@@ -882,8 +882,8 @@ mod tests {
             .expect("role_templates array must be present on coding_tool_contract");
         assert_eq!(
             role_templates.len(),
-            4,
-            "M14-C contracts four role templates; got {role_templates:?}"
+            5,
+            "the runtime ships five role templates; got {role_templates:?}"
         );
         let names: Vec<&str> = role_templates
             .iter()
@@ -891,8 +891,8 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["reviewer", "implementer", "test_worker", "explorer"],
-            "role_templates must enumerate the M14-C canonical names in stable order"
+            vec!["reviewer", "implementer", "test_worker", "test_writer", "explorer"],
+            "role_templates must enumerate the canonical names in stable order"
         );
         for entry in role_templates {
             // Required fields the UX needs.

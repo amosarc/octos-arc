@@ -108,7 +108,11 @@ rustix = { workspace = true }
 
 [features]
 git = ["dep:gix", "dep:similar"]
+# `ast` is a default feature: the testgen pipeline (host-side test-case
+# generation) hard-depends on tree-sitter contract extraction, and a
+# no-ast build would silently lose the coding-agent's test capability.
 ast = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-python", "dep:tree-sitter-javascript", "dep:tree-sitter-typescript"]
+default = ["ast"]
 
 [lints]
 workspace = true

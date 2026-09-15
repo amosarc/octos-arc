@@ -8,10 +8,14 @@
 //! - `Cargo.toml`     → `cargo check --message-format=json`
 //! - `tsconfig.json`  → `tsc --noEmit`
 //! - `go.mod`         → `go vet ./...`
+//! - `package.json` with a vitest `test` script → `vitest run --reporter=json`
+//!   (lowest priority — see [`detect_project`])
 //!
 //! A bare `package.json` is deliberately NOT a TypeScript marker: `tsc
 //! --noEmit` without a tsconfig only prints help text and exits 1, and it
 //! would shadow `go.mod` in Go repos that carry a tooling-only package.json.
+//! It IS a vitest marker when the manifest wires its `test` script to
+//! vitest — but only after the three stronger markers fail to match.
 //!
 //! Output is normalized to `file:line: level: message` lines, capped at
 //! [`MAX_DIAGNOSTICS`] with a `... and N more` trailer. A missing checker
@@ -78,6 +82,11 @@ enum ProjectKind {
     Rust,
     TypeScript,
     Go,
+    /// npm project with a vitest-driven `test` script. Lowest priority:
+    /// detected only when no stronger marker (Cargo.toml/tsconfig/go.mod)
+    /// matched, so tooling-only package.json files in Go/Rust repos never
+    /// shadow the real lane.
+    Node,
 }
 
 impl ProjectKind {
@@ -87,6 +96,7 @@ impl ProjectKind {
             ProjectKind::Rust => "cargo",
             ProjectKind::TypeScript => "tsc",
             ProjectKind::Go => "go",
+            ProjectKind::Node => "npx",
         }
     }
 
@@ -96,6 +106,7 @@ impl ProjectKind {
             ProjectKind::Rust => &["check", "--message-format=json"],
             ProjectKind::TypeScript => &["--noEmit"],
             ProjectKind::Go => &["vet", "./..."],
+            ProjectKind::Node => &["--yes", "vitest", "run", "--reporter=json"],
         }
     }
 
@@ -105,6 +116,7 @@ impl ProjectKind {
             ProjectKind::Rust => "cargo check",
             ProjectKind::TypeScript => "tsc --noEmit",
             ProjectKind::Go => "go vet",
+            ProjectKind::Node => "vitest run",
         }
     }
 }
@@ -121,13 +133,15 @@ struct ParsedDiagnostics {
 }
 
 /// Detect the project kind by marker files directly under `root`.
-/// Priority: Rust, then TypeScript, then Go (first match wins).
+/// Priority: Rust, then TypeScript, then Go, then a vitest-driven npm
+/// project (first match wins).
 ///
 /// The TypeScript lane requires `tsconfig.json` — a bare `package.json` is
-/// NOT enough: `tsc --noEmit` without a tsconfig just prints ~140 lines of
-/// help text and exits 1 (never a useful answer), and treating package.json
-/// as a marker would shadow `go.mod` in the very common "Go service +
-/// tooling-only package.json" repo shape.
+/// NOT enough for tsc: `tsc --noEmit` without a tsconfig just prints ~140
+/// lines of help text and exits 1 (never a useful answer). A package.json
+/// whose `test` script is vitest-driven DOES match the Node lane, but only
+/// after the stronger markers — so "Go service + tooling-only package.json"
+/// repos still resolve to `go vet`.
 fn detect_project(root: &Path) -> Option<ProjectKind> {
     if root.join("Cargo.toml").is_file() {
         return Some(ProjectKind::Rust);
@@ -138,7 +152,26 @@ fn detect_project(root: &Path) -> Option<ProjectKind> {
     if root.join("go.mod").is_file() {
         return Some(ProjectKind::Go);
     }
+    if is_vitest_project(root) {
+        return Some(ProjectKind::Node);
+    }
     None
+}
+
+/// Whether `root/package.json` wires its `test` script to vitest. The
+/// JSON is inspected textually on purpose (fast, and a partial manifest
+/// with a clear `scripts.test` line is still honest evidence).
+fn is_vitest_project(root: &Path) -> bool {
+    let Ok(pkg) = std::fs::read_to_string(root.join("package.json")) else {
+        return false;
+    };
+    let scripts = match pkg.find("\"scripts\"") {
+        Some(i) => &pkg[i..],
+        None => return false,
+    };
+    // "test" script present AND a vitest runner mentioned anywhere in the
+    // manifest (test script, devDependencies).
+    scripts.contains("\"test\"") && pkg.contains("vitest")
 }
 
 impl ParsedDiagnostics {
@@ -351,6 +384,98 @@ fn plural(n: usize, noun: &str) -> String {
     } else {
         format!("{n} {noun}s")
     }
+}
+
+/// Parse `vitest run --reporter=json` stdout into the diagnostics shape.
+/// Each failing case renders one `file: error: title: first-message-line`
+/// line; suites that failed to LOAD (import/syntax errors, empty
+/// assertionResults + a suite message) render as errors named after the
+/// file. Leading non-JSON noise (npm banners) is skipped by scanning to the
+/// first `{`.
+fn parse_vitest_output(stdout: &str) -> ParsedDiagnostics {
+    let mut out = ParsedDiagnostics::default();
+    let mut seen = std::collections::HashSet::new();
+    let Some(start) = stdout.find('{') else {
+        return out;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout[start..].trim_start()) else {
+        return out;
+    };
+
+    if let Some(results) = value.get("testResults").and_then(|v| v.as_array()) {
+        for suite in results {
+            let suite_file = suite
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(basename_path)
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let suite_status = suite.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            let suite_message = suite
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let has_assertions = suite
+                .get("assertionResults")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| !a.is_empty());
+
+            if suite_status == "failed" && !has_assertions && !suite_message.is_empty() {
+                out.push(
+                    &mut seen,
+                    format!(
+                        "{suite_file}: error: suite failed to load: {}",
+                        first_line(suite_message)
+                    ),
+                    Level::Error,
+                );
+                continue;
+            }
+
+            if let Some(cases) = suite.get("assertionResults").and_then(|v| v.as_array()) {
+                for case in cases {
+                    if case.get("status").and_then(|v| v.as_str()) != Some("failed") {
+                        continue;
+                    }
+                    let title = case
+                        .get("fullName")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<unnamed>");
+                    let message = case
+                        .get("failureMessages")
+                        .and_then(|v| v.as_array())
+                        .and_then(|m| m.first())
+                        .and_then(|m| m.as_str())
+                        .map(first_line)
+                        .unwrap_or_else(|| "no failure message".to_string());
+                    out.push(
+                        &mut seen,
+                        format!("{suite_file}: error: {title}: {message}"),
+                        Level::Error,
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
+/// First non-empty line, bounded.
+fn first_line(text: &str) -> String {
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let mut out: String = line.chars().take(200).collect();
+    if line.chars().count() > 200 {
+        out.push('…');
+    }
+    out
+}
+
+fn basename_path(path: &str) -> String {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .to_string()
 }
 
 /// Name the LAYER a non-diagnostic failure happened in, when the raw output
@@ -580,7 +705,8 @@ impl Tool for CheckTool {
         // Detect the project type from marker files at the scoped root.
         let Some(kind) = detect_project(&scope_dir) else {
             return Ok(ok(format!(
-                "no supported project detected at {} (looked for Cargo.toml, tsconfig.json, go.mod)",
+                "no supported project detected at {} (looked for Cargo.toml, tsconfig.json, \
+                 go.mod, or a package.json with a vitest test script)",
                 scope_dir.display()
             )));
         };
@@ -688,6 +814,22 @@ impl Tool for CheckTool {
             ProjectKind::Rust => parse_cargo_json(&stdout),
             ProjectKind::TypeScript => parse_tsc_output(&stdout),
             ProjectKind::Go => parse_go_vet_output(&stderr),
+            ProjectKind::Node => {
+                // vitest ≥3 routes the JSON report to a file
+                // (`.vitest/json/output.json`) and stdout only carries a
+                // notice line — fall back to the file when stdout is bare.
+                let mut parsed = parse_vitest_output(&stdout);
+                if parsed.lines.is_empty() {
+                    let report = scope_dir.join(".vitest/json/output.json");
+                    if let Ok(file_json) = std::fs::read_to_string(&report) {
+                        let from_file = parse_vitest_output(&file_json);
+                        if !from_file.lines.is_empty() || from_file.errors > 0 {
+                            parsed = from_file;
+                        }
+                    }
+                }
+                parsed
+            }
         };
 
         // Raw fallback for a failed run with nothing parseable: stderr tail
@@ -824,6 +966,90 @@ mod tests {
         let dir = tempdir();
         touch(dir.path(), "Cargo.toml");
         assert_eq!(detect_project(dir.path()), Some(ProjectKind::Rust));
+    }
+
+    #[test]
+    fn should_detect_vitest_project_from_package_json_test_script() {
+        let dir = tempdir();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"test":"vitest run --config vitest.config.js"},"devDependencies":{"vitest":"^4"}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_project(dir.path()), Some(ProjectKind::Node));
+    }
+
+    #[test]
+    fn should_not_detect_node_lane_for_non_vitest_package_json() {
+        let dir = tempdir();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"test":"jest"}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_project(dir.path()), None, "jest lane not supported");
+    }
+
+    #[test]
+    fn stronger_markers_shadow_the_node_lane() {
+        let dir = tempdir();
+        touch(dir.path(), "go.mod");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"test":"vitest"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_project(dir.path()),
+            Some(ProjectKind::Go),
+            "Go service + tooling package.json must stay on the go vet lane"
+        );
+    }
+
+    #[test]
+    fn should_parse_vitest_json_with_failures_and_load_errors() {
+        let fixture = r#"noise before the document
+{
+  "numTotalTests": 3,
+  "numPassedTests": 2,
+  "numFailedTests": 1,
+  "success": false,
+  "testResults": [
+    {
+      "name": "/ws/backend/tests/app.test.js",
+      "status": "failed",
+      "message": "",
+      "assertionResults": [
+        { "fullName": "POST /api/register valid", "status": "passed", "failureMessages": [] },
+        { "fullName": "POST /api/register invalid", "status": "failed",
+          "failureMessages": ["AssertionError: expected 200 to be 400"] }
+      ]
+    },
+    {
+      "name": "/ws/backend/tests/broken.test.js",
+      "status": "failed",
+      "message": "SyntaxError: Unexpected token (4:3)",
+      "assertionResults": []
+    }
+  ]
+}"#;
+        let parsed = parse_vitest_output(fixture);
+        assert_eq!(parsed.errors, 2, "1 failing case + 1 suite load error");
+        assert_eq!(parsed.warnings, 0);
+        assert_eq!(
+            parsed.lines,
+            vec![
+                "app.test.js: error: POST /api/register invalid: AssertionError: expected 200 to be 400".to_string(),
+                "broken.test.js: error: suite failed to load: SyntaxError: Unexpected token (4:3)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn vitest_non_json_output_yields_no_diagnostics() {
+        let parsed = parse_vitest_output("npm ERR! missing script: vitest");
+        assert_eq!(parsed.lines, Vec::<String>::new());
+        assert_eq!(parsed.errors, 0);
     }
 
     #[test]

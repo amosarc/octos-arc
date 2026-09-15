@@ -1682,6 +1682,12 @@ struct Input {
     /// Canonical M14-C backend role template to apply to this child.
     #[serde(default)]
     role: Option<String>,
+    /// Task-kind hint recorded on the child's background task. `"test"`
+    /// maps to `TaskKind::Test` (test-writing / verification work);
+    /// anything else (default) stays `TaskKind::Code`. Setting
+    /// `role: "test_writer"` implies `"test"` when unset.
+    #[serde(default)]
+    kind: Option<String>,
     /// Optional structured workflow metadata from the session runtime.
     #[serde(default)]
     workflow: Option<WorkflowMetadata>,
@@ -1832,6 +1838,15 @@ fn apply_role_template(input: &mut Input) -> Result<Option<&'static RoleTemplate
         append_role_instructions(input.additional_instructions.take(), template.prompt_prefix);
     input.role = Some(template.name.to_owned());
     Ok(Some(template))
+}
+
+/// Resolve the background task kind for this spawn: an explicit
+/// `kind: "test"` or the `test_writer` role maps to `TaskKind::Test`
+/// (activating the previously-dead variant so task/list and memory recall
+/// see test work as test work); everything else stays `TaskKind::Code`.
+fn is_test_task_spawn(input: &Input) -> bool {
+    matches!(input.kind.as_deref().map(str::trim), Some("test"))
+        || input.role.as_deref() == Some(crate::role_template::ROLE_TEST_WRITER)
 }
 
 fn should_deliver_output_files(files: &[PathBuf]) -> bool {
@@ -2407,8 +2422,13 @@ impl Tool for SpawnTool {
                 },
                 "role": {
                     "type": "string",
-                    "enum": ["reviewer", "implementer", "test_worker", "explorer"],
-                    "description": "Backend-owned M14-C role template. When set, the server resolves tool budget, sandbox, approval, model preference, and prompt prefix from the runtime template."
+                    "enum": ["reviewer", "implementer", "test_worker", "test_writer", "explorer"],
+                    "description": "Backend-owned M14-C role template. When set, the server resolves tool budget, sandbox, approval, model preference, and prompt prefix from the runtime template. `test_writer` writes test cases against the host testgen pipeline (skeleton + coverage ledger) and implies kind=test."
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["test"],
+                    "description": "Task-kind hint. `test` records the child as TaskKind::Test (test-writing / verification work) instead of the default Code kind. Implied when role=test_writer."
                 },
                 "context": {
                     "type": "string",
@@ -2549,6 +2569,9 @@ impl Tool for SpawnTool {
         let manifest_disallowed_tools =
             apply_agent_definition(&mut input, ctx.agent_definitions.as_ref())?;
         let role_template = apply_role_template(&mut input)?;
+        // Computed BEFORE any partial move of `input` (label/additional_
+        // instructions moves below) and threaded as a plain bool.
+        let is_test_task = is_test_task_spawn(&input);
 
         let worker_num = self.worker_count.fetch_add(1, Ordering::SeqCst);
         let worker_id = AgentId::new(format!("subagent-{worker_num}"));
@@ -3073,16 +3096,28 @@ impl Tool for SpawnTool {
             };
             worker = worker.with_system_prompt(full_prompt);
 
-            let subtask = Task::new(
-                TaskKind::Code {
-                    instruction: task_desc.clone(),
-                    files: vec![],
-                },
-                TaskContext {
-                    working_dir: child_working_dir.clone(),
-                    ..Default::default()
-                },
-            );
+            let subtask = if is_test_task {
+                Task::new(
+                    TaskKind::Test {
+                        instruction: task_desc.clone(),
+                    },
+                    TaskContext {
+                        working_dir: child_working_dir.clone(),
+                        ..Default::default()
+                    },
+                )
+            } else {
+                Task::new(
+                    TaskKind::Code {
+                        instruction: task_desc.clone(),
+                        files: vec![],
+                    },
+                    TaskContext {
+                        working_dir: child_working_dir.clone(),
+                        ..Default::default()
+                    },
+                )
+            };
 
             // PR #1250 finding 1: every refusal point is behind us — the
             // worker starts now. Disarm the prune guard; from here the
@@ -3233,6 +3268,9 @@ impl Tool for SpawnTool {
             // child command execution on the session's backend.
             let child_sandbox = self.sandbox.clone();
             let additional_instructions = input.additional_instructions;
+            // Task-kind hint captured for the detached closure (`input` is
+            // not available inside it).
+            let bg_is_test_task = is_test_task;
             // Spawn iteration budget (caller's clamped value or the generous
             // spawn default), captured for the detached closure (`input` is not
             // `'static`/available inside it).
@@ -3601,16 +3639,28 @@ impl Tool for SpawnTool {
                 };
                 worker = worker.with_system_prompt(full_prompt);
 
-                let subtask = Task::new(
-                    TaskKind::Code {
-                        instruction: task_desc.clone(),
-                        files: vec![],
-                    },
-                    TaskContext {
-                        working_dir: working_dir.clone(),
-                        ..Default::default()
-                    },
-                );
+                let subtask = if bg_is_test_task {
+                    Task::new(
+                        TaskKind::Test {
+                            instruction: task_desc.clone(),
+                        },
+                        TaskContext {
+                            working_dir: working_dir.clone(),
+                            ..Default::default()
+                        },
+                    )
+                } else {
+                    Task::new(
+                        TaskKind::Code {
+                            instruction: task_desc.clone(),
+                            files: vec![],
+                        },
+                        TaskContext {
+                            working_dir: working_dir.clone(),
+                            ..Default::default()
+                        },
+                    )
+                };
 
                 // M8 Runtime Parity W2.B2: wrap `run_task` with single-shot
                 // M8.9 recovery for the detached background path too.

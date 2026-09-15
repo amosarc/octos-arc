@@ -4280,7 +4280,7 @@ pub struct TaskUpdatedEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// Role label assigned at spawn (`"reviewer"`, `"implementer"`,
-    /// `"test_worker"`, `"explorer"`). Mirrors `BackgroundTask::role`.
+    /// `"test_worker"`, `"test_writer"`, `"explorer"`). Mirrors `BackgroundTask::role`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     /// Bounded summary capsule mirroring `ChildResultSummary.summary`

@@ -45,6 +45,7 @@ mod subprocess_env;
 pub use subprocess_env::{register_secret_env_names, sanitize_default_subprocess_env};
 pub mod summarizer;
 pub mod task_supervisor;
+pub mod testgen;
 pub mod tools;
 pub mod turn;
 pub mod workspace_contract;

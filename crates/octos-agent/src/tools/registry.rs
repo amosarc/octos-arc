@@ -1195,6 +1195,13 @@ impl ToolRegistry {
         registry.register(super::GitTool::new(cwd));
         #[cfg(feature = "ast")]
         registry.register(CodeStructureTool::new(cwd));
+        // testgen: host-first test-case pipeline (scaffold + verify).
+        // Runs vitest as a child, so it shares the session sandbox with
+        // check/shell for the same #1607 confinement reason.
+        #[cfg(feature = "ast")]
+        registry.register(
+            super::TestgenTool::new(cwd).with_shared_sandbox(registry.sandbox.clone()),
+        );
         // #972 / M14-B P1: `view_image`, `tool_search`, `tool_suggest`.
         //
         // `view_image` inherits the workspace filesystem scope so it can only
@@ -1298,6 +1305,8 @@ impl ToolRegistry {
         "git",
         #[cfg(feature = "ast")]
         "code_structure",
+        #[cfg(feature = "ast")]
+        "testgen",
     ];
 
     /// Create a copy of this registry with all cwd-bound tools re-registered
@@ -1385,6 +1394,10 @@ impl ToolRegistry {
         registry.register(super::GitTool::new(cwd));
         #[cfg(feature = "ast")]
         registry.register(CodeStructureTool::new(cwd));
+        #[cfg(feature = "ast")]
+        registry.register(
+            super::TestgenTool::new(cwd).with_shared_sandbox(registry.sandbox.clone()),
+        );
         // #972 / M14-B P1: re-register cwd-bound `view_image` and refresh the
         // dynamic-discovery catalog so `tool_search` / `tool_suggest` reflect
         // the rebound workspace's tool surface.

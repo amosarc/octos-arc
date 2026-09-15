@@ -819,6 +819,23 @@ impl Agent {
         attachments: TurnAttachmentContext,
         tracker: Option<&TokenTracker>,
     ) -> Result<ConversationResponse> {
+        // testgen turn marker (`[task-kind:test]`): strip the harness marker
+        // and append the bounded host notice (TestWriter role prompt +
+        // scaffold→fill→verify loop contract). This is the in-session
+        // equivalent of spawning a test_writer child — the only option in
+        // solo/stdio sessions where `spawn` is not registered.
+        let turn_scan = crate::testgen::turn::scan_turn_input(user_content);
+        let marked_message;
+        let user_content: &str = if turn_scan.notice.is_some() {
+            marked_message = crate::testgen::turn::compose_turn_message(&turn_scan);
+            tracing::debug!(
+                original_chars = user_content.len(),
+                "testgen: turn marked as test task; host notice appended"
+            );
+            marked_message.as_str()
+        } else {
+            user_content
+        };
         let activity = Arc::new(LoopActivityState::new(Instant::now()));
         let activity_reporter = Arc::new(ActivityTrackingReporter::new(
             activity.clone(),

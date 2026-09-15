@@ -89,8 +89,10 @@ pub enum TaskKind {
     },
     /// Review: review code changes.
     Review { diff: String },
-    /// Test: run tests or verification.
-    Test { command: String },
+    /// Test: write tests for a target or run test verification. For
+    /// test-writing tasks `instruction` carries the brief (the spawn
+    /// task description), so recall and reporting keep the full context.
+    Test { instruction: String },
     /// Custom task type.
     Custom {
         name: String,

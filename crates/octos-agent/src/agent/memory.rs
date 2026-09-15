@@ -267,7 +267,7 @@ impl Agent {
             octos_core::TaskKind::Plan { goal } => goal.clone(),
             octos_core::TaskKind::Code { instruction, .. } => instruction.clone(),
             octos_core::TaskKind::Review { .. } => "code review".to_string(),
-            octos_core::TaskKind::Test { command } => command.clone(),
+            octos_core::TaskKind::Test { instruction } => instruction.clone(),
             octos_core::TaskKind::Custom { name, .. } => name.clone(),
         };
 
@@ -294,7 +294,9 @@ impl Agent {
                 format!("Code task: {instruction}\nFiles in scope: {files_str}")
             }
             octos_core::TaskKind::Review { diff } => format!("Review this diff:\n{diff}"),
-            octos_core::TaskKind::Test { command } => format!("Run test: {command}"),
+            octos_core::TaskKind::Test { instruction } => {
+                format!("Write tests / verify: {instruction}")
+            }
             octos_core::TaskKind::Custom { name, params } => {
                 format!("Custom task '{name}': {params}")
             }
