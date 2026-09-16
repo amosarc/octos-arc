@@ -72,3 +72,6 @@ tsconfig.tsbuildinfo
 /scratchpad/
 .claude/
 /.zcode/
+
+# ARC bench run output (generated web apps, acceptance reports, context logs)
+/arc-output/
