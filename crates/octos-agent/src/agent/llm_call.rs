@@ -187,6 +187,21 @@ impl Agent {
 
         let retry_max = Self::LLM_RETRY_MAX;
 
+        // Full-context logging (`OCTOS_CONTEXT_LOG=1`): the request record
+        // carries the exact message vector the model will see. One record
+        // per call (messages are identical across attempts; per-attempt
+        // responses carry their own records below).
+        let context_log_tool_names: Vec<String> =
+            tools_spec.iter().map(|spec| spec.name.clone()).collect();
+        self.context_log.log_llm_request(
+            self.tools.workspace_root(),
+            iteration,
+            0,
+            &self.llm.model_id(),
+            messages,
+            &context_log_tool_names,
+        );
+
         // #1712: after a truncated tool call (the turn hit the output cap
         // mid-call), the NEXT attempt requests with the model's full output
         // budget so the call has room to complete — retrying the same capped
@@ -234,6 +249,14 @@ impl Agent {
 
             match call_result {
                 Ok((response, streamed)) => {
+                    self.context_log.log_llm_response(
+                        self.tools.workspace_root(),
+                        iteration,
+                        attempt as usize,
+                        &response,
+                        streamed,
+                        call_start.elapsed().as_millis(),
+                    );
                     self.record_prompt_cache_usage(&response, attempt_config, iteration, attempt);
                     if !Self::is_retriable_response(&response) {
                         // Genuine success -- merge retry usage into response.

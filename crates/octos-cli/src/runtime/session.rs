@@ -927,6 +927,7 @@ sessions/
 users/
 tasks/
 context_ledgers/
+context-logs/
 *.redb
 ";
     if let Err(error) = std::fs::create_dir_all(sessions_root) {

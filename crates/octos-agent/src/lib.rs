@@ -14,6 +14,7 @@ pub mod approval;
 pub mod behaviour;
 pub mod compaction;
 pub mod compaction_tiered;
+pub mod context_log;
 pub mod dispatch_policy;
 pub mod file_state_cache;
 pub mod format;

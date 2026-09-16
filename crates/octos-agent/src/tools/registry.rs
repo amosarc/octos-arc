@@ -199,6 +199,12 @@ pub struct ToolRegistry {
     /// `with_builtins`/`Default` path — and on any host without a real
     /// backend — commands run the argv directly and behavior is unchanged.
     sandbox: Arc<dyn Sandbox>,
+    /// Opt-in full-context logging (`OCTOS_CONTEXT_LOG=1`), installed by the
+    /// session/agent that owns this registry via [`Self::context_log_or_init`].
+    /// OnceLock so an Arc-held registry can receive it after construction;
+    /// cloned into workspace snapshots so sub-agent tool calls land in the
+    /// same `.octos/context-logs/` record stream.
+    context_log: std::sync::OnceLock<std::sync::Arc<crate::context_log::ContextLogger>>,
 }
 
 /// Default per-tool execution-timeout backstop (seconds) for the registry
@@ -240,6 +246,7 @@ impl ToolRegistry {
             // real sandbox (`with_builtins_and_permissions`,
             // `rebind_cwd_with_permissions`) overwrite this below.
             sandbox: Arc::new(NoSandbox),
+            context_log: std::sync::OnceLock::new(),
         }
     }
 
@@ -381,6 +388,19 @@ impl ToolRegistry {
         self.supervisor.clone()
     }
 
+    /// Adopt-or-install the opt-in full-context logger
+    /// (`OCTOS_CONTEXT_LOG=1`). First caller defines the run directory;
+    /// every later adopter (a second agent sharing this registry, a
+    /// workspace snapshot) records into the SAME stream instead of
+    /// fragmenting it across run ids.
+    pub fn context_log_or_init(&self) -> std::sync::Arc<crate::context_log::ContextLogger> {
+        if let Some(logger) = self.context_log.get() {
+            return logger.clone();
+        }
+        let logger = std::sync::Arc::new(crate::context_log::ContextLogger::from_env());
+        let _ = self.context_log.set(logger.clone());
+        logger
+    }
     /// Root workspace path associated with this registry, if any.
     pub fn workspace_root(&self) -> Option<&Path> {
         self.workspace_root.as_deref()
@@ -910,6 +930,7 @@ impl ToolRegistry {
             // plain `snapshot_excluding` caller still observes the same
             // confinement as the parent.
             sandbox: self.sandbox.clone(),
+            context_log: self.context_log.clone(),
         };
         // #1148 codex P2: the cloned `tool_search` / `tool_suggest`
         // Arcs still point to the PARENT's catalog cell. Re-register
@@ -1019,6 +1040,31 @@ impl ToolRegistry {
         // tool future entirely and returns a fresh failure.
         let invocation = tool.execute_with_context(ctx, args);
         let guarded = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(invocation));
+        let log_started = std::time::Instant::now();
+        let log_result = |result: &Result<ToolResult>| {
+            if let Some(logger) = self.context_log.get() {
+                match result {
+                    Ok(r) => logger.log_tool(
+                        self.workspace_root(),
+                        name,
+                        args,
+                        r,
+                        log_started.elapsed().as_millis(),
+                    ),
+                    Err(e) => logger.log_tool(
+                        self.workspace_root(),
+                        name,
+                        args,
+                        &ToolResult {
+                            output: format!("tool dispatch error: {e}"),
+                            success: false,
+                            ..Default::default()
+                        },
+                        log_started.elapsed().as_millis(),
+                    ),
+                }
+            }
+        };
 
         // #1 — human-wait exemption. A tool that blocks on human input (e.g.
         // `ask_user_question` awaiting the requester, mirroring the approval
@@ -1031,10 +1077,12 @@ impl ToolRegistry {
         // applies. This matches how the approval-blocking `shell` gate is not
         // double-killed by the tool timeout.
         if tool.blocks_on_human_input() {
-            return match guarded.await {
+            let result = match guarded.await {
                 Ok(result) => result,
                 Err(panic) => Ok(panic_to_failed_result(name, panic)),
             };
+            log_result(&result);
+            return result;
         }
 
         // Gap 3.3: per-tool execution timeout. A hung foreground tool used to
@@ -1054,8 +1102,15 @@ impl ToolRegistry {
         let timeout = std::time::Duration::from_secs(timeout_secs);
 
         match tokio::time::timeout(timeout, guarded).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(panic)) => Ok(panic_to_failed_result(name, panic)),
+            Ok(Ok(result)) => {
+                log_result(&result);
+                result
+            }
+            Ok(Err(panic)) => {
+                let result = Ok(panic_to_failed_result(name, panic));
+                log_result(&result);
+                result
+            }
             Err(_elapsed) => {
                 tracing::error!(
                     tool = name,
@@ -1063,11 +1118,13 @@ impl ToolRegistry {
                     "tool execution timed out — degraded to a failed tool error; \
                      caller turn preserved"
                 );
-                Ok(ToolResult {
+                let result = Ok(ToolResult {
                     output: format!("Tool '{name}' timed out after {timeout_secs}s"),
                     success: false,
                     ..Default::default()
-                })
+                });
+                log_result(&result);
+                result
             }
         }
     }

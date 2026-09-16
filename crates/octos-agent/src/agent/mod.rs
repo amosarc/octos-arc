@@ -339,6 +339,10 @@ pub struct Agent {
     pub id: AgentId,
     /// LLM provider for generating responses.
     pub(super) llm: Arc<dyn LlmProvider>,
+    /// Opt-in full-context logging (`OCTOS_CONTEXT_LOG=1`). Shared with the
+    /// tool registry so LLM calls and tool executions land in one record
+    /// stream under `<workspace>/.octos/context-logs/`.
+    pub(super) context_log: Arc<crate::context_log::ContextLogger>,
     /// Tool registry for executing tool calls (Arc for sharing with spawned tool tasks).
     pub(super) tools: Arc<ToolRegistry>,
     /// Episode store for memory.
@@ -539,11 +543,15 @@ impl Agent {
         memory: Arc<EpisodeStore>,
     ) -> Self {
         let system_prompt = include_str!("../prompts/worker.txt").to_string();
+        // Adopt-or-init: if this registry already carries a context logger
+        // (a sibling agent adopted it first), both record into ONE stream.
+        let context_log = tools.context_log_or_init();
         let tools = Arc::new(tools);
 
         Self {
             id,
             llm,
+            context_log,
             tools,
             memory,
             embedder: None,
@@ -596,10 +604,12 @@ impl Agent {
         memory: Arc<EpisodeStore>,
     ) -> Self {
         let system_prompt = include_str!("../prompts/worker.txt").to_string();
+        let context_log = tools.context_log_or_init();
 
         Self {
             id,
             llm,
+            context_log,
             tools,
             memory,
             embedder: None,
