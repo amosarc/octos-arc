@@ -1070,7 +1070,7 @@ mod tests {
     #[test]
     fn subagent_progress_event_integrates_with_supervisor() {
         let supervisor = TaskSupervisor::new();
-        let task_id = supervisor.register("search", "call-1", Some("api:session"));
+        let task_id = supervisor.register_with_input("search", "call-1", Some("api:session"), None);
         supervisor.mark_running(&task_id);
 
         let event = HarnessEvent::subagent_progress(

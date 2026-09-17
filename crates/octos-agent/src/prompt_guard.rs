@@ -85,10 +85,6 @@ impl ScanResult {
         self.threats.is_empty()
     }
 
-    /// Highest severity among all detected threats.
-    pub fn max_severity(&self) -> Option<Severity> {
-        self.threats.iter().map(|t| t.severity).max()
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -52,7 +52,6 @@ clap = { version = "4", features = ["derive"] }
 colored = "2"
 dirs = "5"
 rustyline = "15"
-open = "5"
 # Keychain (platform-native secure credential storage)
 keyring = { version = "3", default-features = false }
 # HTTP client (using rustls for pure Rust, no OpenSSL)

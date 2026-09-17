@@ -11,7 +11,7 @@ fn record_final_output_fires_on_change_with_the_output() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let supervisor = TaskSupervisor::new();
-    let id = supervisor.register("spawn", "call-final-output", None);
+    let id = supervisor.register_with_input("spawn", "call-final-output", None, None);
     supervisor.mark_completed(&id, vec![]);
 
     // Only observe changes AFTER completion, so we isolate the
@@ -44,7 +44,7 @@ fn record_final_output_fires_on_change_with_the_output() {
 #[test]
 fn should_register_task_with_spawned_status() {
     let supervisor = TaskSupervisor::new();
-    let id = supervisor.register("tts", "call-123", None);
+    let id = supervisor.register_with_input("tts", "call-123", None, None);
 
     let tasks = supervisor.get_all_tasks();
     assert_eq!(tasks.len(), 1);
@@ -63,7 +63,7 @@ fn should_register_task_with_spawned_status() {
 #[test]
 fn should_transition_through_lifecycle_states() {
     let supervisor = TaskSupervisor::new();
-    let id = supervisor.register("tts", "call-1", None);
+    let id = supervisor.register_with_input("tts", "call-1", None, None);
     let task = &supervisor.get_all_tasks()[0];
     assert_eq!(task.lifecycle_state(), TaskLifecycleState::Queued);
 
@@ -96,7 +96,7 @@ fn should_transition_through_lifecycle_states() {
 #[test]
 fn should_track_failed_tasks_with_error() {
     let supervisor = TaskSupervisor::new();
-    let id = supervisor.register("tts", "call-2", None);
+    let id = supervisor.register_with_input("tts", "call-2", None, None);
 
     supervisor.mark_running(&id);
     supervisor.mark_failed(&id, "connection refused".to_string());
@@ -112,8 +112,8 @@ fn should_track_failed_tasks_with_error() {
 #[test]
 fn should_return_only_active_tasks_in_get_active() {
     let supervisor = TaskSupervisor::new();
-    let id1 = supervisor.register("tts", "call-1", None);
-    let _id2 = supervisor.register("tts", "call-2", None);
+    let id1 = supervisor.register_with_input("tts", "call-1", None, None);
+    let _id2 = supervisor.register_with_input("tts", "call-2", None, None);
 
     supervisor.mark_completed(&id1, vec![]);
 
@@ -130,7 +130,7 @@ fn should_restore_completed_and_failed_truth_after_restart() {
     let supervisor = TaskSupervisor::new();
     supervisor.enable_persistence(&ledger_path).unwrap();
 
-    let completed = supervisor.register_with_lineage("fm_tts", "call-2", Some("api:session"), None);
+    let completed = supervisor.register_with_input("fm_tts", "call-2", Some("api:session"), None);
     supervisor.mark_running(&completed);
     supervisor.mark_runtime_state(
         &completed,
@@ -145,7 +145,7 @@ fn should_restore_completed_and_failed_truth_after_restart() {
     );
 
     let failed =
-        supervisor.register_with_lineage("podcast_generate", "call-3", Some("api:session"), None);
+        supervisor.register_with_input("podcast_generate", "call-3", Some("api:session"), None);
     supervisor.mark_running(&failed);
     supervisor.mark_failed(&failed, "No dialogue lines found in script".to_string());
     supervisor.mark_child_session_outcome(
@@ -297,11 +297,11 @@ fn should_emit_failure_signal_only_after_synth_ack_recorded_for_tool_call_id() {
     let collected = collect_failure_signals(&supervisor);
 
     // First task — synth-ack was suppressed, failure must NOT signal.
-    let suppressed_task = supervisor.register("fm_tts", "call-suppressed", None);
+    let suppressed_task = supervisor.register_with_input("fm_tts", "call-suppressed", None, None);
     supervisor.mark_failed(&suppressed_task, "boom A".to_string());
 
     // Second task — synth-ack fired, failure MUST signal.
-    let acked_task = supervisor.register("fm_tts", "call-acked", None);
+    let acked_task = supervisor.register_with_input("fm_tts", "call-acked", None, None);
     supervisor.mark_synth_ack_emitted("call-acked");
     supervisor.mark_failed(&acked_task, "boom B".to_string());
 
@@ -362,7 +362,7 @@ fn extract_tool_progress(
 fn should_emit_tool_progress_on_completion_with_tool_call_id() {
     let supervisor = TaskSupervisor::new();
     let events = collect_progress_events(&supervisor);
-    let task_id = supervisor.register("podcast_generate", "call-complete-1", None);
+    let task_id = supervisor.register_with_input("podcast_generate", "call-complete-1", None, None);
     supervisor.mark_completed(&task_id, vec!["/tmp/out.mp3".to_string()]);
 
     let captured = events.lock().unwrap().clone();
@@ -381,7 +381,7 @@ fn should_emit_tool_progress_on_completion_with_tool_call_id() {
 #[test]
 fn cancel_running_task_transitions_to_cancelled_and_fires_token() {
     let supervisor = TaskSupervisor::new();
-    let task_id = supervisor.register("bg_research", "call-cancel-1", Some("session-A"));
+    let task_id = supervisor.register_with_input("bg_research", "call-cancel-1", Some("session-A"), None);
     supervisor.mark_running(&task_id);
     let token = supervisor.cancel_token(&task_id);
     assert!(!token.is_cancelled());
@@ -425,7 +425,7 @@ fn mark_completed_after_cancel_does_not_overwrite_cancelled_state() {
         });
     }
 
-    let task_id = supervisor.register("bg_research", "call-race-1", Some("session-X"));
+    let task_id = supervisor.register_with_input("bg_research", "call-race-1", Some("session-X"), None);
     supervisor.mark_running(&task_id); // notify #1
     supervisor.cancel(&task_id).expect("cancel should succeed"); // notify #2
 
@@ -480,7 +480,7 @@ fn relaunch_failed_task_creates_successor_and_fires_callback() {
         });
     }
 
-    let task_id = supervisor.register("bg_research", "call-relaunch-1", Some("session-D"));
+    let task_id = supervisor.register_with_input("bg_research", "call-relaunch-1", Some("session-D"), None);
     supervisor.mark_running(&task_id);
     supervisor.mark_failed(&task_id, "node 'design' failed".to_string());
 
@@ -519,9 +519,9 @@ fn should_fire_on_restore_once_with_the_swept_table_when_persistence_is_enabled(
 
     let writer = TaskSupervisor::new();
     writer.enable_persistence(&ledger_path).unwrap();
-    let orphan = writer.register("search", "call-orphan", Some("api:session"));
+    let orphan = writer.register_with_input("search", "call-orphan", Some("api:session"), None);
     writer.mark_running(&orphan);
-    let finished = writer.register("fm_tts", "call-done", Some("api:session"));
+    let finished = writer.register_with_input("fm_tts", "call-done", Some("api:session"), None);
     writer.mark_completed(&finished, vec![]);
     drop(writer);
 
@@ -578,9 +578,9 @@ fn enable_persistence_reaps_orphan_running_tasks_at_startup() {
     // is left mid-flight (Running). Task B reached terminal Completed.
     let supervisor = TaskSupervisor::new();
     supervisor.enable_persistence(&ledger_path).unwrap();
-    let task_a = supervisor.register_with_lineage("search", "call-a", Some("api:session"), None);
+    let task_a = supervisor.register_with_input("search", "call-a", Some("api:session"), None);
     supervisor.mark_running(&task_a);
-    let task_b = supervisor.register_with_lineage("fm_tts", "call-b", Some("api:session"), None);
+    let task_b = supervisor.register_with_input("fm_tts", "call-b", Some("api:session"), None);
     supervisor.mark_completed(&task_b, vec!["/tmp/voice.mp3".to_string()]);
     // Drop the first supervisor — its in-flight worker for task_a is gone.
     drop(supervisor);
@@ -645,7 +645,7 @@ fn enable_persistence_reaps_orphan_running_tasks_at_startup() {
     // reload, and assert the cancellation survives.
     let cancel_supervisor = restored_again;
     let task_c =
-        cancel_supervisor.register_with_lineage("bg_research", "call-c", Some("api:session"), None);
+        cancel_supervisor.register_with_input("bg_research", "call-c", Some("api:session"), None);
     cancel_supervisor.mark_running(&task_c);
     cancel_supervisor
         .cancel(&task_c)
@@ -672,7 +672,7 @@ fn terminal_guard_marks_failed_when_dropped_while_active() {
     use std::sync::Arc;
 
     let supervisor = Arc::new(TaskSupervisor::new());
-    let id = supervisor.register("mofa_slides", "call-guard", Some("api:session"));
+    let id = supervisor.register_with_input("mofa_slides", "call-guard", Some("api:session"), None);
     supervisor.mark_running(&id);
 
     {
@@ -715,7 +715,7 @@ fn live_detached_task_is_not_swept_as_orphan() {
     // persists a still-Running row.
     let turn_n = TaskSupervisor::new();
     turn_n.enable_persistence(&ledger_path).unwrap();
-    let id = turn_n.register("bg_research", "call-live-1", Some("api:sess"));
+    let id = turn_n.register_with_input("bg_research", "call-live-1", Some("api:sess"), None);
     turn_n.mark_running(&id);
 
     // The detached worker is alive: its id is in the process-global

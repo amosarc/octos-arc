@@ -558,11 +558,6 @@ pub struct TerminalEvent {
 }
 
 impl TerminalEvent {
-    /// True when this event represents a failure transition.
-    pub fn is_failure(&self) -> bool {
-        matches!(self.outcome, TerminalOutcome::Failed(_))
-    }
-
     /// The failure signal payload, when this is a failure event.
     pub fn failure_signal(&self) -> Option<&SpawnOnlyFailureSignal> {
         match &self.outcome {
@@ -1695,28 +1690,6 @@ impl TaskSupervisor {
         *guard = Some(Arc::new(cb));
     }
 
-    /// Add or replace a named observer without disturbing the primary
-    /// callback installed through [`Self::set_on_change`]. Stable keys make
-    /// repeated session wiring idempotent.
-    pub fn set_on_change_listener(
-        &self,
-        key: impl Into<String>,
-        cb: impl Fn(&BackgroundTask) + Send + Sync + 'static,
-    ) {
-        self.on_change_listeners
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key.into(), Arc::new(cb));
-    }
-
-    /// Remove a named task-change observer.
-    pub fn remove_on_change_listener(&self, key: &str) {
-        self.on_change_listeners
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(key);
-    }
-
     /// Set a callback that fires only when a `spawn_only` task transitions to
     /// `Failed`. This is the M8.9 hook the session actor uses to enqueue a
     /// synthetic recovery turn. The callback is only invoked once per failed
@@ -2022,8 +1995,7 @@ impl TaskSupervisor {
 
     /// Register a new background task. Returns the generated task ID, or
     /// an empty-string sentinel when the parent's child fan-out cap fired
-    /// (see [`MAX_CHILDREN_PER_PARENT`] and
-    /// [`Self::try_register_with_input`]). Callers that need strict
+    /// (see [`MAX_CHILDREN_PER_PARENT`]). Callers that need strict
     /// rejection semantics should use [`Self::try_register_with_input`].
     pub fn register(
         &self,
@@ -2036,7 +2008,7 @@ impl TaskSupervisor {
 
     /// Register a new background task with optional ledger-path lineage.
     /// Returns an empty-string sentinel on cap rejection — see
-    /// [`Self::register`] for details.
+    /// [`Self::try_register_with_input`] for strict semantics.
     pub fn register_with_lineage(
         &self,
         tool_name: &str,
@@ -2056,10 +2028,10 @@ impl TaskSupervisor {
             Err(error) => {
                 tracing::error!(
                     tool = tool_name,
-                    tool_call_id = tool_call_id,
+                    tool_call_id = session_key.unwrap_or(""),
                     session_key = ?session_key,
                     error = %error,
-                    "task supervisor register refused (legacy entry point); returning empty id"
+                    "task supervisor register_with_lineage refused; returning empty id"
                 );
                 String::new()
             }
@@ -2535,23 +2507,6 @@ impl TaskSupervisor {
         if let Some(task) = tasks.get_mut(task_id) {
             task.tool_input = Some(tool_input);
         }
-    }
-
-    /// Attach or replace opaque projection metadata for an existing task.
-    /// The update is persisted and emitted through the normal change stream,
-    /// so projections share the supervisor's ordering and durability.
-    pub fn set_projection_metadata(&self, task_id: &str, metadata: Value) {
-        let snapshot = {
-            let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(task) = tasks.get_mut(task_id) else {
-                return;
-            };
-            task.projection_metadata = Some(metadata);
-            task.updated_at = Utc::now();
-            task.clone()
-        };
-        self.persist_snapshot(&snapshot);
-        self.notify_change(&snapshot);
     }
 
     /// Mark a task as running.
@@ -3573,19 +3528,6 @@ impl TaskSupervisor {
     pub fn task_count(&self) -> usize {
         let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         tasks.values().filter(|t| t.status.is_active()).count()
-    }
-
-    /// Override the heartbeat-reaper sweep interval (default
-    /// [`DEFAULT_REAP_INTERVAL`]). Takes effect on the next tick.
-    pub fn set_reap_interval(&self, interval: Duration) {
-        *self.reap_interval.lock().unwrap_or_else(|e| e.into_inner()) = interval;
-    }
-
-    /// Override the silence window after which a live-but-silent task is
-    /// reaped (default [`DEFAULT_STUCK_TIMEOUT`]). Takes effect on the
-    /// next sweep.
-    pub fn set_stuck_timeout(&self, timeout: Duration) {
-        *self.stuck_timeout.lock().unwrap_or_else(|e| e.into_inner()) = timeout;
     }
 
     /// Start the heartbeat-based in-flight orphan reaper (issue #1920).

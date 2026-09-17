@@ -79,11 +79,6 @@ impl SkillsLoader {
         self
     }
 
-    /// Attach a skill-selection filter in place.
-    pub fn set_skill_filter(&mut self, filter: Option<SkillFilter>) {
-        self.filter = filter;
-    }
-
     /// True when `name` is permitted by the active filter (or no filter).
     fn skill_allowed(&self, name: &str) -> bool {
         self.filter
@@ -96,15 +91,6 @@ impl SkillsLoader {
     pub fn add_skills_dir(&mut self, dir: impl AsRef<Path>) {
         let path = dir.as_ref().join("skills");
         // Avoid duplicates
-        if !self.skills_dirs.contains(&path) {
-            self.skills_dirs.push(path);
-        }
-    }
-
-    /// Add a raw skills directory path (no `/skills` suffix appended).
-    /// Used for layered dirs like `platform-skills/` and `bundled-app-skills/`.
-    pub fn add_skills_path(&mut self, path: impl AsRef<Path>) {
-        let path = path.as_ref().to_path_buf();
         if !self.skills_dirs.contains(&path) {
             self.skills_dirs.push(path);
         }

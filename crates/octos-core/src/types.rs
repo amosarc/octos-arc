@@ -108,14 +108,6 @@ impl ThreadId {
         }
     }
 
-    /// Mint a [`ThreadId`] from the [`ClientMessageId`] of the rooting user
-    /// message. This is the canonical "thread inherits from the rooting user
-    /// message" rule expressed as a named conversion (clearer than the
-    /// blanket `From<&ClientMessageId>` impl, which is retained for back-compat).
-    pub fn rooted_at(cmid: &ClientMessageId) -> Self {
-        Self(cmid.0.clone())
-    }
-
     /// Borrow the inner string.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -284,29 +276,6 @@ impl Message {
         }
     }
 
-    /// Create a user message that roots its own thread.
-    ///
-    /// Convenience constructor for the canonical rule "user message's thread
-    /// equals its `client_message_id`" — saves the caller from re-stating the
-    /// invariant at every site. This is the recommended entry point for
-    /// inbound persistence paths that have a typed [`ClientMessageId`] in
-    /// hand. See Codex's PR-A review (`/tmp/codex-pra-review.log`) for the
-    /// rationale.
-    pub fn user_rooting_thread(content: impl Into<String>, cmid: ClientMessageId) -> Self {
-        let thread_id = ThreadId::rooted_at(&cmid);
-        Self {
-            role: MessageRole::User,
-            content: content.into(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: Some(cmid.0),
-            thread_id: Some(thread_id.0),
-            timestamp: Utc::now(),
-        }
-    }
-
     /// Create an assistant message bound to an explicit [`ThreadId`].
     ///
     /// Preferred constructor for production assistant-message construction
@@ -421,15 +390,6 @@ impl Message {
     #[must_use]
     pub fn with_client_message_id(mut self, client_message_id: impl Into<String>) -> Self {
         self.client_message_id = Some(client_message_id.into());
-        self
-    }
-
-    /// Attach a typed [`ClientMessageId`]. Convenience for paths that already
-    /// hold the typed identity (e.g. PR A migrations) so they don't need to
-    /// stringify before calling [`Message::with_client_message_id`].
-    #[must_use]
-    pub fn with_typed_client_message_id(mut self, cmid: ClientMessageId) -> Self {
-        self.client_message_id = Some(cmid.0);
         self
     }
 

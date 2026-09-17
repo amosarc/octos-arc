@@ -212,13 +212,6 @@ impl AgentSummaryGenerator {
         self
     }
 
-    /// Override the summary window (builder-style).
-    #[must_use]
-    pub fn with_summary_window(mut self, window: usize) -> Self {
-        self.summary_window = window;
-        self
-    }
-
     /// Override the minimum runtime threshold (builder-style).
     #[must_use]
     pub fn with_min_runtime(mut self, min: Duration) -> Self {
@@ -679,7 +672,7 @@ mod tests {
     }
 
     fn register_running_task(supervisor: &TaskSupervisor) -> String {
-        let id = supervisor.register("slow_skill", "call-1", Some("api:session"));
+        let id = supervisor.register_with_input("slow_skill", "call-1", Some("api:session"), None);
         supervisor.mark_running(&id);
         id
     }

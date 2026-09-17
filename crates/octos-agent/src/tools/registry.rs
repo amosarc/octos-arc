@@ -135,7 +135,6 @@ pub struct ToolRegistry {
     /// Cached specs output, invalidated on registry mutations.
     cached_specs: std::sync::Mutex<Option<Vec<ToolSpec>>>,
     /// Tool names that came from plugin binaries (for auto-send hook filtering).
-    plugin_tools: HashSet<String>,
     /// Live MCP transport handles, owned for the registry's whole lifetime.
     ///
     /// `McpService` is an `Arc<RunningService<..>>` and every `McpTool` holds a
@@ -231,7 +230,6 @@ impl ToolRegistry {
             context_filter: None,
             active_context: None,
             cached_specs: std::sync::Mutex::new(None),
-            plugin_tools: HashSet::new(),
             mcp_services: Vec::new(),
             spawn_only: HashSet::new(),
             spawn_only_messages: HashMap::new(),
@@ -265,16 +263,6 @@ impl ToolRegistry {
     /// [`Tool::execution_timeout_secs`] still win when present.
     pub fn set_tool_timeout_secs(&mut self, secs: u64) {
         self.tool_timeout_secs = secs.max(1);
-    }
-
-    /// The global per-tool execution-timeout backstop (seconds).
-    pub fn tool_timeout_secs(&self) -> u64 {
-        self.tool_timeout_secs
-    }
-
-    /// Mark a tool name as coming from a plugin binary.
-    pub fn mark_as_plugin(&mut self, name: &str) {
-        self.plugin_tools.insert(name.to_string());
     }
 
     /// Set the session key used to tag background tasks.
@@ -417,29 +405,6 @@ impl ToolRegistry {
         self.workspace_root = Some(cwd);
     }
 
-    /// Register a background task and return its ID.
-    pub fn register_task(&self, tool_name: &str, tool_call_id: &str) -> String {
-        self.supervisor
-            .register(tool_name, tool_call_id, self.session_key.as_deref())
-    }
-
-    /// Register a background task and capture the original tool input so
-    /// failure-recovery flows (M8.9) can reference it without re-walking
-    /// the message history.
-    pub fn register_task_with_input(
-        &self,
-        tool_name: &str,
-        tool_call_id: &str,
-        tool_input: Option<serde_json::Value>,
-    ) -> String {
-        self.supervisor.register_with_input(
-            tool_name,
-            tool_call_id,
-            self.session_key.as_deref(),
-            tool_input,
-        )
-    }
-
     /// Issue #738 fix: register a background task while also threading
     /// the originating user turn's `client_message_id`. Used by the
     /// spawn_only execution path so the synthetic recovery turn (M8.9)
@@ -461,16 +426,6 @@ impl ToolRegistry {
         )
     }
 
-    /// Return the number of currently active background tasks.
-    pub fn bg_task_count(&self) -> u32 {
-        self.supervisor.task_count() as u32
-    }
-
-    /// Return the set of spawn_only tool names.
-    pub fn spawn_only_tools(&self) -> &HashSet<String> {
-        &self.spawn_only
-    }
-
     /// Mark that a spawn_only tool was invoked in this agent run.
     pub fn mark_spawn_only_invoked(&self) {
         self.spawn_only_invoked.store(true, Ordering::SeqCst);
@@ -484,11 +439,6 @@ impl ToolRegistry {
     /// Reset the spawn_only_invoked flag (call at start of each agent run).
     pub fn reset_spawn_only_invoked(&self) {
         self.spawn_only_invoked.store(false, Ordering::SeqCst);
-    }
-
-    /// Check if a tool came from a plugin binary.
-    pub fn is_plugin(&self, name: &str) -> bool {
-        self.plugin_tools.contains(name)
     }
 
     /// Register a tool.
@@ -537,11 +487,6 @@ impl ToolRegistry {
     /// snapshot of available tools without cloning the full registry.
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.keys().cloned().collect()
-    }
-
-    /// Return a handle to a tool by name, if it exists.
-    pub fn get_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.get(name).cloned()
     }
 
     /// Look up the concurrency class of a registered tool (M8.8).
@@ -699,15 +644,6 @@ impl ToolRegistry {
         self.tools.get(name)
     }
 
-    /// Return the names of tools that advertise a given tag.
-    pub fn names_with_tag(&self, tag: &str) -> Vec<String> {
-        self.tools
-            .iter()
-            .filter(|(_, tool)| tool.tags().contains(&tag))
-            .map(|(name, _)| name.clone())
-            .collect()
-    }
-
     /// Number of registered tools.
     pub fn len(&self) -> usize {
         self.tools.len()
@@ -841,26 +777,6 @@ impl ToolRegistry {
         self.provider_policy.as_ref()
     }
 
-    /// #1607 (P2): whether the active **provider policy** permits dispatching
-    /// the named tool. Applies the exact deny-wins-then-allow semantics that
-    /// [`Self::execute_with_context`] enforces at the dispatch boundary
-    /// (including alias equivalence, e.g. `bash`/`shell`/`exec_command`), but
-    /// unlike [`Self::is_tool_visible`] does NOT apply the `context_filter` or
-    /// internal-hidden markers — it answers only "would the provider policy
-    /// let the model call this tool".
-    ///
-    /// Answers "would the provider policy deny this tool" for callers that
-    /// dispatch tools on the model's behalf. With no provider policy set every
-    /// tool is permitted (the default), so this is a no-op on the common path.
-    pub fn provider_policy_permits(&self, name: &str) -> bool {
-        self.provider_policy.as_ref().is_none_or(|policy| {
-            matches!(
-                evaluate_provider_policy_equivalent(policy, name),
-                policy::PolicyDecision::Allow
-            )
-        })
-    }
-
     /// Set a context-based tag filter. Only tools whose tags overlap with these
     /// values will appear in `specs()`. Tools with no tags always pass through.
     pub fn set_context_filter(&mut self, tags: Vec<String>) {
@@ -908,7 +824,6 @@ impl ToolRegistry {
             context_filter: self.context_filter.clone(),
             active_context: self.active_context.clone(),
             cached_specs: std::sync::Mutex::new(None),
-            plugin_tools: self.plugin_tools.clone(),
             spawn_only: self.spawn_only.clone(),
             spawn_only_messages: self.spawn_only_messages.clone(),
             background_result_sender: None,

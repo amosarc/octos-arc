@@ -377,7 +377,6 @@ fn rich_progress_metadata_round_trips_with_extra_fields() {
 fn rpc_success_and_error_responses_use_json_rpc_v2() {
     let success = RpcResponse::success("req-1", json!({ "ok": true }));
     assert_eq!(success.jsonrpc, JSON_RPC_VERSION);
-    assert!(success.is_jsonrpc_v2());
 
     let error = RpcErrorResponse::new(None, RpcError::parse_error("invalid json"));
     let wire = serde_json::to_value(&error).expect("serialize error response");
@@ -478,16 +477,17 @@ fn round_trip_rpc_error(err: &RpcError) -> RpcError {
 
 #[test]
 fn approval_not_pending_carries_recorded_decision() {
-    let approve = RpcError::approval_not_pending(ApprovalDecision::Approve);
-    let json = serde_json::to_value(&approve).expect("serialize approval_not_pending");
-    assert_eq!(json["code"], json!(-32011));
-    assert_eq!(json["data"]["recorded_decision"], json!("approve"));
+    // Hosts hand-roll the `-32011` + `recorded_decision` payload (spec §10);
+    // the reader must accept exactly that shape.
+    let approve = RpcError::new(rpc_error_codes::APPROVAL_NOT_PENDING, "approval is no longer pending")
+        .with_data(json!({ "recorded_decision": "approve" }));
     assert_eq!(
         round_trip_rpc_error(&approve).recorded_decision(),
         Some(ApprovalDecision::Approve),
     );
 
-    let deny = RpcError::approval_not_pending(ApprovalDecision::Deny);
+    let deny = RpcError::new(rpc_error_codes::APPROVAL_NOT_PENDING, "approval is no longer pending")
+        .with_data(json!({ "recorded_decision": "deny" }));
     assert_eq!(
         round_trip_rpc_error(&deny).recorded_decision(),
         Some(ApprovalDecision::Deny),
@@ -719,10 +719,6 @@ fn session_rollback_command_and_result_round_trip() {
     let decoded =
         UiRpcResult::from_method_and_result(methods::SESSION_ROLLBACK, value).expect("decode");
     assert_eq!(decoded, UiRpcResult::SessionRollback(result));
-    assert_eq!(
-        first_server_result_kind_for_method(methods::SESSION_ROLLBACK),
-        Some(UiResultKind::SessionRollback)
-    );
 }
 
 // ===== M12 Phase D-1 auxiliary REST → WS frames =====

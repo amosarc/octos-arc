@@ -621,12 +621,6 @@ impl CheckTool {
         }
     }
 
-    /// Override the checker child-process timeout (default 120s).
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
-        self
-    }
-
     /// Confine the checker to the session sandbox — kept in lockstep with
     /// the shell/exec/bash tools (see
     /// `ToolRegistry::with_builtins_and_permissions`). `cargo check` runs

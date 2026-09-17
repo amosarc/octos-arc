@@ -123,12 +123,6 @@ impl WritePathGrant {
         })
     }
 
-    /// Attach the host's violation sink (`[denied]` audit trail).
-    pub fn with_violation_sink(mut self, sink: WriteGrantViolationSink) -> Self {
-        self.sink = Some(sink);
-        self
-    }
-
     /// Whether allowlisted paths may only be CREATED (never overwritten /
     /// edited / deleted).
     pub fn create_only(&self) -> bool {

@@ -22,7 +22,7 @@ fn test_help_command() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("octos"));
     assert!(stdout.contains("chat"));
-    assert!(stdout.contains("status"));
+    assert!(stdout.contains("serve"));
 }
 
 #[test]

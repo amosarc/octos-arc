@@ -120,8 +120,8 @@ pub struct AgentConfig {
     /// (see `docs/ROBRIX-PHASE4-APPROVAL-FLOW-ADR.md`). When a tool call
     /// matches a rule, the conversation loop returns early with
     /// [`ConversationResponse::pending_approval`] instead of executing the
-    /// tool; the host projects the request to the channel and resumes via
-    /// [`Agent::execute_approved_tool`]. `None` disables the flow.
+    /// tool; the host projects the request to the channel and tracks the
+    /// human decision. `None` disables the flow.
     pub human_approval_rules: Option<crate::approval::HumanApprovalRules>,
     /// Post-edit formatting (issue #1774): when true, a successful
     /// `edit_file` / `write_file` / `diff_edit` runs the file's language
@@ -286,8 +286,7 @@ pub struct ConversationResponse {
     pub synthesized_from_spawn_only: bool,
     /// Set when a tool call matched a [`AgentConfig::human_approval_rules`]
     /// rule: the turn was suspended before executing that tool and the host
-    /// must project this request to the channel, await a human decision, and
-    /// resume via [`Agent::execute_approved_tool`]
+    /// must project this request to the channel and await a human decision
     /// (`docs/ROBRIX-PHASE4-APPROVAL-FLOW-ADR.md`). `content` is empty in
     /// that case. `None` for every ordinary turn.
     pub pending_approval: Option<crate::approval::PendingApprovalDraft>,
@@ -369,8 +368,6 @@ pub struct Agent {
     pub(super) hook_context: std::sync::Mutex<Option<HookContext>>,
     /// Local harness event sink path shared with child tools in this agent.
     pub(super) harness_event_sink: Option<String>,
-    /// Shutdown signal.
-    pub(super) shutdown: Arc<AtomicBool>,
     /// Tracks whether the LOOP DETECTED warning has already fired in the
     /// current session-burst. Reset at the start of each `process_message`
     /// invocation; if a second loop fire happens within the same turn (e.g.
@@ -512,7 +509,6 @@ impl Agent {
             hooks: None,
             hook_context: std::sync::Mutex::new(None),
             harness_event_sink: None,
-            shutdown: Arc::new(AtomicBool::new(false)),
             loop_detected_recently: Arc::new(AtomicBool::new(false)),
             compaction_runner: None,
             compaction_workspace: None,
@@ -562,7 +558,6 @@ impl Agent {
             hooks: None,
             hook_context: std::sync::Mutex::new(None),
             harness_event_sink: None,
-            shutdown: Arc::new(AtomicBool::new(false)),
             loop_detected_recently: Arc::new(AtomicBool::new(false)),
             compaction_runner: None,
             compaction_workspace: None,
@@ -650,22 +645,10 @@ impl Agent {
         self
     }
 
-    /// Access the attached prompt context manager, if any.
-    pub fn prompt_context_manager(&self) -> Option<Arc<dyn PromptContextManager>> {
-        self.prompt_context_manager.clone()
-    }
-
     /// Set the progress reporter.
     pub fn with_reporter(self, reporter: Arc<dyn ProgressReporter>) -> Self {
         *self.reporter.write().unwrap_or_else(|e| e.into_inner()) = reporter;
         self
-    }
-
-    /// Replace the progress reporter at runtime (e.g. per-message stream reporter).
-    /// Takes `&self` (not `&mut self`) -- uses interior mutability via RwLock so
-    /// the agent can be behind an Arc for concurrent speculative overflow.
-    pub fn set_reporter(&self, reporter: Arc<dyn ProgressReporter>) {
-        *self.reporter.write().unwrap_or_else(|e| e.into_inner()) = reporter;
     }
 
     /// Get a clone of the current reporter.
@@ -801,11 +784,6 @@ impl Agent {
         self
     }
 
-    /// Access the agent's recorded spawn nesting depth.
-    pub fn spawn_depth(&self) -> u8 {
-        self.spawn_depth
-    }
-
     /// Set the embedding provider for hybrid memory search.
     pub fn with_embedder(mut self, embedder: Arc<dyn EmbeddingProvider>) -> Self {
         self.embedder = Some(embedder);
@@ -824,13 +802,6 @@ impl Agent {
     /// (`ws_standalone_agent`, ui_protocol per-turn).
     pub fn hooks(&self) -> Option<Arc<HookExecutor>> {
         self.hooks.clone()
-    }
-
-    /// Returns the session-level context injected into hook payloads, if
-    /// any. Counterpart to [`Self::hooks`] — the runtime layer uses it to
-    /// assert the context survives session construction (#2246).
-    pub fn hook_context(&self) -> Option<HookContext> {
-        self.hook_ctx()
     }
 
     /// Set session-level context for hook payloads.
@@ -882,16 +853,6 @@ impl Agent {
         self
     }
 
-    /// Access the attached compaction runner, if any.
-    pub fn compaction_runner(&self) -> Option<Arc<crate::compaction::CompactionRunner>> {
-        self.compaction_runner.clone()
-    }
-
-    /// Access the attached workspace policy used for compaction gating.
-    pub fn compaction_workspace(&self) -> Option<&crate::workspace_policy::WorkspacePolicy> {
-        self.compaction_workspace.as_ref()
-    }
-
     /// Attach a cross-turn persistent [`LoopRetryState`]. When set, the
     /// agent loop observes failures against this shared state instead of
     /// constructing a fresh `LoopRetryState` per turn, so bucket counters
@@ -905,14 +866,6 @@ impl Agent {
     /// triggers the per-bucket exhaustion path because the counters reset
     /// on every turn boundary.
     
-
-    /// Update the session ID in the hook context (call before each message).
-    pub fn set_session_id(&self, session_id: &str) {
-        let mut guard = self.hook_context.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref mut ctx) = *guard {
-            ctx.session_id = Some(session_id.to_string());
-        }
-    }
 
     /// Get a snapshot of the current hook context.
     pub(super) fn hook_ctx(&self) -> Option<HookContext> {
@@ -1191,20 +1144,6 @@ impl Agent {
         }
     }
 
-    /// Update the system prompt at runtime (hot-reload).
-    ///
-    /// Full replace: drops any named segments (re-set them afterwards if
-    /// still wanted).
-    pub fn set_system_prompt(&self, prompt: String) {
-        self.system_prompt
-            .write()
-            .unwrap_or_else(|e| {
-                tracing::warn!("system prompt lock was poisoned, recovering");
-                e.into_inner()
-            })
-            .replace_all(prompt);
-    }
-
     /// The LLM model ID in use.
     pub fn model_id(&self) -> &str {
         self.llm.model_id()
@@ -1215,19 +1154,9 @@ impl Agent {
         self.llm.provider_name()
     }
 
-    /// Get a reference to the LLM provider (for sharing with per-request agents).
-    pub fn llm_provider(&self) -> Arc<dyn LlmProvider> {
-        self.llm.clone()
-    }
-
     /// Get a reference to the tool registry.
     pub fn tool_registry(&self) -> &Arc<ToolRegistry> {
         &self.tools
-    }
-
-    /// Get a reference to the episode store.
-    pub fn memory_store(&self) -> Arc<EpisodeStore> {
-        self.memory.clone()
     }
 
     /// Get a clone of the agent config.
@@ -1248,14 +1177,6 @@ impl Agent {
     pub fn with_sandbox_config(mut self, sandbox: crate::sandbox::SandboxConfig) -> Self {
         self.sandbox_config = Some(sandbox);
         self
-    }
-
-    /// Return the recorded effective [`crate::sandbox::SandboxConfig`], if
-    /// any was supplied via [`Self::with_sandbox_config`]. `None` keeps
-    /// pre-M9 behaviour — callers should fall back to
-    /// `SandboxConfig::default()` only when this is `None`.
-    pub fn sandbox_config(&self) -> Option<crate::sandbox::SandboxConfig> {
-        self.sandbox_config.clone()
     }
 
     /// Anchor the agent's tool registry to a workspace cwd.

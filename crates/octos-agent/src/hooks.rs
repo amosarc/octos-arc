@@ -5,11 +5,9 @@
 //! hooks after consecutive failures.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use metrics::counter;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::warn;
@@ -201,7 +199,7 @@ pub struct HookPayload {
     pub failure_action: Option<String>,
 
     /// Opaque integrator-supplied context (robotics, domain-specific sensors, etc).
-    /// Populated by a `HookPayloadEnricher` registered on `HookExecutor`.
+    /// Populated by integrators before payload serialization.
     /// Serialized form is truncated to `MAX_PAYLOAD_FIELD_BYTES`; if the rendered
     /// JSON exceeds that limit the field is replaced with a `{"truncated": true}`
     /// marker object so hook scripts always see valid JSON.
@@ -629,28 +627,6 @@ impl HookPayload {
     }
 }
 
-/// Synchronous extension point for integrators to attach opaque, domain-specific
-/// context to hook payloads before they are serialized to the hook process stdin.
-///
-/// Robotics integrators use this to attach live sensor telemetry (force/torque,
-/// workspace bounds, e-stop state) that their shell-based before-hooks then
-/// filter on. The core agent stays domain-agnostic: it does not introduce
-/// robot-specific `HookEvent` variants.
-///
-/// Invariants:
-/// - `enrich` runs on the Tokio runtime before payload serialization; keep it
-///   cheap and non-blocking. Expensive I/O must be done off-thread ahead of time
-///   and surfaced through an `Arc`-shared snapshot.
-/// - The populated `HookPayload.domain_data` is subject to truncation: anything
-///   whose rendered JSON exceeds `MAX_PAYLOAD_FIELD_BYTES` is replaced with
-///   a `{"truncated": true}` marker object.
-/// - Implementors MUST be `Send + Sync` so the executor can share them through
-///   `Arc`.
-pub trait HookPayloadEnricher: Send + Sync {
-    /// Mutate the payload in place. Typically sets `payload.domain_data` to a
-    /// JSON object describing the integrator's domain state for `event`.
-    fn enrich(&self, event: &HookEvent, payload: &mut HookPayload);
-}
 
 /// Typed error for a before-hook policy deny that escapes as an
 /// `eyre::Report` (#2249). A deny is expected policy behaviour, not a
@@ -749,8 +725,6 @@ pub struct HookExecutor {
     /// project `cargo check` each. `Duration::ZERO` disables it (the default);
     /// before-event deny hooks are never debounced. (#2153 finding 2.)
     after_event_debounce: Duration,
-    /// Optional domain-data enricher applied to payloads before serialization.
-    enricher: Option<Arc<dyn HookPayloadEnricher>>,
 }
 
 impl HookExecutor {
@@ -769,7 +743,6 @@ impl HookExecutor {
             session_state: Mutex::new(HashMap::new()),
             failure_threshold,
             after_event_debounce: Duration::ZERO,
-            enricher: None,
         }
     }
 
@@ -878,57 +851,10 @@ impl HookExecutor {
         state.last_run[i] = Some(Instant::now());
     }
 
-    /// Test-only: preset a hook's failure count for a session scope (the
-    /// per-session replacement for poking the old `failures[i]` atomic).
-    #[cfg(test)]
-
-    /// Test-only: read a hook's failure count for a session scope.
-    #[cfg(test)]
-
-    /// Attach a synchronous domain-data enricher. Additive: callers that do
-    /// not register an enricher see no payload change.
-    pub fn with_enricher(mut self, enricher: Arc<dyn HookPayloadEnricher>) -> Self {
-        self.enricher = Some(enricher);
-        self
-    }
-
-    /// The hook configurations this executor runs, in run order. Lets a
-    /// host MERGE executors (e.g. coding defaults + operator hooks) without
-    /// forking the runner: rebuild via `HookExecutor::new` from the
-    /// concatenated lists.
-    pub fn configs(&self) -> &[HookConfig] {
-        &self.hooks
-    }
-
     /// Run all matching hooks for the given event sequentially.
     /// Returns `Deny` on the first before-hook that exits with 1.
     pub async fn run(&self, event: HookEvent, payload: &HookPayload) -> HookResult {
-        // Apply the optional enricher before serialization so integrators can
-        // attach domain-specific telemetry (force/torque, workspace bounds,
-        // e-stop) that the hook script filters on.
-        let payload_owned;
-        let payload_ref: &HookPayload = if let Some(ref enricher) = self.enricher {
-            let mut enriched = payload.clone();
-            enricher.enrich(&event, &mut enriched);
-            if let Some(ref data) = enriched.domain_data {
-                // Truncate to MAX_PAYLOAD_FIELD_BYTES. Replace with a
-                // marker object so hook scripts always receive valid JSON.
-                let serialized = serde_json::to_string(data).unwrap_or_default();
-                if serialized.len() > MAX_PAYLOAD_FIELD_BYTES {
-                    enriched.domain_data = Some(serde_json::json!({"truncated": true}));
-                }
-                counter!(
-                    "octos_hook_domain_data_enriched_total",
-                    "event" => format!("{:?}", event)
-                )
-                .increment(1);
-            }
-            payload_owned = enriched;
-            &payload_owned
-        } else {
-            payload
-        };
-        let payload_json = match serde_json::to_string(payload_ref) {
+        let payload_json = match serde_json::to_string(payload) {
             Ok(j) => j,
             Err(e) => return HookResult::Error(format!("failed to serialize payload: {e}")),
         };
@@ -944,7 +870,7 @@ impl HookExecutor {
         // #2153: breaker + debounce state is scoped to this session key so a
         // flaky hook (or a rapid edit burst) in one session never disables or
         // throttles the hook for another session sharing this Arc executor.
-        let session_key = Self::session_key(payload_ref);
+        let session_key = Self::session_key(payload);
 
         for (i, hook) in self.hooks.iter().enumerate() {
             if hook.event != event {
@@ -955,7 +881,7 @@ impl HookExecutor {
             if matches!(event, HookEvent::BeforeToolCall | HookEvent::AfterToolCall)
                 && !hook.tool_filter.is_empty()
             {
-                let tool_name = payload_ref.tool_name.as_deref().unwrap_or("");
+                let tool_name = payload.tool_name.as_deref().unwrap_or("");
                 if !hook.tool_filter.iter().any(|f| f == tool_name) {
                     continue;
                 }
@@ -971,7 +897,7 @@ impl HookExecutor {
             if matches!(event, HookEvent::BeforeToolCall | HookEvent::AfterToolCall)
                 && !self.path_filters[i].is_empty()
             {
-                let tool_path = payload_ref.arguments.as_ref().and_then(extract_tool_path);
+                let tool_path = payload.arguments.as_ref().and_then(extract_tool_path);
                 let Some(tool_path) = tool_path else {
                     continue;
                 };
@@ -1020,7 +946,7 @@ impl HookExecutor {
                 continue;
             }
 
-            let hook_cwd = payload_ref.cwd.as_deref().map(std::path::Path::new);
+            let hook_cwd = payload.cwd.as_deref().map(std::path::Path::new);
             // #2129 review round 2, finding 5: a project-scoped checker
             // (declares `requires_bin`: cargo/eslint/ruff) is meaningless
             // without a known workspace root — running it in the daemon's

@@ -529,36 +529,6 @@ impl Agent {
         .await
     }
 
-    pub async fn process_message_with_attachments(
-        &self,
-        user_content: &str,
-        history: &[Message],
-        media: Vec<String>,
-        attachments: TurnAttachmentContext,
-    ) -> Result<ConversationResponse> {
-        self.process_message_inner(user_content, history, media, attachments, None)
-            .await
-    }
-
-    /// Like `process_message`, but updates a `TokenTracker` in real-time after each LLM call.
-    /// Used by the gateway status indicator to show live token counts.
-    pub async fn process_message_tracked(
-        &self,
-        user_content: &str,
-        history: &[Message],
-        media: Vec<String>,
-        tracker: &TokenTracker,
-    ) -> Result<ConversationResponse> {
-        self.process_message_inner(
-            user_content,
-            history,
-            media,
-            TurnAttachmentContext::default(),
-            Some(tracker),
-        )
-        .await
-    }
-
     pub async fn process_message_tracked_with_attachments(
         &self,
         user_content: &str,
@@ -1753,10 +1723,8 @@ impl Agent {
                             // Phase 4 (docs/ROBRIX-PHASE4-APPROVAL-FLOW-ADR.md):
                             // a tool call matched a human-approval rule —
                             // suspend the turn. The host (session actor)
-                            // projects the request to the channel, stores
-                            // the pending approval, and resumes via
-                            // `Agent::execute_approved_tool` when an
-                            // authorized human answers.
+                            // projects the request to the channel and
+                            // resumes when an authorized human answers.
                             if let Some(draft) = iter_pending_approval {
                                 self.emit_cost_update(&turn, &sanitized_response, attributed_cost);
                                 return Ok(ConversationResponse {
@@ -2116,21 +2084,6 @@ impl Agent {
     /// Run a task to completion (used by spawn tool).
     pub async fn run_task(&self, task: &Task) -> Result<TaskResult> {
         self.run_task_inner(task, None).await
-    }
-
-    /// Like [`Agent::run_task`], but stores the turn-cumulative token counts
-    /// into `tracker` after every LLM response. A caller that runs the task
-    /// under an external wall-clock timeout — which DROPS the future and
-    /// discards the returned [`TaskResult`] — can then still read the REAL
-    /// tokens the run spent. The fleet worker uses this to settle a mid-task
-    /// escalation's budget honestly even on the timeout / run-error path (never
-    /// `0`), mirroring the conversation loop's real-time tracker.
-    pub async fn run_task_with_tracker(
-        &self,
-        task: &Task,
-        tracker: &TokenTracker,
-    ) -> Result<TaskResult> {
-        self.run_task_inner(task, Some(tracker)).await
     }
 
     async fn run_task_inner(

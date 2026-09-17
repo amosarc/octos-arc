@@ -1,7 +1,6 @@
 //! CLI commands for octos.
 
 pub mod auth;
-mod cache;
 pub mod chat;
 mod config;
 pub mod gateway;
@@ -26,7 +25,6 @@ use clap::{Parser, Subcommand};
 use eyre::Result;
 
 pub use auth::AuthCommand;
-pub use cache::CacheCommand;
 pub use chat::ChatCommand;
 pub use config::ConfigCommand;
 pub use octos_arc::ArcCommand;
@@ -75,8 +73,6 @@ pub enum Command {
     /// Interactive multi-turn chat with an agent.
     Chat(ChatCommand),
     Arc(ArcCommand),
-    /// Inspect and reclaim the build-cache pool (`status` / `gc` / `gate`).
-    Cache(CacheCommand),
     /// Inspect the saved startup config (`show` / `path`); read-only.
     Config(ConfigCommand),
     /// Start the stdio JSON-RPC server (requires --features api).
@@ -97,10 +93,6 @@ pub enum Command {
 pub fn reserve_stdout(command: &Command) -> bool {
     match command {
         Command::Chat(_) | Command::Arc(_) => true,
-        // `octos cache <sub> --json` emits a machine-readable object meant
-        // for scripting / the outer loop's gate check. Without `--json` the
-        // human table stays on the historical stdout routing.
-        Command::Cache(cmd) => cmd.emits_json(),
         _ => false,
     }
 }
@@ -229,7 +221,6 @@ impl Executable for Command {
                 println!("{}", serde_json::to_string_pretty(&result)?);
                 Ok(())
             }
-            Self::Cache(cmd) => cmd.execute(),
             Self::Config(cmd) => cmd.execute(),
             #[cfg(feature = "api")]
             Self::Serve(cmd) => cmd.execute(),

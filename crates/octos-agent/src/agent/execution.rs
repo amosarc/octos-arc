@@ -71,8 +71,8 @@ use crate::progress::ProgressEvent;
 use crate::task_supervisor::{TaskRuntimeState, TaskTerminalGuard};
 use crate::tools::spawn::{BackgroundResultKind, BackgroundResultPayload};
 use crate::tools::{
-    ConcurrencyClass, TOOL_APPROVAL_CTX, TOOL_CTX, TURN_ATTACHMENT_CTX, ToolApprovalDecision,
-    ToolApprovalRequest, ToolApprovalRequester, ToolContext, USER_QUESTION_CTX,
+    ConcurrencyClass, TOOL_APPROVAL_CTX, TOOL_CTX, TURN_ATTACHMENT_CTX,
+    ToolApprovalRequester, ToolContext, USER_QUESTION_CTX,
     UserQuestionRequester,
 };
 use crate::workspace_contract::{SpawnTaskContractResult, enforce_spawn_task_contract};
@@ -367,184 +367,7 @@ pub(super) fn compose_system_prompt(agent: &Agent) -> String {
 
 /// Auto-approves the in-tool approval gate when re-running a tool whose human
 /// approval was already granted through the gateway approval flow
-/// (`docs/ROBRIX-PHASE4-APPROVAL-FLOW-ADR.md`). Scoped only around
-/// [`Agent::execute_approved_tool`], so it can never auto-approve an ordinary
-/// turn — that path never installs this requester.
-struct ApprovedToolAutoApprover;
-
-#[async_trait::async_trait]
-impl ToolApprovalRequester for ApprovedToolAutoApprover {
-    async fn request_approval(&self, _request: ToolApprovalRequest) -> ToolApprovalDecision {
-        ToolApprovalDecision::Approve
-    }
-}
-
 impl Agent {
-    /// Phase 4 (docs/ROBRIX-PHASE4-APPROVAL-FLOW-ADR.md): re-check a pending
-    /// human approval just before executing it. Policies may have changed
-    /// while the approval waited (config hot-reload, hook edits), so the
-    /// approver list is re-checked and `before_tool_call` hooks are re-run
-    /// against the original arguments. A hook that now denies — or modifies
-    /// the arguments away from the digest the human approved — invalidates
-    /// the approval.
-    pub async fn revalidate_pending_approval(
-        &self,
-        pending: &crate::approval::PendingApproval,
-        sender_user_id: &str,
-    ) -> std::result::Result<(), String> {
-        if !pending
-            .request
-            .authorized_approvers
-            .iter()
-            .any(|approver| approver == sender_user_id)
-        {
-            return Err("approver is not authorized".to_string());
-        }
-
-        if let Some(ref hooks) = self.hooks {
-            let payload = HookPayload::before_tool(
-                &pending.request.tool_name,
-                pending.tool_args.clone(),
-                &pending.tool_id,
-                self.hook_ctx().as_ref(),
-            );
-            match hooks.run(HookEvent::BeforeToolCall, &payload).await {
-                HookResult::Allow => Ok(()),
-                HookResult::Modified(new_args) => {
-                    if crate::approval::digest_tool_args(&new_args)
-                        == pending.request.tool_args_digest
-                    {
-                        Ok(())
-                    } else {
-                        Err("tool arguments changed since approval request was created".to_string())
-                    }
-                }
-                // Feedback is an after-event-only outcome; never arises here.
-                HookResult::Feedback(_) => Ok(()),
-                // Context injection is a `user_prompt_submit`-only outcome and
-                // never arises for a before-tool re-validation; allow the call.
-                HookResult::Context(_) => Ok(()),
-                HookResult::Deny(reason) => {
-                    if reason.is_empty() {
-                        Err("current policy denied the approved tool call".to_string())
-                    } else {
-                        Err(reason)
-                    }
-                }
-                HookResult::Error(err) => Err(err),
-            }
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Phase 4 (docs/ROBRIX-PHASE4-APPROVAL-FLOW-ADR.md): execute a tool call
-    /// whose human approval was granted. Runs the tool directly with the
-    /// digest-bound arguments — no LLM round trip — and fires the
-    /// `after_tool_call` hooks. The caller is responsible for validating and
-    /// consuming the pending approval first
-    /// (`PendingApprovalStore::consume` + [`Agent::revalidate_pending_approval`]).
-    pub async fn execute_approved_tool(
-        &self,
-        pending: &crate::approval::PendingApproval,
-    ) -> Result<crate::tools::ToolResult> {
-        let tool_start = Instant::now();
-        // #1768: an approved call bypasses `execute_tools`, so it needs its
-        // own pre-mutation snapshot point.
-        self.snapshot_before_mutating_tools(&[pending.request.tool_name.as_str()])
-            .await;
-        // #1532: an approved call must run with the SAME agent-level
-        // infrastructure the foreground path (`spawn_tool_task`) provides —
-        // this used to spread `zero()`, silently dropping the file-state
-        // cache, the profile permission envelope, cost tracking, the
-        // sub-agent plumbing, and the session scope for exactly the calls a
-        // human just vetted. Attachment paths stay empty: they are per-turn
-        // batch state, and an approved call resumes outside a turn batch.
-        let ctx = ToolContext {
-            tool_id: pending.tool_id.clone(),
-            reporter: self.reporter(),
-            harness_event_sink: self.harness_event_sink.clone(),
-            agent_definitions: self.agent_definitions.clone(),
-            file_state_cache: self.file_state_cache.clone(),
-            permissions: self
-                .profile
-                .as_deref()
-                .map(crate::tools::ToolPermissions::from_profile)
-                .unwrap_or_default(),
-            subagent_output_router: self.subagent_output_router.clone(),
-            subagent_summary_generator: self.subagent_summary_generator.clone(),
-            llm_provider: self.llm.clone(),
-            task_supervisor: Some(self.tools.supervisor()),
-            parent_session_key: self.parent_session_key.clone(),
-            spawn_depth: self.spawn_depth,
-            session_scope: self.session_scope.clone(),
-            // #1774: approval-gated edits still honor the post-edit
-            // formatting opt-in.
-            format_after_edit: self.config.format_after_edit,
-            ..ToolContext::zero()
-        };
-        // The human already approved this exact (digest-bound) call through the
-        // gateway approval flow. Some tools (e.g. `shell` on a SafePolicy
-        // `Decision::Ask` command — sudo / rm -rf / git push --force) run a
-        // SECOND, in-tool approval gate that reads `TOOL_APPROVAL_CTX` and
-        // denies when absent. Scope an auto-approving requester so the
-        // already-approved call is not re-denied by that inner gate.
-        let approver: std::sync::Arc<dyn ToolApprovalRequester> =
-            std::sync::Arc::new(ApprovedToolAutoApprover);
-        // #1532 (part 2): dispatch through `execute_with_context` like the
-        // foreground path — the legacy `execute` entry point never hands the
-        // TYPED context to native tools (they receive `zero()` via the
-        // default delegation), so every field above was reaching only
-        // task-local (`TOOL_CTX`) readers. TOOL_CTX stays scoped for plugin
-        // tools that read the task-local.
-        let mut result = TOOL_APPROVAL_CTX
-            .scope(
-                approver,
-                TOOL_CTX.scope(
-                    ctx.clone(),
-                    self.tools.execute_with_context(
-                        &ctx,
-                        &pending.request.tool_name,
-                        &pending.tool_args,
-                    ),
-                ),
-            )
-            .await?;
-
-        if let Some(ref hooks) = self.hooks {
-            let payload = HookPayload::after_tool(
-                &pending.request.tool_name,
-                &pending.tool_id,
-                octos_core::truncated_utf8(&result.output, 500, "..."),
-                result.success,
-                tool_start.elapsed().as_millis() as u64,
-                Some(&pending.tool_args),
-                self.tools.workspace_root(),
-                self.hook_ctx().as_ref(),
-            );
-            // Feedback (a checker reporting diagnostics) reaches the model;
-            // infra errors (missing binary, timeout) stay log-only — see
-            // HookResult::Feedback. Sanitized like every other model-facing
-            // tool output: checkers quote source lines, and source lines
-            // carry secrets.
-            if let HookResult::Feedback(entries) =
-                hooks.run(HookEvent::AfterToolCall, &payload).await
-            {
-                let feedback = crate::sanitize::sanitize_tool_output(&entries.join("\n\n"));
-                // #2129 review round 2, finding 4: truncate the tool output
-                // to its limit FIRST, then append feedback — mirrors the
-                // spawned dispatch site so a downstream cap cannot cut the
-                // checker feedback appended last.
-                let limit = octos_core::tool_output_limit(&pending.request.tool_name);
-                result.output = octos_core::truncate_head_tail(&result.output, limit, 0.7);
-                result.output.push_str("\n\n[hook] ");
-                result.output.push_str(&feedback);
-            }
-        }
-
-        Ok(result)
-    }
-
     /// Spawn a single tool call as a detached `tokio::spawn` task.
     ///
     /// The returned [`JoinHandle`] yields the per-call [`ToolCallResult`]:
@@ -2027,7 +1850,7 @@ impl Agent {
                 // `ToolContext::zero()`. Tools that make their own LLM
                 // sub-calls run through this ctx; without the real provider
                 // they fail with "no real provider". Mirror the approval
-                // path (`execute_approved_tool`), which already sets this.
+                // human-approved direct-send path, which already sets this.
                 llm_provider: llm.clone(),
                 ..ToolContext::zero()
             };

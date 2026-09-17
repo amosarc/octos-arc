@@ -4,9 +4,8 @@
 //! `docs/ROBRIX-PHASE4-APPROVAL-FLOW-ADR.md`: when a tool call matches a
 //! configured [`HumanApprovalRules`] rule, the agent loop returns early with
 //! a [`PendingApprovalDraft`] instead of executing the tool. The host
-//! (session actor) projects the request to the channel, stores the
-//! [`PendingApproval`], and resumes via [`PendingApprovalStore::consume`]
-//! when an authorized human answers.
+//! (session actor) projects the request to the channel and tracks the
+//! human decision in its own approval store.
 //!
 //! Named `HumanApprovalRules` (not `ApprovalPolicy`) to avoid colliding with
 //! the interactive-prompt gate [`crate::policy::ApprovalPolicy`]. The two are
@@ -21,7 +20,6 @@
 //! - responses are bound to the originating room and validated against the
 //!   rule's `authorized_approvers` snapshot.
 
-use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -173,140 +171,6 @@ impl PendingApprovalDraft {
             tool_args,
         })
     }
-
-    pub fn into_pending(
-        self,
-        room_id: impl Into<String>,
-        requester: impl Into<String>,
-    ) -> PendingApproval {
-        PendingApproval {
-            request: self.request,
-            room_id: room_id.into(),
-            requester: requester.into(),
-            tool_id: self.tool_id,
-            tool_args: self.tool_args,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingApproval {
-    pub request: ApprovalRequestEnvelope,
-    pub room_id: String,
-    pub requester: String,
-    pub tool_id: String,
-    pub tool_args: serde_json::Value,
-}
-
-impl PendingApproval {
-    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
-        self.request.expires_at <= now
-    }
-
-    pub fn revalidate_response(
-        &self,
-        room_id: &str,
-        sender_user_id: &str,
-        response: &ApprovalResponsePayload,
-        now: DateTime<Utc>,
-    ) -> Result<(), ApprovalValidationError> {
-        if room_id != self.room_id {
-            return Err(ApprovalValidationError::WrongRoom);
-        }
-        if self.is_expired(now) {
-            return Err(ApprovalValidationError::Expired);
-        }
-        if response.tool_args_digest != self.request.tool_args_digest {
-            return Err(ApprovalValidationError::DigestMismatch);
-        }
-        if !self
-            .request
-            .authorized_approvers
-            .iter()
-            .any(|approver| approver == sender_user_id)
-        {
-            return Err(ApprovalValidationError::Unauthorized);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApprovalValidationError {
-    UnknownRequest,
-    AlreadyConsumed,
-    WrongRoom,
-    Expired,
-    Unauthorized,
-    DigestMismatch,
-}
-
-#[derive(Debug, Default)]
-pub struct PendingApprovalStore {
-    pending: HashMap<String, PendingApproval>,
-    consumed: HashSet<String>,
-}
-
-impl PendingApprovalStore {
-    pub fn insert(&mut self, pending: PendingApproval) {
-        self.pending
-            .insert(pending.request.request_id.clone(), pending);
-    }
-
-    pub fn get(&self, request_id: &str) -> Option<&PendingApproval> {
-        self.pending.get(request_id)
-    }
-
-    pub fn remove(&mut self, request_id: &str) -> Option<PendingApproval> {
-        self.pending.remove(request_id)
-    }
-
-    pub fn mark_consumed(&mut self, request_id: &str) {
-        self.consumed.insert(request_id.to_string());
-    }
-
-    pub fn is_consumed(&self, request_id: &str) -> bool {
-        self.consumed.contains(request_id)
-    }
-
-    pub fn validate_response(
-        &self,
-        room_id: &str,
-        sender_user_id: &str,
-        response: &ApprovalResponsePayload,
-        now: DateTime<Utc>,
-    ) -> Result<(), ApprovalValidationError> {
-        if self.is_consumed(&response.request_id) {
-            return Err(ApprovalValidationError::AlreadyConsumed);
-        }
-        let pending = self
-            .pending
-            .get(&response.request_id)
-            .ok_or(ApprovalValidationError::UnknownRequest)?;
-        pending.revalidate_response(room_id, sender_user_id, response, now)
-    }
-
-    pub fn consume(
-        &mut self,
-        room_id: &str,
-        sender_user_id: &str,
-        response: &ApprovalResponsePayload,
-        now: DateTime<Utc>,
-    ) -> Result<PendingApproval, ApprovalValidationError> {
-        self.validate_response(room_id, sender_user_id, response, now)?;
-        let pending = self
-            .pending
-            .remove(&response.request_id)
-            .ok_or(ApprovalValidationError::UnknownRequest)?;
-        self.mark_consumed(&response.request_id);
-        Ok(pending)
-    }
-}
-
-pub fn digest_tool_args(args: &serde_json::Value) -> String {
-    let encoded = serde_json::to_vec(args).unwrap_or_default();
-    let digest = Sha256::digest(encoded);
-    format!("sha256:{digest:x}")
 }
 
 fn approval_title_for_tool(tool_name: &str) -> String {
@@ -347,113 +211,19 @@ fn next_request_id() -> String {
     format!("req_{}_{}", Utc::now().timestamp_millis(), seq)
 }
 
+pub fn digest_tool_args(args: &serde_json::Value) -> String {
+    let encoded = serde_json::to_vec(args).unwrap_or_default();
+    let digest = Sha256::digest(encoded);
+    format!("sha256:{digest:x}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
 
-    fn valid_spec() -> ApprovalRequestSpec {
-        ApprovalRequestSpec {
-            title: "Execute shell".to_string(),
-            summary: "rm -rf tmp".to_string(),
-            risk_level: ApprovalRiskLevel::Critical,
-            authorized_approvers: vec!["@alice:example.org".to_string()],
-            expires_at: Utc::now() + Duration::minutes(10),
-            on_timeout: ApprovalTimeoutBehavior::Notify,
-        }
-    }
 
-    #[test]
-    fn test_create_pending_approval_with_digest_and_expiry() {
-        let pending = PendingApprovalDraft::from_spec(
-            "shell",
-            "tc1",
-            serde_json::json!({"command": "rm -rf tmp"}),
-            valid_spec(),
-        )
-        .unwrap()
-        .into_pending("!room:example.org", "@requester:example.org");
 
-        assert_eq!(pending.request.tool_name, "shell");
-        assert!(pending.request.tool_args_digest.starts_with("sha256:"));
-        assert_eq!(pending.room_id, "!room:example.org");
-        assert!(!pending.is_expired(Utc::now()));
-    }
 
-    #[test]
-    fn test_pending_approval_rejects_expired_request() {
-        let mut store = PendingApprovalStore::default();
-        let mut spec = valid_spec();
-        spec.expires_at = Utc::now() - Duration::minutes(1);
-        let pending = PendingApprovalDraft::from_spec(
-            "shell",
-            "tc1",
-            serde_json::json!({"command": "echo hi"}),
-            spec,
-        )
-        .unwrap()
-        .into_pending("!room:example.org", "@requester:example.org");
-        let response = ApprovalResponsePayload {
-            request_id: pending.request.request_id.clone(),
-            decision: ApprovalDecision::Approve,
-            source_event_id: "$source".to_string(),
-            tool_args_digest: pending.request.tool_args_digest.clone(),
-        };
-        store.insert(pending);
-
-        assert_eq!(
-            store
-                .validate_response(
-                    "!room:example.org",
-                    "@alice:example.org",
-                    &response,
-                    Utc::now(),
-                )
-                .unwrap_err(),
-            ApprovalValidationError::Expired
-        );
-    }
-
-    #[test]
-    fn test_pending_approval_rejects_duplicate_consume() {
-        let mut store = PendingApprovalStore::default();
-        let pending = PendingApprovalDraft::from_spec(
-            "shell",
-            "tc1",
-            serde_json::json!({"command": "echo hi"}),
-            valid_spec(),
-        )
-        .unwrap()
-        .into_pending("!room:example.org", "@requester:example.org");
-        let response = ApprovalResponsePayload {
-            request_id: pending.request.request_id.clone(),
-            decision: ApprovalDecision::Approve,
-            source_event_id: "$source".to_string(),
-            tool_args_digest: pending.request.tool_args_digest.clone(),
-        };
-        store.insert(pending);
-
-        let _ = store
-            .consume(
-                "!room:example.org",
-                "@alice:example.org",
-                &response,
-                Utc::now(),
-            )
-            .unwrap();
-
-        assert_eq!(
-            store
-                .validate_response(
-                    "!room:example.org",
-                    "@alice:example.org",
-                    &response,
-                    Utc::now(),
-                )
-                .unwrap_err(),
-            ApprovalValidationError::AlreadyConsumed
-        );
-    }
 
     #[test]
     fn test_approval_policy_first_match_wins() {

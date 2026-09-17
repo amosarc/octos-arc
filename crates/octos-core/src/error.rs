@@ -79,31 +79,6 @@ impl Error {
 
     // Convenience constructors
 
-    /// Task not found error.
-    pub fn task_not_found(id: impl Into<String>) -> Self {
-        Self::new(ErrorKind::TaskNotFound(id.into()))
-            .with_suggestion("Run 'octos list' to see available tasks")
-    }
-
-    /// API key not set error.
-    pub fn api_key_not_set(provider: impl Into<String>, env_var: impl Into<String>) -> Self {
-        let provider = provider.into();
-        let env_var = env_var.into();
-        Self::new(ErrorKind::ApiKeyNotSet {
-            provider: provider.clone(),
-            env_var: env_var.clone(),
-        })
-        .with_suggestion(format!(
-            "Set the API key:\n    export {env_var}=your-api-key\n  Or add to .octos/config.json:\n    {{\"api_key_env\": \"{env_var}\"}}"
-        ))
-    }
-
-    /// Unknown provider error.
-    pub fn unknown_provider(provider: impl Into<String>) -> Self {
-        Self::new(ErrorKind::UnknownProvider(provider.into()))
-            .with_suggestion("Supported providers: 'anthropic', 'openai'")
-    }
-
     /// API error.
     pub fn api_error(provider: impl Into<String>, status: u16, body: impl Into<String>) -> Self {
         let provider = provider.into();
@@ -157,18 +132,6 @@ impl Error {
         })
     }
 
-    /// Channel error.
-    pub fn channel_error(channel: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::ChannelError {
-            channel: channel.into(),
-            message: message.into(),
-        })
-    }
-
-    /// Session error.
-    pub fn session_error(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::SessionError(message.into()))
-    }
 }
 
 impl fmt::Display for Error {
@@ -255,23 +218,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_error_task_not_found() {
-        let err = Error::task_not_found("task-123");
-        let msg = err.to_string();
-        assert!(msg.contains("task-123"));
-        assert!(msg.contains("Suggestion")); // Has helpful suggestion
-    }
-
-    #[test]
-    fn test_error_api_key_not_set() {
-        let err = Error::api_key_not_set("anthropic", "ANTHROPIC_API_KEY");
-        let msg = err.to_string();
-        assert!(msg.contains("anthropic"));
-        assert!(msg.contains("ANTHROPIC_API_KEY"));
-        assert!(msg.contains("export")); // Suggests how to set it
-    }
-
-    #[test]
     fn test_error_api_error_with_suggestions() {
         // 401 should suggest checking API key
         let err = Error::api_error("openai", 401, "unauthorized");
@@ -312,14 +258,6 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_provider() {
-        let err = Error::unknown_provider("foobar");
-        let msg = err.to_string();
-        assert!(msg.contains("foobar"));
-        assert!(msg.contains("Supported providers"));
-    }
-
-    #[test]
     fn test_tool_error() {
         let err = Error::tool_error("shell", "command failed");
         let msg = err.to_string();
@@ -350,21 +288,6 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("anthropic"));
         assert!(msg.contains("context too long"));
-    }
-
-    #[test]
-    fn test_channel_error() {
-        let err = Error::channel_error("slack", "webhook failed");
-        let msg = err.to_string();
-        assert!(msg.contains("slack"));
-        assert!(msg.contains("webhook failed"));
-    }
-
-    #[test]
-    fn test_session_error() {
-        let err = Error::session_error("session not found");
-        let msg = err.to_string();
-        assert!(msg.contains("session not found"));
     }
 
     #[test]

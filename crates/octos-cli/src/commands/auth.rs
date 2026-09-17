@@ -1,11 +1,11 @@
-//! Auth command: login, logout, status, and keychain management.
+//! Auth command: logout, status, and keychain management.
 
 use clap::{Args, Subcommand};
 use colored::Colorize;
 use eyre::Result;
 
 use super::Executable;
-use crate::auth::{AuthStore, keychain, oauth, token};
+use crate::auth::{AuthStore, keychain};
 use crate::config_context::{resolve_config_context, run_migrations};
 use crate::profiles::ProfileStore;
 
@@ -30,16 +30,6 @@ pub struct AuthCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum AuthAction {
-    /// Log in to an LLM provider.
-    Login {
-        /// Provider name (openai, anthropic, gemini, etc.).
-        #[arg(long, short)]
-        provider: String,
-
-        /// Use device code flow instead of browser (OpenAI only).
-        #[arg(long)]
-        device_code: bool,
-    },
     /// Log out from a provider.
     Logout {
         /// Provider name.
@@ -101,10 +91,6 @@ impl Executable for AuthCommand {
 impl AuthCommand {
     async fn run_async(self) -> Result<()> {
         match self.action {
-            AuthAction::Login {
-                provider,
-                device_code,
-            } => login(&provider, device_code).await,
             AuthAction::Logout { provider } => logout(&provider),
             AuthAction::Status => status(),
             AuthAction::SetKey {
@@ -117,30 +103,6 @@ impl AuthCommand {
             AuthAction::Unlock { password } => unlock_keychain(password),
         }
     }
-}
-
-async fn login(provider: &str, device_code: bool) -> Result<()> {
-    let cred = match provider {
-        "openai" => {
-            if device_code {
-                oauth::device_code_flow().await?
-            } else {
-                oauth::browser_oauth_flow().await?
-            }
-        }
-        // All other providers use paste-token flow.
-        _ => token::paste_token_flow(provider)?,
-    };
-
-    let mut store = open_global_auth_store()?;
-    store.set(provider, cred)?;
-
-    println!(
-        "{} Logged in to {} (credentials saved)",
-        "OK".green().bold(),
-        provider
-    );
-    Ok(())
 }
 
 fn logout(provider: &str) -> Result<()> {
@@ -159,8 +121,8 @@ fn status() -> Result<()> {
 
     if creds.is_empty() {
         println!(
-            "No saved credentials. Use {} to log in.",
-            "octos auth login".cyan()
+            "No saved credentials. Use {} to add one.",
+            "octos auth set-key".cyan()
         );
         return Ok(());
     }

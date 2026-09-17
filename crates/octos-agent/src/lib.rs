@@ -77,17 +77,14 @@ pub use agent::{
 };
 pub use approval::{
     ApprovalDecision, ApprovalRequestEnvelope, ApprovalRequestSpec, ApprovalResponsePayload,
-    ApprovalRiskLevel, ApprovalRule, ApprovalTimeoutBehavior, ApprovalValidationError,
-    HumanApprovalRules, PendingApproval, PendingApprovalDraft,
-    PendingApprovalStore as HumanPendingApprovalStore, digest_tool_args,
+    ApprovalRiskLevel, ApprovalRule, ApprovalTimeoutBehavior,
+    HumanApprovalRules, PendingApprovalDraft,
 };
 pub use dispatch_policy::{
     DispatchBackendMetadata, DispatchPolicy, DispatchTarget, GateDenial, enforce_dispatch_gates,
     enforce_dispatch_gates_for_backend,
 };
-pub use file_state_cache::{
-    CacheEntry as FileCacheEntry, DEFAULT_MAX_ENTRIES as FILE_CACHE_DEFAULT_MAX_ENTRIES,
-    DEFAULT_MAX_TOTAL_BYTES as FILE_CACHE_DEFAULT_MAX_TOTAL_BYTES, FILE_UNCHANGED_STUB_PREFIX,
+pub use file_state_cache::{FILE_UNCHANGED_STUB_PREFIX,
     FileStateCache, FileStateCacheBuilder, format_file_unchanged_stub,
 };
 pub use harness_errors::{HarnessError, HarnessErrorEvent, OCTOS_LOOP_ERROR_TOTAL, RecoveryHint};
@@ -99,7 +96,7 @@ pub use harness_events::{
 };
 pub use hooks::{
     HookConfig, HookContext, HookDeniedError, HookEvent, HookExecutor, HookPayload,
-    HookPayloadEnricher, HookResult,
+    HookResult,
 };
 pub use mcp::{McpClient, McpServerConfig};
 pub use memory_segment::{
@@ -111,7 +108,7 @@ pub use policy::{
     ApprovalPolicy, EffectivePermissions, FileAccessMode, FilesystemScope, NetworkPolicy,
     PermissionProfile, PermissionProfileError, RuntimeMode,
 };
-pub use progress::{ConsoleReporter, ProgressEvent, ProgressReporter, SilentReporter};
+pub use progress::{ProgressEvent, ProgressReporter, SilentReporter};
 pub use prompt_context::{
     PromptContextManager, PromptContextPhase, PromptContextReport, PromptContextRequest,
 };

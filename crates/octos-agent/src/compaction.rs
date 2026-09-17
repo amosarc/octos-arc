@@ -18,7 +18,6 @@
 //! `tokio::runtime::Handle::current().block_on()` call from their
 //! [`Summarizer::summarize`] impl.
 
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,7 +29,6 @@ use octos_llm::context::{estimate_message_tokens, estimate_tokens};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::abi_schema::COMPACTION_POLICY_SCHEMA_VERSION;
 use crate::harness_events::{HarnessEvent, write_event_to_sink};
 pub use crate::summarizer::{ExtractiveSummarizer, Summarizer};
 pub use crate::workspace_policy::{CompactionPolicy, CompactionSummarizerKind};
@@ -571,7 +569,6 @@ pub struct CompactionRunner {
     policy: CompactionPolicy,
     summarizer: Arc<dyn Summarizer>,
     event_sink: Option<EventSink>,
-    repo_label: Option<String>,
     artifacts: WorkspaceArtifactsPolicy,
     /// Overrides the preserved_artifacts patterns when the caller wires a
     /// workspace-policy-bound runner via `with_workspace_policy`.
@@ -590,7 +587,6 @@ impl std::fmt::Debug for CompactionRunner {
             .field("policy", &self.policy)
             .field("summarizer", &self.summarizer.kind())
             .field("has_event_sink", &self.event_sink.is_some())
-            .field("repo_label", &self.repo_label)
             .field("preserved", &self.resolved_preserved)
             .finish()
     }
@@ -605,7 +601,6 @@ impl CompactionRunner {
             policy,
             summarizer,
             event_sink: None,
-            repo_label: None,
             artifacts: WorkspaceArtifactsPolicy::default(),
             resolved_preserved: Vec::new(),
         }
@@ -630,12 +625,6 @@ impl CompactionRunner {
             session_id: session_id.into(),
             task_id: task_id.into(),
         });
-        self
-    }
-
-    /// Attach a repository label used as the workflow tag on phase events.
-    pub fn with_repo_label(mut self, label: impl Into<String>) -> Self {
-        self.repo_label = Some(label.into());
         self
     }
 
@@ -970,7 +959,7 @@ impl CompactionRunner {
         let event = HarnessEvent::phase_event(
             sink.session_id.clone(),
             sink.task_id.clone(),
-            self.repo_label.clone(),
+            Option::<String>::None,
             COMPACTION_PHASE.to_string(),
             Some(message),
         );
@@ -1035,42 +1024,6 @@ fn fallback_trim(messages: &mut Vec<Message>, budget: u32) -> usize {
     } else {
         0
     }
-}
-
-/// Convenience: resolve the declared `preserved_artifacts` from a workspace
-/// policy into typed [`PreservedArtifact`] records, skipping unknown names.
-pub fn resolve_preserved_artifacts(
-    policy: &CompactionPolicy,
-    artifacts: &WorkspaceArtifactsPolicy,
-) -> Vec<PreservedArtifact> {
-    policy
-        .preserved_artifacts
-        .iter()
-        .map(|name| {
-            let pattern = artifacts
-                .entries
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| name.clone());
-            PreservedArtifact::new(name.clone(), pattern)
-        })
-        .collect()
-}
-
-/// Drop-in helper for metrics: reports the current schema version number for
-/// a policy file, or [`COMPACTION_POLICY_SCHEMA_VERSION`] when absent.
-pub fn policy_schema_version(policy: Option<&CompactionPolicy>) -> u32 {
-    policy
-        .map(|p| p.schema_version)
-        .unwrap_or(COMPACTION_POLICY_SCHEMA_VERSION)
-}
-
-/// Attempt to infer a repo label suitable for phase events from the workspace
-/// root path.
-pub fn repo_label_from_path(path: &Path) -> String {
-    path.file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// Byte cap on the preserved-plan block (bytes, matching

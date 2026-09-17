@@ -48,28 +48,6 @@ pub(super) struct StreamTimeouts {
 pub(super) const REPETITIVE_OUTPUT_MESSAGE: &str = "The model got stuck repeating itself, so the repetitive output was suppressed. Please try again or rephrase the request.";
 
 impl Agent {
-    /// Wait until the shutdown flag is set. Used with `tokio::select!`
-    /// to cancel long-running operations on Ctrl+C.
-    ///
-    /// Codex round (PR #1355): the previous implementation returned after
-    /// 30 seconds even when no shutdown signal arrived ("30s safety
-    /// guard"). That deadline raced the inter-chunk stream timeout: with
-    /// the 180s timeout for reasoning models, the safety guard fired
-    /// first and broke the SSE loop with a false "shutdown received"
-    /// signal — exactly the silent-state-shipping symptom this PR is
-    /// trying to eliminate. The safety guard had no production user
-    /// (Ctrl+C sets the atomic; no other consumer relied on the 30s
-    /// return) so the deadline is removed; the function now polls the
-    /// atomic until the flag flips.
-    pub(super) async fn wait_for_shutdown(&self) {
-        loop {
-            if self.shutdown.load(Ordering::Acquire) {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-    }
-
     pub(super) async fn consume_stream_with_input_estimate(
         &self,
         stream: ChatStream,
@@ -251,10 +229,6 @@ impl Agent {
 
             let event = tokio::select! {
                 event = stream.next() => event,
-                _ = self.wait_for_shutdown() => {
-                    warn!("shutdown received during streaming");
-                    break;
-                }
                 _ = tokio::time::sleep(timeout) => {
                     // Codex round (PR #1355): inter-chunk timeout used to
                     // silently `break` with a half-assembled
@@ -825,10 +799,8 @@ mod tests {
         // no `Ok` ever produced with partial state.
         //
         // The test uses real time with a 1s idle timeout (vs production's
-        // 180s) so the timeout fires before the 30s `wait_for_shutdown`
-        // safety-guard deadline. Virtual-time orchestration is avoided
-        // because it would auto-advance past the safety guard and break
-        // the loop on the shutdown branch instead of the timeout branch.
+        // 180s); virtual-time orchestration is avoided so the wall-clock
+        // assertion below stays meaningful.
         let (agent, _dir) = build_test_agent().await;
 
         // Half-emit a tool_call: open the JSON object but never close it.
@@ -863,15 +835,10 @@ mod tests {
             typed.is_retryable(),
             "idle timeout must be retryable so RetryProvider drives recovery"
         );
-        // The 1s idle timeout MUST fire before the 30s `wait_for_shutdown`
-        // safety guard. If the test takes >= 25s the safety guard fired
-        // first and the test result is by coincidence — fix the
-        // production code so `wait_for_shutdown` cannot break the stream
-        // loop with a false shutdown signal.
+        // Sanity bound: the 1s idle timeout must fire promptly, not hang.
         assert!(
             elapsed < std::time::Duration::from_secs(5),
-            "idle timeout took {elapsed:?} — wait_for_shutdown safety guard likely fired \
-             before the 1s timeout, which means the test passes by accident"
+            "idle timeout took {elapsed:?} — the stream loop likely hung past the timeout"
         );
     }
 

@@ -54,9 +54,6 @@ impl TurnContext {
         }
     }
 
-    pub fn thread_id_str(&self) -> &str {
-        self.thread_id.as_str()
-    }
 }
 
 /// Required server-stamped ownership envelope for web/SSE events.
@@ -525,9 +522,6 @@ impl<T> RpcRequest<T> {
         }
     }
 
-    pub fn is_jsonrpc_v2(&self) -> bool {
-        self.jsonrpc == JSON_RPC_VERSION
-    }
 }
 
 /// Generic JSON-RPC success envelope.
@@ -547,9 +541,6 @@ impl<T> RpcResponse<T> {
         }
     }
 
-    pub fn is_jsonrpc_v2(&self) -> bool {
-        self.jsonrpc == JSON_RPC_VERSION
-    }
 }
 
 /// Generic JSON-RPC notification envelope.
@@ -569,9 +560,6 @@ impl<T> RpcNotification<T> {
         }
     }
 
-    pub fn is_jsonrpc_v2(&self) -> bool {
-        self.jsonrpc == JSON_RPC_VERSION
-    }
 }
 
 /// JSON-RPC error object.
@@ -634,58 +622,6 @@ impl RpcError {
         }))
     }
 
-    /// Spec §10 `unknown_turn`.
-    pub fn unknown_turn(turn_id: &TurnId) -> Self {
-        let turn_id_str = turn_id.0.to_string();
-        Self::new(
-            rpc_error_codes::UNKNOWN_TURN,
-            format!("unknown turn: {turn_id_str}"),
-        )
-        .with_data(serde_json::json!({
-            "kind": "unknown_turn",
-            "turn_id": turn_id_str,
-        }))
-    }
-
-    /// Spec §10 `unknown_approval`.
-    pub fn unknown_approval_id(approval_id: &ApprovalId) -> Self {
-        let approval_id_str = approval_id.0.to_string();
-        Self::new(
-            rpc_error_codes::UNKNOWN_APPROVAL_ID,
-            format!("unknown approval id: {approval_id_str}"),
-        )
-        .with_data(serde_json::json!({
-            "kind": "unknown_approval",
-            "approval_id": approval_id_str,
-        }))
-    }
-
-    /// Spec §10 `unknown_preview`.
-    pub fn unknown_preview_id(preview_id: &PreviewId) -> Self {
-        let preview_id_str = preview_id.0.to_string();
-        Self::new(
-            rpc_error_codes::UNKNOWN_PREVIEW_ID,
-            format!("unknown preview id: {preview_id_str}"),
-        )
-        .with_data(serde_json::json!({
-            "kind": "unknown_preview",
-            "preview_id": preview_id_str,
-        }))
-    }
-
-    /// Spec §10 `unknown_task`.
-    pub fn unknown_task_id(task_id: &TaskId) -> Self {
-        let task_id_str = task_id.to_string();
-        Self::new(
-            rpc_error_codes::UNKNOWN_TASK_ID,
-            format!("unknown task id: {task_id_str}"),
-        )
-        .with_data(serde_json::json!({
-            "kind": "unknown_task",
-            "task_id": task_id_str,
-        }))
-    }
-
     /// Spec §10 `cursor_out_of_range`. Echoes both the client cursor and
     /// the ledger head in `data` so clients can pick a new resume point.
     pub fn cursor_out_of_range(cursor: &UiCursor, ledger_head: &UiCursor) -> Self {
@@ -713,18 +649,6 @@ impl RpcError {
         Self::new(rpc_error_codes::PERMISSION_DENIED, message)
     }
 
-    /// Spec §10 `APPROVAL_NOT_PENDING` (`-32011`). Carries the recorded
-    /// decision in `data.recorded_decision` (snake-case form).
-    pub fn approval_not_pending(decision: ApprovalDecision) -> Self {
-        let recorded =
-            serde_json::to_value(decision).expect("ApprovalDecision serializes to a JSON string");
-        Self::new(
-            rpc_error_codes::APPROVAL_NOT_PENDING,
-            "approval is no longer pending",
-        )
-        .with_data(serde_json::json!({ "recorded_decision": recorded }))
-    }
-
     /// Read back the recorded decision attached to an
     /// `APPROVAL_NOT_PENDING` (`-32011`) error, if present and well-formed.
     pub fn recorded_decision(&self) -> Option<ApprovalDecision> {
@@ -734,17 +658,6 @@ impl RpcError {
         let data = self.data.as_ref()?;
         let recorded = data.get("recorded_decision")?.clone();
         serde_json::from_value(recorded).ok()
-    }
-
-    /// Spec §10 capability-mismatch error. Carries a typed
-    /// `UnsupportedCapabilityReport` in `data` for uniform client handling.
-    pub fn unsupported_capability(method: impl Into<String>, reason: impl Into<String>) -> Self {
-        let report = UnsupportedCapabilityReport::method(method, reason);
-        Self::new(
-            rpc_error_codes::UNSUPPORTED_CAPABILITY,
-            format!("unsupported capability: {}", report.method),
-        )
-        .with_data(report.to_error_data())
     }
 
     /// Spec §10 `runtime_unavailable` / `runtime_not_ready`.
@@ -811,13 +724,6 @@ impl RpcErrorResponse {
         }
     }
 
-    pub fn for_request<T>(request: &RpcRequest<T>, error: RpcError) -> Self {
-        Self::new(Some(request.id.clone()), error)
-    }
-
-    pub fn is_jsonrpc_v2(&self) -> bool {
-        self.jsonrpc == JSON_RPC_VERSION
-    }
 }
 
 fn validate_jsonrpc_version(jsonrpc: &str) -> Result<(), RpcError> {
@@ -1042,11 +948,6 @@ impl UiProtocolVersion {
         }
     }
 
-    pub fn is_supported_by_current_runtime(&self) -> bool {
-        self.protocol == UI_PROTOCOL_V1
-            && self.schema_version <= UI_PROTOCOL_SCHEMA_VERSION
-            && self.jsonrpc == JSON_RPC_VERSION
-    }
 }
 
 /// Capability payload suitable for a client/server handshake.
@@ -1210,11 +1111,6 @@ impl UiProtocolCapabilities {
             .any(|candidate| candidate == feature)
     }
 
-    pub fn unsupported_report(&self, method: &str) -> Option<&UnsupportedCapabilityReport> {
-        self.unsupported
-            .iter()
-            .find(|report| report.method == method)
-    }
 }
 
 /// Result of comparing a server's advertised [`UiProtocolCapabilities`] against
@@ -1242,10 +1138,6 @@ pub enum ProtocolCompat {
 }
 
 impl ProtocolCompat {
-    /// Whether the comparison found no problems at all.
-    pub fn is_compatible(&self) -> bool {
-        matches!(self, ProtocolCompat::Compatible)
-    }
 }
 
 /// Pure protocol-compatibility comparator (no new deps; reasons only over the
@@ -1365,26 +1257,6 @@ pub enum UiResultKind {
     TurnStateGet,
     SessionBtw,
     UnsupportedCapability,
-}
-
-pub fn first_server_result_kind_for_method(method: &str) -> Option<UiResultKind> {
-    match method {
-        methods::PROFILE_LOCAL_CREATE => Some(UiResultKind::ProfileLocalCreate),
-        methods::SESSION_OPEN => Some(UiResultKind::SessionOpen),
-        methods::TURN_START => Some(UiResultKind::TurnStart),
-        methods::TURN_INTERRUPT => Some(UiResultKind::TurnInterrupt),
-        methods::APPROVAL_RESPOND => Some(UiResultKind::ApprovalRespond),
-        methods::APPROVAL_SCOPES_LIST => Some(UiResultKind::ApprovalScopesList),
-        methods::PERMISSION_PROFILE_LIST => Some(UiResultKind::PermissionProfileList),
-        methods::PERMISSION_PROFILE_SET => Some(UiResultKind::PermissionProfileSet),
-        methods::SESSION_HYDRATE => Some(UiResultKind::SessionHydrate),
-        methods::SESSION_ROLLBACK => Some(UiResultKind::SessionRollback),
-        methods::SESSION_FORK => Some(UiResultKind::SessionFork),
-        methods::THREAD_GRAPH_GET => Some(UiResultKind::ThreadGraphGet),
-        methods::TURN_STATE_GET => Some(UiResultKind::TurnStateGet),
-        methods::SESSION_BTW => Some(UiResultKind::SessionBtw),
-        _ => None,
-    }
 }
 
 /// Minimal input item for a started turn.
@@ -3376,14 +3248,6 @@ impl UiRpcResult {
         }
     }
 
-    pub fn into_rpc_response(
-        self,
-        id: impl Into<String>,
-    ) -> Result<RpcResponse<Value>, serde_json::Error> {
-        let result = self.into_result_value()?;
-        Ok(RpcResponse::success(id, result))
-    }
-
     pub fn from_method_and_result(method: &str, result: Value) -> Result<Self, RpcError> {
         // A server may answer any command method with an
         // `UnsupportedCapabilityResult` payload (per spec §3 capability
@@ -3644,15 +3508,6 @@ impl UiProgressMetadata {
         metadata
     }
 
-    pub fn with_message(mut self, message: impl Into<String>) -> Self {
-        self.message = Some(message.into());
-        self
-    }
-
-    pub fn with_iteration(mut self, iteration: u32) -> Self {
-        self.iteration = Some(iteration);
-        self
-    }
 }
 
 /// Standalone rich progress notification payload.
@@ -4203,8 +4058,7 @@ pub struct TaskUpdatedEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_count: Option<u32>,
     /// Effective runtime policy stamp captured at spawn. Stored as raw
-    /// JSON so the wire shape does not depend on the AppUI
-    /// `UiAutonomyRuntimePolicyStamp` schema. Mirrors
+    /// JSON so the wire shape stays backend-owned. Mirrors
     /// `BackgroundTask::runtime_policy_stamp`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_policy_stamp: Option<Value>,
@@ -4277,76 +4131,6 @@ pub struct PlanUpdatedEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<TurnId>,
     pub plan: UiPlanRecord,
-}
-
-/// Runtime policy details attached to M15 agent records. The policy stamp is
-/// backend-owned and intentionally open so future autonomy policy fields round
-/// trip without forcing clients back to raw JSON.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UiAutonomyRuntimePolicyStamp {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sandbox: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval_policy: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_policy_id: Option<String>,
-    #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
-}
-
-/// Artifact metadata shared by `agent/artifact/list`,
-/// `agent/artifact/updated`, and the nested artifact list on agent snapshots.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UiAgentArtifact {
-    pub id: String,
-    pub title: String,
-    pub kind: String,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
-}
-
-/// M15 agent lifecycle snapshot. This mirrors the existing raw fixture and
-/// orchestrator payload while keeping optional display aliases (`title`,
-/// `summary`, `output_tail`) compatible with the production AppUI projection.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UiAgentRecord {
-    pub agent_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_agent_id: Option<String>,
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_id: Option<String>,
-    pub path: String,
-    pub role: String,
-    pub nickname: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    pub backend_kind: String,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_task: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_tail: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    pub profile_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_policy_stamp: Option<UiAutonomyRuntimePolicyStamp>,
-    #[serde(default)]
-    pub artifact_count: usize,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<UiAgentArtifact>,
-    pub created_at_ms: i64,
-    pub updated_at_ms: i64,
 }
 
 /// M15 recurring loop snapshot.

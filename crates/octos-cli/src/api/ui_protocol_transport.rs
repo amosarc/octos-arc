@@ -1174,43 +1174,157 @@ struct ConnectionUiFeatures {
     stdio_transport: bool,
 }
 
+/// Ordered descriptor table for the negotiated feature flags: one row per
+/// wire token with its accessor, setter, and stdio default. `stdio_defaults`,
+/// `from_requested_feature_tokens`, and `negotiated_capabilities` all walk
+/// this single table (in wire order) so a new feature cannot be added to one
+/// list and forgotten in the other two.
+///
+/// Stdio defaults are `false` for `projection.envelope.v1` / `.v2` and
+/// `context.semantic_cache.v1`:
+///
+/// - Do NOT auto-enable `projection.envelope.v1` for stdio connections.
+///   Legacy `turn/completed` is the turn-lifecycle source for clients that
+///   do not consume `projection/envelope` (e.g. the octoscode over stdio,
+///   which clears its turn-active state — `live_reply`, backing the
+///   send-gate — ONLY on legacy `turn/completed`). The γ-cutover
+///   mutual-exclusion gate in `live_event_passes_capability_filter` DROPS
+///   legacy `turn/completed` whenever `projection_envelope` is true, so
+///   auto-enabling envelopes here suppresses the only lifecycle signal such
+///   clients understand and wedges them (every message after turn 1 queues
+///   "after active turn" forever). A stdio client that genuinely consumes
+///   envelopes can still opt in via `client_hello`
+///   (`from_requested_feature_tokens`), so this is a default-only change,
+///   not a capability removal.
+/// - Cache diagnostics are strictly opt-in. Stdio sends a server capability
+///   slice before `client_hello`, so enabling this by default would
+///   advertise fields the client never negotiated.
+const CONNECTION_FEATURES: &[(
+    &'static str,
+    fn(&ConnectionUiFeatures) -> bool,
+    fn(&mut ConnectionUiFeatures, bool),
+    bool,
+)] = &[
+    (
+        UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
+        |f| f.typed_approvals,
+        |f, v| f.typed_approvals = v,
+        true,
+    ),
+    (
+        UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1,
+        |f| f.pane_snapshots,
+        |f, v| f.pane_snapshots = v,
+        true,
+    ),
+    (
+        UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
+        |f| f.session_workspace_cwd,
+        |f, v| f.session_workspace_cwd = v,
+        true,
+    ),
+    (
+        UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1,
+        |f| f.session_sandbox,
+        |f, v| f.session_sandbox = v,
+        true,
+    ),
+    (
+        UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
+        |f| f.session_hydrate,
+        |f, v| f.session_hydrate = v,
+        true,
+    ),
+    (
+        UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1,
+        |f| f.thread_graph,
+        |f, v| f.thread_graph = v,
+        true,
+    ),
+    (
+        UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1,
+        |f| f.turn_state_get,
+        |f, v| f.turn_state_get = v,
+        true,
+    ),
+    (
+        UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1,
+        |f| f.spawn_complete,
+        |f, v| f.spawn_complete = v,
+        true,
+    ),
+    (
+        UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1,
+        |f| f.file_attached,
+        |f, v| f.file_attached = v,
+        true,
+    ),
+    (
+        UI_PROTOCOL_FEATURE_PLAN_TODOS_V1,
+        |f| f.plan_todos,
+        |f, v| f.plan_todos = v,
+        true,
+    ),
+    (
+        UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1,
+        |f| f.projection_envelope,
+        |f, v| f.projection_envelope = v,
+        false,
+    ),
+    (
+        UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2,
+        |f| f.projection_envelope_v2,
+        |f, v| f.projection_envelope_v2 = v,
+        false,
+    ),
+    (
+        UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
+        |f| f.context_lifecycle_v1,
+        |f, v| f.context_lifecycle_v1 = v,
+        true,
+    ),
+    (
+        UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
+        |f| f.context_semantic_cache_v1,
+        |f, v| f.context_semantic_cache_v1 = v,
+        false,
+    ),
+    (
+        UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
+        |f| f.user_question_v1,
+        |f, v| f.user_question_v1 = v,
+        true,
+    ),
+];
+
 impl ConnectionUiFeatures {
     fn stdio_defaults() -> Self {
+        let mut features = Self::empty(true);
+        for (_, _, set, stdio_default) in CONNECTION_FEATURES {
+            set(&mut features, *stdio_default);
+        }
+        features
+    }
+
+    fn empty(stdio_transport: bool) -> Self {
         Self {
-            typed_approvals: true,
-            pane_snapshots: true,
-            session_workspace_cwd: true,
-            session_sandbox: true,
-            session_hydrate: true,
-            thread_graph: true,
-            turn_state_get: true,
-            spawn_complete: true,
-            file_attached: true,
-            plan_todos: true,
-            // Do NOT auto-enable `projection.envelope.v1` for stdio
-            // connections. Legacy `turn/completed` is the turn-lifecycle
-            // source for clients that do not consume `projection/envelope`
-            // (e.g. the octoscode over stdio, which clears its turn-active
-            // state — `live_reply`, backing the send-gate — ONLY on legacy
-            // `turn/completed`). The γ-cutover mutual-exclusion gate in
-            // `live_event_passes_capability_filter` DROPS legacy
-            // `turn/completed` whenever `projection_envelope` is true, so
-            // auto-enabling envelopes here suppresses the only lifecycle
-            // signal such clients understand and wedges them (every message
-            // after turn 1 queues "after active turn" forever). A stdio
-            // client that genuinely consumes envelopes can still opt in via
-            // `client_hello` (`from_requested_feature_tokens`), so this is a
-            // default-only change, not a capability removal.
+            typed_approvals: false,
+            pane_snapshots: false,
+            session_workspace_cwd: false,
+            session_sandbox: false,
+            session_hydrate: false,
+            thread_graph: false,
+            turn_state_get: false,
+            spawn_complete: false,
+            file_attached: false,
+            plan_todos: false,
             projection_envelope: false,
             projection_envelope_v2: false,
-            context_lifecycle_v1: true,
-            // Cache diagnostics are strictly opt-in. Stdio sends a server
-            // capability slice before `client_hello`, so enabling this by
-            // default would advertise fields the client never negotiated.
+            context_lifecycle_v1: false,
             context_semantic_cache_v1: false,
-            user_question_v1: true,
-            header_present: true,
-            stdio_transport: true,
+            user_question_v1: false,
+            header_present: false,
+            stdio_transport,
         }
     }
 
@@ -1224,26 +1338,12 @@ impl ConnectionUiFeatures {
             .map(|feature| feature.as_ref().trim().to_owned())
             .filter(|feature| !feature.is_empty())
             .collect();
-        let has = |feature: &str| requested.contains(feature);
-        Self {
-            typed_approvals: has(UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1),
-            pane_snapshots: has(UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1),
-            session_workspace_cwd: has(UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1),
-            session_sandbox: has(UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1),
-            session_hydrate: has(UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1),
-            thread_graph: has(UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1),
-            turn_state_get: has(UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1),
-            spawn_complete: has(UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1),
-            file_attached: has(UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1),
-            plan_todos: has(UI_PROTOCOL_FEATURE_PLAN_TODOS_V1),
-            projection_envelope: has(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1),
-            projection_envelope_v2: has(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2),
-            context_lifecycle_v1: has(UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1),
-            context_semantic_cache_v1: has(UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1),
-            user_question_v1: has(UI_PROTOCOL_FEATURE_USER_QUESTION_V1),
-            header_present: true,
-            stdio_transport,
+        let mut parsed = Self::empty(stdio_transport);
+        for (token, _, set, _) in CONNECTION_FEATURES {
+            set(&mut parsed, requested.contains(*token));
         }
+        parsed.header_present = true;
+        parsed
     }
 
     /// Build the `UiProtocolCapabilities` payload to advertise on
@@ -1263,51 +1363,16 @@ impl ConnectionUiFeatures {
                 .retain(|feature| feature != UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1);
             return capabilities;
         }
-        let mut requested: Vec<&str> = Vec::with_capacity(8);
-        if self.typed_approvals {
-            requested.push(UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1);
-        }
-        if self.pane_snapshots {
-            requested.push(UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1);
-        }
-        if self.session_workspace_cwd {
-            requested.push(UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1);
-        }
-        if self.session_sandbox {
-            requested.push(UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1);
-        }
-        if self.session_hydrate {
-            requested.push(UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1);
-        }
-        if self.thread_graph {
-            requested.push(UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1);
-        }
-        if self.turn_state_get {
-            requested.push(UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1);
-        }
-        if self.spawn_complete {
-            requested.push(UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1);
-        }
-        if self.file_attached {
-            requested.push(UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1);
-        }
-        if self.plan_todos {
-            requested.push(UI_PROTOCOL_FEATURE_PLAN_TODOS_V1);
-        }
-        if self.projection_envelope {
-            requested.push(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1);
-        }
-        if self.projection_envelope_v2 {
-            requested.push(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2);
-        }
-        if self.context_lifecycle_v1 {
-            requested.push(UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1);
-            if self.context_semantic_cache_v1 {
-                requested.push(UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1);
-            }
-        }
-        if self.user_question_v1 {
-            requested.push(UI_PROTOCOL_FEATURE_USER_QUESTION_V1);
+        let mut requested: Vec<&str> = CONNECTION_FEATURES
+            .iter()
+            .filter(|(_, get, _, _)| get(&self))
+            .map(|(token, ..)| *token)
+            .collect();
+        // `context.semantic_cache.v1` is negotiated only as a nested opt-in
+        // under `context.lifecycle.v1` (§4): a client asking for cache
+        // diagnostics without the lifecycle feature never sees it advertised.
+        if !self.context_lifecycle_v1 {
+            requested.retain(|token| *token != UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1);
         }
         UiProtocolCapabilities::for_negotiated_features(requested)
     }
@@ -6236,6 +6301,66 @@ fn resolve_local_display_name(
     profile_id.to_owned()
 }
 
+/// Build a brand-new local-solo `UserProfile` record: enabled, no parent,
+/// default config, `now` timestamps. The single construction site for the
+/// `profile/local/create` family so the three call sites cannot drift.
+fn new_local_user_profile(profile_id: &str, name: String) -> crate::profiles::UserProfile {
+    let now = Utc::now();
+    crate::profiles::UserProfile {
+        id: profile_id.to_owned(),
+        name,
+        public_subdomain: None,
+        enabled: true,
+        data_dir: None,
+        parent_id: None,
+        config: crate::profiles::ProfileConfig::default(),
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+/// Assemble the `profile/local/create` wire result for a resolved local-solo
+/// profile: identity fields derive from the profile id (username = id, email
+/// synthesized), `created` distinguishes fresh mints from idempotent re-gets.
+fn assemble_local_solo_result(
+    profile_id: &str,
+    name: String,
+    username: &str,
+    created: bool,
+) -> octos_core::ui_protocol::ProfileLocalCreateResult {
+    octos_core::ui_protocol::ProfileLocalCreateResult {
+        profile_id: profile_id.to_owned(),
+        user_id: profile_id.to_owned(),
+        name,
+        username: username.to_owned(),
+        email: synthesized_local_email(profile_id),
+        created,
+        runtime_mode: "solo".to_owned(),
+    }
+}
+
+/// Persist a freshly minted local-solo profile (store save + username
+/// metadata + optional default flag) and return its `created: true` result.
+/// The shared tail of both fresh-create paths.
+fn save_new_local_solo_profile(
+    profile_store: &crate::profiles::ProfileStore,
+    params: &octos_core::ui_protocol::ProfileLocalCreateParams,
+    profile: &crate::profiles::UserProfile,
+    username: &str,
+) -> Result<octos_core::ui_protocol::ProfileLocalCreateResult, RpcError> {
+    profile_store
+        .save(profile)
+        .map_err(|error| runtime_unavailable_error(format!("failed to save profile: {error}")))?;
+    write_local_profile_metadata(profile_store, profile, username)?;
+    persist_default_if_requested(profile_store, params, &profile.id)?;
+    Ok(assemble_local_solo_result(
+        &profile.id,
+        profile.name.clone(),
+        username,
+        true,
+    ))
+}
+
 /// Create a fresh, uniquely-named local solo profile. Used when the client
 /// sends a `requested_id` (normalized + collision-suffixed) or omits the legacy
 /// `username` entirely (id derived from the display name, else generated).
@@ -6255,36 +6380,8 @@ fn create_fresh_local_solo_profile(
     };
 
     let name = resolve_local_display_name(params, &profile_id);
-    let username = profile_id.clone();
-    let email = synthesized_local_email(&profile_id);
-    let now = Utc::now();
-
-    let profile = crate::profiles::UserProfile {
-        id: profile_id.clone(),
-        name: name.clone(),
-        public_subdomain: None,
-        enabled: true,
-        data_dir: None,
-        parent_id: None,
-        config: crate::profiles::ProfileConfig::default(),
-        created_at: now,
-        updated_at: now,
-    };
-    profile_store
-        .save(&profile)
-        .map_err(|error| runtime_unavailable_error(format!("failed to save profile: {error}")))?;
-    write_local_profile_metadata(profile_store, &profile, &username)?;
-    persist_default_if_requested(profile_store, params, &profile_id)?;
-
-    Ok(octos_core::ui_protocol::ProfileLocalCreateResult {
-        profile_id: profile_id.clone(),
-        user_id: profile_id,
-        name,
-        username,
-        email,
-        created: true,
-        runtime_mode: "solo".to_owned(),
-    })
+    let profile = new_local_user_profile(&profile_id, name);
+    save_new_local_solo_profile(profile_store, params, &profile, &profile_id)
 }
 
 /// Record the just-created/resolved profile as the machine's global default
@@ -6353,7 +6450,6 @@ pub(crate) fn create_or_get_local_solo_profile(
     let name = validate_local_name(&params.name)?;
     let profile_id = normalize_local_username(&params.username)?;
     let username = profile_id.clone();
-    let email = synthesized_local_email(&profile_id);
 
     let existing_profile = profile_store
         .get(&profile_id)
@@ -6368,59 +6464,15 @@ pub(crate) fn create_or_get_local_solo_profile(
         // Idempotent re-create: the profile (and its metadata) already match.
         write_local_profile_metadata(&profile_store, profile, &username)?;
         persist_default_if_requested(&profile_store, &params, &profile_id)?;
-        return Ok(octos_core::ui_protocol::ProfileLocalCreateResult {
-            profile_id: profile_id.clone(),
-            user_id: profile_id,
-            name,
-            username,
-            email,
-            created: false,
-            runtime_mode: "solo".to_owned(),
-        });
+        return Ok(assemble_local_solo_result(&profile_id, name, &username, false));
     }
 
-    let now = Utc::now();
-    let profile = crate::profiles::UserProfile {
-        id: profile_id.clone(),
-        name: name.clone(),
-        public_subdomain: None,
-        enabled: true,
-        data_dir: None,
-        parent_id: None,
-        config: crate::profiles::ProfileConfig::default(),
-        created_at: now,
-        updated_at: now,
-    };
-    profile_store
-        .save(&profile)
-        .map_err(|error| runtime_unavailable_error(format!("failed to save profile: {error}")))?;
-    write_local_profile_metadata(&profile_store, &profile, &username)?;
-    persist_default_if_requested(&profile_store, &params, &profile_id)?;
-
-    Ok(octos_core::ui_protocol::ProfileLocalCreateResult {
-        profile_id: profile_id.clone(),
-        user_id: profile_id,
-        name,
-        username,
-        email,
-        created: true,
-        runtime_mode: "solo".to_owned(),
-    })
+    let profile = new_local_user_profile(&profile_id, name);
+    save_new_local_solo_profile(&profile_store, &params, &profile, &profile_id)
 }
 
 fn default_profile(profile_id: &str) -> crate::profiles::UserProfile {
-    let now = Utc::now();
-    crate::profiles::UserProfile {
-        id: profile_id.to_owned(),
-        name: profile_id.to_owned(),
-        public_subdomain: None,
-        enabled: true,
-        data_dir: None,
-        parent_id: None,
-        config: crate::profiles::ProfileConfig::default(),
-        created_at: now,
-        updated_at: now,
-    }
+    new_local_user_profile(profile_id, profile_id.to_owned())
 }
 
 fn profile_store(state: &AppState) -> Result<Arc<crate::profiles::ProfileStore>, RpcError> {
@@ -19217,6 +19269,34 @@ fn direct_send_passes_capability_filter(ws: &WsConnection, event: &UiProtocolLed
     live_event_passes_capability_filter(event, features)
 }
 
+/// Shared prep for the direct-send notification paths (lifecycle + durable):
+/// per-connection envelope projection (Codex #1336 round-2 BLOCKER 1), the
+/// capability filter at the direct-send boundary, and wire metrics. Returns
+/// `None` when the connection's negotiated feature set filters the event
+/// out — callers must treat that as a successful no-op.
+fn prepare_direct_send(
+    ws: &WsConnection,
+    ledger: &UiProtocolLedger,
+    event: LedgeredUiProtocolEvent,
+) -> Option<(
+    Option<UiProtocolDeliveryMetric>,
+    String,
+    UiProtocolLedgerEvent,
+)> {
+    let features = ws.snapshot_live_features();
+    let projected = features
+        .projection_envelope_v2
+        .then(|| project_v2_ledger_event(ledger, &event.event, &event.cursor))
+        .flatten();
+    let event_for_wire = context_event_for_features(projected.unwrap_or(event.event), features);
+    if !live_event_passes_capability_filter(&event_for_wire, features) {
+        return None;
+    }
+    let delivery_metric = ui_protocol_delivery_metric(&event_for_wire);
+    let method = ledger_event_method(&event_for_wire).to_string();
+    Some((delivery_metric, method, event_for_wire))
+}
+
 fn send_notification_lifecycle(
     ws: &WsConnection,
     ledger: &UiProtocolLedger,
@@ -19259,16 +19339,11 @@ fn send_notification_lifecycle(
     // ledger append above still happens so the canonical envelope
     // emit (via `ledger.emit_envelope` on the same handler path)
     // delivers via the broadcast forwarder.
-    let projected = features
-        .projection_envelope_v2
-        .then(|| project_v2_ledger_event(ledger, &event.event, &event.cursor))
-        .flatten();
-    let event_for_wire = context_event_for_features(projected.unwrap_or(event.event), features);
-    let delivery_metric = ui_protocol_delivery_metric(&event_for_wire);
-    let method = ledger_event_method(&event_for_wire).to_string();
-    if !live_event_passes_capability_filter(&event_for_wire, features) {
+    let Some((delivery_metric, method, event_for_wire)) =
+        prepare_direct_send(ws, ledger, event)
+    else {
         return Ok(());
-    }
+    };
     let frame = frame_from_ledger(event_for_wire)
         .ok_or_else(|| SendError::LifecycleFailure(format!("serialize {method}")))?;
     match ws.send_lifecycle(frame) {
@@ -19309,17 +19384,11 @@ fn send_notification_durable(
     // forwarder. Ledger append still occurs above so OTHER
     // connections (without the feature) receive the legacy shape via
     // their own forwarders.
-    let features = ws.snapshot_live_features();
-    let projected = features
-        .projection_envelope_v2
-        .then(|| project_v2_ledger_event(ledger, &event.event, &event.cursor))
-        .flatten();
-    let event_for_wire = context_event_for_features(projected.unwrap_or(event.event), features);
-    let delivery_metric = ui_protocol_delivery_metric(&event_for_wire);
-    let method = ledger_event_method(&event_for_wire).to_string();
-    if !live_event_passes_capability_filter(&event_for_wire, features) {
+    let Some((delivery_metric, method, event_for_wire)) =
+        prepare_direct_send(ws, ledger, event)
+    else {
         return Ok(());
-    }
+    };
     let frame = match frame_from_ledger(event_for_wire) {
         Some(frame) => frame,
         None => {
@@ -19395,58 +19464,73 @@ fn send_notification_ephemeral(
     }
 }
 
+/// Shared delivery tail for the ledger-event durable twins below (metrics +
+/// durable-cursor accounting + `replay_lossy` opportunistic summary). The
+/// macro structurally enforces the #2065 lockstep requirement: both the
+/// blocking and the offloaded twin expand the SAME prep/deliver/recover
+/// sequence and differ only in the enqueue expression, so they cannot
+/// drift. `$frame` / `$method` name the caller-side bindings the macro
+/// creates; `$enqueue` must reference exactly those (e.g.
+/// `ws.send_durable(frame, &method)` or
+/// `ws.send_durable_offloaded(frame, &method).await`).
+macro_rules! deliver_ledger_frame {
+    ($ws:expr, $ledger:expr, $event:expr, $frame:ident, $method:ident, $enqueue:expr) => {{
+        let $method = ledger_event_method(&$event).to_string();
+        let delivery_metric = ui_protocol_delivery_metric(&$event);
+        // `event` already carries its cursor (set by the ledger before
+        // storage) — pull a copy out before consuming the event into a frame.
+        let cursor = ledger_event_cursor(&$event);
+        // Codex #1336 round-2 BLOCKER 1: this helper is called from THREE
+        // paths — (a) the live forwarder, which already filters via
+        // `live_event_passes_capability_filter(features)` BEFORE invoking;
+        // (b) the session/open replay loop, which ALSO already filters
+        // before invoking; (c) handler-direct paths that flush a ledger
+        // event they just appended (progress status, opened-event,
+        // synthetic emits) — these always send shapes that aren't gated
+        // by `projection_envelope` (Progress, SessionOpened, etc.).
+        // Adding a second filter pass here would double up with (a) +
+        // (b) — and in tests where the forwarder's `features` arg is set
+        // explicitly without syncing `WsConnection::live_features`, the
+        // second pass would drop events the forwarder approved. The
+        // `send_notification_*` family is where γ-cutover direct sends
+        // arrive and where the per-connection filter is applied.
+        let $frame = match frame_from_ledger($event) {
+            Some(frame) => frame,
+            None => return Err(SendError::BackpressureDrop),
+        };
+        match $enqueue {
+            Ok(()) => {
+                record_ui_protocol_delivery_metric(delivery_metric);
+                if let Some(cursor) = cursor {
+                    $ws.metrics.record_durable_cursor(&cursor);
+                }
+                Ok(())
+            }
+            Err(SendError::BackpressureDrop) => {
+                if let Some(cursor) = cursor.as_ref() {
+                    emit_replay_lossy_opportunistic($ws, $ledger, &cursor.stream);
+                }
+                Err(SendError::BackpressureDrop)
+            }
+            Err(other) => Err(other),
+        }
+    }};
+}
+
 fn send_ledger_event_durable(
     ws: &WsConnection,
     ledger: &UiProtocolLedger,
     event: UiProtocolLedgerEvent,
 ) -> Result<(), SendError> {
-    let method = ledger_event_method(&event).to_string();
-    let delivery_metric = ui_protocol_delivery_metric(&event);
-    // `event` already carries its cursor (set by the ledger before storage)
-    // — pull a copy out before consuming the event into a frame.
-    let cursor = ledger_event_cursor(&event);
-    // Codex #1336 round-2 BLOCKER 1: this helper is called from THREE
-    // paths — (a) the live forwarder, which already filters via
-    // `live_event_passes_capability_filter(features)` BEFORE invoking;
-    // (b) the session/open replay loop, which ALSO already filters
-    // before invoking; (c) handler-direct paths that flush a ledger
-    // event they just appended (progress status, opened-event,
-    // synthetic emits) — these always send shapes that aren't gated
-    // by `projection_envelope` (Progress, SessionOpened, etc.).
-    // Adding a second filter pass here would double up with (a) +
-    // (b) — and in tests where the forwarder's `features` arg is set
-    // explicitly without syncing `WsConnection::live_features`, the
-    // second pass would drop events the forwarder approved. The
-    // `send_notification_*` family is where γ-cutover direct sends
-    // arrive and where the per-connection filter is applied.
-    let frame = match frame_from_ledger(event) {
-        Some(frame) => frame,
-        None => return Err(SendError::BackpressureDrop),
-    };
-    match ws.send_durable(frame, &method) {
-        Ok(()) => {
-            record_ui_protocol_delivery_metric(delivery_metric);
-            if let Some(cursor) = cursor {
-                ws.metrics.record_durable_cursor(&cursor);
-            }
-            Ok(())
-        }
-        Err(SendError::BackpressureDrop) => {
-            if let Some(cursor) = cursor.as_ref() {
-                emit_replay_lossy_opportunistic(ws, ledger, &cursor.stream);
-            }
-            Err(SendError::BackpressureDrop)
-        }
-        Err(other) => Err(other),
-    }
+    deliver_ledger_frame!(ws, ledger, event, frame, method, ws.send_durable(frame, &method))
 }
 
 /// Async twin of [`send_ledger_event_durable`] for the live-forwarder task
-/// (#2065): identical prep, metrics, and
-/// `replay_lossy` semantics — keep the two in lockstep — but the enqueue
-/// goes through [`WsConnection::send_durable_offloaded`], whose stdio lane
-/// parks THIS task cooperatively (non-blocking probe + async sleep) instead
-/// of a blocking `SyncSender::send` — never an executor-worker stall, and
+/// (#2065): identical prep, metrics, and `replay_lossy` semantics (see the
+/// `deliver_ledger_frame!` macro) — but the enqueue goes through
+/// [`WsConnection::send_durable_offloaded`], whose stdio lane parks THIS
+/// task cooperatively (non-blocking probe + async sleep) instead of a
+/// blocking `SyncSender::send` — never an executor-worker stall, and
 /// cancellable with an atomic enqueue so abort+join leaves nothing
 /// detached in flight.
 async fn send_ledger_event_durable_offloaded(
@@ -19454,29 +19538,14 @@ async fn send_ledger_event_durable_offloaded(
     ledger: &UiProtocolLedger,
     event: UiProtocolLedgerEvent,
 ) -> Result<(), SendError> {
-    let method = ledger_event_method(&event).to_string();
-    let delivery_metric = ui_protocol_delivery_metric(&event);
-    let cursor = ledger_event_cursor(&event);
-    let frame = match frame_from_ledger(event) {
-        Some(frame) => frame,
-        None => return Err(SendError::BackpressureDrop),
-    };
-    match ws.send_durable_offloaded(frame, &method).await {
-        Ok(()) => {
-            record_ui_protocol_delivery_metric(delivery_metric);
-            if let Some(cursor) = cursor {
-                ws.metrics.record_durable_cursor(&cursor);
-            }
-            Ok(())
-        }
-        Err(SendError::BackpressureDrop) => {
-            if let Some(cursor) = cursor.as_ref() {
-                emit_replay_lossy_opportunistic(ws, ledger, &cursor.stream);
-            }
-            Err(SendError::BackpressureDrop)
-        }
-        Err(other) => Err(other),
-    }
+    deliver_ledger_frame!(
+        ws,
+        ledger,
+        event,
+        frame,
+        method,
+        ws.send_durable_offloaded(frame, &method).await
+    )
 }
 
 fn frame_from_ledger(event: UiProtocolLedgerEvent) -> Option<WsMessage> {

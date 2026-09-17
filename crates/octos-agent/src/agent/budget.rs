@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use octos_core::TokenUsage;
-use tracing::{info, warn};
+use tracing::warn;
 
 use super::Agent;
 use super::activity::{DEFAULT_IDLE_TIMEOUT_SECS, LoopActivityState};
@@ -11,7 +11,6 @@ use crate::progress::ProgressEvent;
 
 /// Reason why the agent loop stopped due to budget constraints.
 pub(super) enum BudgetStop {
-    Shutdown,
     /// The agent reached its per-turn iteration limit (`max_iterations`).
     ///
     /// We carry the limit so the user-facing message can name the exact
@@ -40,7 +39,6 @@ pub(super) enum BudgetStop {
 impl BudgetStop {
     pub(super) fn message(&self) -> String {
         match self {
-            Self::Shutdown => String::new(),
             Self::MaxIterations { limit } => {
                 // Surface the iteration count and a concrete hint about
                 // what the user can do next. The previous bare "Reached
@@ -104,11 +102,6 @@ impl Agent {
         total_usage: &TokenUsage,
         activity: &LoopActivityState,
     ) -> Option<BudgetStop> {
-        use std::sync::atomic::Ordering;
-
-        if self.shutdown.load(Ordering::Acquire) {
-            return Some(BudgetStop::Shutdown);
-        }
         // `0` is the Codex-style interactive mode (`octos chat`, `octos acp`):
         // no arbitrary turn cap while a human is attached. Unattended lanes
         // never inherit it: `octos gateway` / `octos serve` session actors
@@ -148,12 +141,6 @@ impl Agent {
     /// Log and report a budget stop event (used by `run_task`).
     pub(super) fn report_budget_stop(&self, stop: &BudgetStop, iteration: u32) {
         match stop {
-            BudgetStop::Shutdown => {
-                info!(iteration, "shutdown signal received");
-                self.reporter().report(ProgressEvent::TaskInterrupted {
-                    iterations: iteration,
-                });
-            }
             BudgetStop::MaxIterations { limit } => {
                 warn!(iteration, max = *limit, "hit max iterations limit");
                 self.reporter()
@@ -227,11 +214,6 @@ mod tests {
     }
 
     // ---------- BudgetStop::message ----------
-
-    #[test]
-    fn budget_stop_shutdown_message() {
-        assert_eq!(BudgetStop::Shutdown.message(), "");
-    }
 
     #[test]
     fn budget_stop_max_iterations_message_surfaces_iteration_count_and_hint() {
