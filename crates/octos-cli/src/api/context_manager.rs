@@ -3177,22 +3177,12 @@ impl ContextManager {
     ) {
         let blocks = self.semantic_blocks();
         let mut retained_block_ids = HashSet::new();
-        let latest_user = blocks
-            .iter()
-            .rposition(|block| block.kind == SemanticBlockKind::UserTurn);
-        let first_open_block = blocks.iter().position(|block| !block.closed);
-
-        // The newest user request and all work after it remain raw even when
-        // that tail alone exceeds the target. With no user block (e.g. a
-        // synthetic/background context), retain at least the newest block. An
-        // open tool interaction moves the mandatory boundary earlier because
-        // it is never legal summary input.
-        let mandatory_tail_start = match (latest_user, first_open_block) {
-            (Some(user), Some(open)) => user.min(open),
-            (Some(user), None) => user,
-            (None, Some(open)) => open,
-            (None, None) => blocks.len().saturating_sub(1),
-        };
+        // Shared with `semantic_compaction_pinned_item_ids` so the summarizer
+        // never drops raw rows that the pin rule protects. When the newest
+        // user turn's tail alone exceeds the target (agentic marathon turn),
+        // the boundary retreats to the most recent complete blocks that fit.
+        let mandatory_tail_start =
+            self.effective_mandatory_tail_start(&blocks, Some(keep_recent_tokens));
         let mut retained_tokens = 0usize;
         if policy.preserve_system_instructions {
             for block in blocks
@@ -3267,21 +3257,81 @@ impl ContextManager {
             .collect::<Vec<_>>();
         (retained, retained_item_ids, dropped_item_ids)
     }
-    fn semantic_compaction_pinned_item_ids(
+    /// Effective boundary where the mandatory (raw, never-summarized) tail
+    /// begins. Shared by [`Self::semantic_compaction_replacement_items`] and
+    /// [`Self::semantic_compaction_pinned_item_ids`] so the summarizer never
+    /// drops raw rows that the pin rule protects.
+    ///
+    /// Chat semantics pin everything from the newest user turn onward. An
+    /// agentic turn — one user message followed by dozens of tool
+    /// interactions — would pin the entire conversation, which is how a
+    /// marathon turn deadlocked on `InfeasiblePinnedTail` (tok-ticket-1
+    /// turn 1: pinned tail estimated 89,641 tokens against a 59,733 target,
+    /// so no compaction could install for the rest of the turn). When the
+    /// mandatory tail alone exceeds `tail_budget_tokens`, the boundary
+    /// retreats to the most recent run of complete blocks that fits.
+    /// Invariants preserved:
+    /// - the open interaction (first unclosed block) is never legal summary
+    ///   input: its output would arrive orphaned after the summary. The
+    ///   boundary therefore never retreats past it, and every block after it
+    ///   stays raw as well;
+    /// - a tail that remains over budget even so installs with the
+    ///   `InfeasiblePinnedTail` outcome as before;
+    /// - stable instructions are retained by the callers regardless of the
+    ///   boundary, so the walk skips them.
+    fn effective_mandatory_tail_start(
         &self,
-        policy: &CompactContextPolicy,
-    ) -> HashSet<TranscriptItemId> {
-        let blocks = self.semantic_blocks();
+        blocks: &[SemanticBlock],
+        tail_budget_tokens: Option<usize>,
+    ) -> usize {
         let latest_user = blocks
             .iter()
             .rposition(|block| block.kind == SemanticBlockKind::UserTurn);
-        let first_open_block = blocks.iter().position(|block| !block.closed);
-        let mandatory_tail_start = match (latest_user, first_open_block) {
+        let first_open = blocks.iter().position(|block| !block.closed);
+        let mandatory = match (latest_user, first_open) {
             (Some(user), Some(open)) => user.min(open),
             (Some(user), None) => user,
             (None, Some(open)) => open,
             (None, None) => blocks.len().saturating_sub(1),
         };
+        let Some(budget) = tail_budget_tokens else {
+            return mandatory;
+        };
+        let mandatory_tokens: usize = blocks[mandatory..]
+            .iter()
+            .map(|block| block.estimated_tokens)
+            .sum();
+        if mandatory_tokens <= budget {
+            return mandatory;
+        }
+        // Retreat: start from the smallest legal retained tail (the open run
+        // when one exists) and walk backwards, keeping whole closed blocks
+        // while they fit the budget. `mandatory <= ceiling` always holds
+        // because `mandatory <= first_open` by construction.
+        let ceiling = first_open.unwrap_or(blocks.len());
+        let mut boundary = ceiling.max(mandatory);
+        let mut acc: usize = blocks[boundary..]
+            .iter()
+            .map(|block| block.estimated_tokens)
+            .sum();
+        while boundary > mandatory {
+            let previous = &blocks[boundary - 1];
+            if acc + previous.estimated_tokens > budget {
+                break;
+            }
+            boundary -= 1;
+            acc += previous.estimated_tokens;
+        }
+        boundary
+    }
+
+    fn semantic_compaction_pinned_item_ids(
+        &self,
+        policy: &CompactContextPolicy,
+    ) -> HashSet<TranscriptItemId> {
+        let blocks = self.semantic_blocks();
+        let mandatory_tail_start =
+            self.effective_mandatory_tail_start(&blocks, policy.keep_recent_tokens);
 
         blocks
             .iter()
@@ -4056,25 +4106,24 @@ fn sha256_prefixed(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-/// Test replacement for the retired `Message::tool_with_thread` constructor.
-fn tool_msg(
-    content: impl Into<String>,
-    tool_call_id: impl Into<String>,
-    thread_id: impl Into<String>,
-) -> Message {
-    Message {
-        role: octos_core::MessageRole::Tool,
-        content: content.into(),
-        media: vec![],
-        tool_calls: None,
-        tool_call_id: Some(tool_call_id.into()),
-        reasoning_content: None,
-        client_message_id: None,
-        thread_id: Some(thread_id.into()),
-        timestamp: chrono::Utc::now(),
+    /// Test replacement for the retired `Message::tool_with_thread` constructor.
+    fn tool_msg(
+        content: impl Into<String>,
+        tool_call_id: impl Into<String>,
+        thread_id: impl Into<String>,
+    ) -> Message {
+        Message {
+            role: octos_core::MessageRole::Tool,
+            content: content.into(),
+            media: vec![],
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+            reasoning_content: None,
+            client_message_id: None,
+            thread_id: Some(thread_id.into()),
+            timestamp: chrono::Utc::now(),
+        }
     }
-}
-
 
     fn assistant_tool_call(call_id: &str) -> Message {
         let mut message = Message::assistant("");
@@ -4550,6 +4599,130 @@ fn tool_msg(
         )));
     }
 
+    fn marathon_tool_iteration(manager: &mut ContextManager, index: usize, output: &str) {
+        let mut assistant = Message::assistant("");
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: format!("call_{index}"),
+            name: "read_file".to_owned(),
+            arguments: json!({"path": format!("src/file_{index}.rs")}),
+            metadata: None,
+        }]);
+        manager.record_message(&assistant);
+        manager.record_message(&tool_msg(output, format!("call_{index}"), "thread-1"));
+    }
+
+    #[test]
+    fn semantic_compaction_should_retreat_tail_boundary_when_single_user_turn_exceeds_target() {
+        // An agentic marathon turn: ONE user message followed by many closed
+        // tool interactions. Chat pin rules would pin everything; the retreat
+        // must still install a compaction that meets the target.
+        let mut manager = ContextManager::new("s", None);
+        manager.record_message(&Message::user("turn prompt ".repeat(200)));
+        for index in 0..8 {
+            marathon_tool_iteration(
+                &mut manager,
+                index,
+                &format!("tool output {index} {}", "result body ".repeat(30)),
+            );
+        }
+
+        let record = manager.compact_context(
+            "earlier interactions summarized",
+            CompactContextPolicy {
+                keep_recent_tokens: Some(400),
+                target_tokens_after_compaction: Some(512),
+                ..CompactContextPolicy::default()
+            },
+        );
+
+        assert_eq!(
+            record.status,
+            ContextCompactionStatus::Installed,
+            "marathon tail must not deadlock compaction: {}",
+            record.error.unwrap_or_default()
+        );
+        assert_eq!(record.budget_outcome, ContextCompactionBudgetOutcome::Met);
+        assert!(
+            record
+                .token_estimate_after
+                .is_some_and(|tokens| tokens <= 512)
+        );
+        // The newest interaction survives raw; the old ones live only in the
+        // summary.
+        let prompt = manager.for_prompt(&PromptBuildPolicy::default());
+        assert!(
+            prompt
+                .messages
+                .iter()
+                .any(|message| message.tool_call_id.as_deref() == Some("call_7")),
+            "newest tool output must remain raw"
+        );
+        assert!(
+            prompt
+                .messages
+                .iter()
+                .all(|message| message.tool_call_id.as_deref() != Some("call_0")),
+            "old tool output must be summarized away"
+        );
+        assert!(
+            prompt
+                .messages
+                .iter()
+                .any(|message| message.content.contains("earlier interactions summarized")),
+            "installed summary must be present"
+        );
+    }
+
+    #[test]
+    fn should_keep_infeasible_outcome_when_open_interaction_alone_exceeds_target() {
+        // An in-flight tool call has no output yet — it can never be summary
+        // input. The retreat stops at the open block; whatever remains over
+        // budget installs with the honest InfeasiblePinnedTail outcome
+        // instead of silently dropping the interaction.
+        let mut manager = ContextManager::new("s", None);
+        manager.record_message(&Message::user("turn prompt"));
+        let mut assistant = Message::assistant("");
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: "call_open".to_owned(),
+            name: "read_file".to_owned(),
+            arguments: json!({"path": "huge.bin"}),
+            metadata: None,
+        }]);
+        manager.record_message(&assistant);
+        manager.record_message(&Message::assistant("thinking ".repeat(4000)));
+
+        let record = manager.compact_context(
+            "summary",
+            CompactContextPolicy {
+                keep_recent_tokens: Some(64),
+                target_tokens_after_compaction: Some(256),
+                ..CompactContextPolicy::default()
+            },
+        );
+
+        assert_eq!(
+            record.budget_outcome,
+            ContextCompactionBudgetOutcome::InfeasiblePinnedTail
+        );
+        assert!(
+            record
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("infeasible")),
+            "oversized pinned tail must be reported: {:?}",
+            record.error
+        );
+        // The open interaction stays raw — never summarized.
+        let prompt = manager.for_prompt(&PromptBuildPolicy::default());
+        assert!(
+            prompt
+                .messages
+                .iter()
+                .any(|message| message.content.contains("thinking")),
+            "open interaction content must remain raw"
+        );
+    }
+
     #[test]
     fn durable_context_ledger_rebuilds_when_snapshot_is_stale() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -4592,7 +4765,9 @@ fn tool_msg(
         manager.compact_context(
             "older exchange summarized",
             CompactContextPolicy {
-                keep_recent_tokens: Some(1),
+                // Above the newest user turn (stays raw), below the older
+                // exchange (summarized).
+                keep_recent_tokens: Some(64),
                 ..CompactContextPolicy::default()
             },
         );
@@ -4745,10 +4920,7 @@ fn tool_msg(
             },
         ]);
         manager.record_persisted_message(&assistant, 1);
-        manager.record_persisted_message(
-            &tool_msg("a result", "call_a", "thread-1"),
-            2,
-        );
+        manager.record_persisted_message(&tool_msg("a result", "call_a", "thread-1"), 2);
         assert!(!manager.semantic_blocks().last().unwrap().closed);
 
         manager.record_persisted_message(&Message::user("continue without b"), 3);
@@ -4791,7 +4963,9 @@ fn tool_msg(
         manager.compact_context(
             "summary of old work",
             CompactContextPolicy {
-                keep_recent_tokens: Some(1),
+                // Above the newest user turn (stays raw), below the older
+                // exchange (summarized).
+                keep_recent_tokens: Some(64),
                 ..CompactContextPolicy::default()
             },
         );
@@ -4968,9 +5142,12 @@ fn tool_msg(
         manager.record_message(&assistant);
         manager.record_message(&tool_msg("a result", "call_a", "thread-1"));
         manager.record_message(&tool_msg("b result", "call_b", "thread-1"));
-        manager.record_message(&Message::user("current request"));
+        manager.record_message(&Message::user("current request ".repeat(20)));
+        // Budget between the newest user turn (stays raw) and the interaction
+        // block (must land in the summary input): this test pins the parallel-
+        // group integrity of the summarized prefix, not tail arithmetic.
         let policy = CompactContextPolicy {
-            keep_recent_tokens: Some(1),
+            keep_recent_tokens: Some(100),
             ..CompactContextPolicy::default()
         };
 
@@ -4990,7 +5167,7 @@ fn tool_msg(
         assert!(
             input
                 .iter()
-                .all(|message| message.content != "current request")
+                .all(|message| !message.content.contains("current request"))
         );
     }
 

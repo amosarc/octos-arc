@@ -653,12 +653,35 @@ pub fn build_plan_state(
                 .map(|s| (f.rel.clone(), s.lines().map(String::from).collect()))
         })
         .collect();
+    // Recently edited files lead the map: the model must see what it is
+    // actively changing even when spec-hit host files outrank everything
+    // (tok-ticket-1: the map never showed the frontend being edited).
+    let mut recent_files: Vec<(std::time::Duration, String)> = tags_by_file
+        .iter()
+        .filter_map(|(rel, (mtime, tags))| {
+            if tags.is_empty() {
+                return None;
+            }
+            SystemTime::now()
+                .duration_since(*mtime)
+                .ok()
+                .filter(|age| age.as_secs() < 30 * 60)
+                .map(|age| (age, rel.clone()))
+        })
+        .collect::<Vec<_>>();
+    recent_files.sort_by(|a, b| a.0.cmp(&b.0));
+    let recent_files: Vec<String> = recent_files.into_iter().map(|(_, rel)| rel).collect();
+
     let repo_map_text = repomap::render_map(&repomap::MapInput {
         tags_by_file: &tags_map,
         rank_by_file: &rank_by_file,
         overlays: &overlays,
         source_lines: &source_lines,
-        budget_tokens: 450,
+        recent_files: &recent_files,
+        // Doubled from 450: the orientation win of showing the actively
+        // edited files outweighs the fixed cost, and rows stay under
+        // MAX_MAP_LINES.
+        budget_tokens: 800,
     });
 
     let drift_now = scan::drift(&required, &hits);

@@ -7,6 +7,7 @@ use eyre::Result;
 use serde::Deserialize;
 
 use super::{ConcurrencyClass, Tool, ToolContext, ToolResult};
+use crate::file_state_cache::{CacheEntry, FileStateCache};
 use crate::policy::{FileAccessMode, FilesystemScope};
 
 /// Tool for editing files via string replacement.
@@ -40,7 +41,6 @@ impl EditFileTool {
         self.file_access = file_access;
         self
     }
-
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,7 +252,6 @@ impl Tool for EditFileTool {
             return Ok(super::file_io_error(e, &input.path));
         }
 
-
         // #1774: opt-in post-edit formatting. Runs BEFORE cache invalidation
         // so both observe the final on-disk content. Best-effort by contract
         // — a formatter failure never fails the edit.
@@ -262,10 +261,36 @@ impl Tool for EditFileTool {
             None
         };
 
-        // M8.4: invalidate any stale cache entry — the file's contents and
-        // mtime just changed.
+        // M8.4: refresh the file-state cache entry. The stale pre-edit entry
+        // is dropped and replaced by a PARTIAL view covering exactly the hunk
+        // the edit result just shows — a follow-up read of that same range
+        // can be answered with the [FILE_UNCHANGED] stub (the edit result is
+        // the previous tool result it points at), while any other range still
+        // misses conservatively. A full-file entry would be a trap: a model
+        // that never read the whole file could get stubbed out of its own
+        // content.
+        let (hunk, hunk_view_range) =
+            edited_hunk_preview(&new_content, range.start, splice_new.len());
         if let Some(cache) = ctx.file_state_cache.as_ref() {
             cache.invalidate(&path);
+            if let Some(view_range) = hunk_view_range {
+                if let Ok(meta) = tokio::fs::metadata(&path).await {
+                    if let Ok(mtime) = meta.modified() {
+                        if !FileStateCache::has_binary_extension(&path)
+                            && FileStateCache::is_text_cacheable(new_content.as_bytes())
+                        {
+                            cache.put(CacheEntry::new(
+                                path.clone(),
+                                mtime,
+                                FileStateCache::content_hash(new_content.as_bytes()),
+                                new_content.len(),
+                                true,
+                                Some(view_range),
+                            ));
+                        }
+                    }
+                }
+            }
         }
 
         // Report which replacer produced the match. The exact-match wording
@@ -279,13 +304,119 @@ impl Tool for EditFileTool {
             )
         };
 
+        // Post-edit sight: show the edited region plus bounded context so the
+        // model does not need a full re-read to see what the file looks like
+        // now (tok-ticket-1: 13 edits drove 30 full-file re-reads).
+        let mut output = format!("{output}{}", format_note.unwrap_or_default());
+        if !hunk.is_empty() {
+            output.push_str("\n\n");
+            output.push_str(&hunk);
+        }
+
         Ok(ToolResult {
-            output: format!("{output}{}", format_note.unwrap_or_default()),
+            output,
             success: true,
             file_modified: Some(path),
             ..Default::default()
         })
     }
+}
+
+/// Maximum rendered size of the post-edit hunk preview (comfortably under
+/// the 4KB model-visible tool-output cap, leaving room for the framing).
+const HUNK_PREVIEW_MAX_CHARS: usize = 2048;
+/// Context lines shown on each side of the edited region.
+const HUNK_CONTEXT_LINES: usize = 10;
+
+/// Render the edited region of `new_content` (1-indexed inclusive line span)
+/// with line numbers (same `{n}│ {line}` style as `read_file`),
+/// [`HUNK_CONTEXT_LINES`] of context on each side, capped at
+/// [`HUNK_PREVIEW_MAX_CHARS`]. Returns the preview and the 1-indexed inclusive
+/// line range it rendered (for the file-state cache). Shared with the
+/// `diff_edit` tool, whose applier reports changed line spans directly.
+pub(crate) fn edited_hunk_preview_lines(
+    new_content: &str,
+    region_start_line: u64,
+    region_end_line: u64,
+) -> (String, Option<(u64, u64)>) {
+    let total_lines = new_content.lines().count() as u64;
+    if total_lines == 0 {
+        return (String::new(), None);
+    }
+    let region_start_line = region_start_line.clamp(1, total_lines);
+    let region_end_line = region_end_line.clamp(region_start_line, total_lines);
+
+    let window_start = region_start_line
+        .saturating_sub(HUNK_CONTEXT_LINES as u64)
+        .max(1);
+    let window_end = (region_end_line + HUNK_CONTEXT_LINES as u64).min(total_lines);
+    let width = total_lines.to_string().len();
+    let render = |start: u64, end: u64| {
+        let mut out = String::new();
+        for (offset, line) in new_content
+            .lines()
+            .skip((start - 1) as usize)
+            .take((end - start + 1) as usize)
+            .enumerate()
+        {
+            let n = start + offset as u64;
+            out.push_str(&format!("{n:>width$}│ {line}\n"));
+        }
+        out
+    };
+    let mut preview = render(window_start, window_end);
+    if preview.len() > HUNK_PREVIEW_MAX_CHARS {
+        preview = render(region_start_line, region_end_line);
+    }
+    if preview.len() > HUNK_PREVIEW_MAX_CHARS {
+        preview.truncate(HUNK_PREVIEW_MAX_CHARS);
+        preview.push_str("\n…[hunk truncated]");
+    }
+    preview.push_str(&format!(
+        "[edit applied at lines {region_start_line}-{region_end_line}; \
+         showing {}-{} of {} lines]",
+        window_start, window_end, total_lines
+    ));
+    (preview, Some((window_start, window_end)))
+}
+
+/// Byte-range wrapper for `edit_file`: translate the replaced byte region of
+/// `new_content` into its line span, then render via
+/// [`edited_hunk_preview_lines`]. A splice ending in `\n` terminates its own
+/// last line; one without it opens an extra (unfinished) line.
+fn edited_hunk_preview(
+    new_content: &str,
+    region_byte_start: usize,
+    region_byte_len: usize,
+) -> (String, Option<(u64, u64)>) {
+    let total_lines = new_content.lines().count() as u64;
+    if total_lines == 0 {
+        return (String::new(), None);
+    }
+    let clamp = |mut at: usize| {
+        at = at.min(new_content.len());
+        while at > 0 && !new_content.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    };
+    let region_start = clamp(region_byte_start);
+    let region_end = clamp(region_byte_start + region_byte_len).max(region_start);
+    let region_start_line = (new_content[..region_start].matches('\n').count() as u64) + 1;
+    let region_text = &new_content[region_start..region_end];
+    let replaced_line_span = if region_text.is_empty() {
+        0
+    } else if region_text.ends_with('\n') {
+        region_text.matches('\n').count() as u64
+    } else {
+        region_text.matches('\n').count() as u64 + 1
+    };
+    let region_end_line = if replaced_line_span == 0 {
+        region_start_line
+    } else {
+        (region_start_line + replaced_line_span - 1).min(total_lines)
+    };
+    edited_hunk_preview_lines(new_content, region_start_line, region_end_line)
 }
 
 #[cfg(test)]
@@ -378,9 +509,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // Phase 2-C: SessionScope integration tests for EditFileTool.
     // -----------------------------------------------------------------------
-
-    
-    
 
     #[tokio::test]
     async fn edit_file_refuses_out_of_scope_path() {
@@ -540,10 +668,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn should_edit_file_tool_invalidate_cache_after_edit() {
+    async fn should_refresh_file_cache_with_hunk_view_after_edit() {
         use crate::file_state_cache::{CacheEntry, FileStateCache};
         use std::sync::Arc;
-        use std::time::SystemTime;
 
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("code.rs");
@@ -552,7 +679,7 @@ mod tests {
         let cache = Arc::new(FileStateCache::new());
         cache.put(CacheEntry::new(
             file_path.clone(),
-            SystemTime::now(),
+            std::time::SystemTime::now(),
             0xCAFE,
             12,
             false,
@@ -577,11 +704,121 @@ mod tests {
             .unwrap();
 
         assert!(result.success);
-        assert!(cache.peek(&file_path).is_none());
+        // The stale entry is replaced by a partial entry covering exactly the
+        // rendered hunk, so a same-range re-read can stub (the edit result is
+        // the previous tool result) while any other range misses conservatively.
+        let entry = cache.peek(&file_path).expect("fresh hunk entry after edit");
+        assert_eq!(entry.view_range, Some((1, 1)));
+        assert!(entry.is_partial_view);
+        // The hunk itself is visible in the result.
+        assert!(
+            result.output.contains("1│ fn bar() {}"),
+            "edit result must show the edited hunk: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("showing 1-1 of 1 lines"),
+            "edit result must bound the preview: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn should_return_edited_hunk_with_line_numbers_when_edit_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = String::new();
+        for i in 1..=30 {
+            file.push_str(&format!("line {i:02}\n"));
+        }
+        std::fs::write(dir.path().join("big.txt"), &file).unwrap();
+
+        let tool = EditFileTool::new(dir.path());
+        let result = tool
+            .execute(&serde_json::json!({
+                "path": "big.txt",
+                "old_string": "line 15\nline 16\n",
+                "new_string": "line 15\nEDITED\nline 16\n"
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.success, "edit should succeed: {}", result.output);
+        assert!(
+            result.output.contains("Successfully edited big.txt"),
+            "historical wording must be preserved: {}",
+            result.output
+        );
+        // The splice inserts EDITED at line 16 and shifts later content.
+        assert!(
+            result.output.contains("16│ EDITED"),
+            "hunk must show the new content, line-numbered: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("15│ line 15") && result.output.contains("17│ line 16"),
+            "hunk must bracket the edit (later lines shift by one): {}",
+            result.output
+        );
+        // ±10-line context around the edited region (lines 5-27).
+        assert!(
+            result.output.contains("5│ line 05") && result.output.contains("27│ line 26"),
+            "hunk must include bounded context: {}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("1│ line 01") && !result.output.contains("31│"),
+            "hunk must not render the whole file: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn should_refresh_file_cache_entry_after_edit() {
+        // Legacy-name regression guard renamed semantics: after an edit the
+        // cache must never retain the STALE pre-edit entry.
+        use crate::file_state_cache::{CacheEntry, FileStateCache};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("code.rs");
+        std::fs::write(&file_path, "fn foo() {}\n").unwrap();
+
+        let cache = Arc::new(FileStateCache::new());
+        cache.put(CacheEntry::new(
+            file_path.clone(),
+            std::time::SystemTime::now(),
+            0xDEAD,
+            12,
+            false,
+            None,
+        ));
+
+        let mut ctx = ToolContext::zero();
+        ctx.file_state_cache = Some(cache.clone());
+
+        let tool = EditFileTool::new(dir.path());
+        let result = tool
+            .execute_with_context(
+                &ctx,
+                &serde_json::json!({
+                    "path": "code.rs",
+                    "old_string": "fn foo() {}",
+                    "new_string": "fn bar() {} // replaced"
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        let entry = cache.peek(&file_path).expect("entry refreshed after edit");
+        assert_ne!(
+            entry.content_hash,
+            crate::file_state_cache::FileStateCache::content_hash(b"fn foo() {}\n"),
+            "cached hash must reflect the new content, not the stale one"
+        );
     }
 
     // -----------------------------------------------------------------------
     // #1774: post-edit formatting integration.
     // -----------------------------------------------------------------------
-
 }

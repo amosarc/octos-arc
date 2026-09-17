@@ -29,7 +29,7 @@ use super::{DomainOverlays, Tag, TagKind, render::ChangeNote};
 use octos_llm::context::estimate_tokens;
 
 /// Map budget defaults; render_map stops early anyway.
-const MAX_MAP_LINES: usize = 24;
+const MAX_MAP_LINES: usize = 40;
 const MAX_SOURCE_LINE_CHARS: usize = 100;
 /// `mul` discount: idents defined in more than this many files are generic.
 const GENERIC_DEFINERS_CAP: usize = 5;
@@ -392,8 +392,17 @@ pub struct MapInput<'a> {
     pub overlays: &'a DomainOverlays,
     /// Workspace file rel paths → first source lines for rendering.
     pub source_lines: &'a HashMap<String, Vec<String>>,
+    /// Recently edited files (most recent first). Each gets reserved leading
+    /// rows before the rank fill — the map must describe what the agent is
+    /// actively changing even when spec-hit files outrank it (tok-ticket-1:
+    /// the map never mentioned the frontend the model was editing).
+    pub recent_files: &'a [String],
     pub budget_tokens: u32,
 }
+
+/// Reserved leading rows for recently edited files.
+const RECENT_FILE_CAP: usize = 4;
+const RECENT_ROWS_PER_FILE: usize = 2;
 
 /// Render the map: overlay lines first, then `path:` groups with
 /// `line: source` rows in rank order. Byte-stable for identical input.
@@ -401,6 +410,7 @@ pub struct MapInput<'a> {
 pub fn render_map(input: &MapInput) -> String {
     let mut out = String::new();
     let mut lines_used = 0usize;
+    let mut rendered_files: HashSet<String> = HashSet::new();
 
     let mut overlay_rows: Vec<String> = Vec::new();
     for r in input.overlays.routes.iter().take(8) {
@@ -418,11 +428,44 @@ pub fn render_map(input: &MapInput) -> String {
         lines_used += overlay_rows.len();
     }
 
+    // Reserved rows for recently edited files: newest first, a couple of
+    // definition lines each, ahead of rank competition.
+    for file in input.recent_files.iter().take(RECENT_FILE_CAP) {
+        if lines_used >= MAX_MAP_LINES || estimate_tokens(&out) > input.budget_tokens {
+            break;
+        }
+        let tags = match input.tags_by_file.get(file) {
+            Some(tags) if !tags.is_empty() => tags,
+            _ => continue,
+        };
+        let source_line = |line: usize| {
+            input
+                .source_lines
+                .get(file)
+                .and_then(|lines| lines.get(line.saturating_sub(1)))
+                .map(|l| truncate(l, MAX_SOURCE_LINE_CHARS))
+                .unwrap_or_default()
+        };
+        out.push_str(&format!("{file}:\n"));
+        lines_used += 1;
+        rendered_files.insert(file.clone());
+        for tag in tags.iter().take(RECENT_ROWS_PER_FILE) {
+            if lines_used >= MAX_MAP_LINES {
+                break;
+            }
+            out.push_str(&format!("  {}: {}\n", tag.line, source_line(tag.line)));
+            lines_used += 1;
+        }
+    }
+
     let rows = rank_rows(input.tags_by_file, &[], input.rank_by_file);
     let mut current_file: Option<String> = None;
     for row in rows {
         if lines_used >= MAX_MAP_LINES || estimate_tokens(&out) > input.budget_tokens {
             break;
+        }
+        if rendered_files.contains(&row.file) {
+            continue;
         }
         if current_file.as_deref() != Some(row.file.as_str()) {
             out.push_str(&format!("{}:\n", row.file));
@@ -715,6 +758,7 @@ new Router();
             rank_by_file: &rank_by_file,
             overlays: &overlays,
             source_lines: &source_lines,
+            recent_files: &[],
             budget_tokens: 450,
         };
         let map1 = render_map(&input);
@@ -740,6 +784,81 @@ new Router();
             estimate_tokens(&small) <= 30 + 20,
             "{}",
             estimate_tokens(&small)
+        );
+    }
+
+    #[test]
+    fn should_reserve_leading_rows_for_recently_edited_files() {
+        // A spec-hit host file outranks everything, but the file the agent is
+        // actively editing must still appear — right after the overlays,
+        // before rank competition eats the budget.
+        let mut tags_by_file: HashMap<String, Vec<Tag>> = HashMap::new();
+        tags_by_file.insert(
+            "backend/src/lib/auth.js".into(),
+            (1..=6)
+                .map(|i| Tag {
+                    name: format!("host_sym_{i}"),
+                    line: i,
+                    kind: TagKind::Def,
+                })
+                .collect(),
+        );
+        tags_by_file.insert(
+            "frontend/src/main.jsx".into(),
+            (1..=6)
+                .map(|i| Tag {
+                    name: format!("app_sym_{i}"),
+                    line: i,
+                    kind: TagKind::Def,
+                })
+                .collect(),
+        );
+        let mut rank_by_file: HashMap<String, f64> = HashMap::new();
+        rank_by_file.insert("backend/src/lib/auth.js".into(), 10.0);
+        rank_by_file.insert("frontend/src/main.jsx".into(), 0.1);
+        let source_lines: HashMap<String, Vec<String>> = tags_by_file
+            .keys()
+            .map(|k| {
+                (
+                    k.clone(),
+                    (1..=6)
+                        .map(|i| format!("function sym_{i}() {{}}"))
+                        .collect(),
+                )
+            })
+            .collect();
+        let input = MapInput {
+            tags_by_file: &tags_by_file,
+            rank_by_file: &rank_by_file,
+            overlays: &DomainOverlays {
+                routes: vec!["/api/auth/login".into()],
+                testids: vec![],
+                pages: vec![],
+            },
+            source_lines: &source_lines,
+            recent_files: &["frontend/src/main.jsx".into()],
+            budget_tokens: 800,
+        };
+        let map = render_map(&input);
+        let frontend_pos = map
+            .find("frontend/src/main.jsx:")
+            .expect("recent file present");
+        let backend_pos = map
+            .find("backend/src/lib/auth.js:")
+            .expect("ranked file present");
+        assert!(
+            frontend_pos < backend_pos,
+            "recently edited file leads over higher-ranked files:\n{map}"
+        );
+        assert!(
+            map.starts_with("route /api/auth/login\n"),
+            "overlays still come first:\n{map}"
+        );
+        // The reserved group is not repeated by the rank fill.
+        assert_eq!(
+            map.matches("frontend/src/main.jsx:").count(),
+            1,
+            "recent group must not be duplicated:\n{map}"
         );
     }
 
@@ -781,10 +900,11 @@ new Router();
             rank_by_file: &rank_by_file,
             overlays: &overlays,
             source_lines: &source_lines,
-            budget_tokens: 450,
+            recent_files: &[],
+            budget_tokens: 800,
         };
         let map = render_map(&input);
         assert!(map.lines().count() <= MAX_MAP_LINES + 1, "line cap");
-        assert!(estimate_tokens(&map) <= 450, "budget cap");
+        assert!(estimate_tokens(&map) <= 800, "budget cap");
     }
 }

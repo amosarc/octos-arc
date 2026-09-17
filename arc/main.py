@@ -756,6 +756,15 @@ def build_octos_env(config_dir: Path) -> dict:
     # npmjs.org is slow/unreliable from the ARC runner network.
     env.setdefault("npm_config_registry", "https://registry.npmmirror.com")
     env.setdefault("NPM_CONFIG_REGISTRY", "https://registry.npmmirror.com")
+    # Compaction threshold: octos derives it as context_window × 7/10
+    # (≈90k on agnes-3.0-flash's reported 128k window). tok-ticket-1
+    # measured 25 cache-miss requests billing full price for a 50–87k
+    # context — 52% of all input tokens. Lowering the threshold caps the
+    # worst-case miss price; the post-compaction target follows at 2/3.
+    # OCTOS_CONTEXT_COMPACT_THRESHOLD_TOKENS is honoured by release builds
+    # (ui_protocol_transport env_usize), so an explicit operator override
+    # still wins via setdefault.
+    env.setdefault("OCTOS_CONTEXT_COMPACT_THRESHOLD_TOKENS", "65536")
     # examples/core-mod: a bundle-root EXTRA_RULES.md becomes extra system-
     # prompt rules when a patched core honors OCTOS_ARC_EXTRA_RULES; the
     # official release ignores the variable, so shipping the file is harmless.

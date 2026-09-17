@@ -7,6 +7,7 @@ use eyre::{Result, WrapErr};
 use serde::Deserialize;
 
 use super::{ConcurrencyClass, Tool, ToolContext, ToolResult};
+use crate::file_state_cache::{CacheEntry, FileStateCache};
 use crate::policy::{FileAccessMode, FilesystemScope};
 
 /// Tool for editing files via unified diff format with fuzzy matching.
@@ -144,8 +145,8 @@ impl Tool for DiffEditTool {
             });
         }
 
-        let new_content = match apply_hunks(&content, &hunks) {
-            Ok(c) => c,
+        let (new_content, changed_spans) = match apply_hunks(&content, &hunks) {
+            Ok((c, spans)) => (c, spans),
             Err(e) => {
                 return Ok(ToolResult {
                     output: format!("Failed to apply diff: {e}"),
@@ -168,19 +169,59 @@ impl Tool for DiffEditTool {
             None
         };
 
-        // M8.4: invalidate any stale cache entry — the file's contents and
-        // mtime just changed.
+        // Post-edit sight: preview the changed span (same renderer and cache
+        // semantics as edit_file) so the model does not re-read the file to
+        // see the result.
+        let span = changed_spans
+            .iter()
+            .fold(None, |acc: Option<(u64, u64)>, &(s, e)| {
+                Some(match acc {
+                    Some((min_s, max_e)) => (min_s.min(s), max_e.max(e)),
+                    None => (s, e),
+                })
+            });
+        let (hunk, hunk_view_range) = match span {
+            Some((s, e)) => super::edit_file::edited_hunk_preview_lines(&new_content, s, e),
+            None => (String::new(), None),
+        };
+
+        // M8.4: drop the stale entry; keep a partial entry over exactly the
+        // previewed hunk (see edit_file for the full-file-entry rationale).
         if let Some(cache) = ctx.file_state_cache.as_ref() {
             cache.invalidate(&path);
+            if let Some(view_range) = hunk_view_range {
+                if let Ok(meta) = tokio::fs::metadata(&path).await {
+                    if let Ok(mtime) = meta.modified() {
+                        if !FileStateCache::has_binary_extension(&path)
+                            && FileStateCache::is_text_cacheable(new_content.as_bytes())
+                        {
+                            cache.put(CacheEntry::new(
+                                path.clone(),
+                                mtime,
+                                FileStateCache::content_hash(new_content.as_bytes()),
+                                new_content.len(),
+                                true,
+                                Some(view_range),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut output = format!(
+            "Applied {} hunk(s) to {}{}",
+            hunks.len(),
+            input.path,
+            format_note.unwrap_or_default()
+        );
+        if !hunk.is_empty() {
+            output.push_str("\n\n");
+            output.push_str(&hunk);
         }
 
         Ok(ToolResult {
-            output: format!(
-                "Applied {} hunk(s) to {}{}",
-                hunks.len(),
-                input.path,
-                format_note.unwrap_or_default()
-            ),
+            output,
             success: true,
             file_modified: Some(path),
             ..Default::default()
@@ -292,7 +333,7 @@ fn parse_hunk_header(line: &str) -> Result<usize> {
 
 const FUZZY_RANGE: i64 = 3;
 
-fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String> {
+fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<(String, Vec<(u64, u64)>)> {
     let mut lines: Vec<String> = content.lines().map(String::from).collect();
 
     // Apply hunks in reverse order so line numbers stay valid
@@ -313,6 +354,10 @@ fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String> {
         }
     }
 
+    // Changed spans in NEW-file coordinates (1-indexed inclusive). Hunks are
+    // applied at descending positions, so every match_pos is final by the
+    // time its own splice runs.
+    let mut changed_spans: Vec<(u64, u64)> = Vec::new();
     for (idx, hunk) in sorted_hunks {
         let context_lines = pattern_lines(&hunk.lines);
 
@@ -331,7 +376,16 @@ fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String> {
 
         // Replace the matched region
         let end = (match_pos + remove_count).min(lines.len());
-        lines.splice(match_pos..end, new_lines);
+        lines.splice(match_pos..end, new_lines.iter().cloned());
+        if !new_lines.is_empty() {
+            changed_spans.push(((match_pos + 1) as u64, (match_pos + new_lines.len()) as u64));
+        } else if match_pos > 0 {
+            // Pure deletion: nothing new to show at the splice point, anchor
+            // the preview on the line that now precedes it.
+            changed_spans.push((match_pos as u64, match_pos as u64));
+        } else if !lines.is_empty() {
+            changed_spans.push((1, 1));
+        }
     }
 
     // Preserve trailing newline if original had one
@@ -339,7 +393,7 @@ fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String> {
     if content.ends_with('\n') {
         result.push('\n');
     }
-    Ok(result)
+    Ok((result, changed_spans))
 }
 
 fn find_match(lines: &[String], pattern: &[&str], target: usize) -> Result<usize> {
@@ -409,7 +463,7 @@ mod tests {
         let content = "line1\nline2\nline3\n";
         let diff = "@@ -1,3 +1,3 @@\n line1\n-line2\n+line2_new\n line3\n";
         let hunks = parse_unified_diff(diff).unwrap();
-        let result = apply_hunks(content, &hunks).unwrap();
+        let (result, _) = apply_hunks(content, &hunks).unwrap();
         assert_eq!(result, "line1\nline2_new\nline3\n");
     }
 
@@ -418,7 +472,7 @@ mod tests {
         let content = "a\nb\n";
         let diff = "@@ -1,2 +1,3 @@\n a\n+inserted\n b\n";
         let hunks = parse_unified_diff(diff).unwrap();
-        let result = apply_hunks(content, &hunks).unwrap();
+        let (result, _) = apply_hunks(content, &hunks).unwrap();
         assert_eq!(result, "a\ninserted\nb\n");
     }
 
@@ -427,7 +481,7 @@ mod tests {
         let content = "a\ndelete_me\nb\n";
         let diff = "@@ -1,3 +1,2 @@\n a\n-delete_me\n b\n";
         let hunks = parse_unified_diff(diff).unwrap();
-        let result = apply_hunks(content, &hunks).unwrap();
+        let (result, _) = apply_hunks(content, &hunks).unwrap();
         assert_eq!(result, "a\nb\n");
     }
 
@@ -438,7 +492,7 @@ mod tests {
         // Diff says line 1, but actual match is at line 2
         let diff = "@@ -1,3 +1,3 @@\n line1\n-line2\n+line2_fuzzy\n line3\n";
         let hunks = parse_unified_diff(diff).unwrap();
-        let result = apply_hunks(content, &hunks).unwrap();
+        let (result, _) = apply_hunks(content, &hunks).unwrap();
         assert_eq!(result, "extra\nline1\nline2_fuzzy\nline3\n");
     }
 
@@ -448,7 +502,7 @@ mod tests {
         let diff = "@@ -1,2 +1,2 @@\n-a\n+A\n b\n@@ -5,2 +5,2 @@\n-e\n+E\n f\n";
         let hunks = parse_unified_diff(diff).unwrap();
         assert_eq!(hunks.len(), 2);
-        let result = apply_hunks(content, &hunks).unwrap();
+        let (result, _) = apply_hunks(content, &hunks).unwrap();
         assert_eq!(result, "A\nb\nc\nd\nE\nf\n");
     }
 
@@ -536,6 +590,37 @@ mod tests {
         assert!(
             err_msg.contains("overlapping hunks"),
             "expected overlapping hunks error, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_return_hunk_preview_when_diff_applies() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = String::new();
+        for i in 1..=25 {
+            file.push_str(&format!("line {i:02}\n"));
+        }
+        std::fs::write(dir.path().join("big.txt"), &file).unwrap();
+
+        let tool = DiffEditTool::new(dir.path());
+        let result = tool
+            .execute(&serde_json::json!({
+                "path": "big.txt",
+                "diff": "@@ -12,3 +12,3 @@\n line 12\n-line 13\n+line 13 EDITED\n line 14\n",
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.success, "diff must apply: {}", result.output);
+        assert!(
+            result.output.contains("13│ line 13 EDITED"),
+            "hunk preview must show the changed line: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("3│ line 03") && result.output.contains("23│ line 23"),
+            "hunk preview must include ±10-line context: {}",
+            result.output
         );
     }
 }
