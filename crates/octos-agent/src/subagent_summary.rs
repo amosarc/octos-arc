@@ -564,7 +564,7 @@ async fn fetch_summary(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use octos_llm::{ChatResponse, ChatStream, StopReason, TokenUsage, ToolSpec};
+    use octos_llm::{ChatResponse, ChatStream, ToolSpec};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Instant;
 
@@ -600,14 +600,7 @@ mod tests {
         ) -> eyre::Result<ChatResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             *self.seen_retention.lock().unwrap() = Some(config.cache_retention);
-            Ok(ChatResponse {
-                content: Some(self.output.clone()),
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                stop_reason: StopReason::EndTurn,
-                usage: TokenUsage::default(),
-                provider_index: None,
-            })
+            Ok(ChatResponse::end_turn(self.output.clone()))
         }
 
         async fn chat_stream(

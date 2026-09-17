@@ -61,14 +61,6 @@ impl OpenAIResponsesProvider {
         self
     }
 
-    /// Explicit override for an endpoint known to implement the OpenAI
-    /// Responses `prompt_cache_key` contract. Custom endpoints stay opt-out
-    /// unless their route configuration deliberately enables it.
-    pub fn with_prompt_cache_affinity(mut self, enabled: bool) -> Self {
-        self.prompt_cache_affinity = enabled;
-        self
-    }
-
     pub fn with_http_timeout(mut self, timeout_secs: u64, connect_timeout_secs: u64) -> Self {
         self.client = crate::provider::build_http_client(timeout_secs, connect_timeout_secs);
         self.stream_client = crate::provider::build_streaming_http_client(connect_timeout_secs);

@@ -9,6 +9,7 @@ use octos_agent::{Agent, AgentConfig, ToolRegistry};
 use octos_core::{AgentId, Message, ToolCall};
 use octos_llm::{ChatConfig, ChatResponse, LlmProvider, StopReason, TokenUsage, ToolSpec};
 use octos_memory::EpisodeStore;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 /// FIFO-scripted provider: pops pre-built responses in order and errors
@@ -119,4 +120,15 @@ pub(crate) async fn boot_agent(
         suppress_auto_send_files: true,
         ..Default::default()
     })
+}
+
+/// Write `body` to `<dir>/<name>` and mark it executable (0o755).
+pub(crate) fn write_script(dir: impl AsRef<Path>, name: &str, body: &str) -> PathBuf {
+    let path = dir.as_ref().join(name);
+    std::fs::write(&path, body).expect("write script");
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&path).expect("read perms").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).expect("chmod script");
+    path
 }

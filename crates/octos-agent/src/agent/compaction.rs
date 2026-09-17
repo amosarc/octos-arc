@@ -105,7 +105,7 @@ impl Agent {
         if runner.needs_preflight(messages).is_none() {
             return Ok(None);
         }
-        let outcome = runner.run(messages, CompactionPhase::Preflight);
+        let outcome = runner.run(messages);
         info!(
             phase = "preflight",
             performed = outcome.performed,
@@ -149,7 +149,7 @@ impl Agent {
         if iteration == 1 {
             return Ok(None);
         }
-        let outcome = runner.run(messages, CompactionPhase::TurnEnd);
+        let outcome = runner.run(messages);
         if outcome.performed {
             info!(
                 phase = "turn_end",

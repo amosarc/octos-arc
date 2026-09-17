@@ -394,27 +394,6 @@ impl HarnessEvent {
     }
 
 
-    pub fn phase_event(
-        session_id: impl Into<String>,
-        task_id: impl Into<String>,
-        workflow: Option<impl Into<String>>,
-        phase: impl Into<String>,
-        message: Option<impl Into<String>>,
-    ) -> Self {
-        Self {
-            schema: HARNESS_EVENT_SCHEMA_V1.to_string(),
-            payload: HarnessEventPayload::Phase {
-                data: HarnessPhaseEvent {
-                    session_id: session_id.into(),
-                    task_id: task_id.into(),
-                    workflow: workflow.map(Into::into),
-                    phase: phase.into(),
-                    message: message.map(Into::into),
-                    extra: HashMap::new(),
-                },
-            },
-        }
-    }
 
     /// Build a `SubagentProgress` event (M8.7). Emitted every tick while a
     /// spawn_only sub-agent is running so operators can see a live

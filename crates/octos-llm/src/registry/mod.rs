@@ -346,3 +346,64 @@ mod tests {
         assert_eq!(detect_provider("deepseek-chat"), Some("deepseek"));
     }
 }
+
+
+#[cfg(test)]
+pub(crate) mod cache_breakpoint_probe {
+    //! Both Anthropic-protocol zai lanes must keep explicit `cache_control`
+    //! breakpoints when built from the registry against a non-official host.
+    use std::sync::Arc;
+
+    use eyre::Result;
+    use octos_core::Message;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::CreateParams;
+    use crate::config::ChatConfig;
+    use crate::provider::LlmProvider;
+
+    pub(crate) async fn assert_cache_breakpoints_survive_registry_build(
+        create: fn(CreateParams) -> Result<Arc<dyn LlmProvider>>,
+        model: &str,
+        lane_label: &str,
+    ) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(
+                        r#"{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+                    )
+                    .append_header("Content-Type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = create(CreateParams {
+            api_key: Some("test-key".to_owned()),
+            model: Some(model.to_owned()),
+            base_url: Some(server.uri()),
+            model_hints: None,
+            llm_timeout_secs: None,
+            llm_connect_timeout_secs: None,
+        })
+        .unwrap();
+        provider
+            .chat(
+                &[Message::system("sys"), Message::user("hi")],
+                &[],
+                &ChatConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert!(
+            body.to_string().contains("cache_control"),
+            "Anthropic-compatible {lane_label} lane must keep explicit cache breakpoints: {body}"
+        );
+    }
+}

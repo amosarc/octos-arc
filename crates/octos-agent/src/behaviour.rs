@@ -58,36 +58,11 @@ impl ActionContext {
     }
 }
 
-/// Extract notification messages from action results.
-pub fn notifications(results: &[(String, ActionResult)]) -> Vec<String> {
-    results
-        .iter()
-        .filter_map(|(_, r)| match r {
-            ActionResult::Notify { message } => Some(message.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
 /// Parse and execute a behaviour action spec against a workspace root.
 ///
-/// Action specs follow the format `"action_kind:argument"`.
-///
-/// Supported actions:
-/// - `file_exists:<glob>` — at least one file matches the glob pattern
-/// - `file_size_min:<glob>:<bytes>` — matched files are at least N bytes
-/// - `file_count_eq:<glob>:<count>` — exactly N files match the glob or named target
-/// - `file_count_min:<glob>:<count>` — at least N files match the glob or named target
-/// - `file_count_max:<glob>:<count>` — at most N files match the glob or named target
-/// - `any_exists:<glob>|<glob>|...` — at least one target resolves to an existing file
-/// - `all_exist:<glob>|<glob>|...` — every listed target resolves to an existing file
-/// - `cleanup:<glob>` — remove files matching the glob (always passes)
-/// - `notify_user:<message>` — log a notification (always passes, actual
-///   delivery wired by caller)
-pub fn run_action(workspace_root: &Path, spec: &str) -> Result<ActionResult> {
-    run_action_with_context(workspace_root, &ActionContext::default(), spec)
-}
-
+/// Action specs follow the format `"action_kind:argument"`. Supported kinds:
+/// `file_exists`, `file_size_min`, `file_count_eq`, `file_count_min`,
+/// `file_count_max`, `any_exists`, `all_exist`, `cleanup`, `notify_user`.
 pub(crate) fn run_action_with_context(
     workspace_root: &Path,
     context: &ActionContext,
@@ -404,7 +379,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("output.mp3"), b"audio data").unwrap();
 
-        let result = run_action(temp.path(), "file_exists:output.mp3").unwrap();
+        let result = run_action_with_context(temp.path(), &ActionContext::default(), "file_exists:output.mp3").unwrap();
         assert_eq!(result, ActionResult::Pass);
     }
 
@@ -414,14 +389,14 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("output")).unwrap();
         std::fs::write(temp.path().join("output/deck.pptx"), b"slides").unwrap();
 
-        let result = run_action(temp.path(), "file_exists:output/*.pptx").unwrap();
+        let result = run_action_with_context(temp.path(), &ActionContext::default(), "file_exists:output/*.pptx").unwrap();
         assert_eq!(result, ActionResult::Pass);
     }
 
     #[test]
     fn should_return_notify_with_message() {
         let temp = tempfile::tempdir().unwrap();
-        let result = run_action(temp.path(), "notify_user:TTS generation failed").unwrap();
+        let result = run_action_with_context(temp.path(), &ActionContext::default(), "notify_user:TTS generation failed").unwrap();
         assert_eq!(
             result,
             ActionResult::Notify {
@@ -434,7 +409,7 @@ mod tests {
     #[test]
     fn should_reject_unknown_action() {
         let temp = tempfile::tempdir().unwrap();
-        let result = run_action(temp.path(), "unknown_action:arg");
+        let result = run_action_with_context(temp.path(), &ActionContext::default(), "unknown_action:arg");
         assert!(result.is_err());
     }
 
@@ -461,7 +436,7 @@ mod tests {
         std::fs::write(&outside_file, b"sensitive").unwrap();
 
         // Try to clean up ../secret.txt — should be blocked
-        let result = run_action(&workspace, "cleanup:../secret.txt").unwrap();
+        let result = run_action_with_context(&workspace, &ActionContext::default(), "cleanup:../secret.txt").unwrap();
         assert_eq!(result, ActionResult::Pass); // cleanup always passes
         // But the file outside workspace must NOT be deleted
         assert!(outside_file.exists(), "path traversal should be blocked");

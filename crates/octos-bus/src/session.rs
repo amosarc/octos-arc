@@ -597,8 +597,9 @@ pub struct Session {
     pub topic: Option<String>,
     /// Short summary of the session content.
     pub summary: Option<String>,
-    /// Display title (auto-derived from first user message; manual rename via
-    /// [`SessionManager::update_title`] preserves across new messages).
+    /// Display title (auto-derived from the first user message; a
+    /// `title_manual` flag carried in persisted metadata preserves it across
+    /// new messages).
     pub title: Option<String>,
     /// True if title was set manually and should not be overwritten by
     /// auto-derivation.
@@ -801,7 +802,7 @@ impl SessionManager {
     ) -> Result<usize> {
         // Auto-derive title from first user message before persistence so the
         // first append_to_disk includes the title in the JSONL meta line.
-        // Manual titles (set via update_title) are preserved.
+        // Manual titles (flagged `title_manual` in persisted metadata) are preserved.
         if matches!(message.role, MessageRole::User) {
             let session = self.get_or_create(key).await;
             if !session.title_manual && session.title.is_none() {
@@ -1727,7 +1728,7 @@ impl SessionHandle {
     async fn add_message_with_seq_unlocked(&mut self, mut message: Message) -> Result<usize> {
         // Auto-derive title from first user message before persistence so the
         // first append_to_disk includes the title in the JSONL meta line.
-        // Manual titles set via update_title elsewhere are preserved.
+        // Manual titles (flagged `title_manual` in persisted metadata) are preserved.
         if matches!(message.role, MessageRole::User)
             && !self.session.title_manual
             && self.session.title.is_none()

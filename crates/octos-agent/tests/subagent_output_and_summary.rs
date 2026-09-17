@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use octos_agent::{AgentSummaryGenerator, AppendResult, SubAgentOutputRouter, TaskSupervisor};
 use octos_core::Message;
 use octos_llm::{
-    ChatConfig, ChatResponse, ChatStream, LlmProvider, StopReason, TokenUsage, ToolSpec,
+    ChatConfig, ChatResponse, ChatStream, LlmProvider, ToolSpec,
 };
 
 struct StepProvider {
@@ -51,14 +51,7 @@ impl LlmProvider for StepProvider {
             .get(idx)
             .cloned()
             .unwrap_or_else(|| "continuing work".to_string());
-        Ok(ChatResponse {
-            content: Some(content),
-            reasoning_content: None,
-            tool_calls: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-            provider_index: None,
-        })
+        Ok(ChatResponse::end_turn(content))
     }
 
     async fn chat_stream(

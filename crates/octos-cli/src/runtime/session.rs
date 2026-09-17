@@ -3,7 +3,7 @@
 //! See the crate-level [`super`] module docs and
 //! `docs/M11-PROFILE-SESSION-RUNTIME-ADR.md` for the two-scope model.
 //! This file owns the [`SessionRuntime`] type and the M11-C
-//! implementation of [`SessionRuntime::bootstrap`].
+//! implementation of [`SessionRuntime::bootstrap_with_permissions_and_sandbox`].
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -145,7 +145,12 @@ pub struct SessionRuntime {
 }
 
 impl SessionRuntime {
-    /// Construct a [`SessionRuntime`] for the given session key.
+    /// Construct a [`SessionRuntime`] for the given session key with explicit
+    /// effective permissions and an optional, already-validated sandbox
+    /// override. The override must be derived from and no wider than the
+    /// profile-level sandbox policy. This is the only `SessionRuntime`
+    /// constructor — the session-runtime cache and tests all bootstrap
+    /// through here.
     ///
     /// See the M11-C contract in `workstreams/M11-runtime-unification.md`
     /// § "M11-C" and the M11-A doc comments preserved on this file
@@ -184,20 +189,7 @@ impl SessionRuntime {
     ///    session with the flag on relocates to `<cwd>/.octos` (per-project
     ///    storage). Stored on [`Self::sessions_root`].
     /// 8. Return `Arc<Self>`.
-    ///
-    /// # Parameters
-    ///
-    /// - `profile` — the parent [`ProfileRuntime`] this session
-    ///   inherits from. Held as `&Arc<...>` so the new session
-    ///   bumps the `Arc` count rather than cloning the profile.
-    /// - `session_key` — the session identifier. Used both as
-    ///   the cache key half and to derive the conventional
-    ///   workspace/plugin paths under `profile.data_dir`.
-    /// - `workspace_hint` — optional caller-supplied workspace
-    ///   root. `Some` for coding-agent UIs that point at a
-    ///   specific repo; `None` for the default "data-dir-relative"
-    ///   layout used by web chat and gateway sessions.
-    ///
+
     /// # Errors
     ///
     /// Returns an error if workspace validation fails, directory
@@ -205,68 +197,6 @@ impl SessionRuntime {
     /// agent construction fails, or session-manager load fails.
     /// A partially constructed [`SessionRuntime`] is never
     /// returned.
-    pub async fn bootstrap(
-        profile: &Arc<ProfileRuntime>,
-        session_key: SessionKey,
-        workspace_hint: Option<PathBuf>,
-    ) -> Result<Arc<Self>> {
-        Self::bootstrap_with_permissions(
-            profile,
-            session_key,
-            workspace_hint,
-            EffectivePermissions::workspace_write(),
-        )
-        .await
-    }
-
-    /// [`Self::bootstrap`] with an explicit `sessions_in_cwd` flag. The
-    /// convenience [`Self::bootstrap`] hard-codes `false` (legacy per-profile
-    /// storage); this variant lets the AppUi path (and tests) request the
-    /// per-project relocation when a cwd hint is present.
-    pub async fn bootstrap_in_cwd(
-        profile: &Arc<ProfileRuntime>,
-        session_key: SessionKey,
-        workspace_hint: Option<PathBuf>,
-        sessions_in_cwd: bool,
-    ) -> Result<Arc<Self>> {
-        Self::bootstrap_with_permissions_and_sandbox(
-            profile,
-            session_key,
-            workspace_hint,
-            EffectivePermissions::workspace_write(),
-            None,
-            sessions_in_cwd,
-        )
-        .await
-    }
-
-    /// Construct a [`SessionRuntime`] with an explicit effective permission
-    /// profile. AppUI integration should resolve and gate requested permission
-    /// profiles before calling this hook.
-    pub async fn bootstrap_with_permissions(
-        profile: &Arc<ProfileRuntime>,
-        session_key: SessionKey,
-        workspace_hint: Option<PathBuf>,
-        permissions: EffectivePermissions,
-    ) -> Result<Arc<Self>> {
-        Self::bootstrap_with_permissions_and_sandbox(
-            profile,
-            session_key,
-            workspace_hint,
-            permissions,
-            None,
-            // Legacy per-profile storage. The AppUi path opts into per-cwd
-            // storage via the `sessions_in_cwd` param on
-            // `bootstrap_with_permissions_and_sandbox`, threaded by the
-            // session-runtime cache from `appui.sessions_in_cwd`.
-            false,
-        )
-        .await
-    }
-
-    /// Construct a [`SessionRuntime`] with explicit effective permissions and
-    /// an optional, already-validated sandbox override. The override must be
-    /// derived from and no wider than the profile-level sandbox policy.
     pub async fn bootstrap_with_permissions_and_sandbox(
         profile: &Arc<ProfileRuntime>,
         session_key: SessionKey,
@@ -1079,7 +1009,7 @@ fn resolve_workspace_root(
 /// For M11 this replicates the lightweight checks
 /// `validate_session_workspace_allowed` performs in
 /// `api/ui_protocol.rs`. Full integration with the AppState-scoped
-/// helper requires AppState, which `SessionRuntime::bootstrap`
+/// helper requires AppState, which `SessionRuntime::bootstrap_with_permissions_and_sandbox`
 /// does not see; lifting the workspace allowlist onto
 /// `ProfileRuntime` is tracked as post-M11 work.
 ///
@@ -1141,11 +1071,13 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let profile = make_profile(data.path().to_owned()).await;
-        let runtime = SessionRuntime::bootstrap_with_permissions(
+        let runtime = SessionRuntime::bootstrap_with_permissions_and_sandbox(
             &profile,
             SessionKey::with_profile("main", "cli", "read-only-migration"),
             Some(workspace.path().to_owned()),
             octos_agent::EffectivePermissions::read_only(),
+            None,
+            false,
         )
         .await
         .unwrap();
@@ -1197,11 +1129,13 @@ tools = ["read_file"]
         )
         .unwrap();
         Arc::get_mut(&mut profile).unwrap().agent_profile = Some(Arc::new(coding));
-        let runtime = SessionRuntime::bootstrap_with_permissions(
+        let runtime = SessionRuntime::bootstrap_with_permissions_and_sandbox(
             &profile,
             SessionKey::with_profile("main", "acp", "narrow"),
             Some(workspace.path().to_owned()),
             octos_agent::EffectivePermissions::workspace_write(),
+            None,
+            false,
         )
         .await
         .unwrap();
@@ -1276,9 +1210,16 @@ tools = ["read_file"]
         .unwrap();
         let profile = make_profile(data_dir.clone()).await;
 
-        let rt = SessionRuntime::bootstrap(&profile, SessionKey::new("appui", "mem"), None)
-            .await
-            .expect("bootstrap");
+        let rt = SessionRuntime::bootstrap_with_permissions_and_sandbox(
+            &profile,
+            SessionKey::new("appui", "mem"),
+            None,
+            EffectivePermissions::workspace_write(),
+            None,
+            false,
+        )
+        .await
+        .expect("bootstrap");
         rt.agent.refresh_prompt_segments().await;
         let prompt = rt.agent.system_prompt_snapshot();
         assert!(
@@ -1323,9 +1264,16 @@ tools = ["read_file"]
         // on macOS).
         let repo_canon = std::fs::canonicalize(&repo).unwrap();
         let key = SessionKey::new("appui", "coding-1");
-        let rt = SessionRuntime::bootstrap(&profile, key, Some(repo.clone()))
-            .await
-            .expect("bootstrap with workspace hint");
+        let rt = SessionRuntime::bootstrap_with_permissions_and_sandbox(
+            &profile,
+            key,
+            Some(repo.clone()),
+            EffectivePermissions::workspace_write(),
+            None,
+            false,
+        )
+        .await
+        .expect("bootstrap with workspace hint");
 
         assert_eq!(rt.workspace_root, repo_canon);
         assert!(
@@ -1360,9 +1308,16 @@ tools = ["read_file"]
 
         // SessionKey with a `:` channel prefix — outside is_safe_session_id.
         let key = SessionKey::new("api", "web-1234");
-        let rt = SessionRuntime::bootstrap(&profile, key, None)
-            .await
-            .expect("bootstrap must succeed for channel-prefixed id");
+        let rt = SessionRuntime::bootstrap_with_permissions_and_sandbox(
+            &profile,
+            key,
+            None,
+            EffectivePermissions::workspace_write(),
+            None,
+            false,
+        )
+        .await
+        .expect("bootstrap must succeed for channel-prefixed id");
 
         let scope = rt
             .agent
@@ -1379,7 +1334,7 @@ tools = ["read_file"]
         assert!(rt.workspace_root.starts_with(&data_dir));
     }
 
-    /// M11 regression fix (#891): `SessionRuntime::bootstrap` must
+    /// M11 regression fix (#891): `SessionRuntime::bootstrap_with_permissions_and_sandbox` must
     /// propagate the parent profile's pre-assembled `system_prompt`
     /// onto the per-session `Agent`. Without this, `/api/chat` and the
     /// UI Protocol WS path miss SKILL.md prompt fragments and the
@@ -1396,9 +1351,16 @@ tools = ["read_file"]
         .await;
 
         let key = SessionKey::new("api", "system-prompt-probe");
-        let rt = SessionRuntime::bootstrap(&profile, key, None)
-            .await
-            .expect("bootstrap");
+        let rt = SessionRuntime::bootstrap_with_permissions_and_sandbox(
+            &profile,
+            key,
+            None,
+            EffectivePermissions::workspace_write(),
+            None,
+            false,
+        )
+        .await
+        .expect("bootstrap");
 
         let snapshot = rt.agent.system_prompt_snapshot();
         assert!(
@@ -1420,11 +1382,13 @@ tools = ["read_file"]
             RuntimeMode::Solo,
         )
         .expect("solo dangerous permissions");
-        let rt = SessionRuntime::bootstrap_with_permissions(
+        let rt = SessionRuntime::bootstrap_with_permissions_and_sandbox(
             &profile,
             SessionKey::new("api", "dangerous-solo"),
             Some(workspace),
             permissions,
+            None,
+            false,
         )
         .await
         .expect("bootstrap");
@@ -1523,14 +1487,26 @@ tools = ["read_file"]
 
         // Same key, two projects.
         let key = SessionKey::new("api", "default");
-        let rt_a =
-            SessionRuntime::bootstrap_in_cwd(&profile, key.clone(), Some(proj_a.clone()), true)
-                .await
-                .expect("bootstrap A");
-        let rt_b =
-            SessionRuntime::bootstrap_in_cwd(&profile, key.clone(), Some(proj_b.clone()), true)
-                .await
-                .expect("bootstrap B");
+        let rt_a = SessionRuntime::bootstrap_with_permissions_and_sandbox(
+            &profile,
+            key.clone(),
+            Some(proj_a.clone()),
+            EffectivePermissions::workspace_write(),
+            None,
+            true,
+        )
+        .await
+        .expect("bootstrap A");
+        let rt_b = SessionRuntime::bootstrap_with_permissions_and_sandbox(
+            &profile,
+            key.clone(),
+            Some(proj_b.clone()),
+            EffectivePermissions::workspace_write(),
+            None,
+            true,
+        )
+        .await
+        .expect("bootstrap B");
 
         // Distinct roots — the isolation boundary — each the project's own
         // profile-namespaced `<cwd>/.octos/<profile_id>`.

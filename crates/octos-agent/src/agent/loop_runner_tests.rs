@@ -23,7 +23,8 @@ use octos_memory::EpisodeStore;
 
 use crate::AgentConfig;
 use crate::test_support::{
-    ScriptedProvider, assistant_with_calls, end_turn, plain_text_response, tool_call, tool_use,
+    ScriptedProvider, assistant_with_calls, boot_agent, end_turn, plain_text_response, tool_call,
+    tool_use,
 };
 
 fn tool_out(tool_call_id: impl Into<String>, content: impl Into<String>) -> Message {
@@ -94,17 +95,14 @@ async fn terminal_integrity_reasoning_only_recovers_to_actual_answer() {
         reasoning,
         end_turn("Actual final answer", 30, 40),
     ])));
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(
-        AgentId::new("terminal-recovery"),
+    let agent = boot_agent(
+        "terminal-recovery",
+        dir.path(),
         provider.clone(),
         ToolRegistry::new(),
-        memory,
+        AgentConfig::default(),
     )
-    .with_config(AgentConfig {
-        save_episodes: false,
-        ..Default::default()
-    });
+    .await;
     let result = agent
         .process_message("Inspect the image", &[], vec![])
         .await
@@ -121,17 +119,14 @@ async fn terminal_integrity_truncated_answer_is_error_with_usage() {
     let mut truncated = end_turn("First I need to inspect the image and then I will", 12, 7);
     truncated.stop_reason = StopReason::MaxTokens;
     let provider = Arc::new(ScriptedProvider::new(vec![truncated]));
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(
-        AgentId::new("terminal-truncated"),
+    let agent = boot_agent(
+        "terminal-truncated",
+        dir.path(),
         provider,
         ToolRegistry::new(),
-        memory,
+        AgentConfig::default(),
     )
-    .with_config(AgentConfig {
-        save_episodes: false,
-        ..Default::default()
-    });
+    .await;
     let error = agent
         .process_message("Inspect the image", &[], vec![])
         .await
@@ -186,12 +181,14 @@ async fn should_preserve_tool_carrier_text_in_durable_log_when_final_answer_repe
         true,
         calls.clone(),
     ));
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent =
-        Agent::new(AgentId::new("dedupe-test"), provider, tools, memory).with_config(AgentConfig {
-            save_episodes: false,
-            ..Default::default()
-        });
+    let agent = boot_agent(
+        "dedupe-test",
+        dir.path(),
+        provider,
+        tools,
+        AgentConfig::default(),
+    )
+    .await;
 
     let response = agent
         .process_message("请读这篇论文", &[], vec![])
@@ -264,15 +261,19 @@ async fn should_send_checkpoint_with_identical_cache_relevant_config_and_tool_ch
         true,
         Arc::new(AtomicUsize::new(0)),
     ));
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("convergence-config"), provider.clone(), tools, memory)
-        .with_config(AgentConfig {
-            save_episodes: false,
+    let agent = boot_agent(
+        "convergence-config",
+        dir.path(),
+        provider.clone(),
+        tools,
+        AgentConfig {
             max_tokens: Some(8_192),
             reasoning_effort: Some(octos_llm::ReasoningEffort::High),
             ..Default::default()
-        })
-        .with_convergence_intervals(2, 100_000_000, std::time::Duration::from_secs(86_400));
+        },
+    )
+    .await
+    .with_convergence_intervals(2, 100_000_000, std::time::Duration::from_secs(86_400));
 
     let response = agent
         .process_message("read the paper", &[], vec![])
@@ -391,13 +392,17 @@ async fn budget_reminder_injected_before_iteration_cap() {
         true,
         Arc::new(AtomicUsize::new(0)),
     ));
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent =
-        Agent::new(AgentId::new("budget-probe"), planner, tools, memory).with_config(AgentConfig {
+    let agent = boot_agent(
+        "budget-probe",
+        dir.path(),
+        planner,
+        tools,
+        AgentConfig {
             max_iterations: 5,
-            save_episodes: false,
             ..Default::default()
-        });
+        },
+    )
+    .await;
 
     let _ = agent.process_message("do a long task", &[], vec![]).await;
 
@@ -476,21 +481,14 @@ impl Tool for TerminalFailureTool {
 }
 
 fn lesson_call(id: &str, tutor_context: &str) -> ChatResponse {
-    ChatResponse {
-        content: None,
-        reasoning_content: None,
-        tool_calls: vec![ToolCall {
-            id: id.to_string(),
-            name: "lesson_generate".to_string(),
-            // The actual incident changed context strings on every retry.
-            // The guard must key on terminal tool identity, not exact args.
-            arguments: serde_json::json!({ "tutor_context": tutor_context }),
-            metadata: None,
-        }],
-        stop_reason: StopReason::ToolUse,
-        usage: LlmTokenUsage::default(),
-        provider_index: None,
-    }
+    ChatResponse::tool_use(vec![ToolCall {
+        id: id.to_string(),
+        name: "lesson_generate".to_string(),
+        // The actual incident changed context strings on every retry.
+        // The guard must key on terminal tool identity, not exact args.
+        arguments: serde_json::json!({ "tutor_context": tutor_context }),
+        metadata: None,
+    }])
 }
 
 #[tokio::test]
@@ -498,28 +496,24 @@ async fn run_task_continues_after_max_tokens_in_same_loop() {
     let dir = tempfile::tempdir().unwrap();
     let tools = ToolRegistry::with_builtins(dir.path());
     let provider = Arc::new(ScriptedProvider::new(vec![
-        ChatResponse {
-            content: Some("part one".to_string()),
-            reasoning_content: None,
-            tool_calls: vec![],
-            stop_reason: StopReason::MaxTokens,
-            usage: LlmTokenUsage {
+        ChatResponse::end_turn("part one")
+            .with_stop_reason(StopReason::MaxTokens)
+            .with_usage(LlmTokenUsage {
                 input_tokens: 3,
                 output_tokens: 10,
                 ..Default::default()
-            },
-            provider_index: None,
-        },
+            }),
         end_turn("part two", 4, 11),
     ]));
     let provider_for_agent: Arc<dyn LlmProvider> = provider.clone();
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(
-        AgentId::new("max-tokens-test"),
+    let agent = boot_agent(
+        "max-tokens-test",
+        dir.path(),
         provider_for_agent,
         tools,
-        memory,
-    );
+        AgentConfig::default(),
+    )
+    .await;
     let task = Task::new(
         TaskKind::Code {
             instruction: "Write a long report".to_string(),
@@ -600,8 +594,8 @@ async fn process_message_preserves_tool_pair_order_across_iterations() {
         ),
         end_turn("done", 0, 0),
     ]));
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("test-agent"), provider, tools, memory);
+    let agent =
+        boot_agent("test-agent", dir.path(), provider, tools, AgentConfig::default()).await;
 
     let result = agent.process_message("do work", &[], vec![]).await.unwrap();
     let roles: Vec<MessageRole> = result.messages.iter().map(|m| m.role).collect();
@@ -646,8 +640,8 @@ async fn terminal_tool_failure_blocks_a_rewritten_retry_in_the_same_turn() {
         lesson_call("call_lesson_0", "first"),
         lesson_call("call_lesson_1", "rewritten"),
     ]));
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("test-agent"), provider, tools, memory);
+    let agent =
+        boot_agent("test-agent", dir.path(), provider, tools, AgentConfig::default()).await;
 
     let result = agent
         .process_message("teach me", &[], vec![])
@@ -909,8 +903,14 @@ async fn build_dispatch_test_agent() -> Agent {
     let dir = tempfile::tempdir().unwrap();
     let provider: Arc<dyn LlmProvider> = Arc::new(crate::test_support::InertProvider);
     let tools = ToolRegistry::new();
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    Agent::new(AgentId::new("test-dispatch"), provider, tools, memory)
+    boot_agent(
+        "test-dispatch",
+        dir.path(),
+        provider,
+        tools,
+        AgentConfig::default(),
+    )
+    .await
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -933,19 +933,12 @@ impl LlmProvider for LoopingToolProvider {
         _config: &octos_llm::ChatConfig,
     ) -> Result<ChatResponse> {
         self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        Ok(ChatResponse {
-            content: None,
-            reasoning_content: None,
-            tool_calls: vec![ToolCall {
-                id: "call_loopy".to_string(),
-                name: "read_file".to_string(),
-                arguments: serde_json::json!({"path": "loopy.txt"}),
-                metadata: None,
-            }],
-            stop_reason: StopReason::ToolUse,
-            usage: LlmTokenUsage::default(),
-            provider_index: None,
-        })
+        Ok(ChatResponse::tool_use(vec![ToolCall {
+            id: "call_loopy".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "loopy.txt"}),
+            metadata: None,
+        }]))
     }
 
     fn model_id(&self) -> &str {
@@ -1194,7 +1187,7 @@ async fn should_bail_on_authentication_error_without_compaction() {
     let mut retry_state = LoopRetryState::new();
     let mut messages: Vec<Message> = Vec::new();
 
-    let auth_error: eyre::Report = LlmError::auth("invalid API key").into();
+    let auth_error: eyre::Report = LlmError::new(LlmErrorKind::Authentication, "invalid API key").into();
     let action =
         agent.handle_loop_error_with_dispatch(&auth_error, &mut retry_state, 1, &mut messages);
     assert_eq!(
@@ -1214,27 +1207,20 @@ async fn should_bail_on_authentication_error_without_compaction() {
 
 #[test]
 fn inject_synthetic_results_pushes_assistant_then_tool_for_every_call() {
-    let response = ChatResponse {
-        content: None,
-        reasoning_content: None,
-        tool_calls: vec![
-            ToolCall {
-                id: "call_a".to_string(),
-                name: "news_fetch".to_string(),
-                arguments: serde_json::json!({"categories": ["tech"]}),
-                metadata: None,
-            },
-            ToolCall {
-                id: "call_b".to_string(),
-                name: "news_fetch".to_string(),
-                arguments: serde_json::json!({"categories": ["world"]}),
-                metadata: None,
-            },
-        ],
-        stop_reason: StopReason::ToolUse,
-        usage: LlmTokenUsage::default(),
-        provider_index: None,
-    };
+    let response = ChatResponse::tool_use(vec![
+        ToolCall {
+            id: "call_a".to_string(),
+            name: "news_fetch".to_string(),
+            arguments: serde_json::json!({"categories": ["tech"]}),
+            metadata: None,
+        },
+        ToolCall {
+            id: "call_b".to_string(),
+            name: "news_fetch".to_string(),
+            arguments: serde_json::json!({"categories": ["world"]}),
+            metadata: None,
+        },
+    ]);
 
     let dir = tempfile::tempdir().unwrap();
     let tools = ToolRegistry::with_builtins(dir.path());
@@ -1329,14 +1315,17 @@ async fn doom_loop_aborts_turn_when_third_identical_call_arrives() {
     });
     let provider_arc: Arc<dyn LlmProvider> = provider.clone();
     let tools = ToolRegistry::with_builtins(dir.path());
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("recover"), provider_arc, tools, memory).with_config(
+    let agent = boot_agent(
+        "recover",
+        dir.path(),
+        provider_arc,
+        tools,
         crate::AgentConfig {
             max_iterations: 30,
-            save_episodes: false,
             ..Default::default()
         },
-    );
+    )
+    .await;
 
     let result = agent
         .process_message("please loop", &[], vec![])
@@ -1364,8 +1353,8 @@ async fn run_task_keeps_success_when_workspace_has_no_policy() {
     let dir = tempfile::tempdir().unwrap();
     let tools = ToolRegistry::with_builtins(dir.path());
     let provider: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider::new(vec![end_turn("done", 0, 0)]));
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("no-contract"), provider, tools, memory);
+    let agent =
+        boot_agent("no-contract", dir.path(), provider, tools, AgentConfig::default()).await;
     let task = Task::new(
         TaskKind::Code {
             instruction: "Hi".into(),
@@ -1451,14 +1440,7 @@ fn spawn_only_tool_result(tool_call_id: &str, content: &str) -> Message {
 }
 
 fn spawn_only_chat_response(tool_calls: Vec<ToolCall>) -> ChatResponse {
-    ChatResponse {
-        content: None,
-        reasoning_content: None,
-        tool_calls,
-        stop_reason: StopReason::ToolUse,
-        usage: LlmTokenUsage::default(),
-        provider_index: None,
-    }
+    ChatResponse::tool_use(tool_calls)
 }
 
 #[test]
@@ -1534,7 +1516,6 @@ async fn should_classify_hook_deny_as_policy_not_internal_bug() {
         chat_calls: chat_calls.clone(),
     });
     let tools = ToolRegistry::with_builtins(dir.path());
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
     let hooks = Arc::new(HookExecutor::new(vec![HookConfig {
         event: HookEvent::BeforeLlmCall,
         command: vec!["false".into()],
@@ -1544,7 +1525,8 @@ async fn should_classify_hook_deny_as_policy_not_internal_bug() {
         requires_bin: None,
     }]));
     let sink_path = dir.path().join("harness-events.jsonl");
-    let agent = Agent::new(AgentId::new("hookdeny-policy"), provider, tools, memory)
+    let agent = boot_agent("hookdeny-policy", dir.path(), provider, tools, AgentConfig::default())
+        .await
         .with_hooks(hooks)
         .with_harness_event_sink(sink_path.to_string_lossy().into_owned());
 
@@ -1706,8 +1688,9 @@ async fn truncated_tool_output_reaches_the_model_with_its_recovery_advice() {
         ),
         end_turn("done", 0, 0),
     ]));
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("truncation-recovery"), provider, tools, memory);
+    let agent =
+        boot_agent("truncation-recovery", dir.path(), provider, tools, AgentConfig::default())
+            .await;
 
     let result = agent.process_message("go", &[], vec![]).await.unwrap();
 
@@ -1786,8 +1769,9 @@ async fn malformed_toolcall_feedback_lets_model_self_correct_and_survive() {
     });
     let tools = ToolRegistry::new();
     let dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("malformed-feedback"), provider, tools, memory);
+    let agent =
+        boot_agent("malformed-feedback", dir.path(), provider, tools, AgentConfig::default())
+            .await;
     let response = agent
         .process_message("do the thing with a tool", &[], vec![])
         .await
@@ -1815,32 +1799,31 @@ fn empty_max_tokens_response() -> ChatResponse {
     // reasoning, so `content` is empty and there are no tool calls. Private
     // reasoning is not an answer: terminal-integrity retries treat this as
     // empty and eventually return an explicit error if no answer arrives.
-    ChatResponse {
-        content: None,
-        reasoning_content: Some("(long internal reasoning, no final answer)".to_string()),
-        tool_calls: vec![],
-        stop_reason: StopReason::MaxTokens,
-        usage: LlmTokenUsage {
+    ChatResponse::tool_use(Vec::new())
+        .with_reasoning_content("(long internal reasoning, no final answer)")
+        .with_stop_reason(StopReason::MaxTokens)
+        .with_usage(LlmTokenUsage {
             input_tokens: 5,
             output_tokens: 128,
             ..Default::default()
-        },
-        provider_index: None,
-    }
+        })
 }
 
 async fn run_conversation_response(responses: Vec<ChatResponse>) -> Result<ConversationResponse> {
     let dir = tempfile::tempdir().unwrap();
     let provider = Arc::new(ScriptedProvider::new(responses));
     let tools = ToolRegistry::new();
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("empty-maxtokens"), provider, tools, memory).with_config(
+    let agent = boot_agent(
+        "empty-maxtokens",
+        dir.path(),
+        provider,
+        tools,
         AgentConfig {
             max_iterations: 10,
-            save_episodes: false,
             ..Default::default()
         },
-    );
+    )
+    .await;
     agent.process_message("go", &[], vec![]).await
 }
 
@@ -1869,8 +1852,8 @@ async fn malformed_exhaustion_error_carries_marker() {
     });
     let tools = ToolRegistry::new();
     let dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("malformed-marker"), provider, tools, memory);
+    let agent =
+        boot_agent("malformed-marker", dir.path(), provider, tools, AgentConfig::default()).await;
     let err = agent
         .process_message("never produces valid JSON", &[], vec![])
         .await

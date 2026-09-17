@@ -213,7 +213,7 @@ pub struct ProfileRuntime {
     /// regression fix (#891) — the previous serve-mode
     /// `try_create_agent` helper called the same build + append loop
     /// inline, but M11-F deleted that helper and routed everything
-    /// through [`super::SessionRuntime::bootstrap`], which never
+    /// through [`super::SessionRuntime::bootstrap_with_permissions_and_sandbox`], which never
     /// re-derived the prompt. The result was that SKILL.md auto-
     /// injected guidance (e.g. the mofa-fm "call fm_tts directly"
     /// note) never reached the LLM on `/api/chat` or the UI Protocol
@@ -260,7 +260,7 @@ pub struct ProfileRuntime {
     /// HookExecutor::new(all_hooks)))`. M11-F lost that wiring on every
     /// per-session agent build. We assemble the executor once at
     /// profile-bootstrap time and propagate it onto every per-session
-    /// [`octos_agent::Agent`] (via [`super::SessionRuntime::bootstrap`]'s
+    /// [`octos_agent::Agent`] (via [`super::SessionRuntime::bootstrap_with_permissions_and_sandbox`]'s
     /// `with_hooks`) AND onto the request-rebuilt agents in both
     /// `ws_standalone_agent` and the UI Protocol per-turn rebuild
     /// loop. `None` keeps the legacy behaviour when no hooks are
@@ -477,7 +477,7 @@ impl ProfileRuntime {
         let default_sandbox = sandbox_config.clone();
         let sandbox = create_sandbox(&sandbox_config);
         // We register against `data_dir` rather than a real workspace
-        // root — sessions rebind cwd via `SessionRuntime::bootstrap`
+        // root — sessions rebind cwd via `SessionRuntime::bootstrap_with_permissions_and_sandbox`
         // before any actual tool call runs.
         let mut tools = ToolRegistry::with_builtins_and_sandbox(data_dir, sandbox);
         tools.set_output_dir_hint(data_dir.join("skill-output").to_string_lossy().into_owned());
@@ -557,7 +557,7 @@ impl ProfileRuntime {
         // mode's `try_create_agent` helper called `build_system_prompt`
         // + the fragment-append loop inline, so every per-request agent
         // observed the SKILL.md guidance. M11-F deleted that helper and
-        // routed everything through `SessionRuntime::bootstrap`, which
+        // routed everything through `SessionRuntime::bootstrap_with_permissions_and_sandbox`, which
         // never re-derived the prompt — meaning `/api/chat` and the UI
         // Protocol WS path lost the mofa-fm "call fm_tts directly"
         // teaching (and any future skill-injected guidance).
@@ -602,7 +602,7 @@ impl ProfileRuntime {
         // `after_llm_call` hooks fire on the api-mode agent the same
         // way they fire under `octos gateway`.
         //
-        // `SessionRuntime::bootstrap` reads this back and chains
+        // `SessionRuntime::bootstrap_with_permissions_and_sandbox` reads this back and chains
         // `.with_hooks(executor.clone())` onto the per-session agent;
         // the per-request rebuild paths in `ws_standalone_agent` and
         // the UI Protocol per-turn builder do the same. Storing as

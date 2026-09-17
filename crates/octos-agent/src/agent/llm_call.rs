@@ -760,14 +760,7 @@ mod tests {
                 )
                 .into());
             }
-            Ok(ChatResponse {
-                content: Some("fallback response".to_owned()),
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                stop_reason: StopReason::EndTurn,
-                usage: LlmTokenUsage::default(),
-                provider_index: None,
-            })
+            Ok(ChatResponse::end_turn("fallback response"))
         }
 
         fn model_id(&self) -> &str {

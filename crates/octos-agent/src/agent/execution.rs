@@ -2978,7 +2978,7 @@ mod tests {
     use async_trait::async_trait;
     use octos_core::{AgentId, ToolCall};
     use octos_llm::{
-        ChatResponse, LlmProvider, StopReason, TokenUsage as LlmTokenUsage,
+        ChatResponse, LlmProvider,
     };
     use octos_memory::EpisodeStore;
 
@@ -3135,14 +3135,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(crate::test_support::InertProvider);
         let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
         let agent = Agent::new(AgentId::new("batch"), provider, tools, memory).with_config(config);
-        let response = ChatResponse {
-            content: None,
-            reasoning_content: None,
-            tool_calls,
-            stop_reason: StopReason::ToolUse,
-            usage: LlmTokenUsage::default(),
-            provider_index: None,
-        };
+        let response = ChatResponse::tool_use(tool_calls);
         let (messages, _fm, _fs, _tok, _st, success_by_id) = agent
             .execute_tools(&response)
             .await
@@ -3263,17 +3256,10 @@ mod tests {
             },
         );
 
-        let response = ChatResponse {
-            content: None,
-            reasoning_content: None,
-            tool_calls: vec![
-                tool_call("call_fast", "fast_tool"),
-                tool_call("call_slow", "slow_tool"),
-            ],
-            stop_reason: StopReason::ToolUse,
-            usage: LlmTokenUsage::default(),
-            provider_index: None,
-        };
+        let response = ChatResponse::tool_use(vec![
+            tool_call("call_fast", "fast_tool"),
+            tool_call("call_slow", "slow_tool"),
+        ]);
 
         let (messages, _files_modified, _files_to_send, _tokens, _structured, success_by_id) =
             agent
@@ -3370,14 +3356,7 @@ mod tests {
     }
 
     fn batch(calls: Vec<ToolCall>) -> ChatResponse {
-        ChatResponse {
-            content: None,
-            reasoning_content: None,
-            tool_calls: calls,
-            stop_reason: StopReason::ToolUse,
-            usage: LlmTokenUsage::default(),
-            provider_index: None,
-        }
+        ChatResponse::tool_use(calls)
     }
 
     #[tokio::test]

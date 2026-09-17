@@ -3522,15 +3522,11 @@ fn register_session_ledger_scope(
             .collect::<String>()
     });
     ledger.set_session_scope(&runtime.session_key, scope.clone());
-    // #1666 residue — mirror the SAME cwd scope into the goal/autonomy store so
-    // a goal set in one folder does not leak into a fresh session that reuses
-    // this wire key in another folder. The goal store was keyed by the bare
-    // wire key while #1666 only cwd-scoped the ledger, so the goal chip leaked
-    // across folders (same profile). Keeping the two scope maps in lock-step
-    // (registered at the same site, cleared together when the flag is off) is
-    // what makes the goal store isolate cwds exactly as the transcript already
-    // does. The goal continuation dispatch strips this scope back to the wire
-    // key when it reaches the session runtime / actor.
+    // #1666 — the transcript ledger is cwd-scoped so state attached to this
+    // wire key cannot leak into a fresh session opened from another folder.
+    // Registration and clearing happen in lock-step with the session scope
+    // map; consumers reaching the session runtime / actor see the scope
+    // stripped back to the bare wire key.
     // Topic-suffixed sessions also emit ledger events under their BASE key
     // (the `#topic` suffix is stripped before appending so base-bucket
     // subscribers see them). Register the base alias with the same
@@ -4604,15 +4600,15 @@ fn approval_event_from_tool_request(
     );
 
     if features.typed_approvals {
-        // Risk is derived from the tool manifest, not from the tool's own
-        // payload — a malicious tool cannot self-attest as `low`. Default
-        // `unspecified` makes "manifest didn't say" visible in the UI badge
-        // instead of silently advertising `medium`. This applies to every
-        // tool surface (shell, plugin, future MCP) — audit #715: previously
-        // gated on `tool_name == "shell"`, leaving plugin approvals with no
-        // risk classification on the wire even though manifest-driven gating
-        // engaged server-side (PR #712).
-        event.risk = Some(server_risk_for(&event.tool_name));
+        // The server always overwrites any tool-emitted risk — a malicious
+        // tool cannot self-attest as `low`. With no manifest registry wired,
+        // every tool resolves to `unspecified`, which makes "manifest didn't
+        // say" visible in the UI badge instead of silently advertising
+        // `medium`. This applies to every tool surface (shell, plugin, future
+        // MCP) — audit #715: previously gated on `tool_name == "shell"`,
+        // leaving plugin approvals with no risk classification on the wire
+        // (PR #712).
+        event.risk = Some(octos_core::ui_protocol::RISK_UNSPECIFIED.to_owned());
 
         if event.tool_name == "shell" {
             let command = request.command;
@@ -4646,28 +4642,6 @@ fn approval_event_from_tool_request(
     }
 
     event
-}
-
-/// Resolve the manifest-declared risk for `tool_name`. Falls back to
-/// `unspecified` when the registry has no entry.
-fn server_risk_for(tool_name: &str) -> String {
-    octos_core::ui_protocol::tool_approval_risk(tool_name)
-}
-
-#[cfg(test)]
-fn register_tool_risk_for_test(tool_name: &str, risk: &str) {
-    octos_core::ui_protocol::register_tool_approval_risk(tool_name, risk);
-}
-
-#[cfg(test)]
-fn clear_tool_risk_registry_for_test() {
-    octos_core::ui_protocol::clear_tool_approval_risks_for_test();
-}
-
-#[cfg(test)]
-fn tool_risk_registry_test_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
 /// Cap on how long stdio shutdown waits for in-flight turns to finalize.
@@ -10363,11 +10337,11 @@ async fn open_session_result(
     // `clone_session_tools` deletion took out. Pre-resolution order:
     //   Tier 1 — `requested_workspace` (validated client cwd above).
     //   Tier 2 — `AppState::appui_default_session_cwd` (operator default).
-    //   Tier 3 — `SessionRuntime::bootstrap`'s
+    //   Tier 3 — `SessionRuntime::bootstrap_with_permissions_and_sandbox`'s
     //            `<profile.data_dir>/users/<encoded base>/workspace`.
     //
     // We resolve Tier 2 here, in the UI Protocol entrypoint, rather
-    // than threading it through `SessionRuntime::bootstrap`. Rationale:
+    // than threading it through `SessionRuntime::bootstrap_with_permissions_and_sandbox`. Rationale:
     //  - The bootstrap signature stays stable across M11-F.
     //  - Tier 2 is a serve-level operator setting (octos serve reads
     //    `config.appui.default_session_cwd`) — the runtime layer
@@ -10375,7 +10349,7 @@ async fn open_session_result(
     //    resolution at the dispatcher keeps `ProfileRuntime` /
     //    `SessionRuntime` free of `AppState`-shaped knowledge.
     //  - The hint is passed verbatim into `SessionRuntimeCache::get_or_init`,
-    //    which forwards it to `SessionRuntime::bootstrap`'s
+    //    which forwards it to `SessionRuntime::bootstrap_with_permissions_and_sandbox`'s
     //    `workspace_hint`. `validate_workspace_hint` runs the same
     //    safety check on it as on a client-supplied cwd (canonicalize,
     //    reject banned system roots).
@@ -10485,7 +10459,7 @@ async fn open_session_result(
                     error = %error,
                     profile_id = %profile_runtime.profile_id,
                     session = %params.session_id,
-                    "session/open: SessionRuntime::bootstrap failed",
+                    "session/open: SessionRuntime::bootstrap_with_permissions_and_sandbox failed",
                 );
                 // The most common bootstrap failure is a non-writable workspace
                 // folder — the session can't create its `.octos-workspace.toml`
@@ -10897,7 +10871,7 @@ fn validate_session_workspace_allowed(
     // early so the client sees a typed error instead of a silent
     // wire/turn mismatch.
     //
-    // Path safety mirrors `SessionRuntime::bootstrap`'s
+    // Path safety mirrors `SessionRuntime::bootstrap_with_permissions_and_sandbox`'s
     // `validate_workspace_hint`: the cwd must canonicalize and must
     // not be rooted under a banned system path (`/etc`, `/usr`,
     // `/sbin`, …). Cross-session containment is intentionally NOT
@@ -10950,7 +10924,7 @@ fn validate_session_workspace_allowed(
 /// Mirrors the banned-system-path list in
 /// `crate::runtime::session::validate_workspace_hint`. The two paths
 /// must stay in lockstep; the duplicate exists because
-/// `SessionRuntime::bootstrap` does not see `AppState` and cannot call
+/// `SessionRuntime::bootstrap_with_permissions_and_sandbox` does not see `AppState` and cannot call
 /// back into this module. TODO(post-M11): collapse to a shared helper.
 fn validate_session_workspace_path_safety(workspace_root: &Path) -> Result<(), RpcError> {
     // `validate_requested_session_cwd` already canonicalized the path
@@ -11142,7 +11116,7 @@ fn session_permission_profiles() -> Arc<SessionPermissionProfileStore> {
 
 /// #1057: report `workspace_policy.toml` presence + parse status. We do not
 /// load the policy into the runtime here — that responsibility lives with
-/// `SessionRuntime::bootstrap`. The probe only answers "would a future
+/// `SessionRuntime::bootstrap_with_permissions_and_sandbox`. The probe only answers "would a future
 /// session/open against this directory hit a policy parse failure?".
 fn workspace_policy_probe(root: Option<&Path>) -> Value {
     let Some(root) = root else {
@@ -11155,7 +11129,7 @@ fn workspace_policy_probe(root: Option<&Path>) -> Value {
     // #1147 codex P2: probe the canonical runtime policy filename
     // (`octos_agent::workspace_policy::WORKSPACE_POLICY_FILE`,
     // currently `.octos-workspace.toml`) — the previous `workspace_policy.toml`
-    // hardcoded name didn't match what `SessionRuntime::bootstrap`
+    // hardcoded name didn't match what `SessionRuntime::bootstrap_with_permissions_and_sandbox`
     // actually reads, so the probe reported `present=false` for
     // every real workspace.
     let policy_path = root.join(octos_agent::workspace_policy::WORKSPACE_POLICY_FILE);
@@ -14804,7 +14778,7 @@ async fn run_standalone_turn(
     // `ProfileStore::list()` at startup, so an unregistered profile
     // here is a configuration bug, not a runtime fallback. Fail closed
     // with a typed `runtime_unavailable` terminal so the client sees
-    // the same error shape it would for a SessionRuntime::bootstrap
+    // the same error shape it would for a SessionRuntime::bootstrap_with_permissions_and_sandbox
     // failure.
     let active_profile_id = session_id
         .profile_id()
@@ -15810,7 +15784,7 @@ async fn run_standalone_turn(
     // coding-agent UI session opened with an explicit `cwd` hint via
     // `SessionOpenParams.cwd` or `appui.default_session_cwd` —
     // `resolve_workspace_root` honoured the hint while
-    // `SessionRuntime::bootstrap` still built the cached
+    // `SessionRuntime::bootstrap_with_permissions_and_sandbox` still built the cached
     // `SessionScope` from the canonical
     // `<data>/users/<id>/workspace` layout), build a fresh
     // **solo** scope rooted at the effective `workspace_root` and
@@ -15833,7 +15807,7 @@ async fn run_standalone_turn(
             request_agent = request_agent.with_session_scope(scope.clone());
         } else {
             // #1377 Phase-3-B: this branch is now a DEFENSIVE FALLBACK
-            // that should be unreachable. `SessionRuntime::bootstrap`
+            // that should be unreachable. `SessionRuntime::bootstrap_with_permissions_and_sandbox`
             // now roots the scope at the session's REAL `workspace_root`
             // for every shape — channel-prefixed (`:`) ids via the
             // encoded-path workspace, and coding-agent `workspace_hint`
@@ -17737,7 +17711,7 @@ fn harden_progress_emitted_approval(event: &mut ApprovalRequestedEvent) {
             "tool-emitted approval risk is ignored; using manifest-declared risk"
         );
     }
-    event.risk = Some(server_risk_for(&event.tool_name));
+    event.risk = Some(octos_core::ui_protocol::RISK_UNSPECIFIED.to_owned());
 
     let Some(typed) = event.typed_details.as_mut() else {
         return;

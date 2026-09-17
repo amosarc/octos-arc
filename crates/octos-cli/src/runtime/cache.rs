@@ -95,7 +95,7 @@ type InflightStorage = Arc<std::sync::Mutex<HashMap<CacheKey, Arc<Semaphore>>>>;
 /// The cache wraps the inner map in a [`tokio::sync::RwLock`] so
 /// multiple readers can fetch concurrently while a single writer
 /// inserts. The lock is async because [`Self::get_or_init`] may need
-/// to await [`SessionRuntime::bootstrap`] under contention; using
+/// to await [`SessionRuntime::bootstrap_with_permissions_and_sandbox`] under contention; using
 /// the async lock keeps the runtime futures `Send`.
 pub struct SessionRuntimeCache {
     inner: CacheStorage,
@@ -290,7 +290,7 @@ impl SessionRuntimeCache {
     }
 
     /// Look up a [`SessionRuntime`] by `(profile_id, session_key)`;
-    /// construct one via [`SessionRuntime::bootstrap`] on miss.
+    /// construct one via [`SessionRuntime::bootstrap_with_permissions_and_sandbox`] on miss.
     ///
     /// On hit, the entry's `last_used` is bumped before the
     /// `Arc<SessionRuntime>` is returned.
@@ -303,7 +303,7 @@ impl SessionRuntimeCache {
     ///
     /// # Errors
     ///
-    /// Propagates any error from [`SessionRuntime::bootstrap`].
+    /// Propagates any error from [`SessionRuntime::bootstrap_with_permissions_and_sandbox`].
     pub async fn get_or_init(
         &self,
         profile: &Arc<ProfileRuntime>,
@@ -955,7 +955,7 @@ mod tests {
     async fn get_or_init_is_single_flight_under_concurrent_misses() {
         // Codex's BLOCK on the first PR: two concurrent same-key
         // get_or_init calls must observe a single
-        // `SessionRuntime::bootstrap`. The single-flight inflight
+        // `SessionRuntime::bootstrap_with_permissions_and_sandbox`. The single-flight inflight
         // map guarantees this: the second caller waits on the
         // first's `Notify` instead of running its own bootstrap.
         // We verify by:
@@ -1132,7 +1132,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_flag_on_relocates_cwd_hinted_session() {
-        // The flag on the cache must reach `SessionRuntime::bootstrap` via
+        // The flag on the cache must reach `SessionRuntime::bootstrap_with_permissions_and_sandbox` via
         // `get_or_init` so a cwd-hinted session's store lands under
         // `<cwd>/.octos`.
         let tmp = TempDir::new().unwrap();

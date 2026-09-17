@@ -73,7 +73,7 @@ use std::sync::Arc;
 use octos_cli::api::AppState;
 use octos_cli::runtime::ProfileRuntime;
 use octos_core::{MAIN_PROFILE_ID, Message, MessageRole, SessionKey, ToolCall};
-use octos_llm::{ChatConfig, ChatResponse, LlmProvider, StopReason, TokenUsage, ToolSpec};
+use octos_llm::{ChatConfig, ChatResponse, LlmProvider, TokenUsage, ToolSpec};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -111,18 +111,13 @@ impl LlmProvider for ReadFileStubLlm {
         // a Tool message. Echo it verbatim so the test can assert on
         // the final `ConversationResponse.content`.
         if let Some(tool_msg) = messages.iter().rev().find(|m| m.role == MessageRole::Tool) {
-            return Ok(ChatResponse {
-                content: Some(tool_msg.content.clone()),
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                stop_reason: StopReason::EndTurn,
-                usage: TokenUsage {
+            return Ok(
+                ChatResponse::end_turn(tool_msg.content.clone()).with_usage(TokenUsage {
                     input_tokens: 3,
                     output_tokens: 5,
                     ..Default::default()
-                },
-                provider_index: None,
-            });
+                }),
+            );
         }
 
         // First-pass: extract the file path from the last user message
@@ -136,23 +131,17 @@ impl LlmProvider for ReadFileStubLlm {
             .unwrap_or("a.txt")
             .to_string();
 
-        Ok(ChatResponse {
-            content: None,
-            reasoning_content: None,
-            tool_calls: vec![ToolCall {
-                id: "m11g-tc-1".to_string(),
-                name: "read_file".to_string(),
-                arguments: json!({ "path": path }),
-                metadata: None,
-            }],
-            stop_reason: StopReason::ToolUse,
-            usage: TokenUsage {
-                input_tokens: 1,
-                output_tokens: 1,
-                ..Default::default()
-            },
-            provider_index: None,
-        })
+        Ok(ChatResponse::tool_use(vec![ToolCall {
+            id: "m11g-tc-1".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({ "path": path }),
+            metadata: None,
+        }])
+        .with_usage(TokenUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+            ..Default::default()
+        }))
     }
 
     fn model_id(&self) -> &str {

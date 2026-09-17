@@ -430,7 +430,6 @@ impl LlmProvider for ProviderChain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::TokenUsage;
 
     struct FailingProvider {
         name: &'static str,
@@ -469,14 +468,7 @@ mod tests {
             _tools: &[ToolSpec],
             _config: &ChatConfig,
         ) -> Result<ChatResponse> {
-            Ok(ChatResponse {
-                content: Some("ok".to_string()),
-                reasoning_content: None,
-                tool_calls: vec![],
-                stop_reason: crate::types::StopReason::EndTurn,
-                usage: TokenUsage::default(),
-                provider_index: None,
-            })
+            Ok(ChatResponse::end_turn("ok"))
         }
 
         fn model_id(&self) -> &str {

@@ -57,13 +57,6 @@ impl ProviderMetadata {
         self.cache_lane = lane;
         self
     }
-
-    pub fn display_label(&self) -> String {
-        match self.endpoint.as_deref().filter(|value| !value.is_empty()) {
-            Some(endpoint) => format!("{}/{} @ {}", self.provider, self.model, endpoint),
-            None => format!("{}/{}", self.provider, self.model),
-        }
-    }
 }
 
 /// Response from a chat completion request.
@@ -84,6 +77,53 @@ pub struct ChatResponse {
     /// Used by `report_late_failure` to penalize the correct provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_index: Option<usize>,
+}
+
+impl ChatResponse {
+    /// Canonical constructor: an `EndTurn` text reply with zero usage. Used
+    /// by provider parse paths and by tests as the fixture kernel.
+    pub fn end_turn(content: impl Into<String>) -> Self {
+        Self {
+            content: Some(content.into()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+            provider_index: None,
+        }
+    }
+
+    /// Canonical constructor: a `ToolUse` turn with empty text and zero
+    /// usage.
+    pub fn tool_use(tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            content: None,
+            reasoning_content: None,
+            tool_calls,
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage::default(),
+            provider_index: None,
+        }
+    }
+
+    /// Fixture mutator: override the stop reason (e.g. a `MaxTokens`
+    /// mid-turn truncation).
+    pub fn with_stop_reason(mut self, stop_reason: StopReason) -> Self {
+        self.stop_reason = stop_reason;
+        self
+    }
+
+    /// Fixture mutator: override the token usage.
+    pub fn with_usage(mut self, usage: TokenUsage) -> Self {
+        self.usage = usage;
+        self
+    }
+
+    /// Fixture mutator: attach reasoning/thinking content.
+    pub fn with_reasoning_content(mut self, reasoning: impl Into<String>) -> Self {
+        self.reasoning_content = Some(reasoning.into());
+        self
+    }
 }
 
 /// Why the model stopped generating.

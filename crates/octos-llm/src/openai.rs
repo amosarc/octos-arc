@@ -259,10 +259,6 @@ pub struct OpenAIProvider {
     /// Kimi/DeepSeek/vLLM never see a reserved field they may reject; the
     /// operator kill-switch (`OCTOS_PROMPT_CACHING`) is evaluated per request.
     prompt_cache_affinity: bool,
-    /// Whether a builder call explicitly selected the affinity mode. An
-    /// explicit opt-in/out must survive either builder-call order (mirrors
-    /// `AnthropicProvider::prompt_caching_override`).
-    prompt_cache_affinity_override: Option<bool>,
 }
 
 const OFFICIAL_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -296,7 +292,6 @@ impl OpenAIProvider {
             base_url: OFFICIAL_OPENAI_BASE_URL.to_string(),
             provider_label: "openai".to_string(),
             prompt_cache_affinity: true,
-            prompt_cache_affinity_override: None,
         }
     }
 
@@ -304,11 +299,8 @@ impl OpenAIProvider {
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         let url = base_url.into();
         let official = is_official_openai_base_url(&url);
-        // Affinity is official-endpoint-only by default; an explicit builder
-        // choice survives either call order.
-        if self.prompt_cache_affinity_override.is_none() {
-            self.prompt_cache_affinity = official;
-        }
+        // Affinity is official-endpoint-only: recompute from the resolved URL.
+        self.prompt_cache_affinity = official;
         // If using a non-default base URL, tag the provider_label to distinguish
         // it in the adaptive router (e.g., "moonshot@autodl" vs "moonshot").
         if !official
@@ -341,16 +333,6 @@ impl OpenAIProvider {
             self.hints.reasoning_style = ReasoningStyle::None;
         }
         self.base_url = url;
-        self
-    }
-
-    /// Explicit override for an endpoint known to implement OpenAI's
-    /// `prompt_cache_key` contract. Custom endpoints remain opt-out by
-    /// default; this explicit choice survives either builder-call order. The
-    /// operator kill-switch (`OCTOS_PROMPT_CACHING`) still applies per request.
-    pub fn with_prompt_cache_affinity(mut self, enabled: bool) -> Self {
-        self.prompt_cache_affinity = enabled;
-        self.prompt_cache_affinity_override = Some(enabled);
         self
     }
 
@@ -1698,7 +1680,7 @@ mod tests {
             ..Default::default()
         };
         let messages = [msg("hello")];
-        let official = OpenAIProvider::new("key", "gpt-5").with_prompt_cache_affinity(true);
+        let official = OpenAIProvider::new("key", "gpt-5");
         let official_body =
             serde_json::to_value(official.build_request(&messages, &[], &config, false)).unwrap();
         assert_eq!(official_body["prompt_cache_key"], "octos-stable-affinity");
@@ -1846,7 +1828,6 @@ mod tests {
         assert_eq!(metadata.provider, "moonshot");
         assert_eq!(metadata.model, "kimi-k2.5");
         assert_eq!(metadata.endpoint.as_deref(), Some("autodl.art"));
-        assert_eq!(metadata.display_label(), "moonshot/kimi-k2.5 @ autodl.art");
     }
 }
 
@@ -1919,16 +1900,6 @@ mod prompt_cache_affinity_tests {
     fn body(provider: &OpenAIProvider, config: &ChatConfig) -> serde_json::Value {
         serde_json::to_value(provider.build_request(&[Message::user("hello")], &[], config, false))
             .unwrap()
-    }
-
-    #[test]
-    fn should_keep_explicit_affinity_opt_out_when_official_base_url_is_set_afterwards() {
-        let config = affinity_config();
-        let provider = OpenAIProvider::new("key", "gpt-5")
-            .with_prompt_cache_affinity(false)
-            .with_base_url("https://api.openai.com/v1");
-        let body = body(&provider, &config);
-        assert!(body.get("prompt_cache_key").is_none(), "{body}");
     }
 
     #[test]

@@ -17,6 +17,8 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -65,13 +67,7 @@ done
 tool=$(printf '%s' "$call" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')
 printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"fake-agent:$tool\"}],\"files_to_send\":[\"/tmp/artifact.md\"]}}"
 "#;
-    let path = dir.path().join("mcp-responder.sh");
-    std::fs::write(&path, script).expect("write responder script");
-    let mut perms = std::fs::metadata(&path).expect("read perms").permissions();
-    use std::os::unix::fs::PermissionsExt;
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod responder script");
-    path
+    common::write_script(dir.path(), "mcp-responder.sh", script)
 }
 
 /// Build a subprocess MCP server that never responds on stdout, used to
@@ -84,13 +80,7 @@ read init
 # Sleep long enough that the dispatch timeout fires before we exit.
 sleep 30
 "#;
-    let path = dir.path().join("mcp-hang.sh");
-    std::fs::write(&path, script).expect("write hang script");
-    let mut perms = std::fs::metadata(&path).expect("read perms").permissions();
-    use std::os::unix::fs::PermissionsExt;
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod hang script");
-    path
+    common::write_script(dir.path(), "mcp-hang.sh", script)
 }
 
 /// Write a script that echoes selected env vars to a log file so tests
@@ -120,13 +110,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","t
 "#,
         log = log_path.display()
     );
-    let path = dir.path().join("mcp-env-probe.sh");
-    std::fs::write(&path, script).expect("write env probe script");
-    let mut perms = std::fs::metadata(&path).expect("read perms").permissions();
-    use std::os::unix::fs::PermissionsExt;
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod env probe script");
-    path
+    common::write_script(dir.path(), "mcp-env-probe.sh", &script)
 }
 
 /// Boot a tiny HTTP server that answers every request with a 302 redirect to
@@ -423,7 +407,6 @@ async fn should_isolate_sub_agent_internal_context_from_parent() {
     // produced by an "inner" sub-agent tool call must stay inside the
     // MCP call and not surface to the dispatch caller.
     let dir = tempfile::tempdir().unwrap();
-    let script_path = dir.path().join("mcp-internal.sh");
     let script = r#"#!/bin/sh
 set -eu
 read init
@@ -445,11 +428,7 @@ done
 >&2 echo "sub-agent internal: cleaning up"
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"final-artifact-only"}]}}'
 "#;
-    std::fs::write(&script_path, script).expect("write internal script");
-    let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
-    use std::os::unix::fs::PermissionsExt;
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&script_path, perms).unwrap();
+    let script_path = common::write_script(dir.path(), "mcp-internal.sh", script);
 
     let config = McpAgentBackendConfig::Local {
         cmd: script_path.display().to_string(),

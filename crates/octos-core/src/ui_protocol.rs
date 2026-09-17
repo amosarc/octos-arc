@@ -12,8 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{OnceLock, RwLock};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Draft protocol identifier for the first control-plane transport.
@@ -211,54 +210,6 @@ pub mod approval_scopes {
 /// `unspecified` is intentionally distinct from `low`: the server does not
 /// silently downgrade unknown tool risk.
 pub const RISK_UNSPECIFIED: &str = "unspecified";
-
-/// Normalize a manifest-declared tool risk.
-///
-/// Blank or missing risk values resolve to [`RISK_UNSPECIFIED`]. The return
-/// value is the server-authoritative value surfaced on approval cards.
-pub fn manifest_tool_risk(risk: Option<&str>) -> String {
-    risk.map(str::trim)
-        .filter(|risk| !risk.is_empty())
-        .unwrap_or(RISK_UNSPECIFIED)
-        .to_owned()
-}
-
-/// Register the server-authoritative approval risk for a tool name.
-///
-/// Plugin loaders call this when trusted manifests are loaded. Re-registering a
-/// tool overwrites the prior risk so a reload with a missing/blank risk cannot
-/// leave a stale stronger value behind.
-pub fn register_tool_approval_risk(tool_name: impl Into<String>, risk: impl Into<String>) {
-    let tool_name = tool_name.into();
-    let risk = risk.into();
-    tool_approval_risk_registry()
-        .write()
-        .expect("tool approval risk registry poisoned")
-        .insert(tool_name, manifest_tool_risk(Some(&risk)));
-}
-
-/// Resolve the server-authoritative approval risk for a tool name.
-pub fn tool_approval_risk(tool_name: &str) -> String {
-    tool_approval_risk_registry()
-        .read()
-        .expect("tool approval risk registry poisoned")
-        .get(tool_name)
-        .cloned()
-        .unwrap_or_else(|| RISK_UNSPECIFIED.to_owned())
-}
-
-fn tool_approval_risk_registry() -> &'static RwLock<HashMap<String, String>> {
-    static REGISTRY: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
-}
-
-#[doc(hidden)]
-pub fn clear_tool_approval_risks_for_test() {
-    tool_approval_risk_registry()
-        .write()
-        .expect("tool approval risk registry poisoned")
-        .clear();
-}
 
 /// JSON-RPC and Octos-application error codes (spec §10 "Error Model").
 ///

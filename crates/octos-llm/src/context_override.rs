@@ -103,7 +103,6 @@ impl LlmProvider for ContextWindowOverride {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::TokenUsage;
 
     struct DummyProvider;
 
@@ -115,14 +114,7 @@ mod tests {
             _tools: &[ToolSpec],
             _config: &ChatConfig,
         ) -> Result<ChatResponse> {
-            Ok(ChatResponse {
-                content: Some("ok".into()),
-                reasoning_content: None,
-                tool_calls: vec![],
-                stop_reason: crate::StopReason::EndTurn,
-                usage: TokenUsage::default(),
-                provider_index: None,
-            })
+            Ok(ChatResponse::end_turn("ok"))
         }
 
         fn model_id(&self) -> &str {

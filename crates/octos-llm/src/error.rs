@@ -99,11 +99,6 @@ impl LlmError {
         self
     }
 
-    /// Convenience: create an Authentication error.
-    pub fn auth(message: impl Into<String>) -> Self {
-        Self::new(LlmErrorKind::Authentication, message)
-    }
-
     /// Convenience: create a RateLimited error.
     pub fn rate_limited(retry_after_secs: Option<u64>) -> Self {
         Self::new(
@@ -497,7 +492,7 @@ mod tests {
 
     #[test]
     fn should_create_convenience_errors() {
-        assert!(!LlmError::auth("bad key").is_retryable());
+        assert!(!LlmError::new(LlmErrorKind::Authentication, "bad key").is_retryable());
         assert!(LlmError::rate_limited(Some(30)).is_retryable());
         assert!(LlmError::timeout("timed out").is_retryable());
     }

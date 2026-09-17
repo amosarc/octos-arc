@@ -9,8 +9,7 @@
 //!
 //! 2. [`CompactionRunner`] + [`CompactionPolicy`] (harness M6.3) — declarative
 //!    compaction with preserved artifacts/invariants, preflight triggering,
-//!    typed [`ToolResultPlaceholder`]s, and `octos.harness.event.v1 { kind:
-//!    phase, phase: "compaction" }` emission. Swappable summarizer via the
+//!    and typed [`ToolResultPlaceholder`]s. Swappable summarizer via the
 //!    [`crate::summarizer::Summarizer`] trait.
 //!
 //! The runner is intentionally synchronous so the agent loop can run it
@@ -29,7 +28,6 @@ use octos_llm::context::{estimate_message_tokens, estimate_tokens};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::harness_events::{HarnessEvent, write_event_to_sink};
 pub use crate::summarizer::{ExtractiveSummarizer, Summarizer};
 pub use crate::workspace_policy::{CompactionPolicy, CompactionSummarizerKind};
 use crate::workspace_policy::{WorkspaceArtifactsPolicy, WorkspacePolicy};
@@ -392,11 +390,8 @@ impl PreservedArtifact {
     }
 }
 
-/// Phase name for compaction-phase events (kind=phase).
-pub const COMPACTION_PHASE: &str = "compaction";
-
-/// The specific stage of the compaction pipeline. Emitted on phase events so
-/// operators can distinguish a preflight pass from a post-LLM compaction.
+/// The specific stage of the compaction pipeline being run (preflight pass
+/// vs post-LLM compaction).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactionPhase {
@@ -520,11 +515,11 @@ impl ToolResultPlaceholder {
             "turn_id": self.turn_id,
             "original_byte_len": self.original_byte_len,
             "reason": self.reason,
-            // #2131: the placeholder already carries `tool_call_id`, and the
-            // `recall` tool's description tells the model to restore an evicted
-            // output by exactly that id — so no in-placeholder call hint is
-            // needed. Emitting one here would also mislead the chat/acp/mcp
-            // paths, which build placeholders but register no recall tool.
+            // #2131: the placeholder already carries `tool_call_id`, which a
+            // memory-recall flow keys on to restore an evicted output — so no
+            // in-placeholder call hint is needed. Emitting one here would also
+            // mislead the chat/acp/mcp paths, which build placeholders without
+            // any restore tool registered.
         });
         format!(
             "{}{}",
@@ -568,17 +563,10 @@ impl ToolResultPlaceholder {
 pub struct CompactionRunner {
     policy: CompactionPolicy,
     summarizer: Arc<dyn Summarizer>,
-    event_sink: Option<EventSink>,
     artifacts: WorkspaceArtifactsPolicy,
     /// Overrides the preserved_artifacts patterns when the caller wires a
     /// workspace-policy-bound runner via `with_workspace_policy`.
     resolved_preserved: Vec<PreservedArtifact>,
-}
-
-struct EventSink {
-    path: String,
-    session_id: String,
-    task_id: String,
 }
 
 impl std::fmt::Debug for CompactionRunner {
@@ -586,7 +574,6 @@ impl std::fmt::Debug for CompactionRunner {
         f.debug_struct("CompactionRunner")
             .field("policy", &self.policy)
             .field("summarizer", &self.summarizer.kind())
-            .field("has_event_sink", &self.event_sink.is_some())
             .field("preserved", &self.resolved_preserved)
             .finish()
     }
@@ -594,13 +581,12 @@ impl std::fmt::Debug for CompactionRunner {
 
 impl CompactionRunner {
     /// Build a runner from a typed policy. Defaults the summarizer to the
-    /// extractive fallback and leaves the event sink unset.
+    /// extractive fallback.
     pub fn new(policy: CompactionPolicy) -> Self {
         let summarizer: Arc<dyn Summarizer> = default_summarizer_for(policy.summarizer);
         Self {
             policy,
             summarizer,
-            event_sink: None,
             artifacts: WorkspaceArtifactsPolicy::default(),
             resolved_preserved: Vec::new(),
         }
@@ -609,22 +595,6 @@ impl CompactionRunner {
     /// Override the summarizer implementation (useful in tests).
     pub fn with_summarizer<S: Summarizer + 'static>(mut self, summarizer: S) -> Self {
         self.summarizer = Arc::new(summarizer);
-        self
-    }
-
-    /// Route `octos.harness.event.v1 { kind: phase }` events to `sink_path`
-    /// for the given session/task IDs.
-    pub fn with_event_sink(
-        mut self,
-        sink_path: impl Into<String>,
-        session_id: impl Into<String>,
-        task_id: impl Into<String>,
-    ) -> Self {
-        self.event_sink = Some(EventSink {
-            path: sink_path.into(),
-            session_id: session_id.into(),
-            task_id: task_id.into(),
-        });
         self
     }
 
@@ -672,14 +642,11 @@ impl CompactionRunner {
 
     /// Run a compaction pass in-place.
     ///
-    /// Emits `octos.harness.event.v1 { kind: phase }` events for `start` and
-    /// `complete` so operators can observe the policy in action. Compaction is
-    /// idempotent: calling it a second time on the already-compacted history
-    /// is a no-op when the conversation already fits under the token budget.
-    pub fn run(&self, messages: &mut Vec<Message>, phase: CompactionPhase) -> CompactionOutcome {
+    /// Compaction is idempotent: calling it a second time on the
+    /// already-compacted history is a no-op when the conversation already
+    /// fits under the token budget.
+    pub fn run(&self, messages: &mut Vec<Message>) -> CompactionOutcome {
         let tokens_before: u32 = messages.iter().map(estimate_message_tokens).sum();
-        self.emit_phase_event(phase, "start", tokens_before);
-
         let prune = self.prune_tool_results(messages);
 
         let budget = self.policy.token_budget;
@@ -702,7 +669,6 @@ impl CompactionRunner {
         if tokens_after_prune <= budget {
             // Nothing to summarise — only the pruning step ran.
             outcome.tokens_after = tokens_after_prune;
-            self.emit_phase_event(phase, "complete", tokens_after_prune);
             return outcome;
         }
 
@@ -720,14 +686,12 @@ impl CompactionRunner {
             );
             let tokens_after: u32 = messages.iter().map(estimate_message_tokens).sum();
             outcome.tokens_after = tokens_after;
-            self.emit_phase_event(phase, "complete", tokens_after);
             return outcome;
         }
 
         if messages.len() < 2 {
             let tokens_after: u32 = messages.iter().map(estimate_message_tokens).sum();
             outcome.tokens_after = tokens_after;
-            self.emit_phase_event(phase, "complete", tokens_after);
             return outcome;
         }
 
@@ -741,7 +705,6 @@ impl CompactionRunner {
             outcome.messages_dropped = dropped;
             let tokens_after: u32 = messages.iter().map(estimate_message_tokens).sum();
             outcome.tokens_after = tokens_after;
-            self.emit_phase_event(phase, "complete", tokens_after);
             return outcome;
         }
 
@@ -754,7 +717,6 @@ impl CompactionRunner {
             outcome.messages_dropped = dropped;
             let tokens_after: u32 = messages.iter().map(estimate_message_tokens).sum();
             outcome.tokens_after = tokens_after;
-            self.emit_phase_event(phase, "complete", tokens_after);
             return outcome;
         }
 
@@ -763,7 +725,6 @@ impl CompactionRunner {
         if old_messages.is_empty() {
             let tokens_after: u32 = messages.iter().map(estimate_message_tokens).sum();
             outcome.tokens_after = tokens_after;
-            self.emit_phase_event(phase, "complete", tokens_after);
             return outcome;
         }
 
@@ -797,7 +758,6 @@ impl CompactionRunner {
 
         let tokens_after: u32 = messages.iter().map(estimate_message_tokens).sum();
         outcome.tokens_after = tokens_after;
-        self.emit_phase_event(phase, "complete", tokens_after);
         outcome
     }
 
@@ -945,28 +905,6 @@ impl CompactionRunner {
         Ok(PreservationLedger { preserved, missing })
     }
 
-    fn emit_phase_event(&self, phase: CompactionPhase, stage: &str, tokens: u32) {
-        let Some(sink) = self.event_sink.as_ref() else {
-            return;
-        };
-        let message = format!(
-            "compaction {} ({}; tokens={} summarizer={})",
-            stage,
-            phase.as_str(),
-            tokens,
-            self.summarizer.kind()
-        );
-        let event = HarnessEvent::phase_event(
-            sink.session_id.clone(),
-            sink.task_id.clone(),
-            Option::<String>::None,
-            COMPACTION_PHASE.to_string(),
-            Some(message),
-        );
-        if let Err(err) = write_event_to_sink(&sink.path, &event) {
-            warn!(path = %sink.path, error = %err, "compaction: failed to emit phase event");
-        }
-    }
 }
 
 fn default_summarizer_for(kind: CompactionSummarizerKind) -> Arc<dyn Summarizer> {
@@ -1400,14 +1338,7 @@ mod tests {
                 *captured.lock().unwrap_or_else(|error| error.into_inner()) = messages.to_vec();
             }
             match &self.result {
-                Ok(content) => Ok(octos_llm::ChatResponse {
-                    content: Some(content.clone()),
-                    reasoning_content: None,
-                    tool_calls: Vec::new(),
-                    stop_reason: octos_llm::StopReason::EndTurn,
-                    usage: octos_llm::TokenUsage::default(),
-                    provider_index: None,
-                }),
+                Ok(content) => Ok(octos_llm::ChatResponse::end_turn(content.clone())),
                 Err(message) => Err(eyre::eyre!("{message}")),
             }
         }
@@ -1580,7 +1511,7 @@ mod tests {
         };
         let runner = CompactionRunner::new(policy);
         let mut messages = vec![user_msg("hi")];
-        let outcome = runner.run(&mut messages, CompactionPhase::OnDemand);
+        let outcome = runner.run(&mut messages);
         assert!(!outcome.performed);
     }
 
@@ -1616,7 +1547,7 @@ mod tests {
         }
         let message_count_before = messages.len();
 
-        let outcome = runner.run(&mut messages, CompactionPhase::OnDemand);
+        let outcome = runner.run(&mut messages);
 
         assert!(
             outcome.tool_results_replaced >= 1,

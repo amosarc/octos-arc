@@ -510,14 +510,7 @@ mod tests {
             _tools: &[octos_llm::ToolSpec],
             _config: &octos_llm::ChatConfig,
         ) -> eyre::Result<octos_llm::ChatResponse> {
-            Ok(octos_llm::ChatResponse {
-                content: Some(String::new()),
-                reasoning_content: None,
-                tool_calls: vec![],
-                stop_reason: octos_llm::StopReason::EndTurn,
-                usage: octos_llm::TokenUsage::default(),
-                provider_index: None,
-            })
+            Ok(octos_llm::ChatResponse::end_turn(String::new()))
         }
         fn model_id(&self) -> &str {
             "test-model"

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use octos_core::{Message, ToolCall};
-use octos_llm::{ChatConfig, ChatResponse, LlmProvider, StopReason, ToolSpec, TokenUsage};
+use octos_llm::{ChatConfig, ChatResponse, LlmProvider, ToolSpec, TokenUsage};
 
 /// `(messages, tools, config)` of one provider request, in call order.
 pub(crate) type RecordedCall = (Vec<Message>, Vec<ToolSpec>, ChatConfig);
@@ -78,34 +78,20 @@ pub(crate) fn tool_use(
     input_tokens: u32,
     output_tokens: u32,
 ) -> ChatResponse {
-    ChatResponse {
-        content: None,
-        reasoning_content: None,
-        tool_calls,
-        stop_reason: StopReason::ToolUse,
-        usage: TokenUsage {
-            input_tokens,
-            output_tokens,
-            ..Default::default()
-        },
-        provider_index: None,
-    }
+    ChatResponse::tool_use(tool_calls).with_usage(TokenUsage {
+        input_tokens,
+        output_tokens,
+        ..Default::default()
+    })
 }
 
 /// An `EndTurn` response with `content`.
 pub(crate) fn end_turn(content: &str, input_tokens: u32, output_tokens: u32) -> ChatResponse {
-    ChatResponse {
-        content: Some(content.to_string()),
-        reasoning_content: None,
-        tool_calls: vec![],
-        stop_reason: StopReason::EndTurn,
-        usage: TokenUsage {
-            input_tokens,
-            output_tokens,
-            ..Default::default()
-        },
-        provider_index: None,
-    }
+    ChatResponse::end_turn(content).with_usage(TokenUsage {
+        input_tokens,
+        output_tokens,
+        ..Default::default()
+    })
 }
 
 /// A plain single-text `EndTurn` response with zero usage.
@@ -177,4 +163,23 @@ impl crate::progress::ProgressReporter for CapturingReporter {
             .unwrap_or_else(|e| e.into_inner())
             .push(event);
     }
+}
+
+/// Boot a test agent the way the loop tests do: a tempdir-scoped
+/// `EpisodeStore` and `save_episodes: false` layered under `config`.
+pub(crate) async fn boot_agent(
+    id: &str,
+    data_dir: &std::path::Path,
+    provider: Arc<dyn LlmProvider>,
+    tools: crate::tools::ToolRegistry,
+    config: crate::AgentConfig,
+) -> crate::Agent {
+    let memory =
+        Arc::new(octos_memory::EpisodeStore::open(data_dir.join("memory")).await.unwrap());
+    crate::Agent::new(octos_core::AgentId::new(id), provider, tools, memory).with_config(
+        crate::AgentConfig {
+            save_episodes: false,
+            ..config
+        },
+    )
 }

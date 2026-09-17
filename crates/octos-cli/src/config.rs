@@ -171,7 +171,7 @@ pub struct Config {
     /// a chosen folder via `appui.default_session_cwd` — the Tier-2
     /// fallback consulted by the UI Protocol dispatcher when no
     /// client-supplied cwd is present and before
-    /// `SessionRuntime::bootstrap`'s Tier-3 profile-default workspace
+    /// `SessionRuntime::bootstrap_with_permissions_and_sandbox`'s Tier-3 profile-default workspace
     /// root. Capability-gated client-sent cwds (Tier-1) still take
     /// precedence.
     #[serde(default)]

@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use octos_agent::compaction::{
-    CompactionPhase, CompactionPolicy, CompactionRunner, ExtractiveSummarizer, PreservedArtifact,
+    CompactionPolicy, CompactionRunner, ExtractiveSummarizer, PreservedArtifact,
     TOOL_RESULT_PLACEHOLDER_SCHEMA_VERSION, ToolResultPlaceholder, ToolResultPlaceholderError,
 };
 use octos_agent::workspace_policy::{
@@ -137,7 +137,7 @@ fn should_fire_preflight_compaction_when_context_exceeds_threshold() {
         "preflight should fire when tokens > threshold"
     );
 
-    let outcome = runner.run(&mut messages, CompactionPhase::Preflight);
+    let outcome = runner.run(&mut messages);
     assert!(outcome.performed, "preflight should execute compaction");
     assert!(
         messages.len() < 4 || outcome.messages_dropped > 0,
@@ -174,7 +174,7 @@ fn should_preserve_declared_artifacts_through_compaction() {
         user_msg("thanks"),
     ];
 
-    let outcome = runner.run(&mut messages, CompactionPhase::TurnEnd);
+    let outcome = runner.run(&mut messages);
     let ledger = runner
         .check_preserved(&messages, &workspace)
         .expect("preservation check");
@@ -206,7 +206,7 @@ fn should_gate_on_validator_failure_when_invariants_not_preserved() {
         user_msg("done"),
     ];
     // Force compaction: (compaction will summarise nothing truly; still run validator)
-    let _ = runner.run(&mut messages, CompactionPhase::TurnEnd);
+    let _ = runner.run(&mut messages);
     let ledger = runner
         .check_preserved(&messages, &workspace)
         .expect("preservation check");
@@ -272,44 +272,6 @@ fn should_replace_old_tool_results_with_typed_placeholder() {
     assert!(placeholder.original_byte_len.unwrap_or(0) > 0);
 }
 
-#[test]
-fn should_emit_compaction_phase_events() {
-    let sink_dir = tempfile::tempdir().expect("tempdir");
-    let sink_path = sink_dir.path().join("events.jsonl");
-
-    let policy = CompactionPolicy {
-        schema_version: COMPACTION_POLICY_SCHEMA_VERSION,
-        token_budget: 400,
-        preflight_threshold: Some(100),
-        prune_tool_results_after_turns: Some(1),
-        preserved_artifacts: vec![],
-        preserved_invariants: vec![],
-        summarizer: Default::default(),
-    };
-    let runner = CompactionRunner::new(policy)
-        .with_summarizer(ExtractiveSummarizer::new())
-        .with_event_sink(sink_path.display().to_string(), "sess-1", "task-1");
-
-    let mut messages = vec![
-        system_msg("system"),
-        user_msg(&"filler ".repeat(200)),
-        assistant_msg(&"reply ".repeat(200)),
-        user_msg("current"),
-    ];
-    let outcome = runner.run(&mut messages, CompactionPhase::Preflight);
-    assert!(outcome.performed || outcome.messages_dropped == 0);
-
-    // Collect emitted events.
-    let raw = std::fs::read_to_string(&sink_path).expect("read sink file");
-    assert!(
-        raw.contains("\"kind\":\"phase\""),
-        "expected phase events to be written: {raw}"
-    );
-    assert!(
-        raw.contains("compaction"),
-        "expected phase name 'compaction' in event payload: {raw}"
-    );
-}
 
 #[test]
 fn compaction_policy_schema_version_is_pinned() {

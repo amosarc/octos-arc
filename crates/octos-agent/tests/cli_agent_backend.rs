@@ -4,24 +4,16 @@
 
 #![cfg(unix)]
 
+mod common;
+use common::write_script;
+
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use octos_agent::tools::mcp_agent::{
     CliAgentBackend, DispatchOutcome, DispatchRequest, McpAgentBackend, McpAgentBackendConfig,
     build_backend_from_config,
 };
-
-fn write_script(dir: &tempfile::TempDir, name: &str, body: &str) -> PathBuf {
-    let path = dir.path().join(name);
-    std::fs::write(&path, body).expect("write script");
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(&path).expect("perms").permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod");
-    path
-}
 
 fn cli_config(cmd: &str) -> McpAgentBackendConfig {
     McpAgentBackendConfig::Cli {

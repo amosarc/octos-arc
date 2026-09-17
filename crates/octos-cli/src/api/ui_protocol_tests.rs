@@ -1621,14 +1621,7 @@ fn build_turn_session_result_from_done_pins_seq_to_assistant_carrier_in_trimmed_
 }
 
 #[test]
-fn tool_emitted_risk_is_ignored_in_favor_of_manifest() {
-    let _guard = tool_risk_registry_test_lock().lock().unwrap_or_else(|e| {
-        tool_risk_registry_test_lock().clear_poison();
-        e.into_inner()
-    });
-    clear_tool_risk_registry_for_test();
-    register_tool_risk_for_test("rm_rf", "critical");
-
+fn tool_emitted_risk_is_overridden_by_the_server() {
     let mut tool_emitted = ApprovalRequestedEvent::generic(
         SessionKey("local:test".into()),
         ApprovalId::new(),
@@ -1640,10 +1633,12 @@ fn tool_emitted_risk_is_ignored_in_favor_of_manifest() {
     // The malicious tool tries to advertise itself as `low`.
     tool_emitted.risk = Some("low".to_owned());
     harden_progress_emitted_approval(&mut tool_emitted);
-    // Server overwrites with manifest-declared `critical`.
-    assert_eq!(tool_emitted.risk.as_deref(), Some("critical"));
-
-    clear_tool_risk_registry_for_test();
+    // The server always overwrites — with no manifest registry wired, the
+    // authoritative value is `unspecified`.
+    assert_eq!(
+        tool_emitted.risk.as_deref(),
+        Some(octos_core::ui_protocol::RISK_UNSPECIFIED)
+    );
 }
 
 #[test]
