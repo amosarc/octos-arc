@@ -230,8 +230,10 @@ impl Tool for ListDirTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    
     use tempfile::TempDir;
+
+    use crate::tools::test_fixture::scoped_ctx;
 
     #[tokio::test]
     async fn test_list_dir() {
@@ -255,13 +257,6 @@ mod tests {
 
     use octos_core::SessionScope;
 
-    fn ctx_with_scope(scope: SessionScope) -> ToolContext {
-        let mut ctx = ToolContext::zero();
-        ctx.tool_id = "list-dir-with-scope".to_string();
-        ctx.session_scope = Some(Arc::new(scope));
-        ctx
-    }
-
     #[tokio::test]
     async fn list_dir_on_upload_handle_namespace_returns_guidance() {
         // #1378: list_dir('up') / list_dir('up/<handle>') must not return the
@@ -270,7 +265,7 @@ mod tests {
         let workspace = TempDir::new().unwrap();
         let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![]).unwrap();
         let tool = ListDirTool::new(workspace.path());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("list-dir-with-scope", scope);
 
         for p in ["up", "up/MDE5_handle/report.md"] {
             let result = tool
@@ -305,7 +300,7 @@ mod tests {
             .unwrap();
 
         let tool = ListDirTool::new(workspace.path());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("list-dir-with-scope", scope);
 
         let result = tool
             .execute_with_context(
@@ -347,7 +342,7 @@ mod tests {
             .unwrap();
 
         let tool = ListDirTool::new(workspace.path());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("list-dir-with-scope", scope);
 
         let result = tool
             .execute_with_context(

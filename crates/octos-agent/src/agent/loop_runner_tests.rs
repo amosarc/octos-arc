@@ -22,21 +22,7 @@ use octos_llm::{ChatResponse, LlmError, LlmErrorKind, LlmProvider, StopReason, T
 use octos_memory::EpisodeStore;
 
 use crate::AgentConfig;
-
-fn tool_use(tool_calls: Vec<ToolCall>, input_tokens: u32, output_tokens: u32) -> ChatResponse {
-    ChatResponse {
-        content: None,
-        reasoning_content: None,
-        tool_calls,
-        stop_reason: StopReason::ToolUse,
-        usage: LlmTokenUsage {
-            input_tokens,
-            output_tokens,
-            ..Default::default()
-        },
-        provider_index: None,
-    }
-}
+use crate::test_support::{ScriptedProvider, end_turn, plain_text_response, tool_use};
 
 fn tool_out(tool_call_id: impl Into<String>, content: impl Into<String>) -> Message {
     Message {
@@ -49,57 +35,6 @@ fn tool_out(tool_call_id: impl Into<String>, content: impl Into<String>) -> Mess
         client_message_id: None,
         thread_id: None,
         timestamp: chrono::Utc::now(),
-    }
-}
-
-fn end_turn(content: &str, input_tokens: u32, output_tokens: u32) -> ChatResponse {
-    ChatResponse {
-        content: Some(content.to_string()),
-        reasoning_content: None,
-        tool_calls: vec![],
-        stop_reason: StopReason::EndTurn,
-        usage: LlmTokenUsage {
-            input_tokens,
-            output_tokens,
-            ..Default::default()
-        },
-        provider_index: None,
-    }
-}
-
-struct ScriptedProvider {
-    responses: StdMutex<Vec<ChatResponse>>,
-}
-
-impl ScriptedProvider {
-    fn new(responses: Vec<ChatResponse>) -> Self {
-        Self {
-            responses: StdMutex::new(responses.into_iter().rev().collect()),
-        }
-    }
-}
-
-#[async_trait]
-impl LlmProvider for ScriptedProvider {
-    async fn chat(
-        &self,
-        _messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &ChatConfig,
-    ) -> Result<ChatResponse> {
-        self.responses
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .pop()
-            .ok_or_else(|| eyre::eyre!("scripted provider exhausted"))
-    }
-
-    fn model_id(&self) -> &str {
-        "planner-test"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
     }
 }
 
@@ -173,7 +108,7 @@ async fn terminal_integrity_reasoning_only_recovers_to_actual_answer() {
         .await
         .unwrap();
     assert_eq!(result.content, "Actual final answer");
-    assert!(provider.0.responses.lock().unwrap().is_empty());
+    assert_eq!(provider.0.remaining(), 0);
     assert_eq!(result.token_usage.input_tokens, 40);
     assert_eq!(result.token_usage.output_tokens, 60);
 }
@@ -289,55 +224,6 @@ async fn should_preserve_tool_carrier_text_in_durable_log_when_final_answer_repe
     );
 }
 
-/// `(messages, tools, config)` of every provider request, in call order.
-type RecordedConfigRequests =
-    Arc<StdMutex<Vec<(Vec<Message>, Vec<octos_llm::ToolSpec>, ChatConfig)>>>;
-
-/// Like [`RequestRecordingProvider`] but also keeps the `ChatConfig` of each
-/// call, so a test can compare the cache-relevant request controls of the
-/// checkpoint reflection with those of the action call it shadows.
-struct ConfigRecordingProvider {
-    responses: StdMutex<Vec<ChatResponse>>,
-    requests: RecordedConfigRequests,
-}
-
-impl ConfigRecordingProvider {
-    fn new(responses: Vec<ChatResponse>, requests: RecordedConfigRequests) -> Self {
-        Self {
-            responses: StdMutex::new(responses.into_iter().rev().collect()),
-            requests,
-        }
-    }
-}
-
-#[async_trait]
-impl LlmProvider for ConfigRecordingProvider {
-    async fn chat(
-        &self,
-        messages: &[Message],
-        tools: &[octos_llm::ToolSpec],
-        config: &ChatConfig,
-    ) -> Result<ChatResponse> {
-        self.requests
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .push((messages.to_vec(), tools.to_vec(), config.clone()));
-        self.responses
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .pop()
-            .ok_or_else(|| eyre::eyre!("scripted provider exhausted"))
-    }
-
-    fn model_id(&self) -> &str {
-        "planner-test"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-}
-
 /// The checkpoint request must be the action request plus appended rows:
 /// same `context_management`, same reasoning effort (Anthropic derives the
 /// `thinking` budget from `max_tokens`, so the output cap must not change it
@@ -345,34 +231,30 @@ impl LlmProvider for ConfigRecordingProvider {
 #[tokio::test]
 async fn should_send_checkpoint_with_identical_cache_relevant_config_and_tool_choice_none() {
     let dir = tempfile::tempdir().unwrap();
-    let requests = Arc::new(StdMutex::new(Vec::new()));
-    let provider = Arc::new(ConfigRecordingProvider::new(
-        vec![
-            tool_use(
-                vec![ToolCall {
-                    id: "call_fetch_1".into(),
-                    name: "fetch_paper".into(),
-                    arguments: serde_json::json!({ "page": 1 }),
-                    metadata: None,
-                }],
-                10,
-                20,
-            ),
-            tool_use(
-                vec![ToolCall {
-                    id: "call_fetch_2".into(),
-                    name: "fetch_paper".into(),
-                    arguments: serde_json::json!({ "page": 2 }),
-                    metadata: None,
-                }],
-                10,
-                20,
-            ),
-            end_turn("REFLECTION: keep going", 5, 5),
-            end_turn("final answer", 10, 10),
-        ],
-        requests.clone(),
-    ));
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_use(
+            vec![ToolCall {
+                id: "call_fetch_1".into(),
+                name: "fetch_paper".into(),
+                arguments: serde_json::json!({ "page": 1 }),
+                metadata: None,
+            }],
+            10,
+            20,
+        ),
+        tool_use(
+            vec![ToolCall {
+                id: "call_fetch_2".into(),
+                name: "fetch_paper".into(),
+                arguments: serde_json::json!({ "page": 2 }),
+                metadata: None,
+            }],
+            10,
+            20,
+        ),
+        end_turn("REFLECTION: keep going", 5, 5),
+        end_turn("final answer", 10, 10),
+    ]));
     let mut tools = ToolRegistry::new();
     tools.register(StaticResultTool::new(
         "fetch_paper",
@@ -381,7 +263,7 @@ async fn should_send_checkpoint_with_identical_cache_relevant_config_and_tool_ch
         Arc::new(AtomicUsize::new(0)),
     ));
     let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("convergence-config"), provider, tools, memory)
+    let agent = Agent::new(AgentId::new("convergence-config"), provider.clone(), tools, memory)
         .with_config(AgentConfig {
             save_episodes: false,
             max_tokens: Some(8_192),
@@ -396,7 +278,7 @@ async fn should_send_checkpoint_with_identical_cache_relevant_config_and_tool_ch
         .expect("turn should complete");
     assert_eq!(response.content, "final answer");
 
-    let requests = requests.lock().unwrap_or_else(|error| error.into_inner());
+    let requests = provider.recorded_calls();
     assert_eq!(requests.len(), 4);
     let (_, _, action) = &requests[1];
     let (_, _, checkpoint) = &requests[2];
@@ -525,67 +407,6 @@ async fn budget_reminder_injected_before_iteration_cap() {
 
 use crate::tools::{Tool, ToolRegistry, ToolResult};
 
-struct MaxTokensThenEndProvider {
-    calls: AtomicUsize,
-    observed_prompts: Arc<StdMutex<Vec<Vec<String>>>>,
-}
-
-#[async_trait]
-impl LlmProvider for MaxTokensThenEndProvider {
-    async fn chat(
-        &self,
-        messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &octos_llm::ChatConfig,
-    ) -> Result<ChatResponse> {
-        self.observed_prompts
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .push(
-                messages
-                    .iter()
-                    .map(|message| message.content.clone())
-                    .collect(),
-            );
-        let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        Ok(if call == 0 {
-            ChatResponse {
-                content: Some("part one".to_string()),
-                reasoning_content: None,
-                tool_calls: vec![],
-                stop_reason: StopReason::MaxTokens,
-                usage: LlmTokenUsage {
-                    input_tokens: 3,
-                    output_tokens: 10,
-                    ..Default::default()
-                },
-                provider_index: None,
-            }
-        } else {
-            ChatResponse {
-                content: Some("part two".to_string()),
-                reasoning_content: None,
-                tool_calls: vec![],
-                stop_reason: StopReason::EndTurn,
-                usage: LlmTokenUsage {
-                    input_tokens: 4,
-                    output_tokens: 11,
-                    ..Default::default()
-                },
-                provider_index: None,
-            }
-        })
-    }
-
-    fn model_id(&self) -> &str {
-        "mock"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-}
-
 struct NamedEchoTool {
     name: &'static str,
     output: &'static str,
@@ -614,75 +435,6 @@ impl Tool for NamedEchoTool {
             success: true,
             ..Default::default()
         })
-    }
-}
-
-struct MultiToolThenEndProvider {
-    calls: AtomicUsize,
-}
-
-#[async_trait]
-impl LlmProvider for MultiToolThenEndProvider {
-    async fn chat(
-        &self,
-        _messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &octos_llm::ChatConfig,
-    ) -> Result<ChatResponse> {
-        let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        let response = match call {
-            0 => ChatResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: vec![
-                    ToolCall {
-                        id: "call_alpha".to_string(),
-                        name: "alpha".to_string(),
-                        arguments: serde_json::json!({}),
-                        metadata: None,
-                    },
-                    ToolCall {
-                        id: "call_beta".to_string(),
-                        name: "beta".to_string(),
-                        arguments: serde_json::json!({}),
-                        metadata: None,
-                    },
-                ],
-                stop_reason: StopReason::ToolUse,
-                usage: LlmTokenUsage::default(),
-                provider_index: None,
-            },
-            1 => ChatResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: vec![ToolCall {
-                    id: "call_gamma".to_string(),
-                    name: "gamma".to_string(),
-                    arguments: serde_json::json!({}),
-                    metadata: None,
-                }],
-                stop_reason: StopReason::ToolUse,
-                usage: LlmTokenUsage::default(),
-                provider_index: None,
-            },
-            _ => ChatResponse {
-                content: Some("done".to_string()),
-                reasoning_content: None,
-                tool_calls: vec![],
-                stop_reason: StopReason::EndTurn,
-                usage: LlmTokenUsage::default(),
-                provider_index: None,
-            },
-        };
-        Ok(response)
-    }
-
-    fn model_id(&self) -> &str {
-        "mock"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
     }
 }
 
@@ -721,43 +473,21 @@ impl Tool for TerminalFailureTool {
     }
 }
 
-struct TerminalLessonRetryProvider {
-    calls: AtomicUsize,
-}
-
-#[async_trait]
-impl LlmProvider for TerminalLessonRetryProvider {
-    async fn chat(
-        &self,
-        _messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &octos_llm::ChatConfig,
-    ) -> Result<ChatResponse> {
-        let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        let suffix = if call == 0 { "first" } else { "rewritten" };
-        Ok(ChatResponse {
-            content: None,
-            reasoning_content: None,
-            tool_calls: vec![ToolCall {
-                id: format!("call_lesson_{call}"),
-                name: "lesson_generate".to_string(),
-                // The actual incident changed context strings on every retry.
-                // The guard must key on terminal tool identity, not exact args.
-                arguments: serde_json::json!({ "tutor_context": suffix }),
-                metadata: None,
-            }],
-            stop_reason: StopReason::ToolUse,
-            usage: LlmTokenUsage::default(),
-            provider_index: None,
-        })
-    }
-
-    fn model_id(&self) -> &str {
-        "mock"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
+fn lesson_call(id: &str, tutor_context: &str) -> ChatResponse {
+    ChatResponse {
+        content: None,
+        reasoning_content: None,
+        tool_calls: vec![ToolCall {
+            id: id.to_string(),
+            name: "lesson_generate".to_string(),
+            // The actual incident changed context strings on every retry.
+            // The guard must key on terminal tool identity, not exact args.
+            arguments: serde_json::json!({ "tutor_context": tutor_context }),
+            metadata: None,
+        }],
+        stop_reason: StopReason::ToolUse,
+        usage: LlmTokenUsage::default(),
+        provider_index: None,
     }
 }
 
@@ -765,11 +495,21 @@ impl LlmProvider for TerminalLessonRetryProvider {
 async fn run_task_continues_after_max_tokens_in_same_loop() {
     let dir = tempfile::tempdir().unwrap();
     let tools = ToolRegistry::with_builtins(dir.path());
-    let observed_prompts = Arc::new(StdMutex::new(Vec::new()));
-    let provider = Arc::new(MaxTokensThenEndProvider {
-        calls: AtomicUsize::new(0),
-        observed_prompts: Arc::clone(&observed_prompts),
-    });
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        ChatResponse {
+            content: Some("part one".to_string()),
+            reasoning_content: None,
+            tool_calls: vec![],
+            stop_reason: StopReason::MaxTokens,
+            usage: LlmTokenUsage {
+                input_tokens: 3,
+                output_tokens: 10,
+                ..Default::default()
+            },
+            provider_index: None,
+        },
+        end_turn("part two", 4, 11),
+    ]));
     let provider_for_agent: Arc<dyn LlmProvider> = provider.clone();
     let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
     let agent = Agent::new(
@@ -797,18 +537,16 @@ async fn run_task_continues_after_max_tokens_in_same_loop() {
         "part one
 part two"
     );
-    assert_eq!(provider.calls.load(AtomicOrdering::SeqCst), 2);
+    let calls = provider.recorded_calls();
+    assert_eq!(calls.len(), 2);
     assert_eq!(result.token_usage.input_tokens, 7);
     assert_eq!(result.token_usage.output_tokens, 21);
-    let prompts = observed_prompts
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    assert_eq!(prompts.len(), 2);
-    assert!(prompts[1].iter().any(|content| content == "part one"));
+    let second_prompt = &calls[1].0;
+    assert!(second_prompt.iter().any(|m| m.content == "part one"));
     assert!(
-        prompts[1]
+        second_prompt
             .iter()
-            .any(|content| content.contains("Continue directly from where you stopped"))
+            .any(|m| m.content.contains("Continue directly from where you stopped"))
     );
 }
 
@@ -829,9 +567,37 @@ async fn process_message_preserves_tool_pair_order_across_iterations() {
         output: "gamma ok",
     });
 
-    let provider: Arc<dyn LlmProvider> = Arc::new(MultiToolThenEndProvider {
-        calls: AtomicUsize::new(0),
-    });
+    let provider: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider::new(vec![
+        tool_use(
+            vec![
+                ToolCall {
+                    id: "call_alpha".to_string(),
+                    name: "alpha".to_string(),
+                    arguments: serde_json::json!({}),
+                    metadata: None,
+                },
+                ToolCall {
+                    id: "call_beta".to_string(),
+                    name: "beta".to_string(),
+                    arguments: serde_json::json!({}),
+                    metadata: None,
+                },
+            ],
+            0,
+            0,
+        ),
+        tool_use(
+            vec![ToolCall {
+                id: "call_gamma".to_string(),
+                name: "gamma".to_string(),
+                arguments: serde_json::json!({}),
+                metadata: None,
+            }],
+            0,
+            0,
+        ),
+        end_turn("done", 0, 0),
+    ]));
     let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
     let agent = Agent::new(AgentId::new("test-agent"), provider, tools, memory);
 
@@ -874,9 +640,10 @@ async fn terminal_tool_failure_blocks_a_rewritten_retry_in_the_same_turn() {
         calls: Arc::clone(&calls),
     });
 
-    let provider: Arc<dyn LlmProvider> = Arc::new(TerminalLessonRetryProvider {
-        calls: AtomicUsize::new(0),
-    });
+    let provider: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider::new(vec![
+        lesson_call("call_lesson_0", "first"),
+        lesson_call("call_lesson_1", "rewritten"),
+    ]));
     let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
     let agent = Agent::new(AgentId::new("test-agent"), provider, tools, memory);
 
@@ -1261,23 +1028,27 @@ async fn build_dispatch_test_agent() -> Agent {
 // M8.10-C — LOOP DETECTED dedup.
 // ─────────────────────────────────────────────────────────────────────
 
-/// Mock LLM that always returns the same shell tool call with the same
-/// arguments, forcing the loop detector to fire on iteration 4.
-struct AlwaysSameToolProvider;
+/// LLM mock that always returns the SAME `read_file` tool call so the loop
+/// detector fires repeatedly. Counts invocations so tests can assert how
+/// many LLM calls happened across the recovery window.
+struct LoopingToolProvider {
+    calls: AtomicUsize,
+}
 
 #[async_trait]
-impl LlmProvider for AlwaysSameToolProvider {
+impl LlmProvider for LoopingToolProvider {
     async fn chat(
         &self,
         _messages: &[Message],
         _tools: &[octos_llm::ToolSpec],
         _config: &octos_llm::ChatConfig,
     ) -> Result<ChatResponse> {
+        self.calls.fetch_add(1, AtomicOrdering::SeqCst);
         Ok(ChatResponse {
             content: None,
             reasoning_content: None,
             tool_calls: vec![ToolCall {
-                id: "call_loop".to_string(),
+                id: "call_loopy".to_string(),
                 name: "read_file".to_string(),
                 arguments: serde_json::json!({"path": "loopy.txt"}),
                 metadata: None,
@@ -1299,7 +1070,9 @@ impl LlmProvider for AlwaysSameToolProvider {
 
 async fn build_agent_with_mock(dir: &std::path::Path) -> Agent {
     let tools = ToolRegistry::with_builtins(dir);
-    let provider: Arc<dyn LlmProvider> = Arc::new(AlwaysSameToolProvider);
+    let provider: Arc<dyn LlmProvider> = Arc::new(LoopingToolProvider {
+        calls: AtomicUsize::new(0),
+    });
     let memory = Arc::new(EpisodeStore::open(dir.join("memory")).await.unwrap());
     Agent::new(AgentId::new("loop-dedup"), provider, tools, memory)
 }
@@ -1576,7 +1349,9 @@ fn inject_synthetic_results_pushes_assistant_then_tool_for_every_call() {
 
     let dir = tempfile::tempdir().unwrap();
     let tools = ToolRegistry::with_builtins(dir.path());
-    let provider: Arc<dyn LlmProvider> = Arc::new(AlwaysSameToolProvider);
+    let provider: Arc<dyn LlmProvider> = Arc::new(LoopingToolProvider {
+        calls: AtomicUsize::new(0),
+    });
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let memory = runtime
         .block_on(async { Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap()) });
@@ -1643,46 +1418,6 @@ fn loop_detected_terminal_message_is_user_facing_and_non_empty() {
     );
 }
 
-/// LLM mock that always returns the SAME tool call so the loop
-/// detector fires repeatedly. Counts invocations so the test can
-/// assert how many LLM calls happened across the recovery window.
-struct CountingAlwaysSameToolProvider {
-    calls: AtomicUsize,
-}
-
-#[async_trait]
-impl LlmProvider for CountingAlwaysSameToolProvider {
-    async fn chat(
-        &self,
-        _messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &octos_llm::ChatConfig,
-    ) -> Result<ChatResponse> {
-        self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        Ok(ChatResponse {
-            content: None,
-            reasoning_content: None,
-            tool_calls: vec![ToolCall {
-                id: "call_loopy".to_string(),
-                name: "read_file".to_string(),
-                arguments: serde_json::json!({"path": "loopy.txt"}),
-                metadata: None,
-            }],
-            stop_reason: StopReason::ToolUse,
-            usage: LlmTokenUsage::default(),
-            provider_index: None,
-        })
-    }
-
-    fn model_id(&self) -> &str {
-        "mock"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-}
-
 #[tokio::test]
 async fn doom_loop_aborts_turn_when_third_identical_call_arrives() {
     // #1765 doom-loop guard: when the LLM issues the SAME tool call
@@ -1700,7 +1435,7 @@ async fn doom_loop_aborts_turn_when_third_identical_call_arrives() {
     //   - The flag (`is_loop_detected_recently`) is set after the run.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("loopy.txt"), b"x").unwrap();
-    let provider = Arc::new(CountingAlwaysSameToolProvider {
+    let provider = Arc::new(LoopingToolProvider {
         calls: AtomicUsize::new(0),
     });
     let provider_arc: Arc<dyn LlmProvider> = provider.clone();
@@ -1734,43 +1469,12 @@ async fn doom_loop_aborts_turn_when_third_identical_call_arrives() {
              loop instead of issuing a 4th; got {total_calls}"
     );
 }
-/// LLM stub that always returns a single EndTurn — used to drive
-/// `run_task` straight to the completion branch without iterating
-/// through tool calls.
-struct EndTurnOnlyProvider;
-#[async_trait]
-impl LlmProvider for EndTurnOnlyProvider {
-    async fn chat(
-        &self,
-        _messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &octos_llm::ChatConfig,
-    ) -> Result<ChatResponse> {
-        Ok(ChatResponse {
-            content: Some("done".into()),
-            reasoning_content: None,
-            tool_calls: vec![],
-            stop_reason: StopReason::EndTurn,
-            usage: LlmTokenUsage::default(),
-            provider_index: None,
-        })
-    }
-
-    fn model_id(&self) -> &str {
-        "mock"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-}
-
 #[tokio::test]
 async fn run_task_keeps_success_when_workspace_has_no_policy() {
     // No-policy workspace must stay Success (no regression).
     let dir = tempfile::tempdir().unwrap();
     let tools = ToolRegistry::with_builtins(dir.path());
-    let provider: Arc<dyn LlmProvider> = Arc::new(EndTurnOnlyProvider);
+    let provider: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider::new(vec![end_turn("done", 0, 0)]));
     let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
     let agent = Agent::new(AgentId::new("no-contract"), provider, tools, memory);
     let task = Task::new(
@@ -2086,54 +1790,6 @@ impl Tool for OverflowingPagedTool {
     }
 }
 
-struct CallsOverflowingToolThenEnds {
-    calls: AtomicUsize,
-}
-
-#[async_trait]
-impl LlmProvider for CallsOverflowingToolThenEnds {
-    async fn chat(
-        &self,
-        _messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &octos_llm::ChatConfig,
-    ) -> Result<ChatResponse> {
-        let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        Ok(if call == 0 {
-            ChatResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: vec![ToolCall {
-                    id: "call_overflow".to_string(),
-                    name: "overflowing_paged".to_string(),
-                    arguments: serde_json::json!({ "page": 0 }),
-                    metadata: None,
-                }],
-                stop_reason: StopReason::ToolUse,
-                usage: LlmTokenUsage::default(),
-                provider_index: None,
-            }
-        } else {
-            ChatResponse {
-                content: Some("done".to_string()),
-                reasoning_content: None,
-                tool_calls: vec![],
-                stop_reason: StopReason::EndTurn,
-                usage: LlmTokenUsage::default(),
-                provider_index: None,
-            }
-        })
-    }
-
-    fn model_id(&self) -> &str {
-        "test-model"
-    }
-
-    fn provider_name(&self) -> &str {
-        "test-provider"
-    }
-}
-
 /// The wiring test: a truncated tool result must reach the model carrying its
 /// recovery advice.
 ///
@@ -2148,9 +1804,19 @@ async fn truncated_tool_output_reaches_the_model_with_its_recovery_advice() {
     let mut tools = ToolRegistry::with_builtins(dir.path());
     tools.register(OverflowingPagedTool);
 
-    let provider: Arc<dyn LlmProvider> = Arc::new(CallsOverflowingToolThenEnds {
-        calls: AtomicUsize::new(0),
-    });
+    let provider: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider::new(vec![
+        tool_use(
+            vec![ToolCall {
+                id: "call_overflow".to_string(),
+                name: "overflowing_paged".to_string(),
+                arguments: serde_json::json!({ "page": 0 }),
+                metadata: None,
+            }],
+            0,
+            0,
+        ),
+        end_turn("done", 0, 0),
+    ]));
     let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
     let agent = Agent::new(AgentId::new("truncation-recovery"), provider, tools, memory);
 
@@ -2217,21 +1883,6 @@ impl LlmProvider for MalformedThenOkProvider {
 
     fn provider_name(&self) -> &str {
         "mock"
-    }
-}
-
-fn plain_text_response(content: &str) -> ChatResponse {
-    ChatResponse {
-        content: Some(content.to_owned()),
-        reasoning_content: None,
-        tool_calls: Vec::new(),
-        stop_reason: octos_llm::StopReason::EndTurn,
-        usage: octos_llm::TokenUsage {
-            input_tokens: 5,
-            output_tokens: 5,
-            ..Default::default()
-        },
-        provider_index: None,
     }
 }
 

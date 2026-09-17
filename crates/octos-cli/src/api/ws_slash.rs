@@ -95,13 +95,6 @@ pub struct SlashCommandContext {
     /// conventional path, which silently bypassed `workspace_hint`
     /// overrides used by the coding-agent UI.
     pub workspace_root: Option<PathBuf>,
-    /// Optional profile id for the site scaffold. The gateway path
-    /// derives this from `GatewayDispatcher.dispatch_profile_id`; on
-    /// the WS path we plumb the same value from
-    /// `SessionKey::profile_id()` / the routed profile id at handshake
-    /// time. `None` falls back to `MAIN_PROFILE_ID` to match
-    /// `gateway_dispatcher.rs:188`.
-    pub profile_id: Option<String>,
 }
 
 /// Try to intercept a slash command on the WS turn path. Returns
@@ -191,47 +184,10 @@ async fn handle_new(ctx: &SlashCommandContext, name_arg: &str) -> String {
         return format!("Invalid session name: {reason}");
     }
 
-    // Round-2 fixup (#1015 codex review BLOCKING 2): use the active
-    // session's `workspace_root` when threaded through. This is the
-    // SAME directory the per-session tool registry is bound to — using
-    // anything else (e.g. a reconstructed `data_dir/users/<base>/workspace`
-    // when the caller actually opened the session with a workspace
-    // hint) would scaffold OUTSIDE the active tool sandbox.
-    let workspace_root: PathBuf = ctx
-        .workspace_root
-        .clone()
-        .unwrap_or_else(|| default_workspace_root_for(&ctx.data_dir, &ctx.session_id));
-    if let Err(error) = std::fs::create_dir_all(&workspace_root) {
-        tracing::warn!(
-            session = %ctx.session_id.0,
-            workspace = %workspace_root.display(),
-            error = %error,
-            "ws slash: failed to create workspace root for /new"
-        );
-    }
-
-    // Round-2 fixup (#1015 codex review BLOCKING 1): normalize the
-    // plural `sites` alias to the canonical singular `site` form
-    // before downstream parsing. The SPA's sites-chat.tsx canonically
-    // emits `/new site <preset>` (singular) matching the gateway
-    // path, but the slides equivalent is plural (`/new slides …`) and
-    // power users / parallel frontends typing `/new sites astro` by
-    // analogy would otherwise fall into the generic switch arm and
-    // never trigger the scaffold. Aliasing here lets one branch
-    // handle both forms — the downstream
-    // [`crate::project_templates::site_preset_from_topic`] parser only
-    // recognises the singular form, so we hand it the normalized
-    // string.
+    // The project scaffolding this command used to drive is gone; the
+    // SPA owns session switching via its sidebar, so `/new <topic>` only
+    // acknowledges the switch.
     format!("Switched to session: {name_arg}")
-}
-
-/// Default workspace root layout when the caller did not thread a
-/// session workspace_root through `SlashCommandContext`. Mirrors
-/// `runtime::session::resolve_workspace_root`'s fallback so the slash
-/// helper and the per-session tool registry agree on the same root.
-fn default_workspace_root_for(data_dir: &std::path::Path, session_id: &SessionKey) -> PathBuf {
-    let encoded_base = octos_bus::session::encode_path_component(session_id.base_key());
-    data_dir.join("users").join(encoded_base).join("workspace")
 }
 
 /// Unknown-command help text. Matches the wording in
@@ -266,7 +222,6 @@ mod tests {
             session_id: session_key.clone(),
             data_dir: tmp.path().to_path_buf(),
             workspace_root: None,
-            profile_id: None,
         };
         (ctx, tmp, session_key)
     }

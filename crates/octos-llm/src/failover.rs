@@ -87,13 +87,6 @@ impl ProviderChain {
         self
     }
 
-    /// Set the per-lane timeout for a single provider attempt. `None`
-    /// disables the cap.
-    pub fn with_max_request_duration(mut self, duration: Option<Duration>) -> Self {
-        self.max_request_duration = duration;
-        self
-    }
-
     /// Find the first non-degraded provider index, or fall back to the one
     /// with the fewest failures if all are degraded.
     fn pick_start(&self) -> usize {

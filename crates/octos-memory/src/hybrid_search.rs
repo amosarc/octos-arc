@@ -58,10 +58,6 @@ pub struct VectorCoverage {
 }
 
 impl VectorCoverage {
-    /// Documents searchable by BM25 only.
-    pub fn bm25_only(&self) -> usize {
-        self.total.saturating_sub(self.vectorized)
-    }
 
     /// Fraction of documents reachable by vector search, `0.0..=1.0`.
     /// An empty index reports `1.0` — nothing is missing.
@@ -93,11 +89,11 @@ const DEFAULT_VECTOR_WEIGHT: f32 = 0.7;
 /// Default weight for BM25 text relevance in hybrid scoring.
 const DEFAULT_BM25_WEIGHT: f32 = 0.3;
 
-/// Per-modality score breakdown returned by [`HybridIndex::search_scored`].
+/// Per-modality score breakdown returned by scored hybrid search.
 ///
 /// `combined` is the same weighted-sum score [`HybridIndex::search`] would
 /// return — preserved here so the caller can keep using the existing
-/// ranking semantics (operator-configured `with_weights` still controls
+/// ranking semantics (the operator-configured weights still control
 /// ranking). `bm25` and `vector` expose the underlying per-modality
 /// similarity in `[0, 1]` so downstream gates can be modality-aware,
 /// admitting a strong single-modality match (e.g. a keyword-perfect
@@ -140,7 +136,7 @@ const HNSW_MAX_LAYER: usize = 16;
 /// Per-modality candidate pool size when a `min_best_modality` floor is
 /// supplied to [`HybridIndex::search_scored_filtered`].
 ///
-/// The standard `search_scored` path uses `limit * 4` (e.g. 24 for the
+/// The unfloored scored path uses `limit * 4` (e.g. 24 for the
 /// agent's `limit=6`) which is fine when no floor is applied — the
 /// caller doesn't care about candidates outside the top-N anyway. But
 /// when a floor IS supplied, codex P2 round 3 flagged that capping the
@@ -169,7 +165,7 @@ pub(crate) const FLOOR_PREFILTER_POOL: usize = HNSW_CAPACITY;
 /// impractical).
 ///
 /// Semantics:
-/// - No floor: `limit * 4` matches the standard `search_scored` budget.
+/// - No floor: `limit * 4` matches the standard unfloored budget.
 /// - Floor supplied: `max(FLOOR_PREFILTER_POOL, limit * 4)` — at
 ///   least the floor pool (so small-`limit` callers get the
 ///   contamination-safe pool) AND at least `limit * 4` (so
@@ -217,7 +213,7 @@ impl HybridIndex {
     /// tombstoned ones — the BM25 inverted index still has them).
     ///
     /// Returned to callers like
-    /// [`crate::store::EpisodeStore::find_relevant_filtered`] that need
+    /// `crate::store::EpisodeStore` fallback recall paths that need
     /// to size an inner-fetch pool exhaustively. Because BM25-only
     /// inserts continue beyond `HNSW_CAPACITY` (HNSW gracefully
     /// degrades to BM25-only insertion), the BM25 inverted index can
@@ -244,13 +240,6 @@ impl HybridIndex {
 
     pub fn len(&self) -> usize {
         self.ids.len()
-    }
-
-    /// Set custom hybrid scoring weights. Weights should sum to 1.0.
-    pub fn with_weights(mut self, vector_weight: f32, bm25_weight: f32) -> Self {
-        self.vector_weight = vector_weight;
-        self.bm25_weight = bm25_weight;
-        self
     }
 
     /// Insert a document with optional embedding.
@@ -491,31 +480,7 @@ impl HybridIndex {
         results
     }
 
-    /// Search the index and return per-modality score breakdowns.
-    ///
-    /// Like [`Self::search`] but exposes the underlying BM25 and vector
-    /// similarity scores separately so downstream gates can be
-    /// modality-aware. This lets callers admit a strong single-modality
-    /// match (e.g. an older episode without a stored embedding, scoring
-    /// 1.0 on BM25 but 0.0 on vector similarity) that would otherwise be
-    /// down-weighted by the configured `bm25_weight` / `vector_weight`
-    /// — useful for the agent loop's "Relevant Past Experiences"
-    /// similarity gate that must not strand keyword-perfect matches
-    /// (NEW-06 follow-up).
-    ///
-    /// Ranking still uses the same configured weighted sum as
-    /// [`Self::search`] — this method only adds the per-modality
-    /// breakdown so callers can gate independently from ranking.
-    pub fn search_scored(
-        &self,
-        query_text: &str,
-        query_embedding: Option<&[f32]>,
-        limit: usize,
-    ) -> Vec<(String, HybridScore)> {
-        self.search_scored_filtered(query_text, query_embedding, limit, None)
-    }
-
-    /// Like [`Self::search_scored`] but applies a `min_best_modality`
+    /// Scored search with a `min_best_modality`
     /// floor on every candidate's [`HybridScore::best_modality`] BEFORE
     /// the `combined`-rank truncation to `limit`.
     ///
@@ -535,8 +500,7 @@ impl HybridIndex {
     /// guarantees that if ANY candidate in the index clears the floor,
     /// it survives into the returned set (subject to `limit`).
     ///
-    /// `min_best_modality == None` matches [`Self::search_scored`]
-    /// semantics exactly.
+    /// `min_best_modality == None` disables the floor.
     pub fn search_scored_filtered(
         &self,
         query_text: &str,
@@ -595,7 +559,7 @@ impl HybridIndex {
                 let vector = vector_scores.get(&idx).copied().unwrap_or(0.0);
                 // The "combined" score below preserves the documented
                 // weighted-sum ranking semantics from `search()` so
-                // operator-configured `with_weights` still controls
+                // operator-configured weights still control
                 // ranking. BM25-only candidates are skipped from the
                 // combined score when no vector results exist so the
                 // BM25-only branch (`has_vectors == false`) matches
@@ -762,11 +726,7 @@ mod tests {
         let c = index.vector_coverage();
         assert_eq!(c.total, 2);
         assert_eq!(c.vectorized, 1);
-        assert_eq!(
-            c.bm25_only(),
-            1,
-            "the vector-less episode still counts as BM25-only"
-        );
+        assert_eq!(c.vectorized, 1);
         assert_eq!(c.dimension_mismatches, 0, "absent != mismatched");
         assert!(!c.has_dimension_mismatch());
     }
@@ -869,8 +829,8 @@ mod tests {
         // The agent loop's similarity gate (MIN_EPISODE_SIMILARITY,
         // currently 0.55) must still accept genuinely relevant
         // single-modality matches (e.g. older episodes without
-        // embeddings, where BM25 is the only signal). The new
-        // `search_scored` exposes both modalities so the agent can gate
+        // embeddings, where BM25 is the only signal). The scored
+        // search exposes both modalities so the agent can gate
         // on `best_modality()` instead of the combined weighted-sum
         // score that down-weights BM25-only hits to `bm25_weight` (0.3
         // with default weights) when any vector result exists.
@@ -881,7 +841,7 @@ mod tests {
         index.insert("ep2", "python web flask", Some(&[1.0, 0.0, 0.0, 0.0]));
 
         let query_emb: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
-        let results = index.search_scored("rust ownership", Some(&query_emb), 5);
+        let results = index.search_scored_filtered("rust ownership", Some(&query_emb), 5, None);
         let ep1 = results
             .iter()
             .find(|(id, _)| id == "ep1")
@@ -1012,7 +972,7 @@ mod tests {
         // to detect a regression to fixed `FLOOR_PREFILTER_POOL`.
 
         // No floor: pool is `limit * 4`, matching the standard
-        // `search_scored` budget.
+        // unfloored budget.
         assert_eq!(bm25_fetch_count(6, None), 24);
         assert_eq!(bm25_fetch_count(100, None), 400);
         // A huge no-floor limit still gets `limit * 4` (no floor cap).

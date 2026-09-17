@@ -28,12 +28,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
-/// Default maximum number of cached entries. Matches Claude Code's 100.
-pub const DEFAULT_MAX_ENTRIES: usize = 100;
-
-/// Default maximum total cached bytes. Matches Claude Code's 25 MB.
-pub const DEFAULT_MAX_TOTAL_BYTES: usize = 25 * 1024 * 1024;
-
 /// Prefix used for the typed "file unchanged" tool-result placeholder.
 ///
 /// Callers that want to emit the stub should format it as:
@@ -150,12 +144,11 @@ impl Default for FileStateCache {
 impl FileStateCache {
     /// Create a cache with default capacity (100 entries / 25 MB).
     pub fn new() -> Self {
-        Self::builder().build()
-    }
-
-    /// Return a builder for tuning `max_entries` / `max_total_bytes`.
-    pub fn builder() -> FileStateCacheBuilder {
-        FileStateCacheBuilder::default()
+        Self {
+            max_entries: 100,
+            max_total_bytes: 25 * 1024 * 1024,
+            inner: Mutex::new(Inner::new()),
+        }
     }
 
     /// Maximum number of cached entries.
@@ -337,49 +330,10 @@ impl Clone for FileStateCache {
     }
 }
 
-/// Builder for [`FileStateCache`].
-#[derive(Debug, Clone)]
-pub struct FileStateCacheBuilder {
-    max_entries: usize,
-    max_total_bytes: usize,
-}
-
-impl Default for FileStateCacheBuilder {
-    fn default() -> Self {
-        Self {
-            max_entries: DEFAULT_MAX_ENTRIES,
-            max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
-        }
-    }
-}
-
-impl FileStateCacheBuilder {
-    /// Maximum number of cached entries (must be >= 1).
-    pub fn max_entries(mut self, value: usize) -> Self {
-        self.max_entries = value.max(1);
-        self
-    }
-
-    /// Maximum total cached bytes (must be >= 1).
-    pub fn max_total_bytes(mut self, value: usize) -> Self {
-        self.max_total_bytes = value.max(1);
-        self
-    }
-
-    /// Construct the cache.
-    pub fn build(self) -> FileStateCache {
-        FileStateCache {
-            max_entries: self.max_entries,
-            max_total_bytes: self.max_total_bytes,
-            inner: Mutex::new(Inner::new()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+    use super::*;
 
     fn mk_entry(path: &str, mtime: SystemTime, size: usize) -> CacheEntry {
         CacheEntry::new(
@@ -422,10 +376,11 @@ mod tests {
 
     #[test]
     fn should_evict_lru_when_max_bytes_exceeded() {
-        let cache = FileStateCache::builder()
-            .max_entries(100)
-            .max_total_bytes(30)
-            .build();
+        let cache = FileStateCache {
+            max_entries: 100,
+            max_total_bytes: 30,
+            inner: Mutex::new(Inner::new()),
+        };
         let mtime = SystemTime::now();
 
         cache.put(mk_entry("/a", mtime, 20));

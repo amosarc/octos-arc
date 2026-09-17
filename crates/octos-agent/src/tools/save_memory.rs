@@ -7,7 +7,7 @@ use eyre::{Result, WrapErr};
 use octos_memory::MemoryStore;
 use serde::Deserialize;
 
-use super::{ConcurrencyClass, Tool, ToolResult};
+use super::{ConcurrencyClass, Tool, ToolResult, to_slug};
 
 /// Tool that saves or updates entity pages in the memory bank.
 pub struct SaveMemoryTool {
@@ -24,11 +24,6 @@ impl SaveMemoryTool {
 struct Input {
     name: String,
     content: String,
-}
-
-/// Normalize an entity name into a slug: trim, lowercase, spaces to hyphens.
-fn to_slug(name: &str) -> String {
-    name.trim().to_lowercase().replace(' ', "-")
 }
 
 /// Check whether a slug is valid: non-empty and only alphanumeric, hyphen, or underscore.
@@ -215,28 +210,6 @@ mod tests {
             .unwrap();
         assert!(result.success, "{}", result.output);
         assert!(store.read_entity("yuechen").await.unwrap().is_some());
-    }
-
-    // --- to_slug ---
-
-    #[test]
-    fn slug_lowercase_and_trim() {
-        assert_eq!(to_slug("  Octos  "), "octos");
-    }
-
-    #[test]
-    fn slug_spaces_to_hyphens() {
-        assert_eq!(to_slug("foo bar baz"), "foo-bar-baz");
-    }
-
-    #[test]
-    fn slug_already_normalized() {
-        assert_eq!(to_slug("octos"), "octos");
-    }
-
-    #[test]
-    fn slug_whitespace_only() {
-        assert_eq!(to_slug("   "), "");
     }
 
     // --- is_valid_slug ---

@@ -79,7 +79,7 @@ struct MemorySections {
 /// Public so the memory-refresh pipeline (extraction input caps,
 /// consolidation output caps) shares one estimator with the injection
 /// budget.
-pub fn estimate_tokens(text: &str) -> usize {
+pub(crate) fn estimate_tokens(text: &str) -> usize {
     let mut ascii = 0usize;
     let mut non_ascii = 0usize;
     for c in text.chars() {
@@ -205,12 +205,6 @@ impl MemoryStore {
     /// trusts the caller's path. Pass only an internally-derived memory dir,
     /// never a request-derived one (#1614 P3).
     #[doc(hidden)]
-    pub fn at_memory_dir(memory_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            memory_dir: memory_dir.into(),
-        }
-    }
-
     /// Path to `MEMORY.md` (for cheap change detection by callers).
     pub fn memory_md_path(&self) -> PathBuf {
         self.memory_dir.join("MEMORY.md")
@@ -219,26 +213,6 @@ impl MemoryStore {
     /// Path to the memory-usage sidecar (`usage.json`).
     fn usage_path(&self) -> PathBuf {
         self.memory_dir.join("usage.json")
-    }
-
-    /// Drop usage entries whose id/slug is no longer live, keeping the
-    /// sidecar bounded as entries are archived/deleted (codex #1614 P2).
-    /// `live` is the set of surviving MEMORY.md entry ids and bank slugs.
-    pub async fn prune_usage(&self, live: &std::collections::HashSet<String>) {
-        let path = self.usage_path();
-        let lock = usage_lock_for(&path);
-        let _guard = lock.lock().await;
-        let mut usage = self.load_usage().await;
-        let before = usage.entries.len();
-        usage.entries.retain(|k, _| live.contains(k));
-        if usage.entries.len() == before {
-            return;
-        }
-        if let Ok(body) = serde_json::to_string_pretty(&usage) {
-            if let Err(e) = write_atomic_with_backup(path, body, None).await {
-                tracing::warn!(error = %e, "failed to prune memory usage");
-            }
-        }
     }
 
     /// Load the usage sidecar: entry id (`^m…`) or bank slug -> stats.
@@ -338,7 +312,7 @@ impl MemoryStore {
     }
 
     /// Read today's daily notes. Returns empty string if missing.
-    pub async fn read_today(&self) -> Result<String> {
+    pub(crate) async fn read_today(&self) -> Result<String> {
         let path = self.today_path();
         match tokio::fs::read_to_string(&path).await {
             Ok(content) => Ok(content),
@@ -375,7 +349,7 @@ impl MemoryStore {
     }
 
     /// Read recent daily notes (excluding today). Returns `(date, content)` pairs.
-    pub async fn read_recent(&self, days: u32) -> Result<Vec<(String, String)>> {
+    pub(crate) async fn read_recent(&self, days: u32) -> Result<Vec<(String, String)>> {
         let today = chrono::Local::now().date_naive();
         let mut entries = Vec::new();
 
@@ -400,7 +374,7 @@ impl MemoryStore {
     /// the app-agent manual is data on disk (provisioned from `octos-one/a2app`),
     /// not a pre-built `MEMORY.md` artifact or a build script. Absent on normal
     /// profiles → the classic `MEMORY.md` path is used unchanged.
-    pub fn app_cards_dir(&self) -> PathBuf {
+    pub(crate) fn app_cards_dir(&self) -> PathBuf {
         self.memory_dir.join("app-cards")
     }
 
@@ -564,14 +538,6 @@ impl MemoryStore {
         ctx
     }
 
-    /// Build a formatted context string for injection into the system prompt.
-    ///
-    /// Unbounded — prefer [`Self::get_injectable_context`], which also
-    /// includes the bank summary and enforces a token budget.
-    pub async fn get_memory_context(&self) -> String {
-        Self::render_context(&self.load_sections().await)
-    }
-
     /// Build the complete, token-capped memory block for system prompt
     /// injection: long-term memory + recent/today notes + bank summary.
     ///
@@ -675,7 +641,7 @@ impl MemoryStore {
     }
 
     /// Ensure the `bank/entities/` directory exists.
-    pub async fn ensure_bank_dir(&self) -> Result<()> {
+    pub(crate) async fn ensure_bank_dir(&self) -> Result<()> {
         tokio::fs::create_dir_all(self.bank_dir())
             .await
             .wrap_err("failed to create memory bank directory")
@@ -782,7 +748,7 @@ impl MemoryStore {
     }
 
     /// Build a compact bank summary for system prompt injection.
-    pub async fn get_bank_summary(&self) -> String {
+    pub(crate) async fn get_bank_summary(&self) -> String {
         let entities = match self.list_entities().await {
             Ok(v) => v,
             Err(e) => {
@@ -850,7 +816,7 @@ impl MemoryStore {
     /// Path to `staging/notes/` (pub for the memory panel's FD-anchored
     /// walk, which needs the store-derived path to compute a relative
     /// component chain — same role as [`Self::bank_entities_dir`]).
-    pub fn staging_notes_dir(&self) -> PathBuf {
+    pub(crate) fn staging_notes_dir(&self) -> PathBuf {
         self.memory_dir.join("staging").join("notes")
     }
 
@@ -941,18 +907,6 @@ impl MemoryStore {
         Ok(path)
     }
 
-    /// Number of pending staging notes (for status surfacing).
-    pub async fn count_staging_notes(&self) -> usize {
-        let mut count = 0;
-        if let Ok(mut entries) = tokio::fs::read_dir(self.staging_notes_dir()).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                if entry.path().extension().is_some_and(|e| e == "md") {
-                    count += 1;
-                }
-            }
-        }
-        count
-    }
 }
 
 /// Who authored a staging note. `Host` notes come from paths with no model
@@ -1090,7 +1044,7 @@ fn bank_summary_row(name: &str, abstract_line: &str) -> String {
 /// serve-side memory panel (`/api/my/memory`) must render EXACTLY the
 /// summary string `list_entities` feeds the agent prompt — a second
 /// parser drifted (codex octos#1611 round-2 P2).
-pub fn extract_abstract(content: &str) -> String {
+pub(crate) fn extract_abstract(content: &str) -> String {
     let body = strip_frontmatter(content);
     let first_line = body
         .lines()
@@ -1201,21 +1155,6 @@ mod tests {
             content.push_str(&tokio::fs::read_to_string(path).await.unwrap());
         }
         content
-    }
-
-    #[tokio::test]
-    async fn test_get_memory_context_formatting() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(dir.path()).await.unwrap();
-
-        store.write_long_term("I am a bot").await.unwrap();
-        store.append_today("did something").await.unwrap();
-
-        let ctx = store.get_memory_context().await;
-        assert!(ctx.contains("## Long-term Memory"));
-        assert!(ctx.contains("I am a bot"));
-        assert!(ctx.contains("## Today's Notes"));
-        assert!(ctx.contains("did something"));
     }
 
     #[tokio::test]
@@ -1609,7 +1548,6 @@ All good.",
         let a = store.write_staging_note(&note).await.unwrap();
         let b = store.write_staging_note(&note).await.unwrap();
         assert_ne!(a, b);
-        assert_eq!(store.count_staging_notes().await, 2);
     }
 
     #[tokio::test]

@@ -5,7 +5,7 @@ pub mod file_handle;
 pub mod session;
 
 pub use session::{
-    MessageCommitObserver, Session, SessionHandle, SessionListEntry,
-    SessionManager, persist_message_through_canonical_path, set_message_commit_observer,
-    set_scoped_message_commit_observer, validate_topic_name,
+    MessageCommitObserver, Session, SessionHandle, SessionManager,
+    persist_message_through_canonical_path, set_scoped_message_commit_observer,
+    validate_topic_name,
 };

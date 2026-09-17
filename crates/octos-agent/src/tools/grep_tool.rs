@@ -483,6 +483,8 @@ mod tests {
         std::fs::write(dir.join("readme.txt"), "This is a readme file.\n").unwrap();
     }
 
+    use crate::tools::test_fixture::scoped_ctx;
+
     #[tokio::test]
     async fn test_grep_finds_matches() {
         let dir = tempfile::tempdir().unwrap();
@@ -525,13 +527,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    fn ctx_with_scope(scope: SessionScope) -> ToolContext {
-        let mut ctx = ToolContext::zero();
-        ctx.tool_id = "grep-with-scope".to_string();
-        ctx.session_scope = Some(Arc::new(scope));
-        ctx
-    }
-
     #[tokio::test]
     async fn grep_refuses_out_of_scope_path() {
         // An explicit path outside every declared zone is refused
@@ -547,7 +542,7 @@ mod tests {
             .unwrap();
 
         let tool = GrepTool::new(workspace.path());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("grep-with-scope", scope);
 
         let result = tool
             .execute_with_context(
@@ -589,7 +584,7 @@ mod tests {
 
         let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![]).unwrap();
         let tool = GrepTool::new(workspace.path());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("grep-with-scope", scope);
 
         // Search the WORKSPACE (not the upload handle): rooted_in_upload=false,
         // so the exemption must not fire and the symlink target stays dropped.

@@ -116,9 +116,6 @@ impl SessionTaskQueryStore {
             // See `query_json`: walk every live supervisor for the session
             // oldest-first, dedup by task id across supervisors.
             for (supervisor, data_dir) in self.live_entries_for_session(&current) {
-                // Freshen stale cross-turn copies from the ledger (codex P2),
-                // same as `query_json` — this feeds reconnect replay.
-                let _ = supervisor.refresh_from_persistence();
                 for task in supervisor.get_tasks_for_session(&current) {
                     if !seen_task_ids.insert(task.id.clone()) {
                         continue;
@@ -188,16 +185,13 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let data_dir = dir.path().join("profile-data");
         std::fs::create_dir_all(&data_dir).unwrap();
-        let ledger = data_dir.join("tasks.jsonl");
         let session_key = SessionKey::new("api", "session");
 
         let sup1 = Arc::new(TaskSupervisor::new());
-        sup1.enable_persistence(&ledger).unwrap();
         let t1 = sup1.register("bg_research", "call-1", Some("api:session"));
         sup1.mark_running(&t1);
 
         let sup2 = Arc::new(TaskSupervisor::new());
-        sup2.enable_persistence(&ledger).unwrap();
         let t2 = sup2.register("deep_search", "call-2", Some("api:session"));
         sup2.mark_running(&t2);
 

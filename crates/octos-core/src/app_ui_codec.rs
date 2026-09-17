@@ -31,16 +31,6 @@ where
     serde_json::to_string(value)
 }
 
-/// Serialize an AppUI envelope as one NDJSON frame.
-pub fn to_ndjson_frame<T>(value: &T) -> Result<String, serde_json::Error>
-where
-    T: Serialize,
-{
-    let mut frame = to_compact_json(value)?;
-    frame.push('\n');
-    Ok(frame)
-}
-
 /// Strip a single NDJSON line ending from a byte buffer in place.
 pub fn strip_ndjson_line_ending_bytes(line: &mut Vec<u8>) {
     if line.last() == Some(&b'\n') {
@@ -49,11 +39,6 @@ pub fn strip_ndjson_line_ending_bytes(line: &mut Vec<u8>) {
     if line.last() == Some(&b'\r') {
         line.pop();
     }
-}
-
-/// Parse one NDJSON frame after removing one optional trailing line ending.
-pub fn parse_ndjson_frame(text: &str) -> Result<AppUiFrame, RpcError> {
-    parse_text_frame(strip_ndjson_line_ending(text))
 }
 
 /// Parse and validate one AppUI JSON-RPC text frame.
@@ -91,12 +76,6 @@ pub fn frame_too_large_error() -> RpcError {
         format!("AppUI text frame exceeds {MAX_TEXT_FRAME_BYTES} bytes"),
     )
     .with_data(json!({ "limit_bytes": MAX_TEXT_FRAME_BYTES }))
-}
-
-fn strip_ndjson_line_ending(text: &str) -> &str {
-    text.strip_suffix('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line))
-        .unwrap_or(text)
 }
 
 fn validate_text_frame_boundary(text: &str) -> Result<(), RpcError> {
@@ -219,15 +198,7 @@ mod tests {
 
         assert_eq!(to_compact_json(&request).expect("serialize"), golden);
         assert_eq!(
-            to_ndjson_frame(&request).expect("serialize ndjson"),
-            format!("{golden}\n")
-        );
-        assert_eq!(
             parse_text_frame(golden).expect("parse request"),
-            AppUiFrame::Request(request.clone())
-        );
-        assert_eq!(
-            parse_ndjson_frame(&format!("{golden}\n")).expect("parse ndjson request"),
             AppUiFrame::Request(request)
         );
     }

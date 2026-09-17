@@ -23,7 +23,6 @@ pub mod loop_detect;
 pub mod mcp;
 pub mod mcp_auth;
 pub mod memory_segment;
-pub mod permissions;
 pub mod planctl;
 pub mod policy;
 pub mod profile;
@@ -33,7 +32,6 @@ pub mod prompt_guard;
 pub mod role_template;
 pub mod sandbox;
 mod sanitize;
-pub mod session;
 mod shell_analysis;
 pub mod skills;
 pub mod snapshot;
@@ -43,9 +41,12 @@ mod subprocess_env;
 pub use subprocess_env::{register_secret_env_names, sanitize_default_subprocess_env};
 pub mod summarizer;
 pub mod task_supervisor;
+
+#[cfg(test)]
+#[path = "test_support.rs"]
+pub(crate) mod test_support;
 pub mod testgen;
 pub mod tools;
-pub mod turn;
 pub mod workspace_contract;
 pub mod workspace_policy;
 /// #48b — stable prefix marking that a turn terminated because the
@@ -58,8 +59,7 @@ pub const MALFORMED_TOOLCALL_EXHAUSTED_MARKER: &str =
 pub use abi_schema::{
     COMPACTION_POLICY_SCHEMA_VERSION, HARNESS_ERROR_SCHEMA_VERSION,
     HARNESS_PROGRESS_EVENT_SCHEMA_VERSION, HOOK_PAYLOAD_SCHEMA_VERSION,
-    PROGRESS_EVENT_SCHEMA_VERSION, SESSION_SUMMARY_SCHEMA_VERSION,
-    SUB_AGENT_DISPATCH_SCHEMA_VERSION, TASK_RESULT_SCHEMA_VERSION, UnsupportedSchemaVersionError,
+    SUB_AGENT_DISPATCH_SCHEMA_VERSION, UnsupportedSchemaVersionError,
     WORKSPACE_POLICY_SCHEMA_VERSION, check_supported,
 };
 pub use agent::{
@@ -80,7 +80,7 @@ pub use approval::{
     HumanApprovalRules, PendingApprovalDraft,
 };
 pub use file_state_cache::{FILE_UNCHANGED_STUB_PREFIX,
-    FileStateCache, FileStateCacheBuilder, format_file_unchanged_stub,
+    FileStateCache, format_file_unchanged_stub,
 };
 pub use harness_errors::{HarnessError, HarnessErrorEvent, OCTOS_LOOP_ERROR_TOTAL, RecoveryHint};
 pub use harness_events::{
@@ -98,7 +98,6 @@ pub use memory_segment::{
     MEMORY_CAPTURE_POLICY, MEMORY_SEGMENT_NAME, MemorySegmentProvider, compose_memory_segment,
     stable_memory_instructions, volatile_memory_content,
 };
-pub use permissions::{InvalidSafetyTier, SafetyTier};
 pub use policy::{
     ApprovalPolicy, EffectivePermissions, FileAccessMode, FilesystemScope, NetworkPolicy,
     PermissionProfile, PermissionProfileError, RuntimeMode,
@@ -113,13 +112,12 @@ pub use role_template::{
     UnknownModelPreference,
 };
 pub use sandbox::{Sandbox, SandboxConfig, SandboxMode, create_sandbox};
-pub use session::{SessionState, SessionStateHandle};
 pub use skills::{SkillFilter, SkillInfo, SkillsLoader};
 pub use snapshot::{
     DEFAULT_SNAPSHOT_KEEP_LAST, SnapshotConfig, SnapshotId, SnapshotInfo, SnapshotManager,
 };
 pub use subagent_output::{
-    AppendResult, DEFAULT_GC_AGE, DEFAULT_MAX_BYTES_PER_TASK, DEFAULT_MAX_BYTES_TOTAL,
+    AppendResult, DEFAULT_MAX_BYTES_PER_TASK, DEFAULT_MAX_BYTES_TOTAL,
     DEFAULT_PREVIEW_BYTES, SubAgentOutputRouter,
 };
 pub use subagent_summary::{
@@ -131,7 +129,7 @@ pub use task_supervisor::{
     BackgroundTask, RegisterTaskError, RelaunchOpts, SpawnOnlyFailureSignal,
     TaskCancelError, TaskCancelToken, TaskLifecycleState, TaskRelaunchError,
     TaskRuntimeState, TaskStatus, TaskSupervisor, TaskTerminalGuard,
-    TerminalOutcome, parse_alternatives,
+    parse_alternatives,
 };
 pub use tools::{
     AskUserQuestionTool, BackgroundResultKind, BackgroundResultPayload, CheckBackgroundTasksTool,
@@ -146,7 +144,6 @@ pub use tools::{
     WriteFileTool, build_backend_from_config, build_dispatch_event_payload, dispatch_with_metrics,
     record_dispatch,
 };
-pub use turn::{Turn, TurnKind};
 pub use workspace_policy::{
     CompactionPolicy, CompactionSummarizerKind, WORKSPACE_POLICY_FILE, WorkspaceArtifactsPolicy,
     WorkspacePolicy, WorkspacePolicyKind, WorkspaceSpawnTaskPolicy,
@@ -253,27 +250,6 @@ mod tests {
 
         assert!(result.success);
         assert!(result.output.contains("fn main()"));
-    }
-
-    #[tokio::test]
-    async fn test_context_filter_restricts_specs() {
-        let dir = setup_test_dir();
-        let mut registry = ToolRegistry::with_builtins(dir.path());
-        let all_count = registry.specs().len();
-
-        // Only allow tools tagged "search"
-        registry.set_context_filter(vec!["search".to_string()]);
-        let specs = registry.specs();
-        let names: Vec<_> = specs.iter().map(|s| s.name.as_str()).collect();
-
-        // grep and glob have "search" tag — should be included
-        assert!(names.contains(&"grep"));
-        assert!(names.contains(&"glob"));
-        // web_search has "web" tag only — should be filtered out
-        // shell has "runtime","code" tags — should be filtered out
-        assert!(!names.contains(&"shell"));
-        // Filtered count should be less than total
-        assert!(specs.len() < all_count);
     }
 
     #[tokio::test]

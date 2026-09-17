@@ -13,8 +13,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, FallbackModel, GatewayConfig};
 
-pub const MAX_SUB_ACCOUNTS_PER_PARENT: usize = 10;
-
 /// A user profile with all configuration needed to run a gateway.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserProfile {
@@ -318,16 +316,6 @@ pub struct LlmRouteConfig {
 impl ProfileConfig {
     pub fn primary_llm(&self) -> Option<&LlmModelSelectionConfig> {
         self.llm.as_ref().and_then(|llm| llm.primary.as_ref())
-    }
-
-    pub fn primary_provider(&self) -> Option<&str> {
-        self.primary_llm()
-            .and_then(|selection| selection.family_id.as_deref())
-    }
-
-    pub fn primary_model(&self) -> Option<&str> {
-        self.primary_llm()
-            .and_then(|selection| selection.model_id.as_deref())
     }
 
     pub fn has_llm_selection(&self) -> bool {

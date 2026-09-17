@@ -777,16 +777,6 @@ impl ToolRegistry {
         self.provider_policy.as_ref()
     }
 
-    /// Set a context-based tag filter. Only tools whose tags overlap with these
-    /// values will appear in `specs()`. Tools with no tags always pass through.
-    pub fn set_context_filter(&mut self, tags: Vec<String>) {
-        if tags.is_empty() {
-            return;
-        }
-        self.context_filter = Some(tags);
-        self.invalidate_cache();
-    }
-
     /// Set the model context for this registry snapshot.
     pub fn set_active_context(&mut self, context: Option<String>) {
         let normalized = context

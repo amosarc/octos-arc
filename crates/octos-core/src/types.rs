@@ -33,23 +33,6 @@ impl ClientMessageId {
         Self(id.into())
     }
 
-    /// Fallible constructor that rejects the empty string.
-    ///
-    /// Routing code in `session_actor` and `add_message_with_seq` already
-    /// treats the empty string as "absent" — guarding here means an upstream
-    /// layer that drops a cmid down to `Some("")` cannot accidentally claim
-    /// to have a cmid through the type system.
-    pub fn try_new(id: impl Into<String>) -> Result<Self, IdentityError> {
-        let s = id.into();
-        if s.is_empty() {
-            Err(IdentityError::Empty {
-                kind: IdentityKind::ClientMessageId,
-            })
-        } else {
-            Ok(Self(s))
-        }
-    }
-
     /// Borrow the inner string.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -84,23 +67,8 @@ pub struct ThreadId(pub String);
 
 impl ThreadId {
     /// Wrap an existing thread-id string.
-    ///
-    /// Accepts any non-empty string; see `try_new` for fallible construction
-    /// that rejects the empty string.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
-    }
-
-    /// Fallible constructor that rejects the empty string.
-    pub fn try_new(id: impl Into<String>) -> Result<Self, IdentityError> {
-        let s = id.into();
-        if s.is_empty() {
-            Err(IdentityError::Empty {
-                kind: IdentityKind::ThreadId,
-            })
-        } else {
-            Ok(Self(s))
-        }
     }
 
     /// Borrow the inner string.
@@ -108,39 +76,6 @@ impl ThreadId {
         &self.0
     }
 }
-
-/// Distinguishes the three identity kinds in [`IdentityError`] messages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IdentityKind {
-    ClientMessageId,
-    ThreadId,
-}
-
-impl std::fmt::Display for IdentityKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::ClientMessageId => "ClientMessageId",
-            Self::ThreadId => "ThreadId",
-        })
-    }
-}
-
-/// Error returned by the fallible `try_new` constructors on the identity
-/// newtypes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IdentityError {
-    Empty { kind: IdentityKind },
-}
-
-impl std::fmt::Display for IdentityError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Empty { kind } => write!(f, "{kind} cannot be empty"),
-        }
-    }
-}
-
-impl std::error::Error for IdentityError {}
 
 impl std::fmt::Display for ThreadId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -247,30 +182,6 @@ pub struct Message {
 impl Message {
     /// Create a user message with a typed [`ClientMessageId`] attached.
     ///
-    /// Preferred constructor for production user-message construction —
-    /// requiring the `ClientMessageId` argument means the type system rejects
-    /// any code path that forgets to set the correlation token. `thread_id`
-    /// stays `None`; the server stamps it (typically equal to the
-    /// `ClientMessageId`) when the message is processed inbound — see the
-    /// PR-A architecture plan and PR #742.
-    ///
-    /// If you already know the user message roots its own thread (the common
-    /// case), prefer [`Message::user_rooting_thread`] which stamps both
-    /// identity tokens in one call.
-    pub fn user_with_cmid(content: impl Into<String>, cmid: ClientMessageId) -> Self {
-        Self {
-            role: MessageRole::User,
-            content: content.into(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: Some(cmid.0),
-            thread_id: None,
-            timestamp: Utc::now(),
-        }
-    }
-
     /// Create an assistant message bound to an explicit [`ThreadId`].
     ///
     /// Preferred constructor for production assistant-message construction
@@ -293,37 +204,10 @@ impl Message {
         }
     }
 
-    /// Create a tool-result message bound to an explicit [`ThreadId`].
-    ///
-    /// Tool replies inherit the originating user turn's thread so a
-    /// late-arriving tool result lands under the right user bubble even when
-    /// later turns have rotated the per-chat sticky `thread_id`.
-    pub fn tool_with_thread(
-        content: impl Into<String>,
-        tool_call_id: impl Into<String>,
-        thread_id: ThreadId,
-    ) -> Self {
-        Self {
-            role: MessageRole::Tool,
-            content: content.into(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: Some(tool_call_id.into()),
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: Some(thread_id.0),
-            timestamp: Utc::now(),
-        }
-    }
-
     /// Create a user message.
     ///
     /// Legacy constructor retained for backwards compatibility with tests,
-    /// JSONL deserialization round-trips, and the (~50) call sites that
-    /// pre-date PR A's typed constructors. New code on the inbound /
-    /// persistence path SHOULD use [`Message::user_with_cmid`] so the
-    /// `ClientMessageId` is supplied at the type level — see the PR-A
-    /// architecture plan in `/tmp/octos-architecture-FINAL.md` §A.1.
+    /// JSONL deserialization round-trips, and pre-PR-A call sites.
     #[doc(hidden)]
     pub fn user(content: impl Into<String>) -> Self {
         Self {
@@ -379,21 +263,6 @@ impl Message {
             timestamp: Utc::now(),
         }
     }
-
-    /// Attach a client-supplied UUID used by the web/runtime client to
-    /// correlate optimistic message bubbles back to the persisted seq.
-    #[must_use]
-    pub fn with_client_message_id(mut self, client_message_id: impl Into<String>) -> Self {
-        self.client_message_id = Some(client_message_id.into());
-        self
-    }
-
-    /// Attach a typed [`ThreadId`].
-    #[must_use]
-    pub fn with_thread_id(mut self, thread_id: ThreadId) -> Self {
-        self.thread_id = Some(thread_id.0);
-        self
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -431,14 +300,6 @@ pub struct ToolCall {
     /// Provider-specific metadata (e.g. Gemini thought_signature).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
-}
-
-/// Reference to an episode in episodic memory.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EpisodeRef {
-    pub id: String,
-    pub summary: String,
-    pub relevance_score: f32,
 }
 
 /// Unique key identifying a conversation session (channel:chat_id).
@@ -712,7 +573,8 @@ mod tests {
 
     #[test]
     fn message_round_trips_client_message_id_when_present() {
-        let msg = Message::user("hi").with_client_message_id("cmid-abc");
+        let mut msg = Message::user("hi");
+        msg.client_message_id = Some("cmid-abc".to_string());
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("client_message_id"));
         assert!(json.contains("cmid-abc"));
@@ -765,18 +627,6 @@ mod tests {
         assert_eq!(MessageRole::User.to_string(), "user");
     }
 
-    #[test]
-    fn test_episode_ref() {
-        let ep_ref = EpisodeRef {
-            id: "ep-123".to_string(),
-            summary: "Fixed auth bug".to_string(),
-            relevance_score: 0.85,
-        };
-        let json = serde_json::to_string(&ep_ref).unwrap();
-        assert!(json.contains("ep-123"));
-        assert!(json.contains("0.85"));
-    }
-
     // PR A: typed identity newtypes — ClientMessageId / ThreadId / TurnId.
     //
     // These tests prove the structural fix that closes the M8.10
@@ -801,19 +651,6 @@ mod tests {
         let tid: ThreadId = (&cmid).into();
         assert_eq!(tid.as_str(), "cmid-root");
         assert_eq!(tid.to_string(), "cmid-root");
-    }
-
-    #[test]
-    fn message_user_with_cmid_stamps_client_message_id() {
-        let cmid = ClientMessageId::new("cmid-001");
-        let msg = Message::user_with_cmid("hello", cmid.clone());
-        assert_eq!(msg.role, MessageRole::User);
-        assert_eq!(msg.content, "hello");
-        assert_eq!(msg.client_message_id.as_deref(), Some("cmid-001"));
-        // user_with_cmid leaves thread_id None — the server stamps it during
-        // process_inbound (typically equal to the cmid). PR-F will tighten
-        // this further; PR A only adds the typed entry point.
-        assert!(msg.thread_id.is_none());
     }
 
     #[test]
@@ -855,8 +692,9 @@ mod tests {
         // Going through serde with a stamped message preserves both identity
         // tokens — proves PR A's typed constructors interoperate with the
         // existing JSONL persistence path without schema changes.
-        let cmid = ClientMessageId::new("cmid-jsonl");
-        let user = Message::user_with_cmid("q", cmid).with_thread_id(ThreadId::new("thread-jsonl"));
+        let mut user = Message::user("q");
+        user.client_message_id = Some("cmid-jsonl".to_string());
+        user.thread_id = Some("thread-jsonl".to_string());
         let json = serde_json::to_string(&user).unwrap();
         let parsed: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.client_message_id.as_deref(), Some("cmid-jsonl"));
@@ -867,30 +705,6 @@ mod tests {
         let parsed: Message = serde_json::from_str(&json).unwrap();
         assert!(parsed.client_message_id.is_none());
         assert_eq!(parsed.thread_id.as_deref(), Some("thread-jsonl"));
-    }
-
-    #[test]
-    fn client_message_id_try_new_rejects_empty_string() {
-        let err = ClientMessageId::try_new("").unwrap_err();
-        assert_eq!(
-            err,
-            IdentityError::Empty {
-                kind: IdentityKind::ClientMessageId
-            }
-        );
-        assert_eq!(err.to_string(), "ClientMessageId cannot be empty");
-    }
-
-    #[test]
-    fn thread_id_try_new_rejects_empty_string() {
-        let err = ThreadId::try_new("").unwrap_err();
-        assert_eq!(
-            err,
-            IdentityError::Empty {
-                kind: IdentityKind::ThreadId
-            }
-        );
-        assert_eq!(err.to_string(), "ThreadId cannot be empty");
     }
 
     #[test]

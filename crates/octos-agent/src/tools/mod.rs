@@ -106,10 +106,6 @@ pub use crate::agents::AgentDefinitions;
 /// hook the existing tools (e.g. `read_file`) consult before executing.
 #[derive(Clone, Debug)]
 pub struct ToolPermissions {
-    /// Coarse permission tier from the profile envelope. Reserved for future
-    /// per-tier rules; today the variant is informational so callers can log
-    /// it without changing semantics.
-    mode: crate::profile::PermissionMode,
     /// Tools the active profile explicitly forbids. Always wins over the
     /// allow list (deny-wins semantics, mirroring [`ToolPolicy`]).
     denied_tools: HashSet<String>,
@@ -129,7 +125,6 @@ impl ToolPermissions {
     /// Allow-all permissions — the zero-value default carried by the context.
     pub fn allow_all() -> Self {
         Self {
-            mode: crate::profile::PermissionMode::Default,
             denied_tools: HashSet::new(),
             allowed_tools: None,
         }
@@ -159,16 +154,9 @@ impl ToolPermissions {
             }
         }
         Self {
-            mode: profile.permissions,
             denied_tools: denied,
             allowed_tools: allowed,
         }
-    }
-
-    /// Permission tier carried by the envelope. Reserved for future
-    /// per-tier rules; today purely informational.
-    pub fn mode(&self) -> crate::profile::PermissionMode {
-        self.mode
     }
 
     /// Check whether the named tool is currently permitted.
@@ -482,17 +470,6 @@ pub struct TurnAttachmentContext {
 tokio::task_local! {
     /// Task-local per-turn attachment context, scoped to the current agent run.
     pub static TURN_ATTACHMENT_CTX: TurnAttachmentContext;
-}
-
-/// Progress update from a long-running tool execution.
-#[derive(Debug, Clone)]
-pub enum ToolProgress {
-    /// Status text update (e.g., "Searching 3 of 10 sources...").
-    Status(String),
-    /// Percentage completion (0..100).
-    Percent(u8),
-    /// Intermediate result available (e.g., partial research findings).
-    Intermediate { summary: String },
 }
 
 /// Concurrency class of a tool — controls how the executor admits tool calls
@@ -937,7 +914,7 @@ pub fn resolve_path_with_scope(
 /// `scope.workspace()`; absolute paths are accepted but must classify
 /// inside one of the scope's zones.
 ///
-/// **Symlink containment.** [`SessionScope::classify_lexical_path`] is
+/// **Symlink containment.** [`SessionScope::classify_canonical_path`] is
 /// intentionally lexical-only — a candidate like
 /// `<workspace>/symlink/out`, where `symlink` is a symbolic link
 /// pointing outside the workspace, would classify as `InWorkspace`
@@ -1140,6 +1117,11 @@ pub(crate) fn upload_namespace_redirect(path: &str, workspace_root: &Path) -> Op
 /// Lexical normalise (collapse `.`, refuse `..`). Mirrors the helper
 /// inside `octos_core::session_scope` so the canonicalize walk above
 /// can't absorb a traversal escape.
+/// Normalize an entity name into a slug: trim, lowercase, spaces to hyphens.
+pub(crate) fn to_slug(name: &str) -> String {
+    name.trim().to_lowercase().replace(' ', "-")
+}
+
 pub(crate) fn lexical_normalise_strict(path: &Path) -> Option<PathBuf> {
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -2025,3 +2007,19 @@ mod tool_context_tests {
         assert!(permissions.is_tool_allowed("shell"));
     }
 }
+
+/// Shared test fixture for the per-tool path-scope rejection tests: a
+/// `ToolContext` bound to `scope` and tagged with `tool_id`.
+#[cfg(test)]
+pub(crate) mod test_fixture {
+    use super::*;
+    use std::sync::Arc;
+
+    pub(crate) fn scoped_ctx(tool_id: &str, scope: octos_core::SessionScope) -> ToolContext {
+        let mut ctx = ToolContext::zero();
+        ctx.tool_id = tool_id.to_string();
+        ctx.session_scope = Some(Arc::new(scope));
+        ctx
+    }
+}
+

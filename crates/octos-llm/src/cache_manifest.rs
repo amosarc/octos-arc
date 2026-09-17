@@ -226,16 +226,6 @@ impl PromptCacheObserver {
         }
     }
 
-    /// Snapshot retained observations in emission order. Intended for
-    /// diagnostics/tests; it never returns prompt bodies.
-    pub fn snapshot(&self) -> Vec<PromptCacheObservation> {
-        lock_unpoisoned(&self.state)
-            .observations
-            .iter()
-            .cloned()
-            .collect()
-    }
-
     fn observe(
         &self,
         manifest: &PromptCacheInputManifest,

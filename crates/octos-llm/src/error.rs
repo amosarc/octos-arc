@@ -117,11 +117,6 @@ impl LlmError {
         Self::new(LlmErrorKind::Timeout, message)
     }
 
-    /// Convenience: create a Network error.
-    pub fn network(message: impl Into<String>) -> Self {
-        Self::new(LlmErrorKind::Network, message)
-    }
-
     /// Returns true if this error is retryable (rate limit, server error, network, timeout).
     pub fn is_retryable(&self) -> bool {
         matches!(
@@ -505,7 +500,6 @@ mod tests {
         assert!(!LlmError::auth("bad key").is_retryable());
         assert!(LlmError::rate_limited(Some(30)).is_retryable());
         assert!(LlmError::timeout("timed out").is_retryable());
-        assert!(LlmError::network("connection reset").is_retryable());
     }
 
     #[test]

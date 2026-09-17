@@ -560,7 +560,9 @@ fn run_glob_legacy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    
+
+    use crate::tools::test_fixture::scoped_ctx;
 
     #[tokio::test]
     async fn glob_on_upload_handle_namespace_returns_guidance() {
@@ -627,13 +629,6 @@ mod tests {
         assert!(!result.success);
     }
 
-    fn ctx_with_scope(scope: SessionScope) -> ToolContext {
-        let mut ctx = ToolContext::zero();
-        ctx.tool_id = "glob-with-scope".to_string();
-        ctx.session_scope = Some(Arc::new(scope));
-        ctx
-    }
-
     #[tokio::test]
     async fn glob_traversal_pattern_drops_matches_outside_zones() {
         // Two cases the scoped walker must refuse:
@@ -649,7 +644,7 @@ mod tests {
 
         let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![]).unwrap();
         let tool = GlobTool::new(workspace.path());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("glob-with-scope", scope);
 
         // (a) Absolute pattern outside every zone.
         let pattern_a = format!("{}/*", outside.path().display());
@@ -701,7 +696,7 @@ mod tests {
 
         let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![]).unwrap();
         let tool = GlobTool::new(workspace.path());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("glob-with-scope", scope);
 
         let result = tool
             .execute_with_context(&ctx, &serde_json::json!({"pattern": "escape/*"}))

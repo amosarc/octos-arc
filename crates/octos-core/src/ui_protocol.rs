@@ -7,7 +7,7 @@
 //! task-control requests so clients can target a stable AppUI contract while
 //! backend support lands behind capabilities.
 
-use crate::{SessionKey, TaskId, ThreadId};
+use crate::{SessionKey, TaskId};
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -30,69 +30,6 @@ pub const JSON_RPC_VERSION: &str = "2.0";
 
 /// Maximum accepted JSON-RPC text frame size for UI transports.
 pub const MAX_TEXT_FRAME_BYTES: usize = 1024 * 1024;
-
-/// Per-turn ownership context for UI/SSE emission.
-///
-/// Construct this once at ingress, before any live event is emitted, and pass
-/// it to emitters instead of re-deriving routing identity from ambient session
-/// state. The `thread_id` is required; callers that do not have one must fail
-/// before producing a live event.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnContext {
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-    pub thread_id: ThreadId,
-}
-
-impl TurnContext {
-    pub fn new(session_id: impl Into<String>, topic: Option<String>, thread_id: ThreadId) -> Self {
-        Self {
-            session_id: session_id.into(),
-            topic,
-            thread_id,
-        }
-    }
-
-}
-
-/// Required server-stamped ownership envelope for web/SSE events.
-///
-/// This is intentionally generic over payload so individual event families can
-/// keep their existing typed payloads while sharing one ownership/routing
-/// contract at the emission boundary.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EventEnvelope<P> {
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-    pub thread_id: ThreadId,
-    pub event_seq: u64,
-    pub event_type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    pub payload: P,
-}
-
-impl<P> EventEnvelope<P> {
-    pub fn new(
-        ctx: &TurnContext,
-        event_seq: u64,
-        event_type: impl Into<String>,
-        tool_call_id: Option<String>,
-        payload: P,
-    ) -> Self {
-        Self {
-            session_id: ctx.session_id.clone(),
-            topic: ctx.topic.clone(),
-            thread_id: ctx.thread_id.clone(),
-            event_seq,
-            event_type: event_type.into(),
-            tool_call_id,
-            payload,
-        }
-    }
-}
 
 /// Feature flag for UPCR-2026-001 typed approval payloads.
 pub const UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1: &str = "approval.typed.v1";
@@ -254,10 +191,6 @@ fn method_capability_gate(method: &str) -> Option<&'static str> {
 
 pub mod approval_kinds {
     pub const COMMAND: &str = "command";
-    pub const DIFF: &str = "diff";
-    pub const FILESYSTEM: &str = "filesystem";
-    pub const NETWORK: &str = "network";
-    pub const SANDBOX_ESCALATION: &str = "sandbox_escalation";
 }
 
 pub mod approval_scopes {
@@ -356,14 +289,8 @@ pub mod rpc_error_codes {
 
     /// Spec §10 `unknown_session`: `session_id` not known to the runtime.
     pub const UNKNOWN_SESSION: i64 = -32100;
-    /// Spec §10 `unknown_turn`: `turn_id` not known for the addressed session.
-    pub const UNKNOWN_TURN: i64 = -32101;
     /// Spec §10 `unknown_approval`: `approval_id` not known to the runtime.
     pub const UNKNOWN_APPROVAL_ID: i64 = -32102;
-    /// Spec §10 `unknown_preview`: `preview_id` unknown (expired or never issued).
-    pub const UNKNOWN_PREVIEW_ID: i64 = -32103;
-    /// Spec §10 `unknown_task`: `task_id` not in the runtime task table.
-    pub const UNKNOWN_TASK_ID: i64 = -32104;
 
     /// Spec §10 `approval_cancelled`: `respond` against an administratively cancelled approval.
     pub const APPROVAL_CANCELLED: i64 = -32105;
@@ -396,10 +323,6 @@ pub mod rpc_error_codes {
 
     /// Spec §10 `permission_denied`: sandbox / approval-scope / profile policy refusal.
     pub const PERMISSION_DENIED: i64 = -32120;
-
-    /// Spec §10 / §3 capability-negotiation category. New emitters should prefer
-    /// this over the legacy `METHOD_NOT_SUPPORTED` (-32004) slot.
-    pub const UNSUPPORTED_CAPABILITY: i64 = -32130;
 
     /// Spec §10 `runtime_unavailable` / `runtime_not_ready`: transient unavailable.
     pub const RUNTIME_NOT_READY: i64 = -32140;
@@ -742,17 +665,6 @@ where
 {
     serde_json::from_value(params)
         .map_err(|err| RpcError::invalid_params(format!("invalid params for {method}: {err}")))
-}
-
-fn decode_result<T>(method: &str, result: Value) -> Result<T, RpcError>
-where
-    T: DeserializeOwned,
-{
-    // Spec §10: `INVALID_PARAMS` (-32602) is the JSON-RPC code for malformed
-    // *params*. A malformed *result* is a server-side schema violation and
-    // gets `MALFORMED_RESULT` (-32150) so clients can distinguish the two.
-    serde_json::from_value(result)
-        .map_err(|err| RpcError::malformed_result(format!("invalid result for {method}: {err}")))
 }
 
 pub mod methods {
@@ -1212,20 +1124,6 @@ impl UnsupportedCapabilityReport {
     }
 }
 
-/// Typed success payload for endpoints that report an unsupported capability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UnsupportedCapabilityResult {
-    pub unsupported: UnsupportedCapabilityReport,
-}
-
-impl UnsupportedCapabilityResult {
-    pub fn method(method: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self {
-            unsupported: UnsupportedCapabilityReport::method(method, reason),
-        }
-    }
-}
-
 impl RpcError {
     pub fn method_not_supported(method: impl Into<String>) -> Self {
         let report =
@@ -1244,7 +1142,6 @@ impl RpcError {
 pub enum UiResultKind {
     ProfileLocalCreate,
     SessionOpen,
-    TurnStart,
     TurnInterrupt,
     ApprovalRespond,
     ApprovalScopesList,
@@ -1256,7 +1153,6 @@ pub enum UiResultKind {
     ThreadGraphGet,
     TurnStateGet,
     SessionBtw,
-    UnsupportedCapability,
 }
 
 /// Minimal input item for a started turn.
@@ -1924,7 +1820,6 @@ pub struct HydratedMessage {
 pub mod thread_status {
     pub const ACTIVE: &str = "active";
     pub const COMPLETED: &str = "completed";
-    pub const ERRORED: &str = "errored";
     pub const INTERRUPTED: &str = "interrupted";
     pub const UNKNOWN: &str = "unknown";
 }
@@ -3059,17 +2954,6 @@ impl SessionOpenResult {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnStartResult {
-    pub accepted: bool,
-}
-
-impl TurnStartResult {
-    pub fn accepted() -> Self {
-        Self { accepted: true }
-    }
-}
-
 /// Typed result for `turn/interrupt`.
 ///
 /// `interrupted` is the canonical boolean response. The three optional
@@ -3114,21 +2998,15 @@ pub struct TurnInterruptResult {
 }
 
 impl TurnInterruptResult {
-    /// Bare constructor preserved for back-compat: callers passing only the
-    /// boolean see no behavioural change.
-    pub fn new(interrupted: bool) -> Self {
+    /// Successful interrupt of a running turn — the typical happy-path
+    /// response.
+    pub fn interrupted_ok() -> Self {
         Self {
-            interrupted,
+            interrupted: true,
             reason: None,
             terminal_state: None,
             ack_timeout: None,
         }
-    }
-
-    /// Successful interrupt of a running turn — the typical happy-path
-    /// response.
-    pub fn interrupted_ok() -> Self {
-        Self::new(true)
     }
 
     /// Interrupt declined with a diagnostic reason (e.g.,
@@ -3172,7 +3050,6 @@ impl TurnInterruptResult {
 pub enum UiRpcResult {
     ProfileLocalCreate(ProfileLocalCreateResult),
     SessionOpen(SessionOpenResult),
-    TurnStart(TurnStartResult),
     TurnInterrupt(TurnInterruptResult),
     ApprovalRespond(ApprovalRespondResult),
     ApprovalScopesList(ApprovalScopesListResult),
@@ -3184,7 +3061,6 @@ pub enum UiRpcResult {
     ThreadGraphGet(ThreadGraphGetResult),
     TurnStateGet(TurnStateGetResult),
     SessionBtw(SessionBtwResult),
-    UnsupportedCapability(UnsupportedCapabilityResult),
 }
 
 impl UiRpcResult {
@@ -3192,7 +3068,6 @@ impl UiRpcResult {
         match self {
             Self::ProfileLocalCreate(_) => UiResultKind::ProfileLocalCreate,
             Self::SessionOpen(_) => UiResultKind::SessionOpen,
-            Self::TurnStart(_) => UiResultKind::TurnStart,
             Self::TurnInterrupt(_) => UiResultKind::TurnInterrupt,
             Self::ApprovalRespond(_) => UiResultKind::ApprovalRespond,
             Self::ApprovalScopesList(_) => UiResultKind::ApprovalScopesList,
@@ -3204,7 +3079,6 @@ impl UiRpcResult {
             Self::ThreadGraphGet(_) => UiResultKind::ThreadGraphGet,
             Self::TurnStateGet(_) => UiResultKind::TurnStateGet,
             Self::SessionBtw(_) => UiResultKind::SessionBtw,
-            Self::UnsupportedCapability(_) => UiResultKind::UnsupportedCapability,
         }
     }
 
@@ -3212,7 +3086,6 @@ impl UiRpcResult {
         match self {
             Self::ProfileLocalCreate(_) => Some(methods::PROFILE_LOCAL_CREATE),
             Self::SessionOpen(_) => Some(methods::SESSION_OPEN),
-            Self::TurnStart(_) => Some(methods::TURN_START),
             Self::TurnInterrupt(_) => Some(methods::TURN_INTERRUPT),
             Self::ApprovalRespond(_) => Some(methods::APPROVAL_RESPOND),
             Self::ApprovalScopesList(_) => Some(methods::APPROVAL_SCOPES_LIST),
@@ -3224,7 +3097,6 @@ impl UiRpcResult {
             Self::ThreadGraphGet(_) => Some(methods::THREAD_GRAPH_GET),
             Self::TurnStateGet(_) => Some(methods::TURN_STATE_GET),
             Self::SessionBtw(_) => Some(methods::SESSION_BTW),
-            Self::UnsupportedCapability(result) => Some(result.unsupported.method.as_str()),
         }
     }
 
@@ -3232,7 +3104,6 @@ impl UiRpcResult {
         match self {
             Self::ProfileLocalCreate(result) => serde_json::to_value(result),
             Self::SessionOpen(result) => serde_json::to_value(result),
-            Self::TurnStart(result) => serde_json::to_value(result),
             Self::TurnInterrupt(result) => serde_json::to_value(result),
             Self::ApprovalRespond(result) => serde_json::to_value(result),
             Self::ApprovalScopesList(result) => serde_json::to_value(result),
@@ -3244,63 +3115,14 @@ impl UiRpcResult {
             Self::ThreadGraphGet(result) => serde_json::to_value(result),
             Self::TurnStateGet(result) => serde_json::to_value(result),
             Self::SessionBtw(result) => serde_json::to_value(result),
-            Self::UnsupportedCapability(result) => serde_json::to_value(result),
         }
     }
 
-    pub fn from_method_and_result(method: &str, result: Value) -> Result<Self, RpcError> {
-        // A server may answer any command method with an
-        // `UnsupportedCapabilityResult` payload (per spec §3 capability
-        // negotiation). The wire shape — an object with a single
-        // `"unsupported"` key — is unambiguous, so peek at it before
-        // committing to the method-specific decode path.
-        if is_unsupported_capability_result(&result) {
-            let parsed: UnsupportedCapabilityResult = decode_result(method, result)?;
-            return Ok(Self::UnsupportedCapability(parsed));
-        }
-        match method {
-            methods::PROFILE_LOCAL_CREATE => {
-                Ok(Self::ProfileLocalCreate(decode_result(method, result)?))
-            }
-            methods::SESSION_OPEN => Ok(Self::SessionOpen(decode_result(method, result)?)),
-            methods::TURN_START => Ok(Self::TurnStart(decode_result(method, result)?)),
-            methods::TURN_INTERRUPT => Ok(Self::TurnInterrupt(decode_result(method, result)?)),
-            methods::APPROVAL_RESPOND => Ok(Self::ApprovalRespond(decode_result(method, result)?)),
-            methods::APPROVAL_SCOPES_LIST => {
-                Ok(Self::ApprovalScopesList(decode_result(method, result)?))
-            }
-            methods::PERMISSION_PROFILE_LIST => {
-                Ok(Self::PermissionProfileList(decode_result(method, result)?))
-            }
-            methods::PERMISSION_PROFILE_SET => {
-                Ok(Self::PermissionProfileSet(decode_result(method, result)?))
-            }
-            methods::SESSION_HYDRATE => Ok(Self::SessionHydrate(decode_result(method, result)?)),
-            methods::SESSION_ROLLBACK => Ok(Self::SessionRollback(decode_result(method, result)?)),
-            methods::SESSION_FORK => Ok(Self::SessionFork(decode_result(method, result)?)),
-            methods::THREAD_GRAPH_GET => Ok(Self::ThreadGraphGet(decode_result(method, result)?)),
-            methods::TURN_STATE_GET => Ok(Self::TurnStateGet(decode_result(method, result)?)),
-            methods::SESSION_BTW => Ok(Self::SessionBtw(decode_result(method, result)?)),
-            _ => Err(RpcError::method_not_found(method)),
-        }
-    }
 }
 
 /// Heuristic gate for `UiRpcResult::UnsupportedCapability` decoding: returns
 /// `true` only when the result looks like `{"unsupported": {...}}`, which is
 /// the unique shape of [`UnsupportedCapabilityResult`].
-fn is_unsupported_capability_result(value: &Value) -> bool {
-    let Some(obj) = value.as_object() else {
-        return false;
-    };
-    if obj.len() != 1 {
-        return false;
-    }
-    obj.get("unsupported")
-        .map(|v| v.is_object())
-        .unwrap_or(false)
-}
-
 pub mod progress_kinds {
     pub const STATUS: &str = "status";
     pub const THINKING: &str = "thinking";
@@ -4131,47 +3953,6 @@ pub struct PlanUpdatedEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<TurnId>,
     pub plan: UiPlanRecord,
-}
-
-/// M15 recurring loop snapshot.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UiLoopRecord {
-    pub loop_id: String,
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    pub prompt: String,
-    pub mode: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interval_seconds: Option<u64>,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_run_at_ms: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_run_at_ms: Option<i64>,
-    pub expires_at_ms: i64,
-    pub created_at_ms: i64,
-    pub updated_at_ms: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UiLoopFire {
-    #[serde(default)]
-    pub queued: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duplicate: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub continuation_id: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dedupe_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub priority: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
 }
 
 /// M16 active model-visible context state exposed through AppUI lifecycle

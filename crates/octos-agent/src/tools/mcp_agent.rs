@@ -37,7 +37,6 @@ use metrics::counter;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::harness_events::HarnessEventPayload;
@@ -1471,13 +1470,6 @@ pub async fn dispatch_with_metrics(
     };
     (response, summary)
 }
-
-/// Convenience: build a `Mutex`-guarded `Command`-like shim so callers
-/// that want to re-use a single subprocess can opt-in. Default behaviour
-/// spawns a fresh child per dispatch, which keeps dispatch attempts
-/// independent (a crash in one attempt cannot leak state into another).
-#[allow(dead_code)]
-pub type BackendMutex = Mutex<Arc<dyn McpAgentBackend>>;
 
 #[cfg(test)]
 mod tests {

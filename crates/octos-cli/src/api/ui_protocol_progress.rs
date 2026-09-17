@@ -1086,7 +1086,6 @@ mod tests {
             child_join_state: None,
             child_joined_at: None,
             child_failure_action: None,
-            task_ledger_path: None,
             status: octos_agent::TaskStatus::Running,
             runtime_state: octos_agent::TaskRuntimeState::DeliveringOutputs,
             runtime_detail: Some(

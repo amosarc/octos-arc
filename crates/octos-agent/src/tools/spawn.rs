@@ -1001,7 +1001,6 @@ pub struct SpawnTool {
     /// Owning session key for tracked background subagents.
     session_key: Option<String>,
     /// Append-only task ledger path for the owning parent session.
-    task_ledger_path: Option<PathBuf>,
     /// Optional agent config inherited from the parent session.
     worker_config: Option<AgentConfig>,
     /// Parent's embedding provider, propagated onto worker Agents.
@@ -1086,7 +1085,6 @@ impl SpawnTool {
             child_tool_factories: Vec::new(),
             task_supervisor: None,
             session_key: None,
-            task_ledger_path: None,
             worker_config: None,
             embedder: None,
             mcp_agent_backend: None,
@@ -1126,7 +1124,6 @@ impl SpawnTool {
             child_tool_factories: Vec::new(),
             task_supervisor: None,
             session_key: None,
-            task_ledger_path: None,
             worker_config: None,
             embedder: None,
             mcp_agent_backend: None,
@@ -1180,7 +1177,6 @@ impl SpawnTool {
             child_tool_factories: self.child_tool_factories.clone(),
             task_supervisor: self.task_supervisor.clone(),
             session_key: self.session_key.clone(),
-            task_ledger_path: self.task_ledger_path.clone(),
             worker_config: self.worker_config.clone(),
             embedder: self.embedder.clone(),
             mcp_agent_backend: self.mcp_agent_backend.clone(),
@@ -1309,11 +1305,9 @@ impl SpawnTool {
         mut self,
         supervisor: Arc<TaskSupervisor>,
         session_key: impl Into<String>,
-        task_ledger_path: impl Into<PathBuf>,
     ) -> Self {
         self.task_supervisor = Some(supervisor);
         self.session_key = Some(session_key.into());
-        self.task_ledger_path = Some(task_ledger_path.into());
         self
     }
 
@@ -3007,16 +3001,11 @@ impl Tool for SpawnTool {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
-            let task_ledger_path = self
-                .task_ledger_path
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned());
             let tracked_task_id = self.task_supervisor.as_ref().map(|supervisor| {
                 supervisor.register_with_lineage(
                     &label,
                     &format!("spawn-{worker_id}"),
                     self.session_key.as_deref(),
-                    task_ledger_path.as_deref(),
                 )
             });
             // Cap refusal: `register_with_lineage` signals a per-session

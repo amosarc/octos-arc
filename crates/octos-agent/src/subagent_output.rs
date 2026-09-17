@@ -24,9 +24,9 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 /// Default total-byte budget across all tasks (5 GB).
 pub const DEFAULT_MAX_BYTES_TOTAL: u64 = 5 * 1024 * 1024 * 1024;
@@ -36,9 +36,6 @@ pub const DEFAULT_MAX_BYTES_PER_TASK: u64 = 500 * 1024 * 1024;
 
 /// Default preview window kept in memory for task status displays (4 KB).
 pub const DEFAULT_PREVIEW_BYTES: usize = 4 * 1024;
-
-/// Default GC age threshold — terminal files older than this are swept.
-pub const DEFAULT_GC_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Outcome of an `append` call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,11 +135,6 @@ impl SubAgentOutputRouter {
     pub fn with_preview_bytes(mut self, cap: usize) -> Self {
         self.preview_cap = cap;
         self
-    }
-
-    /// Root directory under which per-session subtrees live.
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     /// Resolve the per-task output file path.
@@ -278,12 +270,6 @@ impl SubAgentOutputRouter {
         }
     }
 
-    /// Return the per-task preview bytes, if any.
-    pub fn preview(&self, task_id: &str) -> Option<Vec<u8>> {
-        let handles = self.open_handles.lock().unwrap_or_else(|e| e.into_inner());
-        handles.get(task_id).map(|h| h.preview.clone())
-    }
-
     /// Return the last N lines currently written to disk for `task_id`.
     /// Used by `AgentSummaryGenerator` to summarize recent activity.
     pub fn tail_lines(&self, task_id: &str, lines: usize) -> std::io::Result<Vec<String>> {
@@ -309,62 +295,6 @@ impl SubAgentOutputRouter {
         }
     }
 
-    /// Return the bytes recorded for `task_id`, or 0 if untracked.
-    pub fn bytes_written(&self, task_id: &str) -> u64 {
-        let handles = self.open_handles.lock().unwrap_or_else(|e| e.into_inner());
-        handles.get(task_id).map(|h| h.bytes_written).unwrap_or(0)
-    }
-
-    /// Return the overflow (truncated) byte count for `task_id`.
-    pub fn overflow_bytes(&self, task_id: &str) -> u64 {
-        let handles = self.open_handles.lock().unwrap_or_else(|e| e.into_inner());
-        handles.get(task_id).map(|h| h.overflow_bytes).unwrap_or(0)
-    }
-
-    /// Sum of per-task bytes currently tracked.
-    pub fn total_bytes(&self) -> u64 {
-        *self.total_bytes.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Is the task currently marked terminal?
-    pub fn is_terminal(&self, task_id: &str) -> bool {
-        let handles = self.open_handles.lock().unwrap_or_else(|e| e.into_inner());
-        handles
-            .get(task_id)
-            .map(|h| matches!(h.phase, Phase::Terminal))
-            .unwrap_or(false)
-    }
-
-    /// Sweep terminal files older than `older_than` off disk. Returns the
-    /// number of files removed.
-    pub fn gc_old_terminal(&self, older_than: Duration) -> std::io::Result<usize> {
-        let now = SystemTime::now();
-        let mut handles = self.open_handles.lock().unwrap_or_else(|e| e.into_inner());
-        let mut total = self.total_bytes.lock().unwrap_or_else(|e| e.into_inner());
-        let mut removed = 0usize;
-        let victims: Vec<String> = handles
-            .iter()
-            .filter_map(|(id, h)| {
-                if !matches!(h.phase, Phase::Terminal) {
-                    return None;
-                }
-                match now.duration_since(h.last_updated) {
-                    Ok(age) if age >= older_than => Some(id.clone()),
-                    _ => None,
-                }
-            })
-            .collect();
-        for id in victims {
-            if let Some(handle) = handles.remove(&id) {
-                if handle.path.exists() {
-                    let _ = std::fs::remove_file(&handle.path);
-                }
-                *total = total.saturating_sub(handle.bytes_written);
-                removed += 1;
-            }
-        }
-        Ok(removed)
-    }
 
     fn ensure_handle(
         &self,
@@ -428,6 +358,7 @@ impl SubAgentOutputRouter {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use super::*;
     use std::thread::sleep;
 
@@ -446,7 +377,6 @@ mod tests {
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "hello world");
-        assert_eq!(router.bytes_written("task-1"), 11);
     }
 
     #[test]
@@ -506,13 +436,13 @@ mod tests {
         let router = SubAgentOutputRouter::new(dir.path()).with_max_bytes_per_task(5);
         let result = router.append("sess-a", "task-1", b"hello world").unwrap();
         assert_eq!(result, AppendResult::OverCapTruncated);
-        assert_eq!(router.bytes_written("task-1"), 5);
-        assert!(router.overflow_bytes("task-1") > 0);
+        let path = router.path_for("sess-a", "task-1");
+        assert_eq!(std::fs::read(&path).unwrap().len(), 5);
 
         // Subsequent writes on the same task should continue to be truncated.
         let result2 = router.append("sess-a", "task-1", b"more").unwrap();
         assert_eq!(result2, AppendResult::OverCapTruncated);
-        assert_eq!(router.bytes_written("task-1"), 5);
+        assert_eq!(std::fs::read(&path).unwrap().len(), 5);
     }
 
     #[test]
@@ -546,7 +476,7 @@ mod tests {
         );
         router.mark_terminal("task-1");
         // Sleep briefly so LRU ordering by SystemTime is unambiguous.
-        sleep(Duration::from_millis(5));
+        sleep(std::time::Duration::from_millis(5));
         router.mark_terminal("task-2");
 
         // Next write should trigger eviction of task-1 (oldest terminal).
@@ -599,30 +529,6 @@ mod tests {
             // Ensure the real target file was not overwritten with payload.
             assert_eq!(std::fs::read_to_string(&other).unwrap(), "outside");
         }
-    }
-
-    #[test]
-    fn should_gc_terminal_files_older_than_duration() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let router = make_router(dir.path());
-        router.append("sess-a", "task-1", b"x").unwrap();
-        router.mark_terminal("task-1");
-        // Force last_updated backwards by manipulating the handle: the
-        // simplest approach is a zero-age GC and then non-zero age test.
-        assert_eq!(router.gc_old_terminal(Duration::from_secs(999)).unwrap(), 0);
-        assert!(router.path_for("sess-a", "task-1").exists());
-        // With zero threshold, the terminal file is now eligible.
-        assert_eq!(router.gc_old_terminal(Duration::from_secs(0)).unwrap(), 1);
-        assert!(!router.path_for("sess-a", "task-1").exists());
-    }
-
-    #[test]
-    fn should_preview_first_bytes_only() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let router = SubAgentOutputRouter::new(dir.path()).with_preview_bytes(5);
-        router.append("sess-a", "task-1", b"hello world").unwrap();
-        let preview = router.preview("task-1").unwrap();
-        assert_eq!(preview, b"hello".to_vec());
     }
 
     #[test]

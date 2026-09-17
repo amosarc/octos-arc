@@ -97,7 +97,7 @@
 //!    or env vars itself.
 //! 2. Spawns child processes with `current_dir(scope.workspace())`.
 //! 3. Validates every user/LLM-supplied path against
-//!    [`SessionScope::classify_lexical_path`] before opening it.
+//!    [`SessionScope::classify_canonical_path`] before opening it.
 //!    Refuses `PathClassification::OutOfScope`.
 //! 4. Reports outputs back to the host as `files_to_send: [...]`
 //!    listing absolute paths. The host validates each entry against
@@ -625,10 +625,6 @@ impl SessionScope {
         })
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
     pub fn workspace(&self) -> &Path {
         &self.workspace
     }
@@ -683,21 +679,6 @@ impl SessionScope {
         Ok(self)
     }
 
-    /// Return the declared cross-session shared zones (multi-tenant
-    /// only). Empty slice for solo. Callers should prefer this over
-    /// reaching into [`ScopeMode::MultiTenant::shared_zones`]
-    /// directly so the API doesn't churn if the field moves.
-    pub fn shared_zones(&self) -> &[PathBuf] {
-        match &self.mode {
-            ScopeMode::MultiTenant { shared_zones, .. } => shared_zones,
-            ScopeMode::Solo { .. } => &[],
-        }
-    }
-
-    pub fn mode(&self) -> &ScopeMode {
-        &self.mode
-    }
-
     /// The tenant (profile) id this scope belongs to — `Some` for a
     /// multi-tenant session, `None` for a solo session. Used to bind
     /// uploaded files to a tenant and to refuse cross-tenant `up/`
@@ -707,12 +688,6 @@ impl SessionScope {
             ScopeMode::MultiTenant { tenant_id, .. } => Some(tenant_id.as_str()),
             ScopeMode::Solo { .. } => None,
         }
-    }
-
-    /// Return the read-only plugin skill directories the agent may
-    /// reach. See the `skill_read_zones` field doc on [`SessionScope`].
-    pub fn skill_read_zones(&self) -> &[PathBuf] {
-        &self.skill_read_zones
     }
 
     /// Return a new `SessionScope` with `skill_read_zones` replacing
@@ -742,90 +717,17 @@ impl SessionScope {
         Ok(self)
     }
 
-    /// Classify `path` against this scope using pure-lexical rules.
-    /// The single validator that every component must use; bespoke
-    /// equivalents in the codebase should migrate to this and be
-    /// deleted.
-    ///
-    /// `lexical` = collapses `.` components, refuses `..`, does NOT
-    /// resolve symlinks or canonicalise. Callers needing symlink-safe
-    /// checks must additionally use `symlink_metadata().is_file()`
-    /// per the #1189 round-2 codex finding (or a future
-    /// `classify_resolved_path` variant when it lands).
-    ///
-    /// Renamed from `classify_path` per codex round-1: the explicit
-    /// `_lexical_` prefix prevents callers from over-trusting this
-    /// as the filesystem boundary. Sandboxes still apply for defence
-    /// in depth.
-    pub fn classify_lexical_path(&self, path: &Path) -> PathClassification {
-        // Lexical normalisation: collapse `.` components and refuse
-        // any `..` we encounter. Real `..` handling belongs in the
-        // caller's input validator (see #1186); by the time a path
-        // reaches `classify_lexical_path`, callers are expected to
-        // have already refused traversal sequences.
-        let normalised = match lexical_normalise(path) {
-            Some(p) => p,
-            None => return PathClassification::OutOfScope,
-        };
-        // Workspace is most specific — check first.
-        if normalised.starts_with(&self.workspace) {
-            return PathClassification::InWorkspace;
-        }
-        // Per-mode high-trust zones come next. For solo this is
-        // `granted_dirs` (user-approved); for multi-tenant we
-        // intentionally defer `shared_zones` until AFTER
-        // `skill_read_zones` per the PR-A classification order
-        // (workspace > granted_dirs > skill_read_zones > shared_zones).
-        if let ScopeMode::Solo { granted_dirs } = &self.mode {
-            for granted in granted_dirs {
-                if normalised.starts_with(granted) {
-                    return PathClassification::InGrantedDir {
-                        granted_dir: granted.clone(),
-                    };
-                }
-            }
-        }
-        // Read-only plugin skill directories. Consulted AFTER
-        // workspace and granted_dirs so the higher-priority zones
-        // still classify a path inside both (degenerate case where a
-        // skill_dir is nested inside the workspace) as `InWorkspace`,
-        // not `InSkillDir`. Consulted BEFORE shared_zones because
-        // skill dirs are plugin-installed read material, not the
-        // declared cross-session "research/skills" zones; treating
-        // them the same would let plugin paths inherit
-        // `InSharedZone` semantics by accident.
-        for skill_dir in &self.skill_read_zones {
-            if normalised.starts_with(skill_dir) {
-                return PathClassification::InSkillDir {
-                    skill_dir: skill_dir.clone(),
-                };
-            }
-        }
-        if let ScopeMode::MultiTenant { shared_zones, .. } = &self.mode {
-            for zone in shared_zones {
-                if normalised.starts_with(zone) {
-                    return PathClassification::InSharedZone { zone: zone.clone() };
-                }
-            }
-        }
-        PathClassification::OutOfScope
-    }
-
     /// Classify `path` against this scope after canonicalising both
-    /// sides. Closes the ancestor-symlink hole in
-    /// [`Self::classify_lexical_path`]: a symlink anywhere on the
-    /// `path` chain (or inside one of the scope roots) is resolved
-    /// before the prefix comparison, so a skill_dir containing
-    /// `link -> /outside` cannot smuggle `<skill_dir>/link/secret` as
-    /// `InSkillDir`.
+    /// sides: a symlink anywhere on the `path` chain (or inside one of
+    /// the scope roots) is resolved before the prefix comparison, so a
+    /// skill_dir containing `link -> /outside` cannot smuggle
+    /// `<skill_dir>/link/secret` as `InSkillDir`.
     ///
-    /// Input MUST be lexically normalised (no `..` components). Callers
-    /// that don't have a pre-normalised path should call
-    /// [`Self::classify_lexical_path`] first (which rejects `..`) and
-    /// only fall through to this method when they need the canonical
-    /// containment guarantee.
+    /// Input MUST be lexically normalised (no `..` components); callers
+    /// that don't have a pre-normalised path must reject `..` before
+    /// calling this method.
     ///
-    /// Same return shape as [`Self::classify_lexical_path`]. The reported
+    /// The reported
     /// `skill_dir` / `zone` / `granted_dir` is the un-canonicalised form
     /// (matches what callers configured) so log messages and tests stay
     /// readable; the comparison itself uses canonicalised roots.
@@ -977,20 +879,6 @@ pub fn is_safe_session_id(session_id: &str) -> bool {
 ///
 /// Intentionally pure-lexical — no symlink resolution, no
 /// filesystem queries.
-fn lexical_normalise(path: &Path) -> Option<PathBuf> {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir => out.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => return None,
-            Component::Normal(part) => out.push(part),
-        }
-    }
-    Some(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1036,7 +924,6 @@ mod tests {
             vec![data.join("research"), data.join("skills")],
         )
         .expect("encoded workspace under data dir is valid");
-        assert_eq!(scope.root(), data);
         assert_eq!(scope.workspace(), workspace.as_path());
         // Tenant binding present -> the agent resolver's upload gate fires.
         assert_eq!(scope.tenant_id(), Some("dspfac"));
@@ -1070,12 +957,10 @@ mod tests {
     }
 
     #[test]
-    fn solo_collapses_workspace_to_cwd_and_no_shared_zones() {
+    fn solo_collapses_workspace_to_cwd() {
         let cwd = abs("/home/yc/my-project");
         let scope = SessionScope::solo(cwd.clone(), vec![]).unwrap();
-        assert_eq!(scope.root(), cwd);
         assert_eq!(scope.workspace(), cwd);
-        assert!(scope.shared_zones().is_empty());
     }
 
     #[test]
@@ -1086,9 +971,7 @@ mod tests {
             .unwrap()
             .with_workspace(child.clone())
             .unwrap();
-        assert_eq!(scope.root(), cwd);
         assert_eq!(scope.workspace(), child);
-        assert!(matches!(scope.mode(), ScopeMode::Solo { .. }));
     }
 
     #[cfg(unix)]
@@ -1179,7 +1062,7 @@ mod tests {
         let scope = mt_default(&data, "web-1");
         let other_session_workspace = data.join("users/web-2/workspace/secret.md");
         assert_eq!(
-            scope.classify_lexical_path(&other_session_workspace),
+            scope.classify_canonical_path(&other_session_workspace),
             PathClassification::OutOfScope
         );
     }
@@ -1199,7 +1082,7 @@ mod tests {
         let scope = mt_default(&abs("/octos/profiles/dspfac/data"), "web-1");
         let path = abs("/octos/profiles/dspfac/data/users/web-1/workspace/script.md");
         assert_eq!(
-            scope.classify_lexical_path(&path),
+            scope.classify_canonical_path(&path),
             PathClassification::InWorkspace
         );
     }
@@ -1215,7 +1098,7 @@ mod tests {
         let scope = mt_default(&data, "web-1");
         let path = data.join("episodes.redb");
         assert_eq!(
-            scope.classify_lexical_path(&path),
+            scope.classify_canonical_path(&path),
             PathClassification::OutOfScope
         );
     }
@@ -1226,7 +1109,7 @@ mod tests {
         let grant = abs("/tmp/scratch");
         let scope = SessionScope::solo(cwd, vec![grant.clone()]).unwrap();
         assert_eq!(
-            scope.classify_lexical_path(&grant.join("foo.txt")),
+            scope.classify_canonical_path(&grant.join("foo.txt")),
             PathClassification::InGrantedDir {
                 granted_dir: grant.clone()
             }
@@ -1248,34 +1131,32 @@ mod tests {
             .with_skill_read_zones(vec![skill_dir.clone()])
             .expect("absolute skill_dir is valid");
         assert_eq!(
-            scope.classify_lexical_path(&skill_dir.join("SKILL.md")),
+            scope.classify_canonical_path(&skill_dir.join("SKILL.md")),
             PathClassification::InSkillDir {
                 skill_dir: skill_dir.clone()
             }
         );
         assert_eq!(
-            scope.classify_lexical_path(&skill_dir.join("data/example.json")),
+            scope.classify_canonical_path(&skill_dir.join("data/example.json")),
             PathClassification::InSkillDir { skill_dir }
         );
     }
 
-    /// A path that resolves outside the skill_dir via `..` traversal
-    /// must classify as `OutOfScope`, never `InSkillDir`. The
-    /// lexical normaliser rejects `..` outright per the existing
-    /// contract — this pins that behaviour for skill_read_zones too.
+    /// Contract split: the `..` pre-filter lives in the caller's lexical
+    /// normaliser (`tools::lexical_normalise_strict`, which rejects
+    /// `ParentDir` outright — see `test_resolve_blocks_parent_traversal`).
+    /// The canonical classifier's own guarantee is that a normalised path
+    /// outside the skill_dir never classifies `InSkillDir`.
     #[test]
-    fn traversal_attempt_in_skill_dir_classifies_out_of_scope() {
+    fn normalised_path_outside_skill_dir_classifies_out_of_scope() {
         let workspace = abs("/octos/profiles/dspfac/data");
         let skill_dir = abs("/octos/plugins/mofa-podcast");
         let scope = mt_default(&workspace, "web-1")
             .with_skill_read_zones(vec![skill_dir.clone()])
             .unwrap();
-        // Lexical `..` is refused at the normaliser layer, regardless
-        // of whether the canonical destination would land inside the
-        // skill_dir.
-        let traversal = skill_dir.join("../../../etc/passwd");
+        let outside = abs("/octos/plugins/other-plugin/SKILL.md");
         assert_eq!(
-            scope.classify_lexical_path(&traversal),
+            scope.classify_canonical_path(&outside),
             PathClassification::OutOfScope
         );
     }
@@ -1296,7 +1177,7 @@ mod tests {
             .with_skill_read_zones(vec![nested.clone()])
             .unwrap();
         assert_eq!(
-            scope.classify_lexical_path(&nested.join("SKILL.md")),
+            scope.classify_canonical_path(&nested.join("SKILL.md")),
             PathClassification::InGrantedDir {
                 granted_dir: shared_parent
             }
@@ -1318,7 +1199,7 @@ mod tests {
             .with_skill_read_zones(vec![nested_skill.clone()])
             .unwrap();
         assert_eq!(
-            scope.classify_lexical_path(&nested_skill.join("SKILL.md")),
+            scope.classify_canonical_path(&nested_skill.join("SKILL.md")),
             PathClassification::InSkillDir {
                 skill_dir: nested_skill
             }
@@ -1332,12 +1213,11 @@ mod tests {
     fn empty_skill_read_zones_preserves_v1_classification() {
         let data = abs("/octos/profiles/dspfac/data");
         let scope = mt_default(&data, "web-1");
-        assert!(scope.skill_read_zones().is_empty());
         // Pick a path that would have been `InSkillDir` if the zone
         // had been registered.
         let outside = abs("/octos/plugins/mofa-podcast/SKILL.md");
         assert_eq!(
-            scope.classify_lexical_path(&outside),
+            scope.classify_canonical_path(&outside),
             PathClassification::OutOfScope
         );
     }
@@ -1400,18 +1280,10 @@ mod tests {
             .with_skill_read_zones(vec![canonical_skill.clone()])
             .expect("attach skill_read_zone");
 
-        // Lexical classify accepts because the lexical path is
-        // `<skill_dir>/link/secret` and `link` is a Normal component
-        // before the canonical walk happens. Pin that this is the
-        // exact regression scenario.
-        assert!(
-            matches!(
-                scope.classify_lexical_path(&candidate),
-                PathClassification::InSkillDir { .. }
-            ),
-            "lexical classify wrongly accepts symlink escape — the bug we're fixing",
-        );
-        // Canonical classify must refuse.
+        // Canonical classify must refuse: the lexical prefix
+        // `<skill_dir>/link/secret` would have been accepted before the
+        // canonicalize-then-compare fix — that contrast is the exact
+        // regression scenario this test pins.
         assert_eq!(
             scope.classify_canonical_path(&candidate),
             PathClassification::OutOfScope,

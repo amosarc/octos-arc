@@ -10,12 +10,8 @@
 //! workspace contract was satisfied, `Failed` means it was not.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use metrics::counter;
@@ -26,7 +22,6 @@ use serde_json::Value;
 use crate::harness_events::{HarnessEvent, HarnessEventPayload};
 use crate::progress::{ProgressEvent, ProgressReporter};
 
-const CURRENT_TASK_LEDGER_SCHEMA: u32 = 1;
 
 /// Cap on the number of child tasks any single parent session may register
 /// in the supervisor. Hit by the mini4/river runaway: a pipeline node spawned
@@ -97,17 +92,6 @@ pub enum RegisterTaskError {
         count: usize,
         cap: usize,
     },
-    /// #21 (round-4, codex #17 B3) — the registration's FIRST durable
-    /// task-ledger write failed, so the task row (which must already carry
-    /// the workspace stamp: the crash window between a `workspace_root=None`
-    /// insert and a later `set_workspace_root` second write is exactly the
-    /// gap this variant exists to close) was ROLLED BACK: the in-memory
-    /// insert is removed and no half-bound task exists. The caller must
-    /// treat the bind as failed (no registry binding, no task id).
-    WorkspacePersistFailed {
-        tool_call_id: String,
-        source: String,
-    },
 }
 
 impl std::fmt::Display for RegisterTaskError {
@@ -120,14 +104,6 @@ impl std::fmt::Display for RegisterTaskError {
             } => write!(
                 f,
                 "child fanout exceeded ({count} of {cap}) for parent session '{parent_session_key}'"
-            ),
-            Self::WorkspacePersistFailed {
-                tool_call_id,
-                source,
-            } => write!(
-                f,
-                "task (tool_call_id='{tool_call_id}') registration rollback: the first durable \
-                 task-ledger write (including the workspace stamp) failed: {source}"
             ),
         }
     }
@@ -149,16 +125,6 @@ pub enum TaskStatus {
     /// `Failed` so dashboards can surface "user cancelled" instead of
     /// "the task crashed".
     Cancelled,
-    /// #27c — an orphaned task parked for CLIENT REATTACHMENT. The
-    /// supervisor lost its in-process worker to a serve restart, but the
-    /// task's durable work (a staged peer's brief + worktree) is intact
-    /// and a returning client can adopt it — so it is RECOVERABLE, unlike
-    /// `Failed`. Not `is_active()` (no worker drives it here), not
-    /// `is_terminal()` (it must stay re-attachable). The boot sweep
-    /// (`refresh_from_persistence`) parks cross-restart orphans here
-    /// instead of failing them; `mark_running` (a re-attached client's
-    /// first action) revives Parked → Running.
-    Parked,
 }
 
 impl TaskStatus {
@@ -169,8 +135,6 @@ impl TaskStatus {
     /// Whether this status is a terminal (non-recoverable, non-running)
     /// state. Used by the API layer to reject `cancel`/`restart` against
     /// already-terminal tasks with a `409 Conflict` response.
-    /// `Parked` is deliberately NOT terminal: it awaits client re-attach
-    /// (#27c) and may transition back to `Running`.
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
@@ -182,7 +146,6 @@ impl TaskStatus {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
-            Self::Parked => "parked",
         }
     }
 }
@@ -270,9 +233,6 @@ pub struct BackgroundTask {
     pub child_joined_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_failure_action: Option<ChildSessionFailureAction>,
-    /// Append-only ledger path used to persist this task's snapshots.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub task_ledger_path: Option<String>,
     pub status: TaskStatus,
     pub runtime_state: TaskRuntimeState,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -390,7 +350,6 @@ impl BackgroundTask {
             // not failed (the work is recoverable). Reuse `Cancelled`'s
             // idle lifecycle slot so dashboards read it as "stopped",
             // with the `parked` status string carrying the distinction.
-            TaskStatus::Parked => TaskLifecycleState::Cancelled,
             TaskStatus::Running => match self.runtime_state {
                 TaskRuntimeState::Spawned | TaskRuntimeState::ExecutingTool => {
                     TaskLifecycleState::Running
@@ -410,52 +369,6 @@ impl BackgroundTask {
 /// Callback invoked when a task's status changes.
 type OnChangeCallback = Arc<dyn Fn(&BackgroundTask) + Send + Sync>;
 
-
-/// #2056 — callback invoked ONCE at the end of
-/// [`TaskSupervisor::enable_persistence`], with the rebuilt task table as it
-/// stands after replay, the orphan sweep and the descendant cascade — i.e.
-/// every row already in its final restored state.
-///
-/// `enable_persistence` restores terminal rows into the map by direct insert;
-/// it fires neither `on_register` nor `on_change` for them, so a consumer that
-/// mirrors task state elsewhere (the octos-cli goal ledger) has no way to
-/// notice that a transition it was owed never arrived. This observer is that
-/// way. Like [`OnRegisterCallback`] it is an `Arc` so the notify can clone it
-/// out of its mutex and invoke it with NO supervisor locks held, and it is
-/// deliberately given the whole table rather than a filtered subset — the
-/// reconciliation policy belongs to the consumer, not to octos-agent.
-type OnRestoreCallback = Arc<dyn Fn(&[BackgroundTask]) + Send + Sync>;
-
-/// #2056 round 3 — the restore observer and the "a restore happened with no
-/// observer wired" flag, deliberately under ONE mutex.
-///
-/// Round 2 held them apart (an `Option` behind one lock, an `AtomicBool`
-/// beside it) and that is a LOST WAKEUP: `notify_restore` could observe
-/// `None`, release the lock, and be descheduled; an installer would then wire
-/// its callback and find the flag still `false`, so it would not deliver; only
-/// afterwards would the first thread raise the flag. Nothing consumes it,
-/// `enable_persistence` on the same path returns at its idempotence guard, and
-/// the restore is never delivered at all — the exact hole the deferred
-/// delivery was added to close.
-///
-/// Sharing the lock makes "observe the callback, else mark pending" and
-/// "install the callback, taking any pending mark" two indivisible critical
-/// sections, so whichever runs second sees the other's effect and exactly one
-/// of them delivers.
-/// #2056 round 3 — the cfg-gated missed-restore hook (see
-/// [`TaskSupervisor::run_restore_notify_hook`]).
-#[cfg(test)]
-type RestoreNotifyHook = Arc<dyn Fn() + Send + Sync>;
-
-#[derive(Default)]
-struct RestoreObserverSlot {
-    callback: Option<OnRestoreCallback>,
-    /// A restore completed while `callback` was `None`. Taken (and cleared) by
-    /// the next install, so re-wiring an already-delivered supervisor — the
-    /// cached-supervisor idiom re-wires at every point of use — does not
-    /// re-deliver.
-    undelivered: bool,
-}
 
 /// Payload emitted when a `spawn_only` background task transitions to
 /// `Failed`. Consumers (e.g. the session actor) use this to schedule a
@@ -494,35 +407,6 @@ pub struct SpawnOnlyFailureSignal {
 /// signal payload so consumers can build a recovery prompt without re-parsing
 /// the raw `BackgroundTask`.
 type OnFailureCallback = Box<dyn Fn(&SpawnOnlyFailureSignal) + Send + Sync>;
-
-/// Terminal outcome carried by a [`TerminalEvent`]. Distinguishes the
-/// success path (→ `ChildCompleted` re-entry) from the failure path
-/// (→ recovery re-entry, prompt-selected on `synth_ack_emitted`).
-//
-// `large_enum_variant`: the `Failed` variant carries a
-// [`SpawnOnlyFailureSignal`], which holds a `serde_json::Value`
-// (`tool_input`). When any workspace crate enables serde_json's
-// `preserve_order` feature (the `octos acp` bridge's `agent-client-protocol`
-// dependency requires it, and Cargo unifies features workspace-wide),
-// `Value::Object` switches from `BTreeMap` to `IndexMap` and the struct grows
-// past the lint's threshold. Boxing the payload here would ripple through the
-// `pub` API and every match site for a terminal (cold) event; the size
-// difference is immaterial on this non-hot path, so we allow it instead.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TerminalOutcome {
-    /// Task reached `Completed`. Drives the autonomous `ChildCompleted`
-    /// progress-update re-entry.
-    Completed,
-    /// Task reached `Failed` / `Cancelled`. Drives the recovery re-entry.
-    /// The failure payload mirrors today's [`SpawnOnlyFailureSignal`] so
-    /// the consumer can render the recovery prompt without re-parsing the
-    /// raw task.
-    Failed(SpawnOnlyFailureSignal),
-}
-
-
-
 
 /// Options for `TaskSupervisor::relaunch`. Mirrors the
 /// `POST /api/tasks/{id}/restart-from-node` request body.
@@ -691,34 +575,6 @@ pub fn parse_alternatives(error_text: &str) -> Vec<String> {
         .collect()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedTaskRecord {
-    #[serde(default = "default_task_ledger_schema")]
-    schema_version: u32,
-    task: BackgroundTask,
-}
-
-// Wall-clock order remains authoritative across supervisors. On an exact
-// tie, accept only lifecycle progress supported by the live transition rules.
-fn task_snapshot_advances(candidate: &BackgroundTask, existing: &BackgroundTask) -> bool {
-    match candidate.updated_at.cmp(&existing.updated_at) {
-        std::cmp::Ordering::Greater => true,
-        std::cmp::Ordering::Less => false,
-        std::cmp::Ordering::Equal => {
-            (candidate.status.is_terminal() && !existing.status.is_terminal())
-                || (existing.status == TaskStatus::Failed
-                    && existing.failed_by_observer
-                    && (candidate.status == TaskStatus::Completed
-                        || (candidate.status == TaskStatus::Failed
-                            && !candidate.failed_by_observer)))
-        }
-    }
-}
-
-fn default_task_ledger_schema() -> u32 {
-    CURRENT_TASK_LEDGER_SCHEMA
-}
-
 fn record_child_session_lifecycle(kind: &'static str, outcome: &'static str) {
     counter!(
         "octos_child_session_lifecycle_total",
@@ -736,54 +592,14 @@ fn record_child_session_orphan(reason: &'static str) {
     .increment(1);
 }
 
-/// Returns true if the given runtime_state is a terminal state. The
-/// non-terminal complement is the set of states that, on supervisor
-/// restart, indicate an orphaned task whose owning worker is gone.
-///
-/// `Completed`, `Failed`, and `Cancelled` are terminal: the worker has
-/// already driven the task to a final state and persisted the outcome.
-/// Anything else (`Spawned`, `ExecutingTool`, `ResolvingOutputs`,
-/// `VerifyingOutputs`, `DeliveringOutputs`, `CleaningUp`) means the
-/// owning worker was mid-flight when the runtime stopped, so on restart
-/// the task is an orphan with no live actor behind it.
-fn is_terminal_runtime_state(state: &TaskRuntimeState) -> bool {
-    matches!(
-        state,
-        TaskRuntimeState::Completed | TaskRuntimeState::Failed | TaskRuntimeState::Cancelled
-    )
-}
-
 /// Process-global set of task ids whose DETACHED worker is currently live in
-/// THIS process.
+/// THIS process. Armed by [`TaskTerminalGuard`] (insert in the foreground
+/// before `tokio::spawn`, cleared on its `Drop` on every worker exit path).
 ///
-/// fix/orphan-sweep-liveness-gate — root cause: the WS turn path builds a
-/// BRAND-NEW per-turn [`TaskSupervisor`] every turn (`run_standalone_turn` →
-/// `ToolRegistry::snapshot_excluding` → `TaskSupervisor::new()`) and calls
-/// [`TaskSupervisor::enable_persistence`] every turn over the SHARED per-session
-/// ledger. The orphan-sweep inside `enable_persistence` *assumes* "non-terminal
-/// ⇒ no live worker" (true only at true cross-process startup). But a detached
-/// `spawn_only` task (e.g. a long-running background generation, up to ~3600s) outlives
-/// the turn that launched it: when turn N+1 opens, its fresh supervisor restores
-/// turn N's still-`Running` row and falsely reaps it as "orphaned across
-/// restart" — even though the worker is alive on turn N's supervisor and will
-/// `mark_completed` shortly (evidence: 23/23 tasks ever marked orphaned ended
-/// `completed`).
-///
-/// The set CHECKS that precondition instead of assuming it. It is a
-/// `static`/`OnceLock` so it survives the per-turn supervisor rebuild within one
-/// process (the different per-turn `TaskSupervisor` instances are distinct
-/// objects, so per-supervisor state cannot carry liveness across the rebuild),
-/// yet starts EMPTY after a genuine cross-process restart (new process ⇒ no
-/// entries ⇒ stale rows still reaped). No `unsafe` — the workspace is
-/// `deny(unsafe_code)`.
-///
-/// Membership is owned by the detached worker via [`TaskTerminalGuard`]:
-/// constructed (insert) in the FOREGROUND, before the `tokio::spawn`, so the
-/// id is live within the spawning turn (closing the pre-poll window where a
-/// fast next-turn sweep could reap a scheduled-but-not-yet-polled worker); the
-/// guard is then moved into the worker future and dropped (clear) on EVERY
-/// exit path — success, failure, cancel, panic-unwind, or unpolled drop — so a
-/// finished task is never kept "live" forever.
+/// Sole consumer: the per-parent child-fanout cap in `register_full`, which
+/// counts "status-active OR worker-still-running" children — status alone
+/// flips to `Cancelled` immediately while the worker keeps executing, so a
+/// spawn→cancel-all→spawn cycle would run 2× the cap without this set.
 fn live_detached_tasks() -> &'static Mutex<HashSet<String>> {
     static LIVE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     LIVE.get_or_init(|| Mutex::new(HashSet::new()))
@@ -887,15 +703,6 @@ impl std::fmt::Debug for TaskSupervisor {
             .field("on_change", &"<callback>")
             .field("on_failure", &"<callback>")
             .field("progress_reporter", &progress_reporter_attached)
-            .field(
-                "persistence_path",
-                &self
-                    .persistence_path
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_ref()
-                    .map(|path| path.display().to_string()),
-            )
             .finish()
     }
 }
@@ -933,26 +740,6 @@ pub struct TaskSupervisor {
     /// Named observers supplement (and never replace) the primary callback.
     on_change_listeners: Arc<Mutex<HashMap<String, OnChangeCallback>>>,
     on_failure: Arc<Mutex<Option<OnFailureCallback>>>,
-    /// Gap-1 unification: single terminal-transition sink. Fired from
-    /// every terminal path alongside the legacy `on_change` / `on_failure`
-    /// callbacks (strangler — both live during migration; shared dedupe
-    /// keys collapse double-delivery to one continuation).
-    /// #2055 — registration observer, fired once from `register_full`'s
-    /// single success path (covers every `register*` entry point). The
-    /// octos-cli runtime wires the goal-ledger task-row creation here.
-    /// #2056 — restore observer plus its missed-restore state, under ONE
-    /// mutex. The octos-cli runtime wires the goal-ledger reconciliation sweep
-    /// here, next to the registration observer above. See
-    /// [`RestoreObserverSlot`] for why the two fields must share a lock.
-    on_restore: Arc<Mutex<RestoreObserverSlot>>,
-    /// #2056 round 3 — test-only hook run INSIDE the slot's critical section
-    /// on the missed-restore branch, so a test can hold that section open and
-    /// prove an installer cannot slip through it. `None` in production builds,
-    /// and per-instance rather than process-global so parallel tests cannot
-    /// see each other's hook.
-    #[cfg(test)]
-    restore_notify_hook: Arc<Mutex<Option<RestoreNotifyHook>>>,
-    persistence_path: Arc<Mutex<Option<PathBuf>>>,
     /// Optional reporter that receives a [`ProgressEvent::ToolProgress`]
     /// for every supervised state transition. Wired by the agent's
     /// spawn_only branch so chat UIs can anchor progress strictly to the
@@ -990,34 +777,7 @@ pub struct TaskSupervisor {
     /// See [`AckAndPending`] for the field-level documentation that
     /// previously lived on the individual fields.
     ack_and_pending: Arc<Mutex<AckAndPending>>,
-    /// Interval between heartbeat-reaper sweeps — see
-    /// [`TaskSupervisor::start_reaper`]. Defaults to
-    /// [`DEFAULT_REAP_INTERVAL`].
-    reap_interval: Arc<Mutex<Duration>>,
-    /// Silence window after which an ACTIVE task with a LIVE worker is
-    /// considered stuck — see [`TaskSupervisor::start_reaper`]. Defaults
-    /// to [`DEFAULT_STUCK_TIMEOUT`], which matches the agent loop's
-    /// per-tool wall-clock ceiling (`DEFAULT_REGISTRY_TOOL_TIMEOUT_SECS`
-    /// = 1800s) so the reaper never fires earlier than the timeout a
-    /// legitimate tool call is allowed to consume.
-    stuck_timeout: Arc<Mutex<Duration>>,
-    /// Whether the background reaper tokio task has been spawned — makes
-    /// [`TaskSupervisor::start_reaper`] idempotent (the supervisor is
-    /// `Clone`, and every clone shares this flag).
-    reaper_started: Arc<AtomicBool>,
 }
-
-/// Default heartbeat-reaper sweep interval. One minute is far below any
-/// plausible `stuck_timeout`, so the extra lock traffic is negligible.
-pub const DEFAULT_REAP_INTERVAL: Duration = Duration::from_secs(60);
-
-/// Default silence window before a live-but-silent task is reaped. 30 min
-/// matches the agent loop's per-tool timeout (1800s): a worker that has
-/// produced NO progress signal for this long would be killed by the
-/// wall-clock backstop anyway, so the reaper only ever fires on workers
-/// that are genuinely wedged (or on progress paths that forgot to stamp
-/// `updated_at` — see the audit note on [`TaskSupervisor::start_reaper`]).
-pub const DEFAULT_STUCK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Combined state guarded by a single mutex (Codex round-2 BLOCKER):
 /// the synth-ack set, the deferred-failure stash, and the per-task
@@ -1254,16 +1014,9 @@ impl TaskSupervisor {
             on_change: Arc::new(Mutex::new(None)),
             on_change_listeners: Arc::new(Mutex::new(HashMap::new())),
             on_failure: Arc::new(Mutex::new(None)),
-            on_restore: Arc::new(Mutex::new(RestoreObserverSlot::default())),
-            #[cfg(test)]
-            restore_notify_hook: Arc::new(Mutex::new(None)),
-            persistence_path: Arc::new(Mutex::new(None)),
             progress_reporter: Arc::new(Mutex::new(None)),
             cancel_tokens: Arc::new(CancelTokenStore::default()),
             ack_and_pending: Arc::new(Mutex::new(AckAndPending::default())),
-            reap_interval: Arc::new(Mutex::new(DEFAULT_REAP_INTERVAL)),
-            stuck_timeout: Arc::new(Mutex::new(DEFAULT_STUCK_TIMEOUT)),
-            reaper_started: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1318,244 +1071,6 @@ impl TaskSupervisor {
     }
 
 
-    /// Enable append-only persistence for task snapshots and restore existing state.
-    ///
-    /// Re-enabling with the SAME ledger path is a transparent no-op: every
-    /// mutation since the first enable has been appended through the normal
-    /// transition path, so the reload/resnapshot/sweep below would add
-    /// nothing — yet the skill-action job view/invoke paths re-enable on
-    /// every request over the shared session supervisor, and each such call
-    /// used to rewrite the whole ledger (#1906). A repeat returns the live
-    /// task total, exactly what a full run would report.
-    ///
-    /// At the end of replay, sweeps the in-memory map for any task whose
-    /// `runtime_state` is non-terminal (anything other than `Completed`,
-    /// `Failed`, or `Cancelled`). Those tasks are orphans — the worker
-    /// process that owned them died across the restart, so no live actor
-    /// will ever drive them to a terminal state. They are marked
-    /// `Failed("orphaned across restart")` via the standard `mark_failed`
-    /// path so the JSONL ledger gets a proper terminal entry and re-loading
-    /// is idempotent. The `octos_orphaned_tasks_reaped_total` counter is
-    /// incremented per reaped task.
-    ///
-    /// This handles startup-time orphans only: at this point in startup no
-    /// new work has been scheduled yet, so any non-terminal runtime_state
-    /// definitionally has no live worker. In-flight orphans inside a
-    /// long-running supervisor (worker hangs / crashes silently while the
-    /// supervisor itself stays alive) are NOT addressed here — that needs
-    /// a heartbeat-based reaper, which is a follow-up if observed.
-    pub fn enable_persistence(&self, path: impl Into<PathBuf>) -> std::io::Result<usize> {
-        self.enable_persistence_with_recovery(path, |_, _| {})
-    }
-
-    /// Restore host-owned logical lifetimes before the dead-worker sweep.
-    ///
-    /// The callback runs once, after replay/persistence are installed and with
-    /// no supervisor locks held. Hosts may reinstate a proven external
-    /// lifetime's liveness lease or settle an already-closed lifetime. Ordinary
-    /// workers and unproved lifetimes still pass through the normal orphan
-    /// transition; the post-sweep restore observers retain their ordering.
-    pub fn enable_persistence_with_recovery(
-        &self,
-        path: impl Into<PathBuf>,
-        recover: impl FnOnce(&Self, &[BackgroundTask]),
-    ) -> std::io::Result<usize> {
-        let path = path.into();
-        // Idempotence guard (#1906): already persisting to THIS ledger —
-        // nothing new to restore and nothing stale to re-append.
-        {
-            let guard = self
-                .persistence_path
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if guard.as_ref() == Some(&path) {
-                return Ok(self.tasks.lock().unwrap_or_else(|e| e.into_inner()).len());
-            }
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let ledger_path = path.display().to_string();
-        let restored = Self::load_persisted_tasks(&path)?;
-        // Rows whose DISK version won the merge (or that exist only on disk).
-        // They are already persisted verbatim, so the snapshot pass below
-        // must skip them — re-appending every restored row on each enable
-        // made a fresh supervisor's read-only restore grow the ledger by
-        // its full length per call (#1906). Tasks absent from this set
-        // (in-memory work scheduled before enable, or memory state newer
-        // than the ledger) are the only ones the snapshot pass writes.
-        let mut restored_won: HashSet<String> = HashSet::new();
-        {
-            let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-            for (task_id, task) in restored {
-                match tasks.get(&task_id) {
-                    Some(existing) if !task_snapshot_advances(&task, existing) => {}
-                    _ => {
-                        restored_won.insert(task_id.clone());
-                        tasks.insert(task_id, task);
-                    }
-                }
-            }
-            for task in tasks.values_mut() {
-                if task.task_ledger_path.as_deref() != Some(ledger_path.as_str()) {
-                    task.task_ledger_path = Some(ledger_path.clone());
-                }
-            }
-        }
-
-        let mut guard = self
-            .persistence_path
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *guard = Some(path);
-        drop(guard);
-
-        let snapshots: Vec<BackgroundTask> = {
-            let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-            tasks
-                .values()
-                .filter(|task| !restored_won.contains(&task.id))
-                .cloned()
-                .collect()
-        };
-        for task in snapshots {
-            self.persist_snapshot(&task);
-        }
-
-        recover(self, &self.get_all_tasks());
-
-        // Sweep orphans: any task whose runtime_state is non-terminal at
-        // this point has no live worker behind it (we are still in startup,
-        // no new work has been scheduled yet). Mark them Failed via the
-        // standard mark_failed path so the JSONL ledger gets a proper
-        // terminal entry and re-loading is idempotent.
-        let orphans: Vec<(String, String, String)> = {
-            let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-
-            // fix/orphan-sweep-liveness-gate (codex round-2): a live detached
-            // parent registers CHILD rows that SHARE its `tool_call_id` but
-            // carry their OWN task ids — and only the PARENT worker arms a
-            // `TaskTerminalGuard`, so the children are never inserted into the
-            // live-set. Gating solely on `is_task_live(&task.id)` therefore
-            // protects the live parent yet still falsely reaps its active
-            // children. Collect the `tool_call_id` of every currently-live
-            // task so the sweep can exempt the children: while a parent worker
-            // is live it OWNS its tool_call_id family (it drives the children
-            // to terminal, or cascade-fails them on its own timeout via
-            // `mark_descendants_failed`), so none of them is an orphan. Empty
-            // tcids are skipped so an id-less row cannot blanket-exempt every
-            // other empty-tcid row.
-            tasks
-                .values()
-                // CHECK the sweep's "non-terminal ⇒ no live worker"
-                // precondition instead of assuming it. A still-live DETACHED
-                // spawn_only worker (alive on a prior per-turn supervisor in
-                // THIS process) is in the process-global live-set, so it is
-                // NEVER swept — its own worker will drive it terminal. A
-                // genuinely dead task from a true cross-process restart is
-                // absent from the live-set (new process ⇒ empty set) and is
-                // still correctly reaped below.
-                .filter(|task| {
-                    !is_terminal_runtime_state(&task.runtime_state) && !is_task_live(&task.id)
-                })
-                .map(|task| {
-                    (
-                        task.id.clone(),
-                        task.tool_call_id.clone(),
-                        task.tool_name.clone(),
-                    )
-                })
-                .collect()
-        };
-        // Cross-restart TOP-LEVEL orphans fail (the peer re-attach path this
-        // used to park for is gone). A real failure must never masquerade as
-        // recoverable.
-        for (task_id, _, _) in &orphans {
-            self.mark_failed(task_id, "orphaned across restart".to_string());
-        }
-        if !orphans.is_empty() {
-            counter!("octos_orphaned_tasks_reaped_total").increment(orphans.len() as u64);
-        }
-
-        // #2056 — hand the FINAL rebuilt table to the restore observer. Fired
-        // last, after replay + orphan sweep + cascade, so every row is in the
-        // state this boot will act on; and with no supervisor lock held (the
-        // snapshot is taken and the guard dropped first), exactly like
-        // `notify_change` / `notify_register`. Consumers mirror task state
-        // elsewhere and use this to detect transitions the previous process
-        // owed them but never delivered. A repeat `enable_persistence` on the
-        // SAME path returns at the idempotence guard above, so this cannot
-        // re-fire for an unchanged restore.
-        self.notify_restore();
-
-        Ok(self.tasks.lock().unwrap_or_else(|e| e.into_inner()).len())
-    }
-
-    /// Fire the [`OnRestoreCallback`], if one is wired, with a snapshot of the
-    /// rebuilt table. The callback is cloned out of its mutex and the task map
-    /// snapshot taken before invocation, so the observer runs with NO
-    /// supervisor lock held and may safely re-enter the supervisor.
-    ///
-    /// Round 2 (#2056) — with NO observer wired the restore is recorded as
-    /// undelivered rather than dropped, so a later [`Self::set_on_restore`]
-    /// still receives it. See that method for why the alternative (waiting for
-    /// the next restore) never happens on a shared supervisor.
-    fn notify_restore(&self) {
-        // ONE critical section decides between "deliver now" and "remember
-        // that nobody could" — see [`RestoreObserverSlot`]. The guard is
-        // dropped before the snapshot and the invocation, so the observer
-        // still runs with no supervisor lock held.
-        let callback = {
-            let mut slot = self.on_restore.lock().unwrap_or_else(|e| e.into_inner());
-            match slot.callback.clone() {
-                Some(callback) => callback,
-                None => {
-                    slot.undelivered = true;
-                    #[cfg(test)]
-                    self.run_restore_notify_hook();
-                    return;
-                }
-            }
-        };
-        let snapshot: Vec<BackgroundTask> = {
-            let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-            tasks.values().cloned().collect()
-        };
-        callback(&snapshot);
-    }
-
-    /// Run the cfg-gated missed-restore hook, if a test installed one. Called
-    /// while the slot lock is HELD, which is the whole point: it lets a test
-    /// pin that an installer cannot complete inside that section.
-    #[cfg(test)]
-    fn run_restore_notify_hook(&self) {
-        let hook = self
-            .restore_notify_hook
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if let Some(hook) = hook {
-            hook();
-        }
-    }
-
-    /// #2056 round 3 — THE install path for the restore observer, shared by
-    /// [`Self::set_on_restore`] and observer inheritance so neither can bypass
-    /// the missed-restore handshake. Installing and taking the pending mark
-    /// happen in ONE critical section; the delivery runs after the guard is
-    /// dropped.
-    fn install_on_restore(&self, callback: OnRestoreCallback) {
-        let deliver_missed = {
-            let mut slot = self.on_restore.lock().unwrap_or_else(|e| e.into_inner());
-            slot.callback = Some(callback);
-            std::mem::replace(&mut slot.undelivered, false)
-        };
-        if deliver_missed {
-            self.notify_restore();
-        }
-    }
-
     /// Set a callback that fires whenever a task's status changes.
     pub fn set_on_change(&self, cb: impl Fn(&BackgroundTask) + Send + Sync + 'static) {
         let mut guard = self.on_change.lock().unwrap_or_else(|e| e.into_inner());
@@ -1594,23 +1109,6 @@ impl TaskSupervisor {
     /// are kept. Both copies are `Arc` clones — cheap, and later re-wiring
     /// on either side does not affect the other.
     pub fn inherit_registration_observers(&self, parent: &TaskSupervisor) {
-        // #2056 — the restore observer travels with the registration
-        // observer: a child supervisor that enables persistence over its own
-        // ledger must reconcile its own rows too. Round 3 — through
-        // `install_on_restore`, NOT a direct assignment: production children
-        // inherit before enabling and so have nothing pending, but a LATE
-        // inheritance (onto a supervisor that already restored) must consume
-        // the missed restore exactly like `set_on_restore` does. A direct
-        // write would silently drop it.
-        let parent_restore = parent
-            .on_restore
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .callback
-            .clone();
-        if let Some(callback) = parent_restore {
-            self.install_on_restore(callback);
-        }
         let parent_listeners: Vec<(String, OnChangeCallback)> = parent
             .on_change_listeners
             .lock()
@@ -1691,7 +1189,6 @@ impl TaskSupervisor {
         let token = self.cancel_tokens.ensure(task_id);
         token.cancel();
 
-        self.persist_snapshot(&snapshot);
         self.notify_change(&snapshot);
         self.emit_progress_for_state(&snapshot);
         // Codex round-4 BLOCKER (PR #1324 follow-up): if a cancelled
@@ -1793,7 +1290,7 @@ impl TaskSupervisor {
         tool_call_id: &str,
         session_key: Option<&str>,
     ) -> String {
-        self.register_with_lineage(tool_name, tool_call_id, session_key, None)
+        self.register_with_lineage(tool_name, tool_call_id, session_key)
     }
 
     /// Register a new background task with optional ledger-path lineage.
@@ -1804,16 +1301,8 @@ impl TaskSupervisor {
         tool_name: &str,
         tool_call_id: &str,
         session_key: Option<&str>,
-        task_ledger_path: Option<&str>,
     ) -> String {
-        match self.register_full(
-            tool_name,
-            tool_call_id,
-            session_key,
-            task_ledger_path,
-            None,
-            None,
-        ) {
+        match self.register_full(tool_name, tool_call_id, session_key, None, None) {
             Ok(id) => id,
             Err(error) => {
                 tracing::error!(
@@ -1840,7 +1329,7 @@ impl TaskSupervisor {
         session_key: Option<&str>,
         tool_input: Option<Value>,
     ) -> String {
-        match self.register_full(tool_name, tool_call_id, session_key, None, tool_input, None) {
+        match self.register_full(tool_name, tool_call_id, session_key, tool_input, None) {
             Ok(id) => id,
             Err(error) => {
                 tracing::error!(
@@ -1868,14 +1357,7 @@ impl TaskSupervisor {
         tool_input: Option<Value>,
         originating_client_message_id: Option<String>,
     ) -> String {
-        match self.register_full(
-            tool_name,
-            tool_call_id,
-            session_key,
-            None,
-            tool_input,
-            originating_client_message_id,
-        ) {
+        match self.register_full(tool_name, tool_call_id, session_key, tool_input, originating_client_message_id) {
             Ok(id) => id,
             Err(error) => {
                 tracing::error!(
@@ -1890,55 +1372,6 @@ impl TaskSupervisor {
         }
     }
 
-    /// NEW-18b — return the [`TaskStatus`] of the parent task identified
-    /// by `parent_tool_call_id`, with the relaunch-safe selection rule:
-    /// prefer an **active** record if one exists, otherwise
-    /// fall back to the most-recently-updated terminal record.
-    ///
-    /// Filtering rules:
-    /// * When `relaunch` re-registers a new parent task with the same
-    ///   `tool_call_id` as a failed predecessor, the new record is
-    ///   active and the old one is terminal. Preferring the active
-    ///   record avoids rejecting node registrations for the live
-    ///   relaunch just because the stale failed record has a more
-    ///   recent (idempotent) update.
-    ///
-    /// Returns `None` when no parent record matches.
-    pub fn parent_status_for_tool_call_id(&self, parent_tool_call_id: &str) -> Option<TaskStatus> {
-        if parent_tool_call_id.is_empty() {
-            return None;
-        }
-        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        Self::pick_parent_status(&tasks, parent_tool_call_id)
-    }
-
-    /// Shared helper that applies the parent-selection rule documented
-    /// on [`Self::parent_status_for_tool_call_id`]. Caller holds the
-    /// `tasks` lock; this is the inside-lock implementation reused by
-    /// the atomic registration guard in [`Self::register_full`].
-    fn pick_parent_status(
-        tasks: &HashMap<String, BackgroundTask>,
-        parent_tool_call_id: &str,
-    ) -> Option<TaskStatus> {
-        // Codex P2: prefer an active record (live parent) over a stale
-        // terminal record sharing the same tool_call_id.
-        // This makes the lookup relaunch-safe — `TaskSupervisor::relaunch`
-        // re-registers the new parent with the original tool_call_id,
-        // so the active record is the true current parent.
-        if let Some(active) = tasks
-            .values()
-            .filter(|task| task.tool_call_id == parent_tool_call_id && task.status.is_active())
-            .max_by_key(|task| task.updated_at)
-        {
-            return Some(active.status.clone());
-        }
-        tasks
-            .values()
-            .filter(|task| task.tool_call_id == parent_tool_call_id)
-            .max_by_key(|task| task.updated_at)
-            .map(|task| task.status.clone())
-    }
-
     /// Strict variant of [`Self::register_with_input`]: returns the typed
     /// [`RegisterTaskError`] on cap rejection so callers can surface a
     /// structured tool failure instead of swallowing the empty-string
@@ -1950,7 +1383,7 @@ impl TaskSupervisor {
         session_key: Option<&str>,
         tool_input: Option<Value>,
     ) -> Result<String, RegisterTaskError> {
-        self.register_full(tool_name, tool_call_id, session_key, None, tool_input, None)
+        self.register_full(tool_name, tool_call_id, session_key, tool_input, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1959,33 +1392,8 @@ impl TaskSupervisor {
         tool_name: &str,
         tool_call_id: &str,
         session_key: Option<&str>,
-        task_ledger_path: Option<&str>,
         tool_input: Option<Value>,
         originating_client_message_id: Option<String>,
-    ) -> Result<String, RegisterTaskError> {
-        self.register_full_with_workspace(
-            tool_name,
-            tool_call_id,
-            session_key,
-            task_ledger_path,
-            tool_input,
-            originating_client_message_id,
-            None,
-            false,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn register_full_with_workspace(
-        &self,
-        tool_name: &str,
-        tool_call_id: &str,
-        session_key: Option<&str>,
-        task_ledger_path: Option<&str>,
-        tool_input: Option<Value>,
-        originating_client_message_id: Option<String>,
-        workspace_scope: Option<&str>,
-        require_persistence: bool,
     ) -> Result<String, RegisterTaskError> {
         // Per-parent fan-out cap. Detached registrations (`session_key ==
         // None`) skip the gate because they do not have a parent to
@@ -2122,13 +1530,6 @@ impl TaskSupervisor {
             child_join_state: None,
             child_joined_at: None,
             child_failure_action: None,
-            task_ledger_path: task_ledger_path.map(|path| path.to_string()).or_else(|| {
-                self.persistence_path
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-            }),
             status: TaskStatus::Spawned,
             runtime_state: TaskRuntimeState::Spawned,
             runtime_detail: None,
@@ -2154,34 +1555,13 @@ impl TaskSupervisor {
             artifact_count: None,
             runtime_policy_stamp: None,
             projection_metadata: None,
-            workspace_root: workspace_scope
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned),
+            workspace_root: None,
         };
-        // Read configuration before locking the task table: enable_persistence
-        // may consult the task table while holding the configuration lock.
-        let persistence_path = self
-            .persistence_path
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        // Publish the task only after its first, already-stamped row has
-        // been accepted. Holding the task lock also prevents readers from
-        // observing an uncommitted registration.
-        if require_persistence {
-            Self::persist_snapshot_strict(persistence_path.as_ref(), &task).map_err(|error| {
-                RegisterTaskError::WorkspacePersistFailed {
-                    tool_call_id: tool_call_id.to_string(),
-                    source: error.to_string(),
-                }
-            })?;
-        }
+        // Publish the task only after its full initialization while holding
+        // the task lock, so readers never observe an uncommitted registration.
         tasks.insert(id.clone(), task);
         drop(tasks);
-        if !require_persistence {
-            self.persist_snapshot_by_id(&id);
-        }
         record_child_session_lifecycle(
             "tracked",
             if session_key.is_some() {
@@ -2254,7 +1634,6 @@ impl TaskSupervisor {
             task.updated_at = Utc::now();
             task.clone()
         };
-        self.persist_snapshot(&snapshot);
         self.notify_change(&snapshot);
         self.emit_progress_for_state(&snapshot);
     }
@@ -2283,7 +1662,6 @@ impl TaskSupervisor {
             task.updated_at = Utc::now();
             task.clone()
         };
-        self.persist_snapshot(&snapshot);
         self.notify_change(&snapshot);
         self.emit_progress_for_state(&snapshot);
     }
@@ -2329,7 +1707,6 @@ impl TaskSupervisor {
             }
         };
         if let Some(ref task) = snapshot {
-            self.persist_snapshot(task);
             self.notify_change(task);
             self.emit_progress_for_state(task);
         }
@@ -2371,7 +1748,6 @@ impl TaskSupervisor {
             }
         };
         if let Some(ref task) = snapshot {
-            self.persist_snapshot(task);
             self.notify_change(task);
             self.emit_progress_for_state(task);
             let (previous_kind, previous_phase) = workflow_labels(previous_detail.as_deref());
@@ -2470,7 +1846,6 @@ impl TaskSupervisor {
             }
         };
         if let Some(ref task) = snapshot {
-            self.persist_snapshot(task);
             self.notify_change(task);
             self.emit_progress_for_state(task);
             // Codex round-4 BLOCKER (PR #1324 follow-up): drain any
@@ -2516,7 +1891,6 @@ impl TaskSupervisor {
             }
         };
         if let Some(ref task) = snapshot {
-            self.persist_snapshot(task);
             // #1723: `record_final_output` runs AFTER `mark_completed` (the
             // content isn't assembled until the child's turn ends), so the
             // terminal `on_change` → `upsert_background_task_agent` mirror that
@@ -2560,45 +1934,6 @@ impl TaskSupervisor {
         self.mark_failed_inner(task_id, error, true)
     }
 
-    /// #27c — park a task as awaiting CLIENT REATTACHMENT. The boot sweep
-    /// uses this for cross-restart orphans instead of `mark_failed`: the
-    /// worker is gone (serve restarted), but the task's durable work (a
-    /// staged peer's brief + worktree) is intact and a returning client
-    /// can adopt it — `mark_running` revives Parked → Running. A terminal
-    /// task (already Completed/Failed/Cancelled) is left untouched.
-    pub fn mark_parked(&self, task_id: &str, reason: String) {
-        let snapshot = {
-            let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(task) = tasks.get_mut(task_id) {
-                if task.status.is_terminal() {
-                    tracing::debug!(
-                        task_id = %task_id,
-                        current_status = task.status.as_str(),
-                        "ignoring mark_parked on terminal task"
-                    );
-                    return;
-                }
-                task.status = TaskStatus::Parked;
-                task.runtime_state = TaskRuntimeState::Failed;
-                // Mirror mark_failed's field placement so operators and the
-                // restored-persistence views find the park reason in `error`
-                // (the stable, greppable slot) — `runtime_detail` keeps the
-                // richer context copy.
-                task.error = Some(reason.clone());
-                task.runtime_detail = Some(reason);
-                task.updated_at = Utc::now();
-                Some(task.clone())
-            } else {
-                tracing::warn!(task_id = %task_id, "mark_parked: unknown task");
-                return;
-            }
-        };
-        if let Some(snapshot) = snapshot {
-            self.persist_snapshot_by_id(&snapshot.id);
-            self.notify_change(&snapshot);
-        }
-    }
-
     fn mark_failed_inner(&self, task_id: &str, error: String, observed: bool) {
         let (snapshot, was_already_failed) = {
             let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
@@ -2639,7 +1974,6 @@ impl TaskSupervisor {
             }
         };
         if let Some(ref task) = snapshot {
-            self.persist_snapshot(task);
             self.notify_change(task);
             if !was_already_failed {
                 self.emit_progress_for_state(task);
@@ -2856,7 +2190,6 @@ impl TaskSupervisor {
             }
         };
         if let Some(ref task) = snapshot {
-            self.persist_snapshot(task);
             self.notify_change(task);
             record_child_session_lifecycle(kind_label, outcome_label);
             if matches!(join_state, ChildSessionJoinState::Orphaned) {
@@ -2951,199 +2284,10 @@ impl TaskSupervisor {
         Ok(())
     }
 
-    fn persist_snapshot_by_id(&self, task_id: &str) {
-        let snapshot = {
-            let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-            tasks.get(task_id).cloned()
-        };
-        if let Some(task) = snapshot {
-            self.persist_snapshot(&task);
-        }
-    }
-
-    /// #21 (round-4, codex #17 B3) — CHECKED variant of
-    /// [`Self::persist_snapshot`]: returns the write error instead of
-    /// warning it away, so the strict registration entry point can roll the
-    /// in-memory insert back and surface the failure. `Ok(())` when no
-    /// persistence path is configured (in-memory supervision contract).
-    fn persist_snapshot_strict(
-        path: Option<&PathBuf>,
-        task: &BackgroundTask,
-    ) -> std::io::Result<()> {
-        let Some(path) = path else {
-            return Ok(());
-        };
-        let record = PersistedTaskRecord {
-            schema_version: CURRENT_TASK_LEDGER_SCHEMA,
-            task: task.clone(),
-        };
-        let json = serde_json::to_string(&record)
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        Self::append_persisted_task(path, &json)
-    }
-
-    fn persist_snapshot(&self, task: &BackgroundTask) {
-        let Some(path) = self
-            .persistence_path
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        else {
-            return;
-        };
-
-        let record = PersistedTaskRecord {
-            schema_version: CURRENT_TASK_LEDGER_SCHEMA,
-            task: task.clone(),
-        };
-        let Ok(json) = serde_json::to_string(&record) else {
-            return;
-        };
-
-        if let Err(error) = Self::append_persisted_task(&path, &json) {
-            tracing::warn!(
-                task_id = %task.id,
-                path = %path.display(),
-                error = %error,
-                "failed to persist background task snapshot"
-            );
-        }
-    }
-
     /// Return a snapshot for a specific task id.
     pub fn get_task(&self, task_id: &str) -> Option<BackgroundTask> {
         let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         tasks.get(task_id).cloned()
-    }
-
-    /// Return the persistence path for task snapshots, if enabled.
-    pub fn persistence_path(&self) -> Option<PathBuf> {
-        self.persistence_path
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
-    fn append_persisted_task(path: &PathBuf, json: &str) -> std::io::Result<()> {
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        writeln!(file, "{json}")?;
-        Ok(())
-    }
-
-    fn load_persisted_tasks(path: &PathBuf) -> std::io::Result<HashMap<String, BackgroundTask>> {
-        let file = match std::fs::File::open(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(HashMap::new());
-            }
-            Err(error) => return Err(error),
-        };
-
-        let mut restored: HashMap<String, BackgroundTask> = HashMap::new();
-        for line in BufReader::new(file).lines() {
-            let Ok(line) = line else {
-                continue;
-            };
-            if line.trim().is_empty() {
-                continue;
-            }
-            let Ok(record) = serde_json::from_str::<PersistedTaskRecord>(&line) else {
-                continue;
-            };
-            if record.schema_version > CURRENT_TASK_LEDGER_SCHEMA {
-                continue;
-            }
-            // Keep the freshest snapshot per id by `updated_at`, not blindly
-            // the last JSONL row: SUP1 and a later per-turn supervisor both
-            // append to the SAME per-session ledger, so rows can interleave
-            // such that an older snapshot lands after a newer one. (codex P2.)
-            match restored.get(&record.task.id) {
-                Some(existing) if !task_snapshot_advances(&record.task, existing) => {}
-                _ => {
-                    restored.insert(record.task.id.clone(), record.task);
-                }
-            }
-        }
-        Ok(restored)
-    }
-
-    /// Re-read the persistence ledger and merge any snapshot newer (by
-    /// `updated_at`, with lifecycle progress breaking exact ties) than the
-    /// in-memory copy into `self.tasks`. Unlike
-    /// [`Self::enable_persistence`] this does NOT run the orphan sweep, persist
-    /// snapshots, or fire callbacks — it only freshens stale in-memory rows.
-    ///
-    /// Per-turn supervisors share a per-session ledger: a later turn's
-    /// supervisor restores a copy of an earlier turn's still-running task but
-    /// never receives that task's later status updates (those go to the owning
-    /// supervisor). Calling this before projecting/acting on tasks lets the
-    /// later supervisor pick up the owner's terminal write, so a finished
-    /// cross-turn task can't surface as `running` or accept a stale cancel.
-    /// Returns the number of rows refreshed; `Ok(0)` if persistence is off.
-    pub fn refresh_from_persistence(&self) -> std::io::Result<usize> {
-        let path = {
-            let guard = self
-                .persistence_path
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            match guard.as_ref() {
-                Some(path) => path.clone(),
-                None => return Ok(0),
-            }
-        };
-        let restored = Self::load_persisted_tasks(&path)?;
-        let mut refreshed = 0;
-        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        for (task_id, task) in restored {
-            // Only freshen tasks THIS supervisor already owns — never import a
-            // row absent here. Importing would let an older supervisor
-            // accumulate copies of a later supervisor's tasks, and
-            // `cancel_task`/`relaunch_task` (oldest-first) would then fire the
-            // wrong supervisor's token while the real worker runs on (codex P1).
-            if let Some(existing) = tasks.get(&task_id) {
-                if task_snapshot_advances(&task, existing) {
-                    tasks.insert(task_id, task);
-                    refreshed += 1;
-                }
-            }
-        }
-        Ok(refreshed)
-    }
-
-    /// Like [`Self::refresh_from_persistence`] but only for `task_id`. Returns
-    /// the freshened task (newer of ledger vs in-memory), or `None` if absent
-    /// in both. Used before cancel/relaunch act on a task so a stale in-memory
-    /// `Running` copy in a later supervisor can't accept a doomed cancel.
-    pub fn refresh_task_from_persistence(
-        &self,
-        task_id: &str,
-    ) -> std::io::Result<Option<BackgroundTask>> {
-        let path = {
-            let guard = self
-                .persistence_path
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            guard.as_ref().cloned()
-        };
-        if let Some(path) = path {
-            let restored = Self::load_persisted_tasks(&path)?;
-            if let Some(task) = restored.get(task_id) {
-                let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-                // Update only if this supervisor already owns the task — never
-                // import an absent row (codex P1; see `refresh_from_persistence`).
-                if let Some(existing) = tasks.get(task_id) {
-                    if task_snapshot_advances(task, existing) {
-                        tasks.insert(task_id.to_string(), task.clone());
-                    }
-                }
-            }
-        }
-        Ok(self
-            .tasks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(task_id)
-            .cloned())
     }
 
     /// Fire the primary callback and every named observer. Clone callbacks
@@ -3198,154 +2342,6 @@ impl TaskSupervisor {
             .collect()
     }
 
-    /// Number of active (non-completed, non-failed) tasks.
-    pub fn task_count(&self) -> usize {
-        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        tasks.values().filter(|t| t.status.is_active()).count()
-    }
-
-    /// Start the heartbeat-based in-flight orphan reaper (issue #1920).
-    ///
-    /// The startup sweep in [`Self::enable_persistence`] only covers
-    /// orphans left behind by a process RESTART: at that point no work
-    /// has been scheduled, so a non-terminal row definitionally has no
-    /// live worker. A long-running supervisor has a second orphan shape:
-    /// the worker future is still ALIVE (so [`is_task_live`] is true and
-    /// neither the sweep nor [`TaskTerminalGuard`]'s `Drop` will ever
-    /// fire) but permanently STUCK — blocked on a resource that never
-    /// resolves, spinning without producing progress, etc. Such a task
-    /// shows `running` forever, never releases its slot, and is
-    /// indistinguishable from healthy slow work.
-    ///
-    /// This spawns a tokio task that every [`Self::reap_interval`]
-    /// collects candidates and reaps any ACTIVE task that:
-    ///
-    /// 1. has a LIVE worker in this process ([`is_task_live`]) — a
-    ///    non-live active task is the dropped-worker case
-    ///    [`TaskTerminalGuard`]'s `Drop` already handles, so reaping it
-    ///    here would double-fire failure callbacks; and
-    /// 2. has produced NO progress signal for longer than
-    ///    [`Self::stuck_timeout`], measured via `updated_at`.
-    ///
-    /// `updated_at` is the heartbeat: it is stamped by every progress
-    /// path a healthy worker drives — `mark_running` (worker start),
-    /// `mark_runtime_state` (harness/runtime progress events), the
-    /// projection-field updater, `mark_completed` / `mark_failed` /
-    /// `cancel` (terminal transitions), `record_final_output`, and
-    /// `mark_child_session_outcome`. A long-but-progressing task (e.g. a
-    /// `bg_research` pipeline streaming phase events) therefore keeps
-    /// its heartbeat fresh and is NEVER reaped; only genuinely silent
-    /// workers are. The default 30-min timeout additionally matches the
-    /// agent loop's per-tool wall-clock backstop (1800s), so the reaper
-    /// cannot fire earlier than the timeout a legitimate tool call is
-    /// allowed to consume.
-    ///
-    /// Reaping transitions the task through the standard `mark_failed`
-    /// path (terminal ledger entry, persistence, callbacks — idempotent
-    /// if a racing worker already finished) and then flips the task's
-    /// cancel token so a COOPERATIVE stuck worker wakes at its next safe
-    /// point and unwinds (which drops its guard and clears the live-set
-    /// entry). A truly wedged worker stays in the live-set, so the
-    /// reaper would re-log on subsequent sweeps were it not for the
-    /// terminal check — the task is already `Failed` and skipped.
-    ///
-    /// Idempotent: only the first call spawns the loop; later calls are
-    /// no-ops (the flag is shared across `Clone`s). The loop holds only
-    /// a weak liveness story — it keeps running as long as the process
-    /// does; dropping the supervisor's last clone does not stop the
-    /// spawned task until the runtime shuts down (acceptable: the
-    /// production supervisor lives for the process lifetime).
-    pub fn start_reaper(self: &Arc<Self>) {
-        if self.reaper_started.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let supervisor = Arc::clone(self);
-        tokio::spawn(async move {
-            loop {
-                let interval = *supervisor
-                    .reap_interval
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                tokio::time::sleep(interval).await;
-                let timeout = *supervisor
-                    .stuck_timeout
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                supervisor.reap_stuck_tasks(Utc::now(), timeout);
-            }
-        });
-    }
-
-    /// One reaper sweep, factored out of [`Self::start_reaper`]'s tokio
-    /// loop so unit tests can drive it synchronously (no sleeping).
-    /// `now` is the reference instant and `stuck_timeout` the silence
-    /// window; both are parameters so tests control the clock.
-    ///
-    /// Returns the ids of reaped tasks. See [`Self::start_reaper`] for
-    /// the full reaping contract.
-    pub fn reap_stuck_tasks(&self, now: DateTime<Utc>, stuck_timeout: Duration) -> Vec<String> {
-        let candidates: Vec<String> = {
-            let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-            tasks
-                .values()
-                .filter(|task| {
-                    // Terminal rows are already resolved — never touch.
-                    if !task.status.is_active() {
-                        return false;
-                    }
-                    // A NON-live active task is the dropped-worker case:
-                    // its TaskTerminalGuard::drop fires mark_failed
-                    // ("worker dropped before reaching terminal state")
-                    // on every exit path, so reaping here would
-                    // double-fire failure callbacks / ledger entries.
-                    // The startup sweep owns cross-process orphans.
-                    if !is_task_live(&task.id) {
-                        return false;
-                    }
-                    // The heartbeat gate: `now - updated_at > timeout`.
-                    // `signed_duration_since` (not `signed_duration_from`)
-                    // handles a clock-skewed FUTURE updated_at by yielding
-                    // a negative age, which never exceeds the timeout.
-                    now.signed_duration_since(task.updated_at)
-                        .to_std()
-                        .map(|age| age > stuck_timeout)
-                        .unwrap_or(false)
-                })
-                .map(|task| task.id.clone())
-                .collect()
-        };
-
-        let mut reaped = Vec::new();
-        for task_id in candidates {
-            // mark_failed re-checks the terminal guard internally, so a
-            // worker that transitioned between candidate collection and
-            // this call is a no-op (idempotent terminal path).
-            self.mark_failed(
-                &task_id,
-                format!("orphaned: no progress for {stuck_timeout:?} (heartbeat timeout)"),
-            );
-            // Flip the cancel token AFTER the terminal transition — a
-            // cooperative stuck worker wakes at its next safe point,
-            // re-reads the supervisor, sees the terminal state, and
-            // unwinds (dropping its guard, which clears the live-set).
-            // `ensure` mirrors `cancel()`'s ordering: allocate the token
-            // even if the worker never polled one so a late
-            // `cancel_token()` call still observes the cancelled state.
-            self.cancel_tokens.ensure(&task_id).cancel();
-            counter!(
-                "octos_orphaned_tasks_reaped_total",
-                "reason" => "heartbeat_timeout"
-            )
-            .increment(1);
-            tracing::warn!(
-                task_id = %task_id,
-                stuck_timeout = ?stuck_timeout,
-                "reaped stuck background task (heartbeat timeout)"
-            );
-            reaped.push(task_id);
-        }
-        reaped
-    }
 }
 
 /// RAII guard that drives a background task to a terminal state if its

@@ -74,23 +74,6 @@ pub fn temp_upload_root() -> PathBuf {
     std::env::temp_dir().join("octos-uploads")
 }
 
-pub fn encode_profile_file_handle(base_dir: &Path, path: &Path) -> Option<String> {
-    let relative = path
-        .strip_prefix(base_dir)
-        .ok()
-        .map(Path::to_path_buf)
-        .or_else(|| {
-            let canonical_base = std::fs::canonicalize(base_dir).ok()?;
-            let canonical_path = std::fs::canonicalize(path).ok()?;
-            canonical_path
-                .strip_prefix(&canonical_base)
-                .ok()
-                .map(Path::to_path_buf)
-        })?;
-    let display_name = path.file_name()?.to_str()?;
-    encode_scoped_handle(PROFILE_HANDLE_PREFIX, &relative, display_name)
-}
-
 pub fn encode_tmp_upload_handle(path: &Path, display_name: Option<&str>) -> Option<String> {
     let upload_root = temp_upload_root();
     let relative = path.strip_prefix(&upload_root).ok()?;
@@ -99,17 +82,6 @@ pub fn encode_tmp_upload_handle(path: &Path, display_name: Option<&str>) -> Opti
         .filter(|value| !value.is_empty())
         .unwrap_or("file");
     encode_scoped_handle(UPLOAD_HANDLE_PREFIX, relative, display_name)
-}
-
-pub fn encode_workspace_file_handle(workspace_root: &Path, path: &Path) -> Option<String> {
-    let canonical_root = std::fs::canonicalize(workspace_root).ok()?;
-    let canonical_path = std::fs::canonicalize(path).ok()?;
-    if !canonical_path.is_file() {
-        return None;
-    }
-    let relative = canonical_path.strip_prefix(canonical_root).ok()?;
-    let display_name = canonical_path.file_name()?.to_str()?;
-    encode_scoped_handle(WORKSPACE_HANDLE_PREFIX, relative, display_name)
 }
 
 pub fn decode_file_handle(handle: &str) -> Option<FileHandleScope> {
@@ -132,31 +104,6 @@ pub fn decode_file_handle(handle: &str) -> Option<FileHandleScope> {
         WORKSPACE_HANDLE_PREFIX => Some(FileHandleScope::WorkspaceRelative(relative)),
         _ => None,
     }
-}
-
-pub fn resolve_workspace_file_handle(workspace_root: &Path, handle: &str) -> Option<PathBuf> {
-    let FileHandleScope::WorkspaceRelative(relative) = decode_file_handle(handle)? else {
-        return None;
-    };
-    canonicalize_under(workspace_root, &relative)
-}
-
-pub fn resolve_legacy_file_request(base_dir: &Path, raw: &str) -> Option<PathBuf> {
-    let candidate = Path::new(raw);
-    if candidate.is_absolute() {
-        let canonical = std::fs::canonicalize(candidate).ok()?;
-        let profile_root = canonical_root(base_dir);
-        let upload_root = canonical_root(&temp_upload_root());
-        if canonical.is_file()
-            && (canonical.starts_with(&profile_root) || canonical.starts_with(&upload_root))
-        {
-            return Some(canonical);
-        }
-        return None;
-    }
-
-    let relative = safe_relative_path(raw)?;
-    canonicalize_under(&temp_upload_root(), &relative)
 }
 
 pub fn resolve_upload_reference(raw: &str) -> Option<PathBuf> {
@@ -520,25 +467,6 @@ pub fn materialize_turn_uploads(
     )
 }
 
-/// Materialize upload references into `<workspace>/uploads/`.
-///
-/// Unlike turn media, this mode is for consumers that explicitly require
-/// workspace-relative file paths. That means images must be copied too: the
-/// vision encoder's absolute tmpdir path is useful for chat media, but tools
-/// that validate workspace paths reject absolute upload-tmpdir paths.
-pub fn materialize_uploads_as_workspace_relative(
-    workspace_root: &Path,
-    tenant_id: Option<&str>,
-    media: &[String],
-) -> Vec<String> {
-    materialize_uploads(
-        workspace_root,
-        tenant_id,
-        media,
-        ImageMaterializeMode::WorkspaceFile,
-    )
-}
-
 fn materialize_uploads(
     workspace_root: &Path,
     tenant_id: Option<&str>,
@@ -566,8 +494,6 @@ fn materialize_uploads(
 enum ImageMaterializeMode {
     /// Keep images on an absolute upload-tmpdir path for the vision encoder.
     VisionPath,
-    /// Copy images into `<workspace>/uploads/` like every other action input.
-    WorkspaceFile,
 }
 
 enum MaterializeOutcome {
@@ -578,34 +504,6 @@ enum MaterializeOutcome {
     Passthrough,
     /// A staged upload owned by ANOTHER tenant — remove it from the media set.
     DropForeign,
-}
-
-/// Copy one upload reference into `uploads_dir`. See [`MaterializeOutcome`].
-/// Whether a RESOLVED upload-tmpdir path is owned by `tenant_id`.
-///
-/// Uploads are stored as `octos-uploads/<tenant>/<uuid>_<name>`, so the FIRST
-/// path component of the resolved file (relative to the canonical upload root)
-/// is the owning tenant. This is the single tenant-ownership predicate shared by
-/// every upload-into-workspace path so the isolation rule cannot drift between
-/// them (the serve `materialize_one` and the gateway/actor
-/// `copy_media_to_workspace`):
-///
-/// - `tenant_id == Some(t)` → owned only if the resolved file's first component
-///   under the upload root equals `t`. A file owned by ANOTHER tenant — by `up/`
-///   handle, a raw absolute/relative tmpdir path, OR an image path — is NOT
-///   owned. A flat legacy file (no tenant component) is NOT owned either.
-/// - `tenant_id == None` (solo / CLI `octos chat`, single-tenant) → always owned.
-///
-/// Callers pass a path that is ALREADY resolved (e.g. via
-/// [`resolve_upload_reference`]); a path outside the upload root yields `false`
-/// for a multi-tenant caller, so non-upload paths must be screened separately.
-/// Whether a RESOLVED path lives under the process-global upload tmpdir
-/// root (`octos-uploads`). Callers use this to decide whether the tenant
-/// ownership rule ([`upload_owned_by_tenant`]) even applies: a workspace or
-/// profile file is NOT under the upload root and must not be subjected to
-/// the upload-ownership check (it would be falsely denied).
-pub fn is_under_upload_root(resolved: &Path) -> bool {
-    resolved.starts_with(canonical_root(&temp_upload_root()))
 }
 
 pub fn upload_owned_by_tenant(resolved: &Path, tenant_id: Option<&str>) -> bool {
@@ -797,21 +695,6 @@ mod tests {
     }
 
     #[test]
-    fn is_under_upload_root_distinguishes_upload_from_other_paths() {
-        let root = canonical_root(&temp_upload_root());
-        // Upload-root paths (any tenant / flat) are "under" the root — the
-        // download gate then applies the ownership check to these.
-        assert!(is_under_upload_root(&root.join("dspfac/uuid_doc.md")));
-        assert!(is_under_upload_root(&root.join("flat.md")));
-        // Workspace / profile / external paths are NOT under the upload root,
-        // so the download gate leaves them alone (no false denial).
-        assert!(!is_under_upload_root(std::path::Path::new(
-            "/some/profile/data/users/web-1/workspace/out.pptx"
-        )));
-        assert!(!is_under_upload_root(std::path::Path::new("/etc/passwd")));
-    }
-
-    #[test]
     fn upload_owned_by_tenant_keys_off_first_component_under_root() {
         // The shared predicate used by BOTH the serve materializer and the
         // gateway/actor `copy_media_to_workspace`. Ownership = the resolved
@@ -889,25 +772,6 @@ mod tests {
     }
 
     #[test]
-    fn materialize_uploads_as_workspace_relative_copies_images_into_workspace_uploads() {
-        let ws = tempfile::tempdir().unwrap();
-        let (src, handle) = stage_upload("photo.png", b"\x89PNG\r\n");
-
-        let out = materialize_uploads_as_workspace_relative(
-            ws.path(),
-            None,
-            std::slice::from_ref(&handle),
-        );
-
-        assert_eq!(out[0], "uploads/photo.png");
-        assert_eq!(
-            std::fs::read(ws.path().join("uploads/photo.png")).unwrap(),
-            b"\x89PNG\r\n"
-        );
-        let _ = std::fs::remove_file(&src);
-    }
-
-    #[test]
     fn materialize_drops_foreign_image() {
         // codex round-7 P1: a raw image path under ANOTHER tenant's upload dir
         // must be DROPPED, not passed through to the vision encoder.
@@ -971,51 +835,4 @@ mod tests {
         let _ = std::fs::remove_file(&src);
     }
 
-    #[test]
-    fn profile_handle_round_trips() {
-        let base = std::path::Path::new("/tmp/octos-data/profile");
-        let file = base.join("slides/demo/output/deck.pptx");
-
-        let handle = encode_profile_file_handle(base, &file).expect("handle");
-        let decoded = decode_file_handle(&handle).expect("decoded");
-
-        assert_eq!(
-            decoded,
-            FileHandleScope::ProfileRelative(PathBuf::from("slides/demo/output/deck.pptx"))
-        );
-        assert!(handle.ends_with("/deck.pptx"));
-    }
-
-    #[test]
-    fn workspace_handle_round_trips_only_within_its_workspace() {
-        let workspace = tempfile::tempdir().unwrap();
-        let artifact = workspace.path().join("outputs/quiz.md");
-        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
-        std::fs::write(&artifact, b"quiz").unwrap();
-
-        let handle = encode_workspace_file_handle(workspace.path(), &artifact).expect("handle");
-
-        assert!(handle.starts_with("ws/"));
-        assert_eq!(
-            resolve_workspace_file_handle(workspace.path(), &handle),
-            std::fs::canonicalize(artifact).ok(),
-        );
-        let other_workspace = tempfile::tempdir().unwrap();
-        assert!(resolve_workspace_file_handle(other_workspace.path(), &handle).is_none());
-    }
-
-    #[test]
-    fn legacy_absolute_request_is_scoped() {
-        let base = tempfile::tempdir().unwrap();
-        let allowed = base.path().join("workspace").join("ok.txt");
-        std::fs::create_dir_all(allowed.parent().unwrap()).unwrap();
-        std::fs::write(&allowed, b"ok").unwrap();
-
-        let outside_root = tempfile::tempdir().unwrap();
-        let denied = outside_root.path().join("secret.txt");
-        std::fs::write(&denied, b"nope").unwrap();
-
-        assert!(resolve_legacy_file_request(base.path(), &allowed.to_string_lossy()).is_some());
-        assert!(resolve_legacy_file_request(base.path(), &denied.to_string_lossy()).is_none());
-    }
 }

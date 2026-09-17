@@ -30,16 +30,13 @@ pub use session_scope::{
     canonicalize_skill_read_zones, is_safe_session_id,
 };
 pub use task::{
-    DecisionRecord, FileRecord, SESSION_SUMMARY_SCHEMA_VERSION, STALE_DECISION_PREFIX,
-    SessionSummary, TASK_RESULT_SCHEMA_VERSION, Task, TaskContext, TaskKind, TaskResult,
-    TaskStatus, TokenUsage, UnsupportedSessionSummaryVersion,
+    TASK_RESULT_SCHEMA_VERSION, Task, TaskContext, TaskKind, TaskResult, TaskStatus, TokenUsage,
 };
 pub use types::{
-    AgentId, ClientMessageId, EpisodeRef, IdentityError, IdentityKind, MAIN_PROFILE_ID, Message,
-    MessageRole, SessionKey, TaskId, ThreadId, ToolCall, TurnId, is_reserved_channel_name,
+    AgentId, ClientMessageId, MAIN_PROFILE_ID, Message, MessageRole, SessionKey, TaskId, ThreadId,
+    ToolCall, TurnId, is_reserved_channel_name,
 };
-pub use ui_protocol::{EventEnvelope, TurnContext};
 pub use utils::{
-    SAFE_FILENAME_MAX_BYTES, TruncatedBy, TruncationReport, safe_filename, tool_output_limit,
-    truncate_head_tail, truncate_head_tail_report, truncate_utf8, truncated_utf8,
+    TruncatedBy, TruncationReport, safe_filename, tool_output_limit, truncate_head_tail_report,
+    truncate_utf8, truncated_utf8,
 };

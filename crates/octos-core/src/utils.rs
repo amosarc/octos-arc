@@ -71,8 +71,7 @@ pub struct TruncationReport {
     /// Byte length of `content`. When truncated this INCLUDES the elision
     /// marker, so `output_bytes != total_bytes - omitted_bytes` — the marker
     /// adds ~30 bytes. In the degenerate `max_len`-below-marker-overhead
-    /// regime it can even exceed `max_len` (pre-existing
-    /// [`truncate_head_tail`] behaviour, unchanged).
+    /// regime it can even exceed `max_len` (legacy behaviour, unchanged).
     pub output_bytes: usize,
     /// Exact number of input bytes dropped between head and tail — the same
     /// `N` printed in the elision marker. `0` when not truncated.
@@ -89,12 +88,6 @@ pub struct TruncationReport {
 /// the remainder from the end, joined by a separator line showing omitted bytes.
 /// Both split points are UTF-8 safe.
 ///
-/// Thin wrapper over [`truncate_head_tail_report`] keeping the legacy
-/// `String` surface — one implementation, two surfaces.
-pub fn truncate_head_tail(s: &str, max_len: usize, head_ratio: f32) -> String {
-    truncate_head_tail_report(s, max_len, head_ratio).content
-}
-
 /// [`truncate_head_tail`] returning a structured [`TruncationReport`]
 /// instead of a bare `String`.
 ///
@@ -195,8 +188,6 @@ pub fn tool_output_limit(tool_name: &str) -> usize {
     }
 }
 
-/// Maximum byte length of a [`safe_filename`] result.
-pub const SAFE_FILENAME_MAX_BYTES: usize = 80;
 /// Byte budget for the encoded stem before the hash suffix kicks in.
 const SAFE_FILENAME_STEM_BYTES: usize = 64;
 
@@ -272,14 +263,14 @@ mod tests {
     #[test]
     fn test_head_tail_no_op() {
         let s = "short text";
-        assert_eq!(truncate_head_tail(s, 100, 0.5), "short text");
+        assert_eq!(truncate_head_tail_report(s, 100, 0.5).content, "short text");
     }
 
     #[test]
     fn test_head_tail_split() {
         // 100 chars of 'a', 100 chars of 'b'
         let s = format!("{}{}", "a".repeat(100), "b".repeat(100));
-        let result = truncate_head_tail(&s, 100, 0.5);
+        let result = truncate_head_tail_report(&s, 100, 0.5).content;
         assert!(result.starts_with("aaa"));
         assert!(result.ends_with("bbb"));
         assert!(result.contains("bytes omitted"));
@@ -297,13 +288,13 @@ mod tests {
             "h".repeat(25),
             "t".repeat(25)
         );
-        assert_eq!(truncate_head_tail(&s, 100, 0.5), expect);
+        assert_eq!(truncate_head_tail_report(&s, 100, 0.5).content, expect);
     }
 
     #[test]
     fn test_head_tail_preserves_utf8() {
         let s = format!("{}{}", "\u{4F60}".repeat(50), "\u{597D}".repeat(50));
-        let result = truncate_head_tail(&s, 100, 0.5);
+        let result = truncate_head_tail_report(&s, 100, 0.5).content;
         // Should not panic or produce invalid UTF-8
         assert!(result.is_char_boundary(0));
         assert!(result.contains("bytes omitted"));

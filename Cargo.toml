@@ -62,7 +62,6 @@ bincode = "1"
 # Vector search
 hnsw_rs = "0.3"
 # Git (native, feature-gated)
-gix = { version = "0.79", default-features = false, features = ["max-performance-safe", "revision", "blob-diff"] }
 # AST parsing (feature-gated)
 tree-sitter = "0.24"
 tree-sitter-rust = "0.23"
@@ -70,7 +69,6 @@ tree-sitter-python = "0.23"
 tree-sitter-javascript = "0.23"
 tree-sitter-typescript = "0.23"
 # Diff
-similar = "2"
 # PDF text extraction (pure Rust; read_file auto-detects %PDF- magic)
 pdf-extract = "0.9"
 # Unix-specific (O_NOFOLLOW for symlink-safe file I/O)

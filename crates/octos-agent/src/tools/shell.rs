@@ -52,7 +52,6 @@ pub struct ShellTool {
     session_key: Option<String>,
     /// Task-ledger path recorded as lineage on registered background tasks so
     /// they can be restored across a restart, mirroring the spawn tool.
-    task_ledger_path: Option<PathBuf>,
     /// When `false`, a background/detached command — an explicit
     /// `background: true` arg OR a trailing `&` — is refused outright instead
     /// of being spawned detached. A detached child outlives the agent turn and
@@ -81,7 +80,6 @@ impl ShellTool {
             sandbox: Arc::new(NoSandbox),
             task_supervisor: None,
             session_key: None,
-            task_ledger_path: None,
             background_allowed: true,
             max_timeout: None,
         }
@@ -147,7 +145,7 @@ impl ShellTool {
     /// [`TaskSupervisor`] so they surface in `/ps` and the sub-agent dock.
     ///
     /// Mirrors [`crate::tools::spawn::SpawnTool::with_task_supervisor`]: the
-    /// same three-tuple of supervisor + session key + task-ledger path. In
+    /// same supervisor + session key pair. In
     /// production the foreground executor already threads the SSOT supervisor
     /// and session key onto every tool call via
     /// [`ToolContext::task_supervisor`] / [`ToolContext::parent_session_key`],
@@ -157,11 +155,9 @@ impl ShellTool {
         mut self,
         supervisor: Arc<TaskSupervisor>,
         session_key: impl Into<String>,
-        task_ledger_path: impl Into<PathBuf>,
     ) -> Self {
         self.task_supervisor = Some(supervisor);
         self.session_key = Some(session_key.into());
-        self.task_ledger_path = Some(task_ledger_path.into());
         self
     }
 
@@ -231,16 +227,7 @@ impl ShellTool {
             } else {
                 ctx.tool_id.clone()
             };
-            let ledger = self
-                .task_ledger_path
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned());
-            sup.register_with_lineage(
-                &label,
-                &tool_call_id,
-                session_key.as_deref(),
-                ledger.as_deref(),
-            )
+            sup.register_with_lineage(&label, &tool_call_id, session_key.as_deref())
         });
 
         match (supervisor, task_id) {
@@ -1054,6 +1041,8 @@ mod tests {
         })
     }
 
+    use crate::tools::test_fixture::scoped_ctx;
+
     #[tokio::test]
     async fn shell_refuses_with_typed_message_when_sandbox_unavailable() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1178,27 +1167,14 @@ mod tests {
     // behaviour) when the host has not.
     // -----------------------------------------------------------------------
 
-    fn ctx_with_scope(scope: octos_core::SessionScope) -> ToolContext {
-        let mut ctx = ToolContext::zero();
-        ctx.tool_id = "shell-with-scope".to_string();
-        ctx.session_scope = Some(Arc::new(scope));
-        ctx
-    }
-
     #[tokio::test]
     async fn background_command_registers_and_flips_terminal_with_supervisor() {
         use crate::task_supervisor::{TaskStatus, TaskSupervisor};
 
-        let temp = tempfile::tempdir().unwrap();
-        let ledger = temp.path().join("tasks.jsonl");
         let supervisor = Arc::new(TaskSupervisor::new());
-        supervisor.enable_persistence(&ledger).unwrap();
 
-        let tool = ShellTool::new(std::env::temp_dir()).with_task_supervisor(
-            supervisor.clone(),
-            "api:test-session",
-            ledger.clone(),
-        );
+        let tool = ShellTool::new(std::env::temp_dir())
+            .with_task_supervisor(supervisor.clone(), "api:test-session");
 
         // Trailing `&` → background. Returns immediately.
         let result = tool
@@ -1290,7 +1266,7 @@ mod tests {
         let scope = octos_core::SessionScope::solo(scope_dir.path().to_path_buf(), vec![])
             .expect("scope construction");
         let tool = ShellTool::new(std::env::temp_dir());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("shell-with-scope", scope);
 
         let result = tool
             .execute_with_context(&ctx, &serde_json::json!({"command": "rm -rf /"}))

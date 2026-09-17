@@ -1604,19 +1604,6 @@ impl ContextManager {
         )
     }
 
-    pub(crate) fn canonical_ledger_hash(&self) -> String {
-        hash_json(&json!({
-            "schema": CONTEXT_MANAGER_SCHEMA,
-            "session_id": self.session_id,
-            "thread_id": self.thread_id,
-            "ledger_items": self
-                .ledger_items
-                .iter()
-                .map(StableTranscriptHashItem::from)
-                .collect::<Vec<_>>(),
-        }))
-    }
-
     pub(crate) fn source_head_hash(&self) -> String {
         source_head_hash_for_items(&self.ledger_items)
     }
@@ -2338,24 +2325,6 @@ impl ContextManager {
     /// model that produced the summary already knows the bound. The
     /// writer's job is only to install the capsule into the parent's
     /// transcript with the correct `Supervisor` source attribution.
-    pub(crate) fn record_child_result_summary(
-        &mut self,
-        child_agent_id: impl Into<String>,
-        summary: impl Into<String>,
-        artifact_refs: Vec<String>,
-        reference_artifact_refs: Vec<String>,
-    ) -> TranscriptItemId {
-        self.record_item(
-            TranscriptItemKind::ChildResultSummary {
-                child_agent_id: child_agent_id.into(),
-                summary: summary.into(),
-                artifact_refs,
-                reference_artifact_refs,
-            },
-            TranscriptItemSource::Supervisor,
-        )
-    }
-
     pub(crate) fn checkpoint(&mut self, reason: impl Into<String>) -> ContextCheckpointId {
         let checkpoint_id = ContextCheckpointId::new(format!("ctxchk_{:06}", self.generation + 1));
         let transcript_hash = self.transcript_hash();
@@ -2369,21 +2338,6 @@ impl ContextManager {
         );
         self.last_checkpoint_id = Some(checkpoint_id.clone());
         checkpoint_id
-    }
-
-    pub(crate) fn install_compaction_summary(
-        &mut self,
-        summary: impl Into<String>,
-        keep_recent_items: usize,
-    ) -> ContextCompactionId {
-        let record = self.compact_context(
-            summary,
-            CompactContextPolicy {
-                keep_recent_items,
-                ..CompactContextPolicy::default()
-            },
-        );
-        record.compaction_id
     }
 
     pub(crate) fn compact_context(
@@ -4102,6 +4056,26 @@ fn sha256_prefixed(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+/// Test replacement for the retired `Message::tool_with_thread` constructor.
+fn tool_msg(
+    content: impl Into<String>,
+    tool_call_id: impl Into<String>,
+    thread_id: impl Into<String>,
+) -> Message {
+    Message {
+        role: octos_core::MessageRole::Tool,
+        content: content.into(),
+        media: vec![],
+        tool_calls: None,
+        tool_call_id: Some(tool_call_id.into()),
+        reasoning_content: None,
+        client_message_id: None,
+        thread_id: Some(thread_id.into()),
+        timestamp: chrono::Utc::now(),
+    }
+}
+
+
     fn assistant_tool_call(call_id: &str) -> Message {
         let mut message = Message::assistant("");
         message.tool_calls = Some(vec![ToolCall {
@@ -4489,7 +4463,14 @@ mod tests {
         }
         let before_generation = manager.generation();
 
-        let compaction_id = manager.install_compaction_summary("older turns summarized", 2);
+        let record = manager.compact_context(
+            "older turns summarized",
+            CompactContextPolicy {
+                keep_recent_items: 2,
+                ..CompactContextPolicy::default()
+            },
+        );
+        let compaction_id = record.compaction_id;
 
         assert_eq!(manager.state().last_compaction_id, Some(compaction_id));
         assert_eq!(manager.generation(), before_generation + 1);
@@ -4675,11 +4656,7 @@ mod tests {
         manager.record_message(&Message::assistant("old answer ".repeat(80)));
         manager.record_message(&Message::user("recent user"));
         manager.record_message(&assistant_tool_call("call_keep"));
-        manager.record_message(&Message::tool_with_thread(
-            "tool result",
-            "call_keep",
-            octos_core::ThreadId::new("thread-1"),
-        ));
+        manager.record_message(&tool_msg("tool result", "call_keep", "thread-1"));
 
         let frame = manager.for_prompt(&PromptBuildPolicy {
             max_prompt_token_estimate: Some(32),
@@ -4769,7 +4746,7 @@ mod tests {
         ]);
         manager.record_persisted_message(&assistant, 1);
         manager.record_persisted_message(
-            &Message::tool_with_thread("a result", "call_a", octos_core::ThreadId::new("thread-1")),
+            &tool_msg("a result", "call_a", "thread-1"),
             2,
         );
         assert!(!manager.semantic_blocks().last().unwrap().closed);
@@ -4799,11 +4776,7 @@ mod tests {
             &[
                 Message::user("inspect both"),
                 assistant,
-                Message::tool_with_thread(
-                    "a result",
-                    "call_a",
-                    octos_core::ThreadId::new("thread-1"),
-                ),
+                tool_msg("a result", "call_a", "thread-1"),
                 Message::user("continue without b"),
             ]
         ));
@@ -4993,16 +4966,8 @@ mod tests {
             },
         ]);
         manager.record_message(&assistant);
-        manager.record_message(&Message::tool_with_thread(
-            "a result",
-            "call_a",
-            octos_core::ThreadId::new("thread-1"),
-        ));
-        manager.record_message(&Message::tool_with_thread(
-            "b result",
-            "call_b",
-            octos_core::ThreadId::new("thread-1"),
-        ));
+        manager.record_message(&tool_msg("a result", "call_a", "thread-1"));
+        manager.record_message(&tool_msg("b result", "call_b", "thread-1"));
         manager.record_message(&Message::user("current request"));
         let policy = CompactContextPolicy {
             keep_recent_tokens: Some(1),

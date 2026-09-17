@@ -29,26 +29,6 @@ pub struct SemanticCheckpointHint {
     pub checkpoint_priority: u8,
 }
 
-impl PromptCacheContext {
-    /// Deepest semantic checkpoint whose exact prefix survives in both
-    /// contexts. A local runtime can use this to avoid restoring state past an
-    /// edited tool/thinking boundary.
-    pub fn deepest_shared_checkpoint<'a>(
-        &'a self,
-        next: &Self,
-    ) -> Option<&'a SemanticCheckpointHint> {
-        self.semantic_boundaries
-            .iter()
-            .zip(next.semantic_boundaries.iter())
-            .take_while(|(previous, current)| {
-                previous.boundary_kind == current.boundary_kind
-                    && previous.prefix_hash == current.prefix_hash
-            })
-            .map(|(previous, _)| previous)
-            .last()
-    }
-}
-
 /// Configuration for a chat completion request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatConfig {

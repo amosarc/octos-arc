@@ -15,9 +15,6 @@ pub enum PolicyDecision {
 /// Metric counter name for policy denials.
 pub const POLICY_DENIAL_COUNTER: &str = "octos_tool_policy_denial_total";
 
-/// Deny reason label used when a robot-tier group gates a tool.
-pub const ROBOT_TIER_GATE_REASON: &str = "robot_tier_gate";
-
 /// Deny reason label used for a non-robot policy deny.
 pub const GENERIC_DENY_REASON: &str = "policy_deny";
 

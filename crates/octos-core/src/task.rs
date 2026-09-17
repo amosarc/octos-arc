@@ -5,23 +5,19 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{AgentId, EpisodeRef, Message, TaskId};
+use crate::types::{Message, TaskId};
 
 /// A task is an atomic unit of work assigned to an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     /// Unique identifier.
     pub id: TaskId,
-    /// Parent task ID (for subtasks).
-    pub parent_id: Option<TaskId>,
     /// Current status.
     pub status: TaskStatus,
     /// What kind of task this is.
     pub kind: TaskKind,
     /// Context passed to the agent.
     pub context: TaskContext,
-    /// Result after completion (if any).
-    pub result: Option<TaskResult>,
     /// When the task was created.
     pub created_at: DateTime<Utc>,
     /// When the task was last updated.
@@ -34,26 +30,9 @@ impl Task {
         let now = Utc::now();
         Self {
             id: TaskId::new(),
-            parent_id: None,
             status: TaskStatus::Pending,
             kind,
             context,
-            result: None,
-            created_at: now,
-            updated_at: now,
-        }
-    }
-
-    /// Create a subtask of this task.
-    pub fn subtask(&self, kind: TaskKind) -> Self {
-        let now = Utc::now();
-        Self {
-            id: TaskId::new(),
-            parent_id: Some(self.id.clone()),
-            status: TaskStatus::Pending,
-            kind,
-            context: self.context.clone(),
-            result: None,
             created_at: now,
             updated_at: now,
         }
@@ -66,10 +45,6 @@ impl Task {
 pub enum TaskStatus {
     /// Waiting to be assigned.
     Pending,
-    /// Currently being executed by an agent.
-    InProgress { agent_id: AgentId },
-    /// Blocked waiting for something.
-    Blocked { reason: String },
     /// Successfully completed.
     Completed,
     /// Failed with an error.
@@ -105,23 +80,8 @@ pub enum TaskKind {
 pub struct TaskContext {
     /// Working directory for the task.
     pub working_dir: PathBuf,
-    /// Git state (branch, uncommitted changes).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub git_state: Option<GitState>,
     /// Recent conversation turns (working memory).
     pub working_memory: Vec<Message>,
-    /// References to relevant past episodes.
-    pub episodic_refs: Vec<EpisodeRef>,
-    /// Files in scope for this task.
-    pub files_in_scope: Vec<PathBuf>,
-}
-
-/// Git repository state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GitState {
-    pub branch: String,
-    pub has_uncommitted_changes: bool,
-    pub head_commit: Option<String>,
 }
 
 /// Current durable ABI schema version for [`TaskResult`].
@@ -178,143 +138,6 @@ fn is_zero(v: &u32) -> bool {
     *v == 0
 }
 
-/// Current durable ABI schema version for [`SessionSummary`] (harness M6.4).
-///
-/// `SessionSummary` is the typed payload emitted by the LLM-iterative
-/// compaction summarizer. Serialized copies carry this field so future harness
-/// versions can upgrade the schema without silently dropping older summaries.
-/// See `docs/OCTOS_HARNESS_ABI_VERSIONING.md` for the stable vs experimental
-/// field list and the deprecation rules.
-pub const SESSION_SUMMARY_SCHEMA_VERSION: u32 = 1;
-
-fn default_session_summary_schema_version() -> u32 {
-    SESSION_SUMMARY_SCHEMA_VERSION
-}
-
-/// Typed error returned when a [`SessionSummary`] advertises a schema version
-/// the running harness does not know how to handle.
-///
-/// Surfacing this as a typed error (not a panic) lets the compaction runner
-/// log the mismatch, fall back to the extractive summarizer, and continue.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnsupportedSessionSummaryVersion {
-    /// Version advertised by the parsed payload.
-    pub found: u32,
-    /// Highest version this harness supports.
-    pub supported: u32,
-}
-
-impl std::fmt::Display for UnsupportedSessionSummaryVersion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "unsupported SessionSummary schema_version {} (max supported: {}); upgrade octos to a newer release",
-            self.found, self.supported
-        )
-    }
-}
-
-impl std::error::Error for UnsupportedSessionSummaryVersion {}
-
-/// Typed payload produced by the LLM-iterative compaction summarizer
-/// (harness M6.4).
-///
-/// A `SessionSummary` is the typed re-expression of a conversation compaction
-/// pass. Unlike prose-only summaries, it preserves the structural shape of
-/// decisions, files, and next steps so iterative refinement can update
-/// existing records rather than regenerating from scratch.
-///
-/// Invariants:
-/// - `schema_version` is a durable ABI field; deserializers default it to
-///   [`SESSION_SUMMARY_SCHEMA_VERSION`] when missing (pre-M6.4 files remain
-///   readable).
-/// - Field order is stable for byte-identical serde round-trips.
-/// - Missing/future versions surface as
-///   [`UnsupportedSessionSummaryVersion`] (not panic).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSummary {
-    /// Durable ABI schema version. Defaults to
-    /// [`SESSION_SUMMARY_SCHEMA_VERSION`] when deserializing a pre-M6.4
-    /// payload that omits the field.
-    #[serde(default = "default_session_summary_schema_version")]
-    pub schema_version: u32,
-    /// Top-level goal the session is pursuing.
-    pub goal: String,
-    /// Hard constraints the session must respect (policies, invariants,
-    /// forbidden paths, etc.).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub constraints: Vec<String>,
-    /// Work items already completed.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub progress_done: Vec<String>,
-    /// Work items currently in-progress at the time of compaction.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub progress_in_progress: Vec<String>,
-    /// Typed decision log. Iterative refinement MUST either retain each
-    /// decision verbatim or explicitly mark it stale via
-    /// `DecisionRecord::summary` ("[STALE] ..."). Silent drops are a
-    /// contract violation.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub decisions: Vec<DecisionRecord>,
-    /// Files referenced during the session with a short role annotation.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<FileRecord>,
-    /// Next steps the agent should take after compaction.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub next_steps: Vec<String>,
-}
-
-/// Prefix used when the iterative summarizer marks a prior decision stale.
-/// Callers can inspect decisions and filter/surface stale entries instead of
-/// dropping them silently.
-pub const STALE_DECISION_PREFIX: &str = "[STALE]";
-
-impl SessionSummary {
-    /// Validate the schema version against the running harness.
-    ///
-    /// Returns `Ok(())` when the payload is at or below the current
-    /// [`SESSION_SUMMARY_SCHEMA_VERSION`] (older files remain readable) and a
-    /// typed [`UnsupportedSessionSummaryVersion`] otherwise.
-    pub fn validate_schema_version(&self) -> Result<(), UnsupportedSessionSummaryVersion> {
-        if self.schema_version > SESSION_SUMMARY_SCHEMA_VERSION {
-            Err(UnsupportedSessionSummaryVersion {
-                found: self.schema_version,
-                supported: SESSION_SUMMARY_SCHEMA_VERSION,
-            })
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Return true if this decision line is an explicit stale marker.
-    pub fn is_stale_line(line: &str) -> bool {
-        line.trim_start().starts_with(STALE_DECISION_PREFIX)
-    }
-}
-
-/// A single decision recorded in a [`SessionSummary`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DecisionRecord {
-    /// Turn index at which the decision was reached (0 = first user turn).
-    pub at_turn: u32,
-    /// Short summary of the decision. Prefixed with
-    /// [`STALE_DECISION_PREFIX`] when iterative refinement retires the
-    /// decision (for example, the goal no longer requires it).
-    pub summary: String,
-    /// Optional longer-form rationale for the decision.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rationale: Option<String>,
-}
-
-/// A file referenced in a [`SessionSummary`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileRecord {
-    /// Relative path to the file.
-    pub path: String,
-    /// Short role annotation (e.g. `"input"`, `"generated"`, `"spec"`).
-    pub role: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,21 +152,19 @@ mod tests {
         );
 
         assert_eq!(task.status, TaskStatus::Pending);
-        assert!(task.parent_id.is_none());
-        assert!(task.result.is_none());
     }
 
     #[test]
     fn test_task_status_serialization() {
-        let status = TaskStatus::InProgress {
-            agent_id: crate::AgentId::new("test-agent"),
+        let status = TaskStatus::Failed {
+            error: "boom".to_string(),
         };
         let json = serde_json::to_string(&status).unwrap();
-        assert!(json.contains("in_progress"));
-        assert!(json.contains("test-agent"));
+        assert!(json.contains("failed"));
+        assert!(json.contains("boom"));
 
         let parsed: TaskStatus = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, TaskStatus::InProgress { .. }));
+        assert!(matches!(parsed, TaskStatus::Failed { .. }));
     }
 
     #[test]
@@ -413,78 +234,7 @@ mod tests {
     fn test_task_context_default() {
         let ctx = TaskContext::default();
         assert_eq!(ctx.working_dir, PathBuf::new());
-        assert!(ctx.git_state.is_none());
         assert!(ctx.working_memory.is_empty());
-        assert!(ctx.episodic_refs.is_empty());
-        assert!(ctx.files_in_scope.is_empty());
     }
 
-    #[test]
-    fn test_git_state_serde() {
-        let state = GitState {
-            branch: "main".to_string(),
-            has_uncommitted_changes: true,
-            head_commit: Some("abc123".to_string()),
-        };
-        let json = serde_json::to_string(&state).unwrap();
-        let parsed: GitState = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.branch, "main");
-        assert!(parsed.has_uncommitted_changes);
-        assert_eq!(parsed.head_commit.as_deref(), Some("abc123"));
-    }
-
-    #[test]
-    fn should_default_missing_schema_version_to_v1() {
-        // Pre-M6.4 JSON that predates the `schema_version` field must still
-        // deserialize cleanly and pin to v1.
-        let legacy = r#"{
-            "goal": "old-world summary",
-            "constraints": [],
-            "progress_done": ["init"],
-            "progress_in_progress": [],
-            "decisions": [],
-            "files": [],
-            "next_steps": []
-        }"#;
-        let parsed: SessionSummary = serde_json::from_str(legacy).expect("legacy summary parses");
-        assert_eq!(parsed.schema_version, SESSION_SUMMARY_SCHEMA_VERSION);
-        assert_eq!(parsed.goal, "old-world summary");
-        parsed
-            .validate_schema_version()
-            .expect("defaulted version is supported");
-    }
-
-    #[test]
-    fn should_reject_future_schema_version_with_actionable_error() {
-        let future = serde_json::json!({
-            "schema_version": SESSION_SUMMARY_SCHEMA_VERSION + 7,
-            "goal": "from tomorrow",
-            "constraints": [],
-            "progress_done": [],
-            "progress_in_progress": [],
-            "decisions": [],
-            "files": [],
-            "next_steps": []
-        })
-        .to_string();
-        let parsed: SessionSummary =
-            serde_json::from_str(&future).expect("JSON still deserializes");
-        let err = parsed
-            .validate_schema_version()
-            .expect_err("future schema version must be rejected, not panic");
-        assert_eq!(err.found, SESSION_SUMMARY_SCHEMA_VERSION + 7);
-        assert_eq!(err.supported, SESSION_SUMMARY_SCHEMA_VERSION);
-        let rendered = err.to_string();
-        assert!(rendered.contains("SessionSummary"));
-        assert!(rendered.contains("upgrade octos"));
-    }
-
-    #[test]
-    fn stale_decision_prefix_is_recognised() {
-        assert!(SessionSummary::is_stale_line(
-            "[STALE] revert stateless path"
-        ));
-        assert!(!SessionSummary::is_stale_line("revert stateless path"));
-        assert!(SessionSummary::is_stale_line("   [STALE] indented"));
-    }
 }

@@ -25,11 +25,6 @@ use crate::harness_errors::HarnessErrorEvent;
 use crate::task_supervisor::TaskSupervisor;
 
 pub const HARNESS_EVENT_SCHEMA_V1: &str = "octos.harness.event.v1";
-pub const OCTOS_EVENT_SINK_ENV: &str = "OCTOS_EVENT_SINK";
-pub const OCTOS_SESSION_ID_ENV: &str = "OCTOS_SESSION_ID";
-pub const OCTOS_TASK_ID_ENV: &str = "OCTOS_TASK_ID";
-pub const OCTOS_HARNESS_SESSION_ID_ENV: &str = "OCTOS_HARNESS_SESSION_ID";
-pub const OCTOS_HARNESS_TASK_ID_ENV: &str = "OCTOS_HARNESS_TASK_ID";
 pub const MAX_HARNESS_EVENT_LINE_BYTES: usize = 16 * 1024;
 const MAX_SESSION_ID_BYTES: usize = 256;
 const MAX_TASK_ID_BYTES: usize = 128;
@@ -185,18 +180,6 @@ fn register_sink_context(sink: String, context: HarnessEventSinkContext) {
     contexts.insert(sink, context);
 }
 
-/// Test-only wrapper around [`register_sink_context`] for crates that need
-/// to assert against a sink without booting a full [`HarnessEventSink`].
-#[doc(hidden)]
-pub fn attach_event_sink_context(sink: String, context: HarnessEventSinkContext) {
-    register_sink_context(sink, context);
-}
-
-/// Test-only wrapper around `unregister_sink_context`.
-#[doc(hidden)]
-pub fn detach_event_sink_context(sink: &str) {
-    unregister_sink_context(sink);
-}
 
 fn unregister_sink_context(sink: &str) {
     let mut contexts = sink_contexts().lock().unwrap_or_else(|e| e.into_inner());

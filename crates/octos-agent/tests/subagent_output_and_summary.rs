@@ -99,7 +99,8 @@ async fn end_to_end_router_and_summary_cover_one_mb_with_three_ticks() {
         total += line.len() as u64;
     }
     assert!(total >= 1024 * 1024);
-    assert_eq!(router.bytes_written(task_id), total);
+    let out_path = router.path_for(session_id, task_id);
+    assert_eq!(std::fs::read(&out_path).unwrap().len() as u64, total);
 
     // 2. Wire the summary generator to a mock provider that returns three
     //    distinct summaries.

@@ -800,6 +800,8 @@ mod tests {
         assert_eq!(tool.concurrency_class(), ConcurrencyClass::Safe);
     }
 
+    use crate::tools::test_fixture::scoped_ctx;
+
     #[tokio::test]
     async fn invalid_args_error_names_each_problem_with_did_you_mean() {
         // #1770: a misspelled parameter must produce a model-facing
@@ -966,13 +968,6 @@ mod tests {
 
     use octos_core::SessionScope;
 
-    fn ctx_with_scope(scope: SessionScope) -> ToolContext {
-        let mut ctx = ToolContext::zero();
-        ctx.tool_id = "read-with-scope".to_string();
-        ctx.session_scope = Some(Arc::new(scope));
-        ctx
-    }
-
     #[tokio::test]
     async fn read_file_refuses_out_of_scope_path() {
         // An absolute path outside every declared zone classifies as
@@ -984,7 +979,7 @@ mod tests {
 
         let scope = SessionScope::solo(scope_dir.path().to_path_buf(), vec![]).unwrap();
         let tool = ReadFileTool::new(scope_dir.path());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("read-with-scope", scope);
 
         let result = tool
             .execute_with_context(
@@ -1005,7 +1000,7 @@ mod tests {
     #[tokio::test]
     async fn read_file_refuses_ancestor_symlink_escape() {
         // Per codex review of the Phase 2-C commit: `O_NOFOLLOW` only
-        // guards the FINAL path component, and `classify_lexical_path`
+        // guards the FINAL path component, and `classify_canonical_path`
         // is explicitly lexical. Without our canonicalization step a
         // path like `<workspace>/link/secret.txt`, where `link` is a
         // symlink pointing outside the workspace, would classify as
@@ -1023,7 +1018,7 @@ mod tests {
 
         let scope = SessionScope::solo(scope_dir.path().to_path_buf(), vec![]).unwrap();
         let tool = ReadFileTool::new(scope_dir.path());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("read-with-scope", scope);
 
         let result = tool
             .execute_with_context(&ctx, &serde_json::json!({"path": "link/secret.txt"}))

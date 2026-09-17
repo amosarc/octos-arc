@@ -623,11 +623,12 @@ mod tests {
         // The store write is awaited (the embed is fire-and-forget); the
         // episode is BM25-findable in its cwd immediately.
         let hits = memory
-            .find_relevant(&workspace, "websocket gateway keepalive", 5)
+            .find_relevant_hybrid_scored_filtered("websocket gateway keepalive", None, 20, None, false)
             .await
             .unwrap();
         assert!(
-            hits.iter().any(|e| e.summary.contains("keepalive")),
+            hits.iter()
+                .any(|(e, _)| e.working_dir == workspace && e.summary.contains("keepalive")),
             "conversation episode must be stored + recallable"
         );
     }
@@ -652,9 +653,12 @@ mod tests {
             .await;
 
         let hits = memory
-            .find_relevant(&workspace, "conversation summary", 5)
+            .find_relevant_hybrid_scored_filtered("conversation summary", None, 20, None, false)
             .await
             .unwrap();
-        assert!(hits.is_empty(), "no episode without an embedder");
+        assert!(
+            hits.iter().all(|(e, _)| e.working_dir != workspace),
+            "no episode without an embedder"
+        );
     }
 }

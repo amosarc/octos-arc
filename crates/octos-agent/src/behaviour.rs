@@ -26,12 +26,6 @@ pub enum ActionResult {
     },
 }
 
-impl ActionResult {
-    pub fn is_pass(&self) -> bool {
-        matches!(self, Self::Pass | Self::Notify { .. })
-    }
-}
-
 /// Optional named target resolution for actions that need runtime-bound paths.
 ///
 /// This is used by spawn-task contracts so shared actions such as
@@ -115,12 +109,6 @@ pub(crate) fn run_action_with_context(
     }
 }
 
-/// Run a list of action specs. Returns all results. Stops early on error
-/// (action parse/execution failure), but NOT on `ActionResult::Fail`.
-pub fn run_actions(workspace_root: &Path, specs: &[String]) -> Result<Vec<(String, ActionResult)>> {
-    run_actions_with_context(workspace_root, &ActionContext::default(), specs)
-}
-
 pub(crate) fn evaluate_actions_with_context(
     workspace_root: &Path,
     context: &ActionContext,
@@ -133,34 +121,6 @@ pub(crate) fn evaluate_actions_with_context(
                 spec.clone(),
                 run_action_with_context(workspace_root, context, spec),
             )
-        })
-        .collect()
-}
-
-pub(crate) fn run_actions_with_context(
-    workspace_root: &Path,
-    context: &ActionContext,
-    specs: &[String],
-) -> Result<Vec<(String, ActionResult)>> {
-    let mut results = Vec::with_capacity(specs.len());
-    for (spec, result) in evaluate_actions_with_context(workspace_root, context, specs) {
-        results.push((spec, result?));
-    }
-    Ok(results)
-}
-
-/// Check if all results passed.
-pub fn all_passed(results: &[(String, ActionResult)]) -> bool {
-    results.iter().all(|(_, r)| r.is_pass())
-}
-
-/// Collect failure reasons from results.
-pub fn failure_reasons(results: &[(String, ActionResult)]) -> Vec<String> {
-    results
-        .iter()
-        .filter_map(|(spec, r)| match r {
-            ActionResult::Fail { reason } => Some(format!("{spec}: {reason}")),
-            ActionResult::Pass | ActionResult::Notify { .. } => None,
         })
         .collect()
 }
@@ -468,7 +428,7 @@ mod tests {
                 message: "TTS generation failed".into()
             }
         );
-        assert!(result.is_pass()); // Notify counts as pass
+        assert!(matches!(result, ActionResult::Pass | ActionResult::Notify { .. }));
     }
 
     #[test]
@@ -518,14 +478,29 @@ mod tests {
             "notify_user:done".to_string(),
         ];
 
-        let results = run_actions(temp.path(), &specs).unwrap();
+        let results =
+            evaluate_actions_with_context(temp.path(), &ActionContext::default(), &specs);
         assert_eq!(results.len(), 3);
-        assert!(results[0].1.is_pass());
-        assert!(!results[1].1.is_pass());
-        assert!(results[2].1.is_pass());
+        assert!(matches!(
+            results[0].1,
+            Ok(ActionResult::Pass) | Ok(ActionResult::Notify { .. })
+        ));
+        assert!(!matches!(
+            results[1].1,
+            Ok(ActionResult::Pass) | Ok(ActionResult::Notify { .. })
+        ));
+        assert!(matches!(
+            results[2].1,
+            Ok(ActionResult::Pass) | Ok(ActionResult::Notify { .. })
+        ));
 
-        assert!(!all_passed(&results));
-        let failures = failure_reasons(&results);
+        let failures: Vec<String> = results
+            .iter()
+            .filter_map(|(spec, r)| match r {
+                Ok(ActionResult::Fail { reason }) => Some(format!("{spec}: {reason}")),
+                _ => None,
+            })
+            .collect();
         assert_eq!(failures.len(), 1);
         assert!(failures[0].contains("missing.txt"));
     }

@@ -7,7 +7,6 @@
 //! - [`HookPayload`](crate::hooks::HookPayload)
 //! - [`ProgressEvent`](crate::progress::ProgressEvent) (emitted shape)
 //! - [`TaskResult`](octos_core::TaskResult)
-//! - [`SessionSummary`](octos_core::SessionSummary) (harness M6.4)
 //!
 //! Each serialized instance carries a numeric `schema_version` (v1 is the
 //! current shape). Missing versions default to v1 for backward compatibility
@@ -37,19 +36,12 @@ pub const COMPACTION_POLICY_SCHEMA_VERSION: u32 = 1;
 /// Current schema version for `HookPayload`.
 pub const HOOK_PAYLOAD_SCHEMA_VERSION: u32 = 1;
 
-/// Current schema version for `ProgressEvent` and its legacy serialized
-/// envelope at `octos.agent.progress.event.v1`.
-pub const PROGRESS_EVENT_SCHEMA_VERSION: u32 = 1;
-
 /// Current schema version for the typed
 /// [`HarnessEventPayload::Progress`](crate::harness_events::HarnessEventPayload::Progress)
 /// event emitted by long-running child workflows through
 /// `octos.harness.event.v1`. This is the parent-visible progress ABI
 /// that folds into durable task status snapshots.
 pub const HARNESS_PROGRESS_EVENT_SCHEMA_VERSION: u32 = 1;
-
-/// Current schema version for `TaskResult`.
-pub const TASK_RESULT_SCHEMA_VERSION: u32 = 1;
 
 /// Current schema version for the typed
 /// [`HarnessEventPayload::SubAgentDispatch`](crate::harness_events::HarnessEventPayload::SubAgentDispatch)
@@ -59,17 +51,6 @@ pub const TASK_RESULT_SCHEMA_VERSION: u32 = 1;
 /// sub-agent. Callers MUST validate the version on deserialization via
 /// [`check_supported`] before using any v1-specific fields.
 pub const SUB_AGENT_DISPATCH_SCHEMA_VERSION: u32 = 1;
-
-/// Current schema version for `SessionSummary` (harness M6.4).
-///
-/// Carries the typed LLM-iterative compaction summary: goal, constraints,
-/// progress, decisions (with turn index + rationale), files, and next steps.
-/// Persisted instances include this field so iterative refinement can detect
-/// legacy payloads and reject future versions with a typed error.
-///
-/// Re-exports [`octos_core::SESSION_SUMMARY_SCHEMA_VERSION`] so callers can
-/// take the value from either crate interchangeably.
-pub const SESSION_SUMMARY_SCHEMA_VERSION: u32 = octos_core::SESSION_SUMMARY_SCHEMA_VERSION;
 
 /// Current schema version for `HarnessError` events (M6.1, issue #488).
 /// Emitted as part of `octos.harness.event.v1` with `kind: "error"`.

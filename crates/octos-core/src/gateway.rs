@@ -3,7 +3,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::SessionKey;
 
 /// Provenance of an inbound message: who put it on the bus.
 ///
@@ -67,12 +66,6 @@ fn default_metadata() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }
 
-impl InboundMessage {
-    pub fn session_key(&self) -> SessionKey {
-        SessionKey::new(&self.channel, &self.chat_id)
-    }
-
-}
 
 /// Metadata key carrying the sender identity on outbound messages
 /// (channel-adapter identity assertion).
@@ -80,22 +73,6 @@ impl InboundMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_inbound_session_key() {
-        let msg = InboundMessage {
-            channel: "telegram".into(),
-            sender_id: "user1".into(),
-            chat_id: "chat42".into(),
-            content: "hello".into(),
-            timestamp: Utc::now(),
-            media: vec![],
-            metadata: serde_json::json!({}),
-            message_id: None,
-            origin: MessageOrigin::ExternalUser,
-        };
-        assert_eq!(msg.session_key(), SessionKey::new("telegram", "chat42"));
-    }
 
     #[test]
     fn test_inbound_serde_roundtrip() {

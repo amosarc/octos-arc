@@ -15030,10 +15030,6 @@ async fn run_standalone_turn(
         sessions: sessions.clone(),
         session_id: session_id.clone(),
         data_dir: session_runtime.profile.data_dir.clone(),
-        profile_id: session_id
-            .profile_id()
-            .map(ToOwned::to_owned)
-            .or_else(|| routed_profile_id.clone()),
         workspace_root: Some(session_runtime.workspace_root.clone()),
     };
     if let Some(reply) = ws_slash::try_dispatch_slash_command(&prompt, &slash_ctx).await {
@@ -15123,17 +15119,13 @@ async fn run_standalone_turn(
     // Falls back to the server-wide data dir for local sessions / dev.
     let plugin_root_dir = session_runtime.profile.data_dir.clone();
 
-    // C1 fix: create the progress channel + drop counter UP HERE — BEFORE
-    // the `enable_persistence` block below — so the supervisor `on_change`
-    // callback (which captures clones of these) can be installed BEFORE
-    // `enable_persistence`. The orphan-task sweep that runs inside
-    // `enable_persistence` fires terminal `mark_failed("orphaned across
-    // restart")` transitions; if `on_change` is installed AFTER persistence
-    // (the pre-C1 ordering) the sweep's `notify_change` hits
-    // `on_change == None` and the `task_updated` event is silently dropped,
-    // leaving the TUI task count stuck at "N running". The channel itself is
-    // consumed (`progress_rx` drained) much later in the function — only its
-    // sender clone needs to exist this early.
+    // C1 fix: create the progress channel + drop counter UP HERE so the
+    // supervisor `on_change` callback (which captures clones of these) is
+    // wired before any task transition can fire; if `on_change` were
+    // installed late, early `task_updated` events would be silently
+    // dropped, leaving the TUI task count stuck at "N running". The
+    // channel itself is consumed (`progress_rx` drained) much later in
+    // the function — only its sender clone needs to exist this early.
     let (progress_tx, mut progress_rx) =
         tokio::sync::mpsc::channel::<String>(PROGRESS_CHANNEL_CAPACITY);
     let progress_dropped = Arc::new(AtomicU64::new(0));
@@ -15164,24 +15156,10 @@ async fn run_standalone_turn(
         let bg_session_id = session_id.clone();
         let bg_thread_id = turn_id.0.to_string();
         let bg_turn_id = turn_id.clone();
-        let task_state_path = {
-            let encoded_base = octos_bus::session::encode_path_component(session_id.base_key());
-            let topic = session_id
-                .topic()
-                .filter(|topic| !topic.is_empty())
-                .unwrap_or("default");
-            let encoded_topic = octos_bus::session::encode_path_component(topic);
-            bg_data_dir
-                .join("users")
-                .join(encoded_base)
-                .join("sessions")
-                .join(format!("{encoded_topic}.tasks.jsonl"))
-        };
         let task_supervisor = tool_registry.supervisor();
         // PR #1324 follow-up (L3 WS coverage gap): wire the spawn_only
-        // post-spawn failure signal BEFORE `enable_persistence` so the
-        // orphan-task sweep at `task_supervisor.rs:1164-1166` —
-        // which can `mark_failed` resurrected tasks — does NOT
+        // post-spawn failure signal EARLY so a resurrected task's
+        // `mark_failed` — which can fire from any racing path — does NOT
         // silently drop the recovery turn. We re-inject the failure
         // into the global master continuation queue (drained on every
         // `appui_continuation_tick`). `default_agent_orchestrator()`
@@ -15418,11 +15396,7 @@ async fn run_standalone_turn(
         // running on the host.
         .with_sandbox(session_runtime.sandbox.clone())
         .with_agent_config(agent_config.clone())
-        .with_task_supervisor(
-            task_supervisor.clone(),
-            session_id.to_string(),
-            task_state_path.clone(),
-        )
+        .with_task_supervisor(task_supervisor.clone(), session_id.to_string())
         // Embed-on-save + recall parity: spawn workers save episodes by
         // default; without the profile's embedder those episodes are
         // stored vectorless and worker episodic recall silently skips.
@@ -15643,10 +15617,10 @@ async fn run_standalone_turn(
         .apply_tool_envelope(&mut tool_registry);
     let tool_registry = Arc::new(tool_registry);
 
-    // C1 fix: `progress_tx` / `progress_dropped` are now created earlier
-    // (before the `enable_persistence` block) so the supervisor `on_change`
-    // callback can be wired before the orphan sweep runs. See the note at
-    // their construction site.
+    // C1 fix: `progress_tx` / `progress_dropped` are created early (at the
+    // top of this function) so the supervisor `on_change` callback can be
+    // wired before any task transition fires. See the note at their
+    // construction site.
     // PR F (M8.10 thread-binding chain `#649 → #740`): bind the originating
     // `TurnId` into the reporter so every progress event the agent emits
     // carries `thread_id`. Closes the wire-side leak where standalone-turn
@@ -15673,9 +15647,8 @@ async fn run_standalone_turn(
     );
     let progress_tx_for_result = progress_tx.clone();
     // C1 fix: the supervisor `on_change` callback is now wired earlier
-    // (before `enable_persistence`, inside the background-result block) so
-    // the orphan sweep's terminal `task_updated` events are not dropped. See
-    // the note at that wiring site.
+    // early in this function so terminal `task_updated` events are not
+    // dropped. See the note at that wiring site.
     drop(progress_tx);
     // M11-E: the agent is built per-turn (so per-turn callbacks layer in
     // without mutating shared session state), but its LLM, memory,

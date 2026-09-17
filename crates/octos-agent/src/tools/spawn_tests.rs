@@ -1,5 +1,6 @@
 use super::*;
 #[cfg(unix)]
+use crate::test_support::{ScriptedProvider, end_turn};
 use crate::{HookConfig, HookEvent};
 
 /// Runaway guard for the "poll until the background task reaches state X"
@@ -92,49 +93,30 @@ async fn background_deliverable_auto_materializes_inline_final_output() {
     // deliverable path so it surfaces in output_files instead of being
     // lost. Uses a mock provider that ends with a long text answer and
     // never writes a file.
-    struct InlineReviewProvider;
-    #[async_trait]
-    impl LlmProvider for InlineReviewProvider {
-        async fn chat(
-            &self,
-            _m: &[octos_core::Message],
-            _t: &[octos_llm::ToolSpec],
-            _c: &octos_llm::ChatConfig,
-        ) -> Result<octos_llm::ChatResponse> {
-            Ok(octos_llm::ChatResponse {
-                content: Some(format!(
-                    "# Code Review\n\n{}",
-                    "detailed finding. ".repeat(60)
-                )),
-                reasoning_content: None,
-                tool_calls: vec![],
-                stop_reason: octos_llm::StopReason::EndTurn,
-                usage: octos_llm::TokenUsage::default(),
-                provider_index: None,
-            })
-        }
-        fn model_id(&self) -> &str {
-            "mock"
-        }
-        fn provider_name(&self) -> &str {
-            "mock"
-        }
-    }
 
     let (in_tx, _in_rx) = tokio::sync::mpsc::channel(16);
     let temp = tempfile::tempdir().unwrap();
-    let ledger = temp.path().join("tasks.jsonl");
     let workspace = temp.path().join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
     let supervisor = Arc::new(TaskSupervisor::new());
-    supervisor.enable_persistence(&ledger).unwrap();
     let tool = SpawnTool::new(
-        Arc::new(InlineReviewProvider),
+        // The original mock answered identically on EVERY call; the child's
+        // deliverable flow may issue several LLM rounds, so script a generous
+        // run of identical turns — exhaustion still fails loudly.
+        Arc::new(ScriptedProvider::new(
+            (0..16)
+                .map(|_| end_turn(
+                    &format!("# Code Review\n\n{}", "detailed finding. ".repeat(60)),
+                    0,
+                    0,
+                ))
+                .collect(),
+        )),
         Arc::new(create_test_store().await),
         workspace.clone(),
         in_tx,
     )
-    .with_task_supervisor(supervisor.clone(), "api:test-session", ledger.clone())
+    .with_task_supervisor(supervisor.clone(), "api:test-session")
     .with_sandbox(SandboxConfig {
         mode: crate::sandbox::SandboxMode::None,
         ..Default::default()
@@ -248,7 +230,7 @@ fn rewrite_output_files_hook(replacement_path: &std::path::Path) -> HookConfig {
 async fn spawn_threads_configured_sandbox_into_validator_registry() {
     let (in_tx, _in_rx) = tokio::sync::mpsc::channel(16);
     let tool = SpawnTool::new(
-        Arc::new(MockProvider),
+        Arc::new(ScriptedProvider::new(vec![end_turn("done", 0, 0)])),
         Arc::new(create_test_store().await),
         PathBuf::from("/tmp"),
         in_tx,
@@ -281,16 +263,12 @@ async fn test_background_spawn_tracks_supervisor_lifecycle() {
     let (in_tx, _in_rx) = tokio::sync::mpsc::channel(16);
     let supervisor = Arc::new(TaskSupervisor::new());
     let tool = SpawnTool::new(
-        Arc::new(MockProvider),
+        Arc::new(ScriptedProvider::new(vec![end_turn("done", 0, 0)])),
         Arc::new(create_test_store().await),
         PathBuf::from("/tmp"),
         in_tx,
     )
-    .with_task_supervisor(
-        supervisor.clone(),
-        "api:test-session",
-        PathBuf::from("/tmp/tasks.jsonl"),
-    );
+    .with_task_supervisor(supervisor.clone(), "api:test-session");
 
     let result = tool
         .execute(&serde_json::json!({
@@ -426,7 +404,7 @@ async fn child_spawn_clone_is_named_spawn_and_binds_spawn_agent_via_registry_swa
     // the child's working directory rather than the parent's.
     let (in_tx, _in_rx) = tokio::sync::mpsc::channel(16);
     let parent = SpawnTool::new(
-        Arc::new(MockProvider),
+        Arc::new(ScriptedProvider::new(vec![end_turn("done", 0, 0)])),
         Arc::new(create_test_store().await),
         PathBuf::from("/tmp"),
         in_tx,
@@ -465,94 +443,11 @@ async fn child_spawn_clone_is_named_spawn_and_binds_spawn_agent_via_registry_swa
     assert!(registry.get("delegate").is_some());
 }
 
-// Minimal mock provider for testing
-struct MockProvider;
-
-#[async_trait]
-impl LlmProvider for MockProvider {
-    async fn chat(
-        &self,
-        _messages: &[octos_core::Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &octos_llm::ChatConfig,
-    ) -> Result<octos_llm::ChatResponse> {
-        Ok(octos_llm::ChatResponse {
-            content: Some("done".into()),
-            reasoning_content: None,
-            tool_calls: vec![],
-            stop_reason: octos_llm::StopReason::EndTurn,
-            usage: octos_llm::TokenUsage {
-                input_tokens: 0,
-                output_tokens: 0,
-                ..Default::default()
-            },
-            provider_index: None,
-        })
-    }
-
-    fn model_id(&self) -> &str {
-        "mock"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-}
-
 async fn create_test_store() -> EpisodeStore {
     let dir = tempfile::tempdir().unwrap();
     // Leak the dir so it stays alive for the test
     let dir = Box::leak(Box::new(dir));
     EpisodeStore::open(dir.path()).await.unwrap()
-}
-
-/// Emits assistant text + a `list_dir` call, then a final text answer —
-/// the minimal shape of a child that plans, uses a tool, and reports.
-struct ContentThenToolProvider {
-    calls: std::sync::atomic::AtomicUsize,
-}
-
-#[async_trait]
-impl LlmProvider for ContentThenToolProvider {
-    async fn chat(
-        &self,
-        _messages: &[octos_core::Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &octos_llm::ChatConfig,
-    ) -> Result<octos_llm::ChatResponse> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        if call == 0 {
-            return Ok(octos_llm::ChatResponse {
-                content: Some("PLAN: scan the tree".into()),
-                reasoning_content: None,
-                tool_calls: vec![octos_core::ToolCall {
-                    id: "call_ls".into(),
-                    name: "list_dir".into(),
-                    arguments: serde_json::json!({"path": "."}),
-                    metadata: None,
-                }],
-                stop_reason: octos_llm::StopReason::ToolUse,
-                usage: octos_llm::TokenUsage::default(),
-                provider_index: None,
-            });
-        }
-        Ok(octos_llm::ChatResponse {
-            content: Some("FINAL: transcript test done".into()),
-            reasoning_content: None,
-            tool_calls: vec![],
-            stop_reason: octos_llm::StopReason::EndTurn,
-            usage: octos_llm::TokenUsage::default(),
-            provider_index: None,
-        })
-    }
-
-    fn model_id(&self) -> &str {
-        "mock"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
 }
 
 #[tokio::test]
@@ -567,23 +462,34 @@ async fn background_child_transcript_streams_to_router_and_final_output_is_recor
     //      (`final_output`) through the real completion path.
     let (in_tx, _in_rx) = tokio::sync::mpsc::channel(16);
     let temp = tempfile::tempdir().unwrap();
-    let ledger = temp.path().join("tasks.jsonl");
     let workspace = temp.path().join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
     let supervisor = Arc::new(TaskSupervisor::new());
-    supervisor.enable_persistence(&ledger).unwrap();
     let router = Arc::new(crate::subagent_output::SubAgentOutputRouter::new(
         temp.path().join("router"),
     ));
     let tool = SpawnTool::new(
-        Arc::new(ContentThenToolProvider {
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        }),
+        Arc::new(ScriptedProvider::new(vec![
+            octos_llm::ChatResponse {
+                content: Some("PLAN: scan the tree".into()),
+                reasoning_content: None,
+                tool_calls: vec![octos_core::ToolCall {
+                    id: "call_ls".into(),
+                    name: "list_dir".into(),
+                    arguments: serde_json::json!({"path": "."}),
+                    metadata: None,
+                }],
+                stop_reason: octos_llm::StopReason::ToolUse,
+                usage: octos_llm::TokenUsage::default(),
+                provider_index: None,
+            },
+            end_turn("FINAL: transcript test done", 0, 0),
+        ])),
         Arc::new(create_test_store().await),
         workspace.clone(),
         in_tx,
     )
-    .with_task_supervisor(supervisor.clone(), "api:test-session", ledger.clone())
+    .with_task_supervisor(supervisor.clone(), "api:test-session")
     .with_parent_subagent_output_router(router.clone());
 
     let result = tool
@@ -627,10 +533,13 @@ async fn background_child_transcript_streams_to_router_and_final_output_is_recor
     assert!(final_output.contains("Status: SUCCESS"));
 
     // (a) the transcript reached the parent's router file.
-    let transcript = router
-        .preview(&task.id)
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default();
+    let mut transcript = String::new();
+    for sess in std::fs::read_dir(temp.path().join("router")).unwrap().flatten() {
+        for file in std::fs::read_dir(sess.path()).unwrap().flatten() {
+            let bytes = std::fs::read(file.path()).unwrap_or_default();
+            transcript.push_str(&String::from_utf8_lossy(&bytes));
+        }
+    }
     assert!(
         transcript.contains("[tool] list_dir"),
         "tool start must stream to the router: {transcript:?}"
@@ -860,7 +769,7 @@ async fn run_task_with_m8_9_recovery_retries_once_after_initial_failure() {
 async fn spawn_refuses_at_depth_4() {
     let (in_tx, _in_rx) = tokio::sync::mpsc::channel(16);
     let tool = SpawnTool::new(
-        Arc::new(MockProvider),
+        Arc::new(ScriptedProvider::new(vec![end_turn("done", 0, 0)])),
         Arc::new(create_test_store().await),
         PathBuf::from("/tmp"),
         in_tx,
@@ -1125,7 +1034,7 @@ async fn worktree_isolation_refuses_scope_escape_before_creating() {
 
     let (in_tx, _in_rx) = tokio::sync::mpsc::channel(16);
     let tool = SpawnTool::new(
-        Arc::new(MockProvider),
+        Arc::new(ScriptedProvider::new(vec![end_turn("done", 0, 0)])),
         Arc::new(create_test_store().await),
         session_root.clone(),
         in_tx,

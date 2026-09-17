@@ -40,37 +40,6 @@ const CURRENT_SESSION_SCHEMA: u32 = 1;
 pub type MessageCommitObserver =
     std::sync::Arc<dyn Fn(&SessionKey, &Message, usize) + Send + Sync + 'static>;
 
-static MESSAGE_COMMIT_OBSERVER: std::sync::OnceLock<
-    std::sync::RwLock<Option<MessageCommitObserver>>,
-> = std::sync::OnceLock::new();
-
-fn observer_slot() -> &'static std::sync::RwLock<Option<MessageCommitObserver>> {
-    MESSAGE_COMMIT_OBSERVER.get_or_init(|| std::sync::RwLock::new(None))
-}
-
-/// Install a process-global observer that fires after every successful
-/// `add_message_with_seq` commit. Returns the previous observer if any,
-/// allowing layered installs (e.g. tests can save / restore).
-///
-/// Wired by the AppUI server entry-point to dispatch
-/// `message/persisted` notifications per UPCR-2026-012. Off-thread fan-out
-/// happens inside the observer callback; this call is cheap and non-blocking.
-pub fn set_message_commit_observer(
-    observer: Option<MessageCommitObserver>,
-) -> Option<MessageCommitObserver> {
-    let slot = observer_slot();
-    let mut guard = slot.write().expect("message commit observer poisoned");
-    std::mem::replace(&mut *guard, observer)
-}
-
-/// Read-side accessor used by the durable-commit path. Cloned out so the
-/// callback does not hold the global lock while it runs.
-fn current_message_commit_observer() -> Option<MessageCommitObserver> {
-    let slot = observer_slot();
-    slot.read()
-        .expect("message commit observer poisoned")
-        .clone()
-}
 
 type ScopedCommitObservers = std::collections::HashMap<
     PathBuf,
@@ -103,16 +72,13 @@ fn notify_message_commit(
     committed_seq: usize,
 ) {
     let root = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_owned());
-    let scoped = scoped_commit_observers()
+    let Some(observer) = scoped_commit_observers()
         .lock()
         .unwrap()
         .get(&root)
-        .cloned();
-    let observer = match scoped {
-        Some(observer) => observer.upgrade(),
-        None => current_message_commit_observer(),
-    };
-    let Some(observer) = observer else {
+        .cloned()
+        .and_then(|observer| observer.upgrade())
+    else {
         return;
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -608,15 +574,6 @@ fn record_session_rewrite(outcome: &'static str) {
     .increment(1);
 }
 
-fn record_child_session_fork(outcome: &'static str) {
-    counter!(
-        "octos_child_session_lifecycle_total",
-        "kind" => "fork".to_string(),
-        "outcome" => outcome.to_string()
-    )
-    .increment(1);
-}
-
 /// Structured terminal outcome for a child session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -824,147 +781,9 @@ impl SessionManager {
         })
     }
 
-    /// Set the maximum number of sessions to keep in memory (minimum 1).
-    /// Sessions evicted from memory are NOT deleted from disk.
-    pub fn with_max_sessions(mut self, max: usize) -> Self {
-        let cap = NonZeroUsize::new(max.max(1)).expect("clamped to >= 1");
-        self.cache.resize(cap);
-        self
-    }
-
-    /// List all sessions (ID + message count) from disk, including internal
-    /// runtime topics (`child-*`, `*.tasks`).
-    ///
-    /// Scans both the legacy flat layout (`sessions/*.jsonl`) and the per-user
-    /// layout (`users/{base_key}/sessions/{topic}.jsonl`).
-    /// Counts lines efficiently using `BufRead` to avoid loading entire files.
-    ///
-    /// Use [`Self::list_top_level_sessions`] for the user-facing listing path:
-    /// the all-inclusive walk is O(N) over every JSONL on disk and becomes a
-    /// hard bottleneck once spawn-fanout sessions accumulate (one user dir
-    /// observed in the wild had 65k+ `child-*.jsonl` siblings, each
-    /// line-counted by [`Self::count_lines`], hanging `/api/sessions` for
-    /// 30 s+).
-    pub fn list_sessions(&self) -> Vec<(String, usize)> {
-        self.list_sessions_inner(false)
-    }
-
-
-
-
-
-
-    fn list_sessions_inner(&self, skip_internal_topics: bool) -> Vec<(String, usize)> {
-        let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
-
-        // 1. Legacy flat layout: data/sessions/*.jsonl
-        if let Ok(entries) = std::fs::read_dir(&self.sessions_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                    if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
-                        let decoded = Self::decode_filename(name);
-                        if skip_internal_topics && Self::is_internal_session_key(&decoded) {
-                            continue;
-                        }
-                        let count = Self::count_lines(&path);
-                        if seen.insert(decoded.clone()) {
-                            result.push((decoded, count));
-                        }
-                    }
-                }
-            }
-        }
-
-        // 2. Per-user layout: data/users/{base_key}/sessions/{topic}.jsonl
-        let users_dir = self
-            .sessions_dir
-            .parent()
-            .unwrap_or(&self.sessions_dir)
-            .join("users");
-        if let Ok(user_entries) = std::fs::read_dir(&users_dir) {
-            for user_entry in user_entries.flatten() {
-                let user_path = user_entry.path();
-                if !user_path.is_dir() {
-                    continue;
-                }
-                let base_key_encoded = match user_path.file_name().and_then(|n| n.to_str()) {
-                    Some(n) => n,
-                    None => continue,
-                };
-                let base_key = Self::decode_filename(base_key_encoded);
-                let sessions_subdir = user_path.join("sessions");
-                if let Ok(session_files) = std::fs::read_dir(&sessions_subdir) {
-                    for file_entry in session_files.flatten() {
-                        let file_path = file_entry.path();
-                        if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                            continue;
-                        }
-                        let topic_encoded = match file_path.file_stem().and_then(|n| n.to_str()) {
-                            Some(n) => n,
-                            None => continue,
-                        };
-                        let topic = Self::decode_filename(topic_encoded);
-                        if skip_internal_topics && Self::is_internal_session_topic(&topic) {
-                            // Skip child-* and *.tasks files BEFORE counting
-                            // lines: line counting opens every file, and on
-                            // user dirs with tens of thousands of spawn
-                            // children the cumulative I/O blocks the
-                            // /api/sessions handler for tens of seconds.
-                            continue;
-                        }
-                        // Reconstruct the full session key
-                        let session_key = if topic == "default" {
-                            base_key.clone()
-                        } else {
-                            format!("{base_key}#{topic}")
-                        };
-                        let count = Self::count_lines(&file_path);
-                        if seen.insert(session_key.clone()) {
-                            result.push((session_key, count));
-                        }
-                    }
-                }
-            }
-        }
-
-        result
-    }
-
     /// True for runtime-internal topics that should never appear in the
     /// user-facing session listing (`child-*` spawn fanouts and `*.tasks`
     /// background-task ledger sidecars).
-    fn is_internal_session_topic(topic: &str) -> bool {
-        topic.starts_with("child-") || topic == "default.tasks" || topic.ends_with(".tasks")
-    }
-
-    /// True for full session keys (legacy flat layout, encoded as
-    /// `{base}#{topic}` after decoding) whose topic is internal.
-    fn is_internal_session_key(decoded_key: &str) -> bool {
-        decoded_key
-            .split_once('#')
-            .is_some_and(|(_, topic)| Self::is_internal_session_topic(topic))
-    }
-
-    /// Count lines in a JSONL session file, skipping oversized files.
-    fn count_lines(path: &Path) -> usize {
-        let too_large = path
-            .metadata()
-            .map(|m| m.len() > MAX_SESSION_FILE_SIZE)
-            .unwrap_or(false);
-        if too_large {
-            return 0;
-        }
-        std::fs::File::open(path)
-            .ok()
-            .map(|f| {
-                use std::io::BufRead;
-                std::io::BufReader::new(f).lines().count()
-            })
-            .unwrap_or(0)
-    }
-
     /// Load a session from disk (read-only). Returns None if not found.
     pub async fn load(&self, key: &SessionKey) -> Option<Session> {
         self.load_from_disk(key).await
@@ -1674,12 +1493,6 @@ impl SessionManager {
     }
 
 
-    /// Number of sessions the LRU cache can hold.
-    pub fn capacity(&self) -> usize {
-        self.cache.cap().get()
-    }
-
-
     /// Drop the cached in-memory copy of a session so the next read consults
     /// disk. Required by callers that write through alternate channels (e.g.
     /// `SessionHandle`) and must keep the manager's LRU cache from serving
@@ -2001,61 +1814,6 @@ impl SessionHandle {
     }
 
 
-    /// Seed a child session from a parent session if the child does not already exist.
-    ///
-    /// Copies the parent's most recent `copy_messages` messages into the child
-    /// when the child is empty, repairs a missing parent linkage on existing
-    /// child sessions, and persists the result. Existing child history is never
-    /// overwritten.
-    pub async fn fork_from_parent_if_missing(
-        data_dir: &Path,
-        parent_key: &SessionKey,
-        child_key: &SessionKey,
-        copy_messages: usize,
-    ) -> Result<()> {
-        let parent_history = {
-            let parent = Self::open(data_dir, parent_key);
-            parent.get_history(copy_messages).to_vec()
-        };
-
-        let mut child = Self::open(data_dir, child_key);
-        if child
-            .session
-            .parent_key
-            .as_ref()
-            .is_some_and(|existing| existing != parent_key)
-        {
-            record_child_session_fork("skipped_existing");
-            return Ok(());
-        }
-
-        let mut changed = false;
-        let mut seeded_history = false;
-
-        if child.session.parent_key.is_none() {
-            child.session.parent_key = Some(parent_key.clone());
-            changed = true;
-        }
-        if child.session.messages.is_empty() {
-            child.session.messages = parent_history;
-            changed = true;
-            seeded_history = true;
-        }
-        if !changed {
-            record_child_session_fork("skipped_existing");
-            return Ok(());
-        }
-
-        child.session.updated_at = Utc::now();
-        child.rewrite().await?;
-        record_child_session_fork(if seeded_history {
-            "seeded"
-        } else {
-            "linked_existing"
-        });
-        Ok(())
-    }
-
     /// Encode a path component (base key) for safe directory names.
     fn encode_path_component(s: &str) -> String {
         encode_path_component(s)
@@ -2067,47 +1825,6 @@ impl SessionHandle {
         let topic = key.topic().unwrap_or("default");
         let encoded = Self::encode_path_component(topic);
         format!("{encoded}.jsonl")
-    }
-
-    /// The session key.
-    pub fn key(&self) -> &SessionKey {
-        &self.session.key
-    }
-
-    /// Immutable access to the session.
-    pub fn session(&self) -> &Session {
-        &self.session
-    }
-
-
-    /// Get the most recent N messages from history.
-    pub fn get_history(&self, max: usize) -> &[Message] {
-        self.session.get_history(max)
-    }
-
-    /// Get or initialize the session (always returns a reference).
-    pub fn get_or_create(&mut self) -> &mut Session {
-        &mut self.session
-    }
-
-    /// Add a message to the session and persist it.
-    pub async fn add_message(&mut self, message: Message) -> Result<()> {
-        self.add_message_with_seq(message).await.map(|_| ())
-    }
-
-    /// Add a message to the session, persist it, and return its committed sequence.
-    ///
-    /// Serialises on the per-key persist lock (see [`persist_lock_for`]) so a
-    /// concurrent writer on the same key — another `SessionHandle`, the
-    /// canonical [`persist_message_through_canonical_path`] helper, or a
-    /// rewrite — cannot interleave between the disk append and the seq
-    /// derivation. The lock is NOT reentrant: a caller that already holds it
-    /// (the canonical helper) must use
-    /// [`Self::add_message_with_seq_unlocked`] instead.
-    pub async fn add_message_with_seq(&mut self, message: Message) -> Result<usize> {
-        let lock = persist_lock_for(&self.session.key);
-        let _guard = lock.lock().await;
-        self.add_message_with_seq_unlocked(message).await
     }
 
     /// Append + seq derivation without taking the persist lock — the caller
@@ -2195,108 +1912,8 @@ impl SessionHandle {
         Ok(committed_seq)
     }
 
-    /// Append a message to the in-memory transcript only — no disk I/O.
-    ///
-    /// Used by callers that funneled the persist through
-    /// [`persist_message_through_canonical_path`] and now need to keep the
-    /// per-actor handle's in-memory `messages` consistent with disk WITHOUT
-    /// double-writing (the canonical helper already wrote the JSONL line).
-    pub fn push_message_in_memory(&mut self, message: Message) {
-        self.session.messages.push(message);
-        self.session.updated_at = Utc::now();
-    }
-
-
-
-
-    /// Rewrite the session to disk (atomic write-then-rename).
-    ///
-    /// Serialises on the per-key persist lock so a whole-file rewrite cannot
-    /// interleave with the canonical locked append path
-    /// ([`persist_message_through_canonical_path`]) — an append committed
-    /// between an unlocked rewrite's snapshot and its rename was silently
-    /// erased by the rename.
-    pub async fn rewrite(&self) -> Result<()> {
-        let lock = persist_lock_for(&self.session.key);
-        let _guard = lock.lock().await;
-        self.rewrite_unlocked().await
-    }
-
     /// Snapshot-and-rename without taking the persist lock — the caller
     /// must already hold it.
-    async fn rewrite_unlocked(&self) -> Result<()> {
-        let meta = SessionMeta {
-            schema_version: CURRENT_SESSION_SCHEMA,
-            session_key: self.session.key.0.clone(),
-            parent_key: self.session.parent_key.as_ref().map(|k| k.0.clone()),
-            topic: self.session.topic.clone(),
-            summary: self.session.summary.clone(),
-            title: self.session.title.clone(),
-            title_manual: self.session.title_manual,
-            child_contracts: self.session.child_contracts.clone(),
-            created_at: self.session.created_at,
-            updated_at: self.session.updated_at,
-        };
-        let mut content = serde_json::to_string(&meta)?;
-        content.push('\n');
-        for msg in &self.session.messages {
-            content.push_str(&serde_json::to_string(msg)?);
-            content.push('\n');
-        }
-
-        let msg_count = self.session.messages.len();
-        let path = self.session_path();
-        let key_display = self.session.key.to_string();
-
-        let rewrite_result = tokio::task::spawn_blocking(move || {
-            use std::io::Write;
-            let tmp_path = rewrite_tmp_path(&path);
-            let write_result = (|| -> Result<(), eyre::Report> {
-                let mut file = std::fs::File::create(&tmp_path)?;
-                file.write_all(content.as_bytes())?;
-                // `flush()` on a std File is a no-op (no userspace buffer) —
-                // `sync_all` is what actually gets the bytes to stable
-                // storage before the rename swaps the inode.
-                file.sync_all()?;
-                std::fs::rename(&tmp_path, &path)?;
-                if let Some(dir) = path.parent() {
-                    fsync_dir(dir);
-                }
-                Ok(())
-            })();
-            if write_result.is_err() {
-                // Best-effort tmp cleanup, same as rewrite_blocking_inner.
-                let _ = std::fs::remove_file(&tmp_path);
-            }
-            write_result
-        })
-        .await
-        .map_err(|e| eyre::eyre!("spawn_blocking join error: {e}"))?;
-        if let Err(error) = rewrite_result {
-            record_session_rewrite("failed");
-            return Err(error);
-        }
-
-        debug!(key = %key_display, messages = msg_count, "Rewrote session to disk");
-        record_session_rewrite("committed");
-        Ok(())
-    }
-
-    /// Path for the append-only background task ledger sidecar.
-    pub fn task_state_path(&self) -> PathBuf {
-        self.session_path().with_extension("tasks.jsonl")
-    }
-
-    /// Clear the session (in-memory and on disk).
-    pub async fn clear(&mut self) -> Result<()> {
-        self.session = Session::new(self.session.key.clone());
-        let path = self.session_path();
-        if path.exists() {
-            tokio::fs::remove_file(&path).await?;
-        }
-        Ok(())
-    }
-
     fn session_path(&self) -> PathBuf {
         self.sessions_dir
             .join(Self::topic_filename(&self.session.key))
@@ -2560,104 +2177,6 @@ impl SessionManager {
         entries
     }
 
-    /// Update the summary field for a session (rewrites metadata line).
-    pub async fn update_summary(&mut self, key: &SessionKey, summary: String) -> Result<()> {
-        let session = self.get_or_create(key).await;
-        session.summary = Some(summary);
-        self.rewrite(key).await
-    }
-
-
-    /// List sessions for a chat, merging per-user and legacy flat layouts.
-    ///
-    /// Scans `{data_dir}/users/{base_key}/sessions/` for JSONL files and
-    /// also includes any sessions from the legacy flat `{data_dir}/sessions/`
-    /// directory that aren't already present in the per-user layout.
-    pub fn list_user_sessions(&self, base_key: &str) -> Vec<SessionListEntry> {
-        let encoded_base = SessionHandle::encode_path_component(base_key);
-        let user_sessions_dir = self
-            .sessions_dir
-            .parent()
-            .unwrap_or(&self.sessions_dir)
-            .join("users")
-            .join(&encoded_base)
-            .join("sessions");
-
-        let mut entries = if user_sessions_dir.is_dir() {
-            Self::scan_sessions_dir(&user_sessions_dir)
-        } else {
-            Vec::new()
-        };
-
-        // Merge legacy flat layout sessions that don't exist in per-user dir
-        let legacy = self.list_sessions_for_chat(base_key);
-        let existing_topics: std::collections::HashSet<Option<String>> =
-            entries.iter().map(|e| e.topic.clone()).collect();
-        for entry in legacy {
-            if !existing_topics.contains(&entry.topic) {
-                entries.push(entry);
-            }
-        }
-
-        entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
-        entries
-    }
-
-    /// Scan a sessions directory and return entries sorted by updated_at descending.
-    fn scan_sessions_dir(dir: &Path) -> Vec<SessionListEntry> {
-        let mut entries = Vec::new();
-        let Ok(read_dir) = std::fs::read_dir(dir) else {
-            return entries;
-        };
-
-        for entry in read_dir.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Some(name) = path.file_stem().and_then(|n| n.to_str()) else {
-                continue;
-            };
-
-            if path
-                .metadata()
-                .map(|m| m.len() > MAX_SESSION_FILE_SIZE)
-                .unwrap_or(false)
-            {
-                continue;
-            }
-
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let mut lines = content.lines();
-            let Some(meta_line) = lines.next() else {
-                continue;
-            };
-            let meta: SessionMeta = match serde_json::from_str(meta_line) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-
-            let message_count = lines.filter(|l| !l.trim().is_empty()).count();
-            let topic = if name == "default" {
-                None
-            } else {
-                Some(Self::decode_filename(name))
-            };
-
-            entries.push(SessionListEntry {
-                topic,
-                message_count,
-                updated_at: meta.updated_at,
-                summary: meta.summary,
-                title: meta.title,
-            });
-        }
-
-        entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
-        entries
-    }
 }
 
 

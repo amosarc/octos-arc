@@ -7,7 +7,7 @@ use eyre::{Result, WrapErr};
 use octos_memory::MemoryStore;
 use serde::Deserialize;
 
-use super::{Tool, ToolResult};
+use super::{Tool, ToolResult, to_slug};
 
 /// Tool that loads full entity pages from the memory bank.
 pub struct RecallMemoryTool {
@@ -28,11 +28,6 @@ struct Input {
     /// entities.
     #[serde(default)]
     page: Option<usize>,
-}
-
-/// Normalize an entity name into a slug: trim, lowercase, spaces to hyphens.
-fn to_slug(name: &str) -> String {
-    name.trim().to_lowercase().replace(' ', "-")
 }
 
 /// Split the registry into byte-safe, line-aligned pages each just under

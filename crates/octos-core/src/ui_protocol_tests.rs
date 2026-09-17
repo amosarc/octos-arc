@@ -314,11 +314,6 @@ fn turn_interrupt_result_round_trips_with_reason() {
         value,
         json!({ "interrupted": false, "reason": "turn_id_mismatch" })
     );
-    assert_eq!(
-        UiRpcResult::from_method_and_result(methods::TURN_INTERRUPT, value)
-            .expect("decode turn/interrupt result"),
-        result
-    );
 }
 
 #[test]
@@ -518,43 +513,6 @@ fn cursor_out_of_range_round_trip() {
 }
 
 #[test]
-fn decode_malformed_result_returns_malformed_result_not_invalid_params() {
-    // Bad inbound result must surface MALFORMED_RESULT, never INVALID_PARAMS.
-    let bad = json!({ "definitely_not": "a session_open result" });
-    let err = UiRpcResult::from_method_and_result(methods::SESSION_OPEN, bad)
-        .expect_err("malformed result should fail to decode");
-    assert_eq!(err.code, rpc_error_codes::MALFORMED_RESULT);
-    assert_ne!(err.code, rpc_error_codes::INVALID_PARAMS);
-    assert!(err.message.contains(methods::SESSION_OPEN));
-}
-
-#[test]
-fn unsupported_capability_result_round_trips() {
-    // `from_method_and_result` must reconstruct UnsupportedCapability
-    // even though the originating method is `approval/respond`.
-    let result = UiRpcResult::UnsupportedCapability(UnsupportedCapabilityResult::method(
-        methods::APPROVAL_RESPOND,
-        "approval is pending",
-    ));
-    let value = result
-        .clone()
-        .into_result_value()
-        .expect("serialize unsupported result");
-    let decoded = UiRpcResult::from_method_and_result(methods::APPROVAL_RESPOND, value)
-        .expect("decode unsupported result");
-    assert_eq!(decoded, result);
-    assert_eq!(decoded.kind(), UiResultKind::UnsupportedCapability);
-
-    // Regular ApprovalRespond payload must still route to its typed variant.
-    let regular = UiRpcResult::ApprovalRespond(ApprovalRespondResult::accepted(ApprovalId::new()))
-        .into_result_value()
-        .expect("serialize approval respond");
-    let decoded_regular = UiRpcResult::from_method_and_result(methods::APPROVAL_RESPOND, regular)
-        .expect("decode approval respond");
-    assert_eq!(decoded_regular.kind(), UiResultKind::ApprovalRespond);
-}
-
-#[test]
 fn closed_string_enums_capture_unknown_wire_values() {
     // ApprovalRespondStatus
     let status: ApprovalRespondStatus =
@@ -619,15 +577,11 @@ fn rpc_error_codes_partition_is_disjoint() {
     // spec-pinned APPROVAL_NOT_PENDING is the documented exception.
     for code in [
         rpc_error_codes::UNKNOWN_SESSION,
-        rpc_error_codes::UNKNOWN_TURN,
         rpc_error_codes::UNKNOWN_APPROVAL_ID,
-        rpc_error_codes::UNKNOWN_PREVIEW_ID,
-        rpc_error_codes::UNKNOWN_TASK_ID,
         rpc_error_codes::APPROVAL_CANCELLED,
         rpc_error_codes::CURSOR_OUT_OF_RANGE,
         rpc_error_codes::CURSOR_INVALID,
         rpc_error_codes::PERMISSION_DENIED,
-        rpc_error_codes::UNSUPPORTED_CAPABILITY,
         rpc_error_codes::RUNTIME_NOT_READY,
         rpc_error_codes::MALFORMED_RESULT,
         rpc_error_codes::RATE_LIMITED,
@@ -716,9 +670,8 @@ fn session_rollback_command_and_result_round_trip() {
     assert_eq!(wire.method(), Some(methods::SESSION_ROLLBACK));
     assert_eq!(wire.kind(), UiResultKind::SessionRollback);
     let value = wire.into_result_value().expect("encode result");
-    let decoded =
-        UiRpcResult::from_method_and_result(methods::SESSION_ROLLBACK, value).expect("decode");
-    assert_eq!(decoded, UiRpcResult::SessionRollback(result));
+    let decoded: SessionRollbackResult = serde_json::from_value(value).expect("decode");
+    assert_eq!(decoded, result);
 }
 
 // ===== M12 Phase D-1 auxiliary REST → WS frames =====
@@ -999,114 +952,111 @@ fn topic_method_reads_explicit_field_then_session_suffix_across_event_classes() 
 /// so a topic-scoped subscriber always routes the event correctly.
 #[test]
 fn stamp_topic_from_session_populates_new_topic_class_events() {
-    // ToolStarted
-    let mut event = UiNotification::ToolStarted(ToolStartedEvent {
-        session_id: topic_session(),
-        topic: None,
-        turn_id: TurnId::new(),
-        tool_call_id: "tc".into(),
-        tool_name: "shell".into(),
-        arguments: None,
-    });
-    event.stamp_topic_from_session();
-    assert_eq!(event.topic(), Some("slides"));
-    if let UiNotification::ToolStarted(inner) = &event {
-        assert_eq!(inner.topic.as_deref(), Some("slides"));
-    } else {
-        panic!("event variant changed unexpectedly");
-    }
+    type Ctor = Box<dyn Fn() -> UiNotification>;
+    // `stamp_topic_from_session` MUST populate the explicit `topic` field for
+    // the new-topic-class events (the safety net inside `into_rpc_notification`)
+    // so a topic-scoped subscriber always routes correctly even when a caller
+    // forgets to stamp.
+    let rows: Vec<(&str, Ctor)> = vec![
+        ("ToolStarted", Box::new(|| {
+            UiNotification::ToolStarted(ToolStartedEvent {
+                session_id: topic_session(),
+                topic: None,
+                turn_id: TurnId::new(),
+                tool_call_id: "tc".into(),
+                tool_name: "shell".into(),
+                arguments: None,
+            })
+        })),
+        ("ToolProgress", Box::new(|| {
+            UiNotification::ToolProgress(ToolProgressEvent {
+                session_id: topic_session(),
+                topic: None,
+                turn_id: TurnId::new(),
+                tool_call_id: "tc".into(),
+                message: None,
+                progress_pct: None,
+            })
+        })),
+        ("ToolCompleted", Box::new(|| {
+            UiNotification::ToolCompleted(ToolCompletedEvent {
+                session_id: topic_session(),
+                topic: None,
+                turn_id: TurnId::new(),
+                tool_call_id: "tc".into(),
+                tool_name: "shell".into(),
+                success: Some(true),
+                output_preview: None,
+                duration_ms: None,
+            })
+        })),
+        ("ApprovalAutoResolved", Box::new(|| {
+            UiNotification::ApprovalAutoResolved(ApprovalAutoResolvedEvent {
+                session_id: topic_session(),
+                topic: None,
+                approval_id: ApprovalId::new(),
+                turn_id: TurnId::new(),
+                tool_name: "shell".into(),
+                scope: approval_scopes::SESSION.into(),
+                scope_match: "exact".into(),
+                decision: ApprovalDecision::Approve,
+            })
+        })),
+        ("ApprovalDecided", Box::new(|| {
+            UiNotification::ApprovalDecided(ApprovalDecidedEvent {
+                session_id: topic_session(),
+                topic: None,
+                approval_id: ApprovalId::new(),
+                turn_id: TurnId::new(),
+                decision: ApprovalDecision::Approve,
+                scope: None,
+                decided_at: Utc::now(),
+                decided_by: "user:test".into(),
+                auto_resolved: false,
+                policy_id: None,
+                client_note: None,
+            })
+        })),
+        ("ApprovalCancelled", Box::new(|| {
+            UiNotification::ApprovalCancelled(ApprovalCancelledEvent {
+                session_id: topic_session(),
+                topic: None,
+                approval_id: ApprovalId::new(),
+                turn_id: TurnId::new(),
+                reason: approval_cancelled_reasons::TURN_INTERRUPTED.into(),
+            })
+        })),
+        ("FileAttached", Box::new(|| {
+            UiNotification::FileAttached(FileAttachedEvent {
+                session_id: topic_session(),
+                topic: None,
+                turn_id: TurnId::new(),
+                path: "/tmp/deck.pptx".into(),
+                tool_call_id: None,
+                attachment_owner: None,
+                mime: None,
+            })
+        })),
+    ];
 
-    // ToolProgress
-    let mut event = UiNotification::ToolProgress(ToolProgressEvent {
-        session_id: topic_session(),
-        topic: None,
-        turn_id: TurnId::new(),
-        tool_call_id: "tc".into(),
-        message: None,
-        progress_pct: None,
-    });
-    event.stamp_topic_from_session();
-    if let UiNotification::ToolProgress(inner) = &event {
-        assert_eq!(inner.topic.as_deref(), Some("slides"));
-    }
-
-    // ToolCompleted
-    let mut event = UiNotification::ToolCompleted(ToolCompletedEvent {
-        session_id: topic_session(),
-        topic: None,
-        turn_id: TurnId::new(),
-        tool_call_id: "tc".into(),
-        tool_name: "shell".into(),
-        success: Some(true),
-        output_preview: None,
-        duration_ms: None,
-    });
-    event.stamp_topic_from_session();
-    if let UiNotification::ToolCompleted(inner) = &event {
-        assert_eq!(inner.topic.as_deref(), Some("slides"));
-    }
-
-    // ApprovalAutoResolved
-    let mut event = UiNotification::ApprovalAutoResolved(ApprovalAutoResolvedEvent {
-        session_id: topic_session(),
-        topic: None,
-        approval_id: ApprovalId::new(),
-        turn_id: TurnId::new(),
-        tool_name: "shell".into(),
-        scope: approval_scopes::SESSION.into(),
-        scope_match: "exact".into(),
-        decision: ApprovalDecision::Approve,
-    });
-    event.stamp_topic_from_session();
-    if let UiNotification::ApprovalAutoResolved(inner) = &event {
-        assert_eq!(inner.topic.as_deref(), Some("slides"));
-    }
-
-    // ApprovalDecided
-    let mut event = UiNotification::ApprovalDecided(ApprovalDecidedEvent {
-        session_id: topic_session(),
-        topic: None,
-        approval_id: ApprovalId::new(),
-        turn_id: TurnId::new(),
-        decision: ApprovalDecision::Approve,
-        scope: None,
-        decided_at: Utc::now(),
-        decided_by: "user:test".into(),
-        auto_resolved: false,
-        policy_id: None,
-        client_note: None,
-    });
-    event.stamp_topic_from_session();
-    if let UiNotification::ApprovalDecided(inner) = &event {
-        assert_eq!(inner.topic.as_deref(), Some("slides"));
-    }
-
-    // ApprovalCancelled
-    let mut event = UiNotification::ApprovalCancelled(ApprovalCancelledEvent {
-        session_id: topic_session(),
-        topic: None,
-        approval_id: ApprovalId::new(),
-        turn_id: TurnId::new(),
-        reason: approval_cancelled_reasons::TURN_INTERRUPTED.into(),
-    });
-    event.stamp_topic_from_session();
-    if let UiNotification::ApprovalCancelled(inner) = &event {
-        assert_eq!(inner.topic.as_deref(), Some("slides"));
-    }
-
-    // FileAttached (sibling)
-    let mut event = UiNotification::FileAttached(FileAttachedEvent {
-        session_id: topic_session(),
-        topic: None,
-        turn_id: TurnId::new(),
-        path: "/tmp/deck.pptx".into(),
-        tool_call_id: None,
-        attachment_owner: None,
-        mime: None,
-    });
-    event.stamp_topic_from_session();
-    if let UiNotification::FileAttached(inner) = &event {
-        assert_eq!(inner.topic.as_deref(), Some("slides"));
+    for (name, ctor) in rows {
+        let mut event = ctor();
+        event.stamp_topic_from_session();
+        assert_eq!(
+            event.topic(),
+            Some("slides"),
+            "{name}: stamp must populate the topic from the session suffix"
+        );
+        // The stamped topic must also survive onto the wire for routing.
+        let wire = serde_json::to_value(event.into_rpc_notification().unwrap_or_else(|e| {
+            panic!("{name}: wire serialize failed: {e}")
+        }))
+        .unwrap_or_else(|e| panic!("{name}: to_value failed: {e}"));
+        assert_eq!(
+            wire["params"]["topic"],
+            json!("slides"),
+            "{name}: stamped topic must reach the wire"
+        );
     }
 }
 

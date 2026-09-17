@@ -599,6 +599,8 @@ impl WriteFileTool {
 mod tests {
     use super::*;
 
+    use crate::tools::test_fixture::scoped_ctx;
+
     #[tokio::test]
     async fn test_write_file_creates_new() {
         let dir = tempfile::tempdir().unwrap();
@@ -654,14 +656,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use octos_core::SessionScope;
-    use std::sync::Arc;
-
-    fn ctx_with_scope(scope: SessionScope) -> ToolContext {
-        let mut ctx = ToolContext::zero();
-        ctx.tool_id = "write-with-scope".to_string();
-        ctx.session_scope = Some(Arc::new(scope));
-        ctx
-    }
+    
 
     #[tokio::test]
     async fn write_file_uses_scope_workspace_as_base_dir_for_relative_paths() {
@@ -674,7 +669,7 @@ mod tests {
 
         let scope = SessionScope::solo(scope_dir.path().to_path_buf(), vec![]).unwrap();
         let tool = WriteFileTool::new(legacy_dir.path());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("write-with-scope", scope);
 
         let result = tool
             .execute_with_context(
@@ -697,7 +692,7 @@ mod tests {
 
         let scope = SessionScope::solo(scope_dir.path().to_path_buf(), vec![]).unwrap();
         let tool = WriteFileTool::new(scope_dir.path());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("write-with-scope", scope);
 
         let result = tool
             .execute_with_context(
@@ -740,7 +735,7 @@ mod tests {
         )
         .unwrap();
         let tool = WriteFileTool::new(scope.workspace());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("write-with-scope", scope);
 
         let result = tool
             .execute_with_context(
@@ -782,7 +777,7 @@ mod tests {
 
         let scope = SessionScope::solo(scope_dir.path().to_path_buf(), vec![]).unwrap();
         let tool = WriteFileTool::new(scope_dir.path());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("write-with-scope", scope);
 
         let result = tool
             .execute_with_context(

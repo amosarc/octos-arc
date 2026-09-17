@@ -553,7 +553,7 @@ impl Agent {
     ///
     /// Cache-aware (#1640 follow-up, protocol-aware per #2194 review): the
     /// resolved slot's PROVIDER + MODEL pick the cache rate card
-    /// (`pricing::cache_rates` — Anthropic protocol 0.1x/1.25x incl. relabeled
+    /// (Anthropic-protocol cache rates 0.1x/1.25x incl. relabeled
     /// proxies, Gemini 0.25x/0, unknown 1.0x/1.25x so a reported write never
     /// vanishes), and `TokenUsage`'s crate-wide contract is DISJOINT
     /// accounting (inclusive wire formats are normalized at each provider's

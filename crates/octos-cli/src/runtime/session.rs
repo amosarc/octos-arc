@@ -1389,8 +1389,6 @@ tools = ["read_file"]
         assert_eq!(scope.tenant_id(), Some(profile.profile_id.as_str()));
         // root == workspace == canonical repo; no shared zones (out-of-tree).
         assert_eq!(scope.workspace(), repo_canon.as_path());
-        assert_eq!(scope.root(), repo_canon.as_path());
-        assert!(scope.shared_zones().is_empty());
         // Critical for propagation: scope.workspace() == workspace_root.
         assert_eq!(scope.workspace(), rt.workspace_root.as_path());
     }
@@ -1422,9 +1420,7 @@ tools = ["read_file"]
         // Tenant binding present -> the resolver's `up/` ownership gate fires.
         assert_eq!(scope.tenant_id(), Some(profile.profile_id.as_str()));
         // No-hint session: workspace_root is the raw `<data>/users/<enc>/
-        // workspace` path, so scope.root() stays the raw data_dir (the form
-        // that prefixes workspace_root).
-        assert_eq!(scope.root(), data_dir.as_path());
+        // workspace` path under the raw data_dir.
         // Workspace matches the runtime's workspace_root, so per-turn
         // propagation attaches it.
         assert_eq!(scope.workspace(), rt.workspace_root.as_path());

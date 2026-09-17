@@ -61,7 +61,6 @@ async fn setup_ctx() -> (SlashCommandContext, TempDir, SessionKey) {
         session_id: session_key.clone(),
         data_dir: tmp.path().to_path_buf(),
         workspace_root: None,
-        profile_id: None,
     };
     (ctx, tmp, session_key)
 }

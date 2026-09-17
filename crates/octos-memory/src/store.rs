@@ -344,7 +344,7 @@ impl EpisodeStore {
     /// index is updated with the summary so [`Self::find_relevant_hybrid`]
     /// (which is index-only when populated) can match it for ranking,
     /// but full episode bodies come from disk — so the public read
-    /// methods ([`Self::find_relevant`], [`Self::find_relevant_hybrid`])
+    /// recall methods
     /// still return empty on a degraded handle because there is no
     /// DB to fetch bodies from. The intent is "writes accepted, reads
     /// empty," not in-memory persistence.
@@ -400,203 +400,6 @@ impl EpisodeStore {
         }
 
         Ok(())
-    }
-
-    /// Find episodes relevant to a query in the given directory.
-    ///
-    /// Delegates to `find_relevant_hybrid` (BM25-only, no embedding) and
-    /// post-filters by CWD. Falls back to a direct DB scan if the hybrid
-    /// index is empty.
-    pub async fn find_relevant(
-        &self,
-        cwd: &Path,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<Episode>> {
-        self.find_relevant_filtered(cwd, query, limit, None).await
-    }
-
-    /// NEW-06 defense-in-depth: CWD-scoped relevance search with an
-    /// optional `min_best_modality` floor applied to the BM25 score
-    /// (the only modality available on the no-embedder fallback path).
-    ///
-    /// The agent loop calls this when no embedder is configured so
-    /// pipeline workers spawned without the parent embedder still
-    /// drop sub-threshold matches BEFORE injection — even though the
-    /// `find_relevant_hybrid` path inside this fallback only has BM25
-    /// scores. A score of `1.0` on BM25 still passes; loose
-    /// cross-domain "shared token" matches (the NEW-06 contamination
-    /// pattern) do not.
-    ///
-    /// `min_best_modality == None` matches [`Self::find_relevant`]
-    /// semantics exactly.
-    pub async fn find_relevant_filtered(
-        &self,
-        cwd: &Path,
-        query: &str,
-        limit: usize,
-        min_best_modality: Option<f32>,
-    ) -> Result<Vec<Episode>> {
-        // Check if hybrid index has documents
-        let index_populated = self
-            .index
-            .read()
-            .map(|idx| !idx.is_empty())
-            .unwrap_or(false);
-
-        if index_populated {
-            // Inner-fetch sizing — codex P2 rounds 4 and 5 follow-up:
-            //
-            // The hybrid index is global (not cwd-scoped). After we
-            // ask for the top-N candidates, we apply the cwd filter
-            // locally. If we used the standard `limit * 4` pool, a
-            // shared episode store with many foreign-cwd matches that
-            // clear the same floor could truncate a current-cwd
-            // match out BEFORE the cwd filter ever sees it — flipping
-            // the "return empty when floor set" branch into a false-
-            // negative for legitimately relevant local memories.
-            //
-            // Two regimes:
-            // * No floor → keep the legacy `limit * 4` over-fetch.
-            //   Without a floor there is no natural cap on the
-            //   candidate set; growing the pool unboundedly would be
-            //   wasted work and the legacy fall-through to
-            //   `find_relevant_db_scan` already handles the no-cwd-
-            //   match case.
-            // * Floor supplied → size the inner fetch from the actual
-            //   corpus (`HybridIndex::len`). Round 4 used
-            //   `FLOOR_PREFILTER_POOL = HNSW_CAPACITY = 10_000`, but
-            //   codex round 5 flagged that the BM25 inverted index
-            //   keeps inserting documents AFTER HNSW saturates, so a
-            //   corpus larger than 10K BM25-only docs could still
-            //   truncate a local floor-clearing match. Reading the
-            //   corpus size directly closes that gap without
-            //   over-allocating for small stores.
-            let corpus_size = self
-                .index
-                .read()
-                .map(|idx| idx.len())
-                .unwrap_or(crate::hybrid_search::FLOOR_PREFILTER_POOL);
-            let inner_limit = if min_best_modality.is_some() {
-                corpus_size
-            } else {
-                limit * 4
-            };
-            let candidates = self
-                .find_relevant_hybrid_scored_filtered(
-                    query,
-                    None,
-                    inner_limit,
-                    min_best_modality,
-                    false,
-                )
-                .await?;
-            let filtered: Vec<Episode> = candidates
-                .into_iter()
-                .filter(|(ep, _)| ep.working_dir == cwd)
-                .map(|(ep, _)| ep)
-                .take(limit)
-                .collect();
-
-            if !filtered.is_empty() {
-                return Ok(filtered);
-            }
-            // NEW-06 codex follow-up: when a caller passed a
-            // `min_best_modality` floor and the scored+CWD-filtered set
-            // came back empty (with an exhaustive `inner_limit`), the
-            // correct answer is empty — nothing in the index cleared
-            // the contamination floor for this cwd. Falling through to
-            // the unscored `find_relevant_db_scan` would silently
-            // bypass the floor (the scan is keyword-substring only
-            // with no scoring infrastructure), which is exactly the
-            // contamination pattern this filter exists to prevent.
-            //
-            // Only fall through to the unscored DB scan when no floor
-            // was requested (legacy `find_relevant` semantics).
-            if min_best_modality.is_some() {
-                return Ok(Vec::new());
-            }
-            // Fall through to DB scan if hybrid returned no CWD matches
-            // AND no contamination floor was requested.
-        }
-
-        // Fallback: direct DB scan (for empty index or no CWD matches).
-        // The DB scan path is keyword-substring based with no scoring
-        // infrastructure, so we can't apply `min_best_modality` here
-        // without rewriting it. We only reach this path when the caller
-        // did not request a floor (see early-return above), so legacy
-        // unscored behaviour is preserved without bypassing the
-        // contamination filter when one was asked for.
-        self.find_relevant_db_scan(cwd, query, limit).await
-    }
-
-    /// Direct DB scan fallback for CWD-scoped relevance search.
-    async fn find_relevant_db_scan(
-        &self,
-        cwd: &Path,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<Episode>> {
-        // Degraded fallback: no DB to scan; return empty.
-        let Some(db) = self.db.clone() else {
-            return Ok(Vec::new());
-        };
-        let cwd_str = cwd.to_string_lossy().to_string();
-        let query = query.to_lowercase();
-
-        tokio::task::spawn_blocking(move || {
-            let read_txn = db.begin_read()?;
-            let episodes_table = read_txn.open_table(EPISODES_TABLE)?;
-            let index_table = read_txn.open_table(CWD_INDEX_TABLE)?;
-
-            // Get episode IDs for this cwd
-            let episode_ids: Vec<String> = index_table
-                .get(cwd_str.as_str())?
-                .map(|v| parse_episode_ids_with_salvage(v.value()))
-                .unwrap_or_default();
-
-            // Tokenize query consistently (#127): split on non-alphanumeric, filter short tokens
-            let terms: Vec<String> = query
-                .split(|c: char| !c.is_alphanumeric())
-                .filter(|w| w.len() >= 2)
-                .map(|w| w.to_string())
-                .collect();
-
-            // Load and filter episodes
-            let mut results: Vec<(Episode, usize)> = Vec::new();
-
-            for id in episode_ids {
-                if let Some(json) = episodes_table.get(id.as_str())? {
-                    if let Ok(episode) = serde_json::from_str::<Episode>(json.value()) {
-                        // Tokenize summary the same way for word-boundary matching (#130)
-                        let summary_tokens: Vec<String> = episode
-                            .summary
-                            .to_lowercase()
-                            .split(|c: char| !c.is_alphanumeric())
-                            .filter(|w| w.len() >= 2)
-                            .map(|w| w.to_string())
-                            .collect();
-                        let relevance = terms
-                            .iter()
-                            .filter(|term| summary_tokens.contains(term))
-                            .count();
-
-                        if relevance > 0 {
-                            results.push((episode, relevance));
-                        }
-                    }
-                }
-            }
-
-            // Sort by relevance (descending) then by date (descending)
-            results.sort_by(|a, b| {
-                b.1.cmp(&a.1)
-                    .then_with(|| b.0.created_at.cmp(&a.0.created_at))
-            });
-
-            Ok(results.into_iter().take(limit).map(|(e, _)| e).collect())
-        })
-        .await?
     }
 
     /// Store an embedding for an episode.
@@ -879,7 +682,6 @@ mod tests {
                 c.dimension_mismatches, 3,
                 "every dropped vector is counted, not just the first (which is the only one logged)"
             );
-            assert_eq!(c.bm25_only(), 3);
             assert!(
                 c.has_dimension_mismatch(),
                 "a health check must be able to see this"
@@ -924,125 +726,7 @@ mod tests {
         assert!((c.ratio() - 1.0).abs() < 1e-9);
     }
 
-    #[tokio::test]
-    async fn test_store_and_find() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EpisodeStore::open(dir.path()).await.unwrap();
-
-        let ep = make_episode("Fixed parser bug", "/tmp/project");
-        store.store(ep).await.unwrap();
-
-        let results = store
-            .find_relevant(Path::new("/tmp/project"), "parser", 10)
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].summary, "Fixed parser bug");
-    }
-
-    #[tokio::test]
-    async fn test_find_relevant() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EpisodeStore::open(dir.path()).await.unwrap();
-
-        store
-            .store(make_episode("Fixed parser bug in tokenizer", "/proj"))
-            .await
-            .unwrap();
-        store
-            .store(make_episode("Added new API endpoint", "/proj"))
-            .await
-            .unwrap();
-        store
-            .store(make_episode("Refactored parser module", "/proj"))
-            .await
-            .unwrap();
-
-        let results = store
-            .find_relevant(Path::new("/proj"), "parser", 10)
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 2);
-    }
-
-    /// NEW-06 codex P2 rounds 4 + 5 — when a floor is supplied AND the
-    /// hybrid index holds many foreign-cwd matches that all clear the
-    /// floor with stronger scores, a current-cwd match that ALSO
-    /// clears the floor must not be truncated out before the cwd
-    /// filter sees it.
-    ///
-    /// Pre-fix-round-4: with `limit=1` and ~10 stronger foreign-cwd
-    /// exact matches sharing the same query token, the inner fetch
-    /// pool (`limit * 4 = 4`) returned only foreign episodes; the
-    /// cwd filter dropped them all; the floor-set early-return then
-    /// returned empty even though a local episode clearing the floor
-    /// existed in the store.
-    ///
-    /// Round 4 raised the inner pool to `FLOOR_PREFILTER_POOL = 10_000`
-    /// (the HNSW capacity), but codex round 5 flagged that the BM25
-    /// inverted index keeps inserting beyond `HNSW_CAPACITY` (HNSW
-    /// gracefully degrades to BM25-only), so a corpus with >10K
-    /// foreign-cwd BM25 matches could still truncate out a local hit.
-    ///
-    /// Post-fix-round-5: the inner pool is sized from the actual
-    /// corpus (`HybridIndex::len`), so no truncation happens before
-    /// the cwd filter regardless of how large the BM25-only index
-    /// grows.
-    #[tokio::test]
-    async fn find_relevant_filtered_returns_local_match_through_many_foreign_with_floor() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EpisodeStore::open(dir.path()).await.unwrap();
-
-        // 20 foreign-cwd episodes that all match the query token —
-        // these will all clear the floor and crowd the inner pool.
-        // `limit * 4 = 4` (with the caller's `limit = 1`) is far
-        // below 20, so without round-4 the local episode below would
-        // be truncated out.
-        for i in 0..20 {
-            store
-                .store(make_episode(
-                    "bg_research gravitational lensing JWST",
-                    &format!("/foreign-cwd-{i}"),
-                ))
-                .await
-                .unwrap();
-        }
-        // Single local episode that also clears the floor.
-        store
-            .store(make_episode(
-                "bg_research gravitational lensing JWST",
-                "/proj",
-            ))
-            .await
-            .unwrap();
-
-        let results = store
-            .find_relevant_filtered(
-                Path::new("/proj"),
-                "bg_research gravitational lensing JWST",
-                1,
-                Some(0.5),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            results.len(),
-            1,
-            "find_relevant_filtered must return the local floor-clearing \
-             episode even when many foreign-cwd matches share the floor \
-             pass (codex P2 round 4); returned {} episodes",
-            results.len()
-        );
-        assert_eq!(
-            results[0].working_dir,
-            PathBuf::from("/proj"),
-            "local match must be the one returned, not a foreign-cwd \
-             leak: got {:?}",
-            results[0].working_dir
-        );
-    }
-
-    #[tokio::test]
+#[tokio::test]
     async fn test_reopen_persists_data() {
         let dir = tempfile::tempdir().unwrap();
         {
@@ -1050,14 +734,16 @@ mod tests {
             let ep = make_episode("persistent data", "/proj");
             store.store(ep).await.unwrap();
         }
-        // Reopen and verify data persists via find_relevant
+        // Reopen and verify data persists via the hybrid recall path.
         let store = EpisodeStore::open(dir.path()).await.unwrap();
         let results = store
-            .find_relevant(Path::new("/proj"), "persistent", 10)
+            .find_relevant_hybrid_scored_filtered("persistent data", None, 10, None, false)
             .await
             .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].summary, "persistent data");
+        assert!(
+            results.iter().any(|(ep, _)| ep.summary == "persistent data"),
+            "reopened store must still recall the persisted episode"
+        );
     }
 
 }

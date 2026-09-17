@@ -377,6 +377,8 @@ impl Tool for EditFileTool {
 mod tests {
     use super::*;
 
+    use crate::tools::test_fixture::scoped_ctx;
+
     #[tokio::test]
     async fn test_edit_file_basic_replacement() {
         let dir = tempfile::tempdir().unwrap();
@@ -463,14 +465,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use octos_core::SessionScope;
-    use std::sync::Arc;
-
-    fn ctx_with_scope(scope: SessionScope) -> ToolContext {
-        let mut ctx = ToolContext::zero();
-        ctx.tool_id = "edit-with-scope".to_string();
-        ctx.session_scope = Some(Arc::new(scope));
-        ctx
-    }
+    
 
     #[tokio::test]
     async fn edit_file_refuses_out_of_scope_path() {
@@ -481,7 +476,7 @@ mod tests {
 
         let scope = SessionScope::solo(scope_dir.path().to_path_buf(), vec![]).unwrap();
         let tool = EditFileTool::new(scope_dir.path());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("edit-with-scope", scope);
 
         let result = tool
             .execute_with_context(
@@ -524,7 +519,7 @@ mod tests {
 
         let scope = SessionScope::solo(scope_dir.path().to_path_buf(), vec![]).unwrap();
         let tool = EditFileTool::new(scope_dir.path());
-        let ctx = ctx_with_scope(scope);
+        let ctx = scoped_ctx("edit-with-scope", scope);
 
         let result = tool
             .execute_with_context(
