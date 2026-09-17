@@ -147,7 +147,10 @@ pub fn detect(workspace: &Path) -> Option<StackProfile> {
     let vitest_cfg = workspace.join("backend/vitest.config.js");
     let backend_pkg = workspace.join("backend/package.json");
     let frontend_pkg = workspace.join("frontend/package.json");
-    if !(app_js.is_file() && vitest_cfg.is_file() && backend_pkg.is_file() && frontend_pkg.is_file())
+    if !(app_js.is_file()
+        && vitest_cfg.is_file()
+        && backend_pkg.is_file()
+        && frontend_pkg.is_file())
     {
         return None;
     }
@@ -171,9 +174,7 @@ fn normalize_rel(path: &str) -> String {
 }
 
 fn strip_prefix(path: &str, prefix: &str) -> String {
-    path.strip_prefix(prefix)
-        .unwrap_or(path)
-        .to_string()
+    path.strip_prefix(prefix).unwrap_or(path).to_string()
 }
 
 /// Parse a package.json just enough to learn whether a named script exists
@@ -238,15 +239,24 @@ mod tests {
         ]);
         assert_eq!(cmds.len(), 2);
         assert_eq!(cmds[0].cwd, "backend");
-        assert_eq!(cmds[0].args, "npx vitest run tests/a.test.js --reporter=json");
+        assert_eq!(
+            cmds[0].args,
+            "npx vitest run tests/a.test.js --reporter=json"
+        );
         assert_eq!(cmds[1].cwd, "frontend");
-        assert_eq!(cmds[1].args, "npx vitest run tests/b.test.jsx --reporter=json");
+        assert_eq!(
+            cmds[1].args,
+            "npx vitest run tests/b.test.jsx --reporter=json"
+        );
     }
 
     #[test]
     fn detect_requires_all_markers_and_a_vitest_test_script() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(detect(dir.path()).is_none(), "empty workspace matches nothing");
+        assert!(
+            detect(dir.path()).is_none(),
+            "empty workspace matches nothing"
+        );
 
         for rel in [
             "backend/src/app.js",

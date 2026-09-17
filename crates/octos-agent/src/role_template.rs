@@ -395,10 +395,9 @@ impl RoleTemplate {
             | "test-worker"
             | "verification_worker"
             | "verifier" => ROLE_TEST_WORKER,
-            "test_writer"
-            | "test-writer"
-            | "unit_test_writer"
-            | "testcase_writer" => ROLE_TEST_WRITER,
+            "test_writer" | "test-writer" | "unit_test_writer" | "testcase_writer" => {
+                ROLE_TEST_WRITER
+            }
             "explore" | "explorer" | "analyst" | "codebase_analyst" | "read_only" | "read-only" => {
                 ROLE_EXPLORER
             }
@@ -600,7 +599,13 @@ mod tests {
         let names: Vec<&'static str> = RoleTemplate::all().iter().map(|tpl| tpl.name).collect();
         assert_eq!(
             names,
-            vec!["reviewer", "implementer", "test_worker", "test_writer", "explorer"],
+            vec![
+                "reviewer",
+                "implementer",
+                "test_worker",
+                "test_writer",
+                "explorer"
+            ],
             "canonical role names drifted; update guard + wire docs together"
         );
     }
@@ -611,10 +616,16 @@ mod tests {
     #[test]
     fn test_writer_patches_tests_and_runs_suites_but_never_spawns() {
         let tpl = RoleTemplate::for_name(ROLE_TEST_WRITER).expect("test_writer must be registered");
-        assert!(tpl.permits("group:fs"), "needs apply_patch/edit to fill stubs");
+        assert!(
+            tpl.permits("group:fs"),
+            "needs apply_patch/edit to fill stubs"
+        );
         assert!(tpl.permits("group:search"));
         assert!(tpl.permits("group:runtime"), "needs to run the suite");
-        assert!(tpl.permits("testgen"), "drives the scaffold/verify pipeline");
+        assert!(
+            tpl.permits("testgen"),
+            "drives the scaffold/verify pipeline"
+        );
         assert!(tpl.permits("recall_memory"));
         // No fan-out, no memory writes.
         assert!(!tpl.permits("group:sessions"));

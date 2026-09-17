@@ -110,7 +110,10 @@ impl TestgenTool {
     async fn scaffold(&self, targets: &[String]) -> Result<ToolResult> {
         if targets.len() > MAX_TARGETS {
             return Ok(ToolResult {
-                output: format!("too many targets ({}) — cap is {MAX_TARGETS}", targets.len()),
+                output: format!(
+                    "too many targets ({}) — cap is {MAX_TARGETS}",
+                    targets.len()
+                ),
                 success: false,
                 ..Default::default()
             });
@@ -288,28 +291,34 @@ mod tests {
     #[test]
     fn classification_precedence_matches_loop_needs() {
         // Load errors first: test-side responsibility.
-        let v = testgen::classify(&ledger_state(vec![], vec![], vec![], vec![]),
-            Some(&summary(2, vec!["broken.test.js: SyntaxError"])), "");
+        let v = testgen::classify(
+            &ledger_state(vec![], vec![], vec![], vec![]),
+            Some(&summary(2, vec!["broken.test.js: SyntaxError"])),
+            "",
+        );
         assert!(matches!(v, testgen::TestGenVerdict::TestErr(_)));
 
         // Gaps beat failures: fill stubs before debugging assertions.
         let v = testgen::classify(
             &ledger_state(vec!["t"], vec![], vec![], vec![]),
-            Some(&summary(2, vec![])), "",
+            Some(&summary(2, vec![])),
+            "",
         );
         assert!(matches!(v, testgen::TestGenVerdict::Gap(_)));
 
         // Green + complete ledger = covered.
         let v = testgen::classify(
             &ledger_state(vec![], vec![], vec![], vec![]),
-            Some(&summary(0, vec![])), "",
+            Some(&summary(0, vec![])),
+            "",
         );
         assert!(matches!(v, testgen::TestGenVerdict::Covered));
 
         // Complete ledger + red suite = app bug.
         let v = testgen::classify(
             &ledger_state(vec![], vec![], vec![], vec![]),
-            Some(&summary(2, vec![])), "",
+            Some(&summary(2, vec![])),
+            "",
         );
         assert!(matches!(v, testgen::TestGenVerdict::AppBug(_)));
 
@@ -367,7 +376,11 @@ mod tests {
         .unwrap();
         std::fs::write(dir.path().join("frontend/package.json"), "{}").unwrap();
         std::fs::write(dir.path().join("backend/vitest.config.js"), "{}").unwrap();
-        std::fs::write(dir.path().join("backend/src/app.js"), "module.exports = {};").unwrap();
+        std::fs::write(
+            dir.path().join("backend/src/app.js"),
+            "module.exports = {};",
+        )
+        .unwrap();
 
         let tool = TestgenTool::new(dir.path());
         let result = tool

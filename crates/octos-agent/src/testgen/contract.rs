@@ -22,12 +22,7 @@ const ROUTE_VERBS: &[&str] = &[
 ];
 
 /// Named-handler registry entry: `(name, decl_line, body_rows, params_row)`.
-type NamedFn = (
-    String,
-    Option<usize>,
-    Option<(usize, usize)>,
-    Option<usize>,
-);
+type NamedFn = (String, Option<usize>, Option<(usize, usize)>, Option<usize>);
 
 /// One request field of an endpoint (body/query member or destructured name).
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -171,7 +166,10 @@ fn try_route_call(
     let (verb, _) = match fn_node.kind() {
         "member_expression" => {
             let prop = fn_node.child_by_field_name("property")?;
-            (node_text(&prop, source)?, fn_node.child_by_field_name("object"))
+            (
+                node_text(&prop, source)?,
+                fn_node.child_by_field_name("object"),
+            )
         }
         "computed_member_expression" => {
             let prop = fn_node.child_by_field_name("property")?;
@@ -188,7 +186,9 @@ fn try_route_call(
     let args = call.child_by_field_name("arguments")?;
     let positional: Vec<tree_sitter::Node> = {
         let mut cursor = args.walk();
-        args.children(&mut cursor).filter(|c| c.is_named()).collect()
+        args.children(&mut cursor)
+            .filter(|c| c.is_named())
+            .collect()
     };
     if positional.is_empty() {
         return None;
@@ -315,12 +315,8 @@ fn collect_request_fields(
                             for child in n.children(&mut cursor).filter(|c| c.is_named()) {
                                 let text = node_text(&child, source).unwrap_or_default();
                                 let base = text.split('=').next().unwrap_or(&text);
-                                let field = base
-                                    .split(':')
-                                    .next()
-                                    .unwrap_or(base)
-                                    .trim()
-                                    .to_string();
+                                let field =
+                                    base.split(':').next().unwrap_or(base).trim().to_string();
                                 if field.is_empty()
                                     || !field
                                         .chars()
@@ -438,8 +434,10 @@ fn collect_named_functions(
                 let name = child_text(&node, "name", source);
                 let value = node.child_by_field_name("value");
                 if let (Some(name), Some(value)) = (name, value) {
-                    if matches!(value.kind(), "arrow_function" | "function_expression" | "function")
-                    {
+                    if matches!(
+                        value.kind(),
+                        "arrow_function" | "function_expression" | "function"
+                    ) {
                         let body = value
                             .child_by_field_name("body")
                             .map(|b| (b.start_position().row, b.end_position().row));
@@ -460,11 +458,7 @@ fn collect_named_functions(
     out
 }
 
-fn function_signature(
-    node: tree_sitter::Node,
-    source: &[u8],
-    file: &str,
-) -> Option<FnSignature> {
+fn function_signature(node: tree_sitter::Node, source: &[u8], file: &str) -> Option<FnSignature> {
     let name = child_text(&node, "name", source)?;
     let params = node
         .child_by_field_name("parameters")
@@ -641,7 +635,11 @@ const add = (a, b = 2) => a + b;
     #[test]
     fn extracts_routes_with_literal_handlers() {
         let out = extract_file(FIXTURE, "backend/src/app.js").unwrap();
-        assert_eq!(out.endpoints.len(), 3, "GET health, POST register, PUT users/:id");
+        assert_eq!(
+            out.endpoints.len(),
+            3,
+            "GET health, POST register, PUT users/:id"
+        );
 
         let health = &out.endpoints[0];
         assert_eq!(health.key, "GET /api/health");
@@ -650,7 +648,11 @@ const add = (a, b = 2) => a + b;
 
         let register = &out.endpoints[1];
         assert_eq!(register.key, "POST /api/register");
-        let names: Vec<&str> = register.body_fields.iter().map(|f| f.name.as_str()).collect();
+        let names: Vec<&str> = register
+            .body_fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
         assert_eq!(names, vec!["username", "email", "captcha"]);
         let email = register
             .body_fields

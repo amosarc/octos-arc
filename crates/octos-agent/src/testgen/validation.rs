@@ -274,7 +274,14 @@ fn rule(
 /// `x.length` → `x`; anything longer than a bound stays trimmed raw text.
 fn short_subject(node: &Node, source: &[u8]) -> String {
     let text = node_text(node, source).unwrap_or_default();
-    for prefix in ["req.body.", "req.query.", "req.params.", "body.", "query.", "params."] {
+    for prefix in [
+        "req.body.",
+        "req.query.",
+        "req.params.",
+        "body.",
+        "query.",
+        "params.",
+    ] {
         if let Some(rest) = text.strip_prefix(prefix) {
             return rest.split('.').next().unwrap_or(rest).to_string();
         }
@@ -373,7 +380,13 @@ app.post('/api/register', (req, res) => {
         assert!(kinds.contains(&&RuleKind::TypeCheck));
         assert!(kinds.contains(&&RuleKind::Format));
         assert!(kinds.contains(&&RuleKind::EnumMembership));
-        assert!(kinds.iter().filter(|k| **k == &RuleKind::ErrorBranch).count() >= 7);
+        assert!(
+            kinds
+                .iter()
+                .filter(|k| **k == &RuleKind::ErrorBranch)
+                .count()
+                >= 7
+        );
 
         // Length bounds from the two comparisons.
         assert!(kinds.contains(&&RuleKind::LengthMin(3)), "got {kinds:?}");
@@ -400,9 +413,18 @@ if (nick.length > 32) fail();
 "#;
         let rules = rules_of(source);
         let kinds: Vec<&RuleKind> = rules.iter().map(|r| &r.kind).collect();
-        assert!(kinds.contains(&&RuleKind::LengthMin(6)), "exact pin: {kinds:?}");
-        assert!(kinds.contains(&&RuleKind::LengthMax(1)), ">= 2 rejected → max 1: {kinds:?}");
-        assert!(kinds.contains(&&RuleKind::LengthMin(101)), "<= 100 rejected → min 101: {kinds:?}");
+        assert!(
+            kinds.contains(&&RuleKind::LengthMin(6)),
+            "exact pin: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&&RuleKind::LengthMax(1)),
+            ">= 2 rejected → max 1: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&&RuleKind::LengthMin(101)),
+            "<= 100 rejected → min 101: {kinds:?}"
+        );
         assert!(kinds.contains(&&RuleKind::LengthMin(3)));
         assert!(kinds.contains(&&RuleKind::LengthMax(32)));
     }

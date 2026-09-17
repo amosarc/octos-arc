@@ -123,6 +123,28 @@ impl PromptSegments {
         self.render_with_named_replacement(Some((name, replacement)))
     }
 
+    /// Render a snapshot while DROPPING the named segments listed in
+    /// `excluded` (planctl: the volatile `arc_host_plan` segment is
+    /// excluded from the stable snapshot and re-appended last, after the
+    /// tool-use discipline block). Anonymous segments render verbatim.
+    pub(super) fn render_excluding_named(&self, excluded: &[&str]) -> String {
+        let mut out = String::new();
+        for seg in &self.segments {
+            let Some(name) = &seg.name else {
+                out.push_str(&seg.content);
+                continue;
+            };
+            if excluded.contains(&name.as_str()) || seg.content.is_empty() {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(&seg.content);
+        }
+        out
+    }
+
     pub(super) fn named_content(&self, name: &str) -> Option<String> {
         self.segments
             .iter()
@@ -240,6 +262,23 @@ mod tests {
         segs.set_named("memory", "mem".to_string());
         segs.replace_all("fresh full prompt".to_string());
         assert_eq!(segs.render(), "fresh full prompt");
+    }
+
+    #[test]
+    fn should_exclude_only_the_named_segment_requested() {
+        // planctl: base + appends + other named segments survive; only the
+        // excluded slot vanishes (its content is re-appended by the
+        // caller after the tool-use discipline block).
+        let mut segs = PromptSegments::from_base("BASE".to_string());
+        segs.set_named("memory", "MEM".to_string());
+        segs.set_named("arc_host_plan", "PLAN".to_string());
+        segs.append("TAIL");
+        assert_eq!(
+            segs.render_excluding_named(&["arc_host_plan"]),
+            "BASE\n\nMEM\n\nTAIL"
+        );
+        // Excluding an unknown name is the identity.
+        assert_eq!(segs.render_excluding_named(&["nope"]), segs.render());
     }
 
     #[test]

@@ -891,7 +891,13 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["reviewer", "implementer", "test_worker", "test_writer", "explorer"],
+            vec![
+                "reviewer",
+                "implementer",
+                "test_worker",
+                "test_writer",
+                "explorer"
+            ],
             "role_templates must enumerate the canonical names in stable order"
         );
         for entry in role_templates {

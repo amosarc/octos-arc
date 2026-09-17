@@ -10,8 +10,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use octos_agent::tools::Tool;
 use octos_agent::testgen::{self, tool::TestgenTool};
+use octos_agent::tools::Tool;
 
 /// Install vitest + supertest + express ONCE into a shared base backend
 /// (the generated workspaces symlink its node_modules). This makes the
@@ -21,10 +21,8 @@ use octos_agent::testgen::{self, tool::TestgenTool};
 fn shared_node_modules() -> PathBuf {
     static BASE: OnceLock<PathBuf> = OnceLock::new();
     let base = BASE.get_or_init(|| {
-        let backend = std::env::temp_dir().join(format!(
-            "octos-testgen-e2e-deps-{}",
-            std::process::id()
-        ));
+        let backend =
+            std::env::temp_dir().join(format!("octos-testgen-e2e-deps-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&backend);
         std::fs::create_dir_all(&backend).expect("create deps dir");
         let status = std::process::Command::new("npm")
@@ -75,7 +73,11 @@ fn express_workspace() -> tempfile::TempDir {
 }"#,
     )
     .unwrap();
-    std::fs::write(dir.path().join("frontend/package.json"), r#"{"name":"frontend"}"#).unwrap();
+    std::fs::write(
+        dir.path().join("frontend/package.json"),
+        r#"{"name":"frontend"}"#,
+    )
+    .unwrap();
     std::fs::write(
         dir.path().join("backend/vitest.config.js"),
         r#"const { defineConfig } = require('vitest/config');
@@ -152,7 +154,11 @@ async fn scaffold_fill_verify_covered_end_to_end() {
     assert_eq!(out.endpoints.len(), 2);
     assert_eq!(out.ledger.len(), 8);
     assert!(out.injected_tokens <= testgen::MAX_INJECT_TOKENS);
-    assert!(dir.path().join("backend/tests/testgen-ledger.json").is_file());
+    assert!(
+        dir.path()
+            .join("backend/tests/testgen-ledger.json")
+            .is_file()
+    );
     // The injected contract carries the validation rules so the model never
     // re-reads app source.
     assert!(out.injected_prompt.contains("length bound"));
@@ -208,7 +214,10 @@ async fn complete_ledger_with_red_suite_is_app_bug() {
     let failures = verdict["result"]["failures"].as_array().unwrap();
     assert!(!failures.is_empty(), "failure evidence present: {verdict}");
     assert!(
-        failures[0]["message"].as_str().unwrap_or("").contains("expected"),
+        failures[0]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("expected"),
         "failure carries the assertion evidence"
     );
 }
@@ -245,10 +254,12 @@ async fn scaffold_verify_round_trip_through_the_tool_surface() {
     assert!(scaffold_result.success, "{}", scaffold_result.output);
     let scaffold_json: serde_json::Value = serde_json::from_str(&scaffold_result.output).unwrap();
     assert_eq!(scaffold_json["ledger_size"], 8);
-    assert!(scaffold_json["injected_prompt"]
-        .as_str()
-        .unwrap()
-        .contains("POST /api/register"));
+    assert!(
+        scaffold_json["injected_prompt"]
+            .as_str()
+            .unwrap()
+            .contains("POST /api/register")
+    );
 
     fill_stubs(dir.path(), |_| "expect(2).toBe(2);".to_string());
 

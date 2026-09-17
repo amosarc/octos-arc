@@ -178,9 +178,7 @@ fn try_case(call: Node, source: &[u8]) -> Option<FoundCase> {
         .child_by_field_name("arguments")
         .and_then(|a| {
             let mut c = a.walk();
-            a.children(&mut c)
-                .filter(|x| x.is_named())
-                .nth(1)
+            a.children(&mut c).filter(|x| x.is_named()).nth(1)
         })
         .map(|callback| callback_body(callback));
 
@@ -215,9 +213,9 @@ fn case_title(node: &Node, source: &[u8]) -> Option<String> {
 /// The case callback's body: arrow/function expression → statement block.
 fn callback_body(callback: Node) -> Node {
     match callback.kind() {
-        "arrow_function" | "function_expression" | "function" => callback
-            .child_by_field_name("body")
-            .unwrap_or(callback),
+        "arrow_function" | "function_expression" | "function" => {
+            callback.child_by_field_name("body").unwrap_or(callback)
+        }
         "identifier" => callback, // it('t', namedHelper): body unknown → text = name
         _ => callback,
     }

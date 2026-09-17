@@ -9,10 +9,10 @@ out = Path(sys.argv[1]).resolve(); req = sys.argv[2]; port = int(sys.argv[3]) if
 root = Path(__file__).resolve().parent
 specs = root / "public-tests" / req
 grader = root / "local-grader"
+env = os.environ.copy(); env["PATH"] = os.environ.get("NODE_BIN", "/opt/homebrew/opt/node@24/bin") + ":" + env["PATH"]
 if not (grader / "node_modules" / "@playwright").exists():
     grader.mkdir(exist_ok=True)
     subprocess.run("npm init -y >/dev/null && npm install --no-audit --no-fund @playwright/test && npx playwright install chromium", cwd=grader, env=env, shell=True, check=True)
-env = os.environ.copy(); env["PATH"] = os.environ.get("NODE_BIN", "/opt/homebrew/opt/node@24/bin") + ":" + env["PATH"]
 def sh(cmd, cwd, **kw):
     r = subprocess.run(cmd, cwd=cwd, env=env, shell=True, capture_output=True, text=True, **kw)
     return r.returncode, (r.stdout + r.stderr)[-1500:]
@@ -33,7 +33,7 @@ if work.exists(): shutil.rmtree(work)
 shutil.copytree(specs, work / "tests")
 (work / "playwright.config.ts").write_text(
     "import { defineConfig } from '@playwright/test';\n"
-    "export default defineConfig({ testDir: './tests', timeout: 60000, retries: 0, workers: 4, reporter: [['json', { outputFile: 'report.json' }], ['line']], use: { headless: true } });\n")
+    "export default defineConfig({ testDir: './tests', timeout: 60000, retries: 0, workers: 4, reporter: [['json', { outputFile: 'report.json' }], ['line']], use: { headless: true, baseURL: process.env.E2E_BASE_URL } });\n")
 tenv = dict(env, E2E_BASE_URL=f"http://127.0.0.1:{port}")
 t0 = time.time()
 r = subprocess.run(["npx", "playwright", "test", "-c", str(work/"playwright.config.ts")], cwd=grader, env=tenv, capture_output=True, text=True)

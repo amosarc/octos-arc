@@ -156,7 +156,16 @@ class OctosStdioSession:
         self._send("session/open", params, want_response=True, timeout=timeout)
 
     def run_turn(self, text: str, timeout: float = 1800.0) -> tuple[bool, str]:
-        """Run one turn; stream events to on_event. Returns (ok, full_text)."""
+        """Run one turn; stream events to on_event. Returns (ok, full_text).
+
+        `timeout` is an IDLE budget, not a wall clock: the deadline resets
+        on every protocol event (deltas, tool traffic), so a slow but
+        progressing turn is never killed mid-write. The 2026-09-16
+        ticket-booking baseline lost a 1200s wall-clock turn that was
+        actively streaming (slow provider: 30-60s TTFB, 0.3-15 tok/s),
+        leaving server.js truncated mid-declaration. A hard wall clock
+        (3x the idle budget, min 1h) still guards a truly stuck turn.
+        """
         turn_id = str(uuid.uuid4())
         self._send("turn/start", {
             "session_id": self.session_id,
@@ -165,16 +174,20 @@ class OctosStdioSession:
         }, want_response=True, timeout=60.0)
 
         chunks: list[str] = []
-        deadline = time.monotonic() + timeout
+        hard_deadline = time.monotonic() + max(timeout * 3, 3600.0)
+        idle_deadline = time.monotonic() + timeout
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False, "octos turn timed out"
+            now = time.monotonic()
+            if now >= hard_deadline:
+                return False, "octos turn hard wall clock exceeded"
+            if now >= idle_deadline:
+                return False, "octos turn idle timeout (no protocol events)"
             if self.proc.poll() is not None:
                 return False, (f"octos process exited {self.proc.returncode}; "
                                f"stderr tail: {self.stderr_tail()}")
             try:
-                frame = self._notifications.get(timeout=min(remaining, 5.0))
+                frame = self._notifications.get(
+                    timeout=max(min(idle_deadline, hard_deadline) - now, 0.05))
             except queue.Empty:
                 continue
             method = frame.get("method", "")
@@ -182,6 +195,7 @@ class OctosStdioSession:
             self.on_event(method, params)
             if method == "server/heartbeat":
                 continue
+            idle_deadline = time.monotonic() + timeout
             if method == "message/delta" and params.get("turn_id") == turn_id:
                 chunks.append(str(params.get("text", "")))
             elif method == "approval/requested":

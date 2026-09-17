@@ -2289,14 +2289,14 @@ impl TaskSupervisor {
                 // 2× the cap concurrently. The process-global live-set
                 // (armed by `TaskTerminalGuard::new`, cleared on its Drop at
                 // every worker exit path) tracks actual worker liveness.
-                let count = tasks
+
+                tasks
                     .values()
                     .filter(|task| {
                         task.parent_session_key.as_deref() == Some(parent_session_key)
                             && (task.status.is_active() || is_task_live(&task.id))
                     })
-                    .count();
-                count
+                    .count()
             };
             if current_count >= cap {
                 // Mark the parent session as poisoned so subsequent

@@ -156,10 +156,7 @@ pub async fn run_vitest(
                 exit_code: None,
                 timed_out: true,
                 summary: None,
-                raw_tail: format!(
-                    "vitest timed out after {}s",
-                    DEFAULT_RUN_TIMEOUT.as_secs()
-                ),
+                raw_tail: format!("vitest timed out after {}s", DEFAULT_RUN_TIMEOUT.as_secs()),
             });
         }
     };
@@ -245,11 +242,7 @@ pub fn parse_vitest_json(stdout: &str) -> Option<VitestSummary> {
                             let ancestors: Vec<&str> = case
                                 .get("ancestorTitles")
                                 .and_then(|v| v.as_array())
-                                .map(|a| {
-                                    a.iter()
-                                        .filter_map(|t| t.as_str())
-                                        .collect()
-                                })
+                                .map(|a| a.iter().filter_map(|t| t.as_str()).collect())
                                 .unwrap_or_default();
                             let t = case
                                 .get("title")
@@ -406,7 +399,11 @@ mod tests {
         let f = &s.failures[0];
         assert_eq!(f.file, "app.test.js");
         assert_eq!(f.title, "POST /api/register invalid");
-        assert!(f.message.starts_with("AssertionError"), "got: {}", f.message);
+        assert!(
+            f.message.starts_with("AssertionError"),
+            "got: {}",
+            f.message
+        );
         assert!(f.message.contains("⏎"), "multi-line message collapsed");
 
         assert_eq!(s.load_errors.len(), 1);
@@ -430,7 +427,9 @@ mod tests {
 
     #[test]
     fn handles_json_with_noise_prefix() {
-        let s = parse_vitest_json("some noise before {\"numTotalTests\":1,\"numPassedTests\":1,\"numFailedTests\":0,\"success\":true}");
+        let s = parse_vitest_json(
+            "some noise before {\"numTotalTests\":1,\"numPassedTests\":1,\"numFailedTests\":0,\"success\":true}",
+        );
         assert!(s.is_some());
     }
 }

@@ -67,7 +67,10 @@ pub fn scan_turn_input(user_content: &str) -> TestTaskScan {
 /// (stable for provider prompt caches), host notice appended after.
 pub fn compose_turn_message(scan: &TestTaskScan) -> String {
     match scan.notice {
-        Some(notice) => format!("{}\n\n{notice}{}", scan.text, ROLE_TEST_WRITER_PROMPT_PREFIX),
+        Some(notice) => format!(
+            "{}\n\n{notice}{}",
+            scan.text, ROLE_TEST_WRITER_PROMPT_PREFIX
+        ),
         None => scan.text.clone(),
     }
 }
@@ -80,10 +83,7 @@ mod tests {
     fn unmarked_text_passes_through_unchanged() {
         let scan = scan_turn_input("Write unit tests for the register endpoint.");
         assert_eq!(scan.notice, None);
-        assert_eq!(
-            scan.text,
-            "Write unit tests for the register endpoint."
-        );
+        assert_eq!(scan.text, "Write unit tests for the register endpoint.");
         // Compose is the identity for unmarked turns.
         assert_eq!(compose_turn_message(&scan), scan.text);
     }

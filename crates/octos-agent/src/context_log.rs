@@ -19,8 +19,8 @@
 //! the disk cost nobody wants in normal runs.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use octos_core::Message;
 use serde_json::json;
@@ -80,7 +80,10 @@ impl ContextLogger {
     /// Directory the records land in — `None` while disabled or before the
     /// first write resolved the workspace root.
     pub fn dir(&self) -> Option<&Path> {
-        self.inner.as_ref().and_then(|i| i.dir.get()).map(|p| p.as_path())
+        self.inner
+            .as_ref()
+            .and_then(|i| i.dir.get())
+            .map(|p| p.as_path())
     }
 
     fn resolve_dir(&self, workspace_root: Option<&Path>) -> Option<&Path> {
@@ -106,7 +109,8 @@ impl ContextLogger {
         let inner = self.inner.as_ref().expect("resolve_dir implies inner");
         let seq = inner.seq.fetch_add(1, Ordering::Relaxed);
         record["seq"] = json!(seq);
-        record["ts"] = json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        record["ts"] =
+            json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
         record["run_id"] = json!(inner.run_id);
         let line = record.to_string();
         if let Err(error) = std::fs::OpenOptions::new()
@@ -115,7 +119,8 @@ impl ContextLogger {
             .open(dir.join(file))
             .and_then(|mut f| {
                 use std::io::Write;
-                f.write_all(line.as_bytes()).and_then(|_| f.write_all(b"\n"))
+                f.write_all(line.as_bytes())
+                    .and_then(|_| f.write_all(b"\n"))
             })
         {
             tracing::debug!(error = %error, "context log append failed");
@@ -228,14 +233,7 @@ mod tests {
     fn disabled_logger_is_a_full_noop() {
         let ws = workspace();
         let logger = ContextLogger::new(false);
-        logger.log_llm_request(
-            Some(ws.path()),
-            1,
-            0,
-            "test-model",
-            &[],
-            &[],
-        );
+        logger.log_llm_request(Some(ws.path()), 1, 0, "test-model", &[], &[]);
         assert!(!logger.is_enabled());
         assert!(logger.dir().is_none());
         assert!(
@@ -251,11 +249,20 @@ mod tests {
         assert!(logger.is_enabled());
 
         // Serde-built so the record shows exactly what a caller would send.
-        let messages = vec![serde_json::from_str::<Message>(
-            r#"{"role":"user","content":"hello","timestamp":"2026-09-16T00:00:00Z"}"#,
-        )
-        .unwrap()];
-        logger.log_llm_request(Some(ws.path()), 1, 0, "test-model", &messages, &["shell".to_string()]);
+        let messages = vec![
+            serde_json::from_str::<Message>(
+                r#"{"role":"user","content":"hello","timestamp":"2026-09-16T00:00:00Z"}"#,
+            )
+            .unwrap(),
+        ];
+        logger.log_llm_request(
+            Some(ws.path()),
+            1,
+            0,
+            "test-model",
+            &messages,
+            &["shell".to_string()],
+        );
         let response = octos_llm::ChatResponse {
             content: Some("hi".to_string()),
             reasoning_content: None,
@@ -319,7 +326,8 @@ mod tests {
         );
         let dir = logger.dir().unwrap();
         let tools = std::fs::read_to_string(dir.join("tools.jsonl")).unwrap();
-        let record: serde_json::Value = serde_json::from_str(tools.lines().next().unwrap()).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(tools.lines().next().unwrap()).unwrap();
         assert_eq!(record["output_truncated"], true);
         let logged = record["output"].as_str().unwrap().chars().count();
         assert_eq!(logged, MAX_TOOL_OUTPUT_CHARS);

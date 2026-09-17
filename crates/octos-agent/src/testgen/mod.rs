@@ -43,7 +43,7 @@ pub mod validation;
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "ast")]
-use eyre::{bail, Result};
+use eyre::{Result, bail};
 use serde::Serialize;
 
 #[cfg(feature = "ast")]
@@ -130,7 +130,10 @@ pub fn classify(
         let detail = if raw_tail.trim().is_empty() {
             "runner produced no parseable report".to_string()
         } else {
-            format!("runner produced no parseable report: {}", first_line(raw_tail))
+            format!(
+                "runner produced no parseable report: {}",
+                first_line(raw_tail)
+            )
         };
         return TestGenVerdict::TestErr(TestErrDetail { summary: detail });
     };
@@ -244,7 +247,11 @@ pub fn scaffold(workspace: &Path, targets: &[String]) -> Result<ScaffoldOutput> 
     }
 
     // Sort endpoints by file then line for stable output.
-    endpoints.sort_by(|a, b| a.file.cmp(&b.file).then(a.handler_line.cmp(&b.handler_line)));
+    endpoints.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then(a.handler_line.cmp(&b.handler_line))
+    });
 
     let files = skeleton::generate(&profile, &endpoints, &rules);
     let ledger = skeleton::ledger(&files, &endpoints);
@@ -367,9 +374,7 @@ fn render_injected(
 /// Workspace path of the ledger artifact for a detected profile.
 #[cfg(feature = "ast")]
 pub fn ledger_file(workspace: &Path, profile: &StackProfile) -> PathBuf {
-    workspace
-        .join(profile.backend_test_root)
-        .join(LEDGER_FILE)
+    workspace.join(profile.backend_test_root).join(LEDGER_FILE)
 }
 
 #[cfg(feature = "ast")]
@@ -422,11 +427,7 @@ fn collect_js_files(dir: &Path, out: &mut Vec<String>, rel_prefix: &str) {
             // enough for route scanning; deeper trees are intentionally
             // out of the default scope.
             if rel_prefix.matches('/').count() < 3 {
-                collect_js_files(
-                    &path,
-                    out,
-                    &format!("{rel_prefix}/{name}"),
-                );
+                collect_js_files(&path, out, &format!("{rel_prefix}/{name}"));
             }
         } else if name.ends_with(".js") || name.ends_with(".mjs") || name.ends_with(".cjs") {
             out.push(format!("{rel_prefix}/{name}"));
@@ -450,7 +451,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.path().join("frontend/package.json"), "{}").unwrap();
-        std::fs::write(dir.path().join("backend/vitest.config.js"), "module.exports = {};").unwrap();
+        std::fs::write(
+            dir.path().join("backend/vitest.config.js"),
+            "module.exports = {};",
+        )
+        .unwrap();
         std::fs::write(
             dir.path().join("backend/src/app.js"),
             r#"
@@ -508,7 +513,8 @@ module.exports = app;
         let dir = tempfile::tempdir().unwrap();
         let err = scaffold(dir.path(), &[]).unwrap_err();
         assert!(
-            err.to_string().contains("no built-in testgen stack profile"),
+            err.to_string()
+                .contains("no built-in testgen stack profile"),
             "got: {err}"
         );
     }

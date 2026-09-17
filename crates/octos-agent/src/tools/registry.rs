@@ -1256,9 +1256,8 @@ impl ToolRegistry {
         // Runs vitest as a child, so it shares the session sandbox with
         // check/shell for the same #1607 confinement reason.
         #[cfg(feature = "ast")]
-        registry.register(
-            super::TestgenTool::new(cwd).with_shared_sandbox(registry.sandbox.clone()),
-        );
+        registry
+            .register(super::TestgenTool::new(cwd).with_shared_sandbox(registry.sandbox.clone()));
         // #972 / M14-B P1: `view_image`, `tool_search`, `tool_suggest`.
         //
         // `view_image` inherits the workspace filesystem scope so it can only
@@ -1452,9 +1451,8 @@ impl ToolRegistry {
         #[cfg(feature = "ast")]
         registry.register(CodeStructureTool::new(cwd));
         #[cfg(feature = "ast")]
-        registry.register(
-            super::TestgenTool::new(cwd).with_shared_sandbox(registry.sandbox.clone()),
-        );
+        registry
+            .register(super::TestgenTool::new(cwd).with_shared_sandbox(registry.sandbox.clone()));
         // #972 / M14-B P1: re-register cwd-bound `view_image` and refresh the
         // dynamic-discovery catalog so `tool_search` / `tool_suggest` reflect
         // the rebound workspace's tool surface.

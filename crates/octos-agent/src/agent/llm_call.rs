@@ -197,7 +197,7 @@ impl Agent {
             self.tools.workspace_root(),
             iteration,
             0,
-            &self.llm.model_id(),
+            self.llm.model_id(),
             messages,
             &context_log_tool_names,
         );
