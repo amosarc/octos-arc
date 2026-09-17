@@ -9575,12 +9575,12 @@ fn ledger_event_matches_topic_scope(
 /// leaks across tenants on every shared/unprofiled wire session key — which is
 /// exactly what `session/goal/updated` and `session/goal/cleared` did — and
 /// what the `loop/*` and `monitor/*` frames beside them did, since most of them
-/// are appended DURABLY by the same `record_autonomy_rpc_evidence` ->
-/// `send_notification_durable` dispatch and all of them carry tenant text
+/// are appended DURABLY by the same `send_notification_durable` dispatch and
+/// all of them carry tenant text
 /// (goal objective, loop prompt, monitor argv/name).
 ///
-/// `MonitorFired` and `BackgroundActivity` are the exceptions to "stamped by
-/// `resolve_autonomy_profile_id`": both are emitted off the continuation drain
+/// `MonitorFired` and `BackgroundActivity` are the exceptions to the
+/// turn-profile stamping rule: both are emitted off the continuation drain
 /// from a stored record, and that record's profile is the TURN's
 /// `ProfileRuntime` id whenever the monitor or fleet was created by a model
 /// tool. Filtering them is safe only because
@@ -9592,8 +9592,8 @@ fn ledger_event_matches_topic_scope(
 /// overwrites it with `open_session_result`'s
 /// `active_profile_id.unwrap_or(MAIN_PROFILE_ID)`. `_main` is therefore a real
 /// scope on both sides of the wire, NOT a wildcard: the emitters normalize the
-/// same way (`resolve_autonomy_profile_id` returns `_main` for an unprofiled
-/// deployment), and treating an unscoped connection as "authorized for any
+/// same way (an unprofiled deployment normalizes to `_main`), and treating an
+/// unscoped connection as "authorized for any
 /// profile" is deployment-dependent — see the KNOWN LIMITATION on the
 /// interactive goal-charge binding.
 ///
@@ -9694,7 +9694,7 @@ fn ledger_event_matches_profile_scope(
         // `ProfileRuntime`-derived whenever the monitor came from
         // `monitor_create` rather than the `monitor/create` RPC. Together with
         // `MonitorFired` below, these are the only two arms here whose stamp can
-        // come from the turn rather than from `resolve_autonomy_profile_id` —
+        // come from the turn rather than from the connection's resolved scope —
         // which is exactly why filtering is gated on
         // `connection_filterable_profile_scope`, under which the two resolutions
         // provably agree.
@@ -9709,7 +9709,7 @@ fn ledger_event_matches_profile_scope(
 /// fallback, so a `None` here means the frame names no profile ANYWHERE. That
 /// is a LEGACY row: the field is `skip_serializing_if = "Option::is_none"`, and
 /// every current producer stamps a concrete id somewhere on the frame
-/// (`resolve_autonomy_profile_id` never returns an empty or absent id, and the
+/// (the stamp is always a concrete non-empty id when present, and the
 /// stored `AutonomyGoalRecord` / `AutonomyLoopRecord` / `AutonomyMonitorRecord`
 /// hold a non-optional `profile_id`), so a fully unstamped frame can only have
 /// been persisted by a backend that predates the stamp. Only an
@@ -12173,7 +12173,7 @@ async fn active_turn_sessions(
 /// #2019 — bound on the human-sink queue. Producers (`try_send`) never block:
 /// a full queue drops the event, bumps a metric, and logs. Generous enough
 /// that only a genuinely pathological burst reaches it, and the per-origin cap
-/// in `autonomy::human_events` already emits a VISIBLE marker long before.
+/// upstream already emits a VISIBLE marker long before.
 
 async fn handle_turn_interrupt(
     ws: &WsConnection,

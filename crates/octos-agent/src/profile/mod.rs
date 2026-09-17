@@ -5,7 +5,7 @@
 //! A [`ProfileDefinition`] is a single, declarative manifest that describes
 //! how the agent runtime should bootstrap: which tools are available, which
 //! [`crate::agents::AgentDefinition`] sub-agents are preloaded, which MCP
-//! servers are wired, how compaction is tiered, and which models are
+//! servers are wired, how compaction is wired, and which models are
 //! preferred. Before M8.3 every one of these settings was wired implicitly
 //! across a dozen startup sites; afterwards, a single profile declaration
 //! consolidates the envelope.
@@ -172,8 +172,6 @@ pub enum PermissionMode {
     Restricted,
 }
 
-/// Profile-level override for the M8.5 tiered compaction runner.
-///
 /// A single profile manifest.
 ///
 /// Field layout and naming mirrors the runtime plan's "profile envelope".
@@ -228,8 +226,8 @@ impl Default for ProfileDefinition {
 
 impl ProfileDefinition {
     /// Validate a freshly-deserialized profile. Today only the schema
-    /// version is enforced — additional cross-field validation lands as
-    /// the permission / compaction wiring comes online.
+    /// version is enforced — additional cross-field validation may land
+    /// in future revisions.
     pub fn validate(&self) -> Result<()> {
         if self.version != PROFILE_SCHEMA_VERSION {
             eyre::bail!(
@@ -519,7 +517,7 @@ mod tests {
             }
             other => panic!("coding must declare a lean allow list, got {other:?}"),
         }
-        // Today's coding default carries no compaction or permission
+        // Today's coding default carries no permission
         // override — those live at the workspace / app-state level.
         assert_eq!(coding.permissions, PermissionMode::Default);
         // Agents preloaded match the M8.2 built-in set so spawn() can

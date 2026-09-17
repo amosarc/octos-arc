@@ -57,6 +57,17 @@ fn is_macos() -> bool {
     cfg!(target_os = "macos")
 }
 
+/// Skip the test unless `sandbox-exec` can actually run (macOS CI and
+/// non-macOS hosts skip quietly).
+macro_rules! ensure_sandbox_exec {
+    () => {
+        if !sandbox_exec_available() {
+            eprintln!("SKIP: sandbox-exec not available");
+            return;
+        }
+    };
+}
+
 fn sandbox_exec_available() -> bool {
     is_macos() && Path::new("/usr/bin/sandbox-exec").exists()
 }
@@ -65,10 +76,7 @@ fn sandbox_exec_available() -> bool {
 
 #[test]
 fn should_allow_write_inside_workspace() {
-    if !sandbox_exec_available() {
-        eprintln!("SKIP: sandbox-exec not available");
-        return;
-    }
+    ensure_sandbox_exec!();
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path().to_str().unwrap();
     // macOS: canonicalize to resolve /tmp → /private/tmp
@@ -88,10 +96,7 @@ fn should_allow_write_inside_workspace() {
 
 #[test]
 fn should_block_write_outside_workspace() {
-    if !sandbox_exec_available() {
-        eprintln!("SKIP: sandbox-exec not available");
-        return;
-    }
+    ensure_sandbox_exec!();
     let dir = tempfile::tempdir().unwrap();
     let real_workspace = std::fs::canonicalize(dir.path())
         .unwrap()
@@ -113,10 +118,7 @@ fn should_block_write_outside_workspace() {
 
 #[test]
 fn should_block_write_to_etc() {
-    if !sandbox_exec_available() {
-        eprintln!("SKIP: sandbox-exec not available");
-        return;
-    }
+    ensure_sandbox_exec!();
     let dir = tempfile::tempdir().unwrap();
     let real_workspace = std::fs::canonicalize(dir.path())
         .unwrap()
@@ -135,10 +137,7 @@ fn should_block_write_to_etc() {
 
 #[test]
 fn should_block_write_to_home() {
-    if !sandbox_exec_available() {
-        eprintln!("SKIP: sandbox-exec not available");
-        return;
-    }
+    ensure_sandbox_exec!();
     let dir = tempfile::tempdir().unwrap();
     let real_workspace = std::fs::canonicalize(dir.path())
         .unwrap()
@@ -165,10 +164,7 @@ fn should_block_write_to_home() {
 
 #[test]
 fn should_block_tmp_write_without_tmp_allowance() {
-    if !sandbox_exec_available() {
-        eprintln!("SKIP: sandbox-exec not available");
-        return;
-    }
+    ensure_sandbox_exec!();
     let dir = tempfile::tempdir().unwrap();
     let real_workspace = std::fs::canonicalize(dir.path())
         .unwrap()
@@ -190,10 +186,7 @@ fn should_block_tmp_write_without_tmp_allowance() {
 
 #[test]
 fn should_allow_tmp_write_with_explicit_tmp_allowance() {
-    if !sandbox_exec_available() {
-        eprintln!("SKIP: sandbox-exec not available");
-        return;
-    }
+    ensure_sandbox_exec!();
     let dir = tempfile::tempdir().unwrap();
     let real_workspace = std::fs::canonicalize(dir.path())
         .unwrap()
@@ -228,10 +221,7 @@ fn should_allow_tmp_write_with_explicit_tmp_allowance() {
 
 #[test]
 fn should_block_python_write_outside_workspace() {
-    if !sandbox_exec_available() {
-        eprintln!("SKIP: sandbox-exec not available");
-        return;
-    }
+    ensure_sandbox_exec!();
     // Check python3 is available
     if !Path::new("/usr/bin/python3").exists()
         && Command::new("which")
@@ -270,10 +260,7 @@ except PermissionError:
 
 #[test]
 fn should_allow_python_write_inside_workspace() {
-    if !sandbox_exec_available() {
-        eprintln!("SKIP: sandbox-exec not available");
-        return;
-    }
+    ensure_sandbox_exec!();
     if !Path::new("/usr/bin/python3").exists()
         && Command::new("which")
             .arg("python3")
@@ -307,10 +294,7 @@ print('OK')
 
 #[test]
 fn should_redirect_python_tempfile_via_tmpdir() {
-    if !sandbox_exec_available() {
-        eprintln!("SKIP: sandbox-exec not available");
-        return;
-    }
+    ensure_sandbox_exec!();
     if !Path::new("/usr/bin/python3").exists()
         && Command::new("which")
             .arg("python3")
@@ -355,10 +339,7 @@ with tempfile.NamedTemporaryFile(mode='w', suffix='.tmp', delete=False) as f:
 
 #[test]
 fn should_block_cross_user_write() {
-    if !sandbox_exec_available() {
-        eprintln!("SKIP: sandbox-exec not available");
-        return;
-    }
+    ensure_sandbox_exec!();
     let user_a_dir = tempfile::tempdir().unwrap();
     let user_b_dir = tempfile::tempdir().unwrap();
     let real_a = std::fs::canonicalize(user_a_dir.path())
@@ -383,10 +364,7 @@ fn should_block_cross_user_write() {
 
 #[test]
 fn should_isolate_two_users_simultaneously() {
-    if !sandbox_exec_available() {
-        eprintln!("SKIP: sandbox-exec not available");
-        return;
-    }
+    ensure_sandbox_exec!();
     let user_a_dir = tempfile::tempdir().unwrap();
     let user_b_dir = tempfile::tempdir().unwrap();
     let real_a = std::fs::canonicalize(user_a_dir.path())
@@ -429,10 +407,7 @@ fn should_isolate_two_users_simultaneously() {
 
 #[test]
 fn should_restrict_reads_when_configured() {
-    if !sandbox_exec_available() {
-        eprintln!("SKIP: sandbox-exec not available");
-        return;
-    }
+    ensure_sandbox_exec!();
 
     // Verify the MacosSandbox generates restricted read rules when read_allow_paths is set.
     // Note: macOS SBPL with subpath-only reads prevents even `sh` from starting
@@ -497,10 +472,7 @@ fn should_restrict_reads_when_configured() {
 
 #[test]
 fn should_block_network_when_denied() {
-    if !sandbox_exec_available() {
-        eprintln!("SKIP: sandbox-exec not available");
-        return;
-    }
+    ensure_sandbox_exec!();
     let dir = tempfile::tempdir().unwrap();
     let real_workspace = std::fs::canonicalize(dir.path())
         .unwrap()

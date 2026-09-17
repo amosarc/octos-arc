@@ -215,89 +215,6 @@ fn derive_title_from_message(content: &str) -> String {
         .to_string()
 }
 
-/// Derive `thread_id` for a legacy JSONL load — gap-fill only.
-///
-/// PR F (M8.10): preserves the historical `derive_thread_id_for_new_message`
-/// semantics verbatim, but is reachable ONLY via the load-time
-/// [`synthesize_thread_ids`] call site. The new write path uses
-/// [`derive_thread_id_for_new_write`] instead, which fail-closes for
-/// Assistant/Tool roles when the caller didn't pre-stamp.
-///
-/// Why split? Under concurrent web turns (rapid-fire-five-fast,
-/// speculative-overflow) the in-memory `history` has been mutated by
-/// sibling user persists between *this* turn's user write and *this*
-/// turn's assistant write. Walking history backwards looking for the
-/// "most recent user" picks the WRONG cmid for Assistant rows. The fix
-/// is structural: the persist hot path now refuses to derive — every
-/// caller MUST pre-stamp the originating turn's `thread_id`. Legacy
-/// JSONL replay (which has no concurrent siblings to confuse it) keeps
-/// the old derivation.
-///
-/// Rules (matches the spec in the M8.10 tracking issue):
-/// - `User`: thread_id = the message's `client_message_id`. If absent the
-///   user effectively starts a new thread anchored on a freshly synthesized
-///   id (UUIDv7 — temporally ordered so subsequent assistant replies inherit
-///   it cleanly).
-/// - `Assistant`: thread_id = the most recent user message's resolved
-///   thread_id. Without a prior user message we leave it `None` (rare —
-///   only happens for transcripts that begin with an assistant primer).
-/// - `Tool`: inherits the immediately-preceding assistant message's
-///   thread_id when present, otherwise falls back to the most recent user
-///   message's thread_id.
-/// - `System`: `None` — system messages are session-scoped, not thread-scoped.
-///
-/// Currently exercised only by the unit tests (and reserved for any future
-/// per-message legacy-load callers that arrive). [`synthesize_thread_ids`]
-/// inlines the same algorithm in batch form for full-transcript gap-fill.
-#[allow(dead_code)]
-pub(crate) fn derive_thread_id_for_legacy_load(
-    message: &Message,
-    history: &[Message],
-) -> Option<String> {
-    use octos_core::MessageRole;
-
-    match message.role {
-        MessageRole::System => None,
-        MessageRole::User => Some(
-            message
-                .client_message_id
-                .clone()
-                .unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
-        ),
-        MessageRole::Assistant => history
-            .iter()
-            .rev()
-            .find(|prior| matches!(prior.role, MessageRole::User))
-            .and_then(|user| {
-                user.thread_id
-                    .clone()
-                    .or_else(|| user.client_message_id.clone())
-            }),
-        MessageRole::Tool => {
-            // Prefer the immediately-preceding assistant message's thread_id;
-            // fall back to the most recent user message if there's no
-            // assistant in between (e.g. tool result preceding the first
-            // assistant turn — rare but possible on resume paths).
-            if let Some(prior) = history.last() {
-                if matches!(prior.role, MessageRole::Assistant) {
-                    if let Some(id) = prior.thread_id.clone() {
-                        return Some(id);
-                    }
-                }
-            }
-            history
-                .iter()
-                .rev()
-                .find(|prior| matches!(prior.role, MessageRole::User))
-                .and_then(|user| {
-                    user.thread_id
-                        .clone()
-                        .or_else(|| user.client_message_id.clone())
-                })
-        }
-    }
-}
-
 /// Derive `thread_id` for a brand-new write about to be persisted.
 ///
 /// PR F (M8.10 thread-binding chain `#649 → #740`): fail-closed for
@@ -991,28 +908,6 @@ impl SessionManager {
             safe_name.push_str(&format!("_{hash:016X}"));
         }
         sessions_dir.join(format!("{safe_name}.jsonl"))
-    }
-
-    /// Decode a percent-encoded session filename back to the original session key.
-    pub fn decode_filename(encoded: &str) -> String {
-        let mut bytes = Vec::new();
-        let mut chars = encoded.chars();
-        while let Some(c) = chars.next() {
-            if c == '%' {
-                let hi = chars.next().unwrap_or('0');
-                let lo = chars.next().unwrap_or('0');
-                if let Ok(byte) = u8::from_str_radix(&format!("{hi}{lo}"), 16) {
-                    bytes.push(byte);
-                } else {
-                    bytes.push(b'%');
-                    bytes.extend_from_slice(hi.encode_utf8(&mut [0; 4]).as_bytes());
-                    bytes.extend_from_slice(lo.encode_utf8(&mut [0; 4]).as_bytes());
-                }
-            } else {
-                bytes.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
-            }
-        }
-        String::from_utf8(bytes).unwrap_or_else(|_| encoded.to_string())
     }
 
     /// Load a session from its JSONL file.
@@ -2094,89 +1989,6 @@ impl SessionHandle {
             updated_at: meta.updated_at,
         })
     }
-}
-
-/// Entry describing a session for listing purposes.
-#[derive(Debug, Clone)]
-pub struct SessionListEntry {
-    /// Topic name (None = default session).
-    pub topic: Option<String>,
-    /// Number of messages in the session.
-    pub message_count: usize,
-    /// Last updated timestamp.
-    pub updated_at: DateTime<Utc>,
-    /// Short summary of the session.
-    pub summary: Option<String>,
-    /// Display title (derived from first user message or set manually).
-    pub title: Option<String>,
-}
-
-impl SessionManager {
-    /// List all sessions belonging to a specific chat (base key without topic).
-    ///
-    /// Scans the sessions directory for files matching the base key or base key + topic suffix.
-    /// Returns entries sorted by updated_at descending (most recent first).
-    pub fn list_sessions_for_chat(&self, base_key: &str) -> Vec<SessionListEntry> {
-        let mut entries = Vec::new();
-        let Ok(dir) = std::fs::read_dir(&self.sessions_dir) else {
-            return entries;
-        };
-
-        for entry in dir.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Some(name) = path.file_stem().and_then(|n| n.to_str()) else {
-                continue;
-            };
-
-            // Skip oversized files
-            if path
-                .metadata()
-                .map(|m| m.len() > MAX_SESSION_FILE_SIZE)
-                .unwrap_or(false)
-            {
-                continue;
-            }
-
-            let decoded = Self::decode_filename(name);
-
-            // Check if this session belongs to the given base key
-            let session_base = decoded.split('#').next().unwrap_or(&decoded);
-            if session_base != base_key {
-                continue;
-            }
-
-            // Read first line (metadata) and count remaining lines
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let mut lines = content.lines();
-            let Some(meta_line) = lines.next() else {
-                continue;
-            };
-            let meta: SessionMeta = match serde_json::from_str(meta_line) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-
-            let message_count = lines.filter(|l| !l.trim().is_empty()).count();
-            let topic = decoded.split_once('#').map(|(_, t)| t.to_string());
-
-            entries.push(SessionListEntry {
-                topic,
-                message_count,
-                updated_at: meta.updated_at,
-                summary: meta.summary,
-                title: meta.title,
-            });
-        }
-
-        entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
-        entries
-    }
-
 }
 
 

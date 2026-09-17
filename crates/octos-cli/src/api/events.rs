@@ -168,16 +168,6 @@ pub(crate) fn event_to_json(event: &ProgressEvent, thread_id: Option<&str>) -> s
         ProgressEvent::PlanUpdated { plan } => {
             serde_json::json!({"type": "plan_updated", "plan": plan})
         }
-        ProgressEvent::TokenUsage {
-            input_tokens,
-            output_tokens,
-        } => {
-            serde_json::json!({
-                "type": "cost_update",
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-            })
-        }
         ProgressEvent::TaskCompleted {
             success,
             iterations,
@@ -465,5 +455,49 @@ mod tests {
         assert_eq!(token_budget["type"], "token_budget_exceeded");
         assert_eq!(token_budget["used"], 1200);
         assert_eq!(token_budget["limit"], 1000);
+    }
+
+    /// Table-driven coverage for the remaining serializer arms.
+    #[test]
+    fn event_to_json_covers_remaining_variants() {
+        use std::time::Duration;
+        let cases: Vec<(ProgressEvent, serde_json::Value)> = vec![
+            (
+                ProgressEvent::FileModified {
+                    path: "src/lib.rs".into(),
+                },
+                serde_json::json!({"type": "file_modified", "path": "src/lib.rs"}),
+            ),
+            (
+                ProgressEvent::PlanUpdated { plan: serde_json::json!({"items": [1]}) },
+                serde_json::json!({"type": "plan_updated", "plan": {"items": [1]}}),
+            ),
+            (
+                ProgressEvent::ActivityTimeoutReached {
+                    elapsed: Duration::from_millis(1500),
+                    limit: Duration::from_millis(1000),
+                },
+                serde_json::json!({
+                    "type": "activity_timeout_reached",
+                    "elapsed_ms": 1500u64,
+                    "limit_ms": 1000u64,
+                }),
+            ),
+            (
+                ProgressEvent::LlmStatus {
+                    message: "retrying".into(),
+                    iteration: 2,
+                },
+                serde_json::json!({"type": "llm_status", "message": "retrying", "iteration": 2}),
+            ),
+            (
+                ProgressEvent::StreamRetry { iteration: 3 },
+                serde_json::json!({"type": "stream_retry", "message": "stream retry", "iteration": 3}),
+            ),
+        ];
+        for (event, expected) in cases {
+            let json = event_to_json(&event, None);
+            assert_eq!(json, expected, "mismatch for {}", expected["type"]);
+        }
     }
 }

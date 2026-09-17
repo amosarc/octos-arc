@@ -29,20 +29,11 @@ fn normalize_plan_maps_codex_shape_and_assigns_ids() {
     assert_eq!(record.items[0].title, "web P3: PWA manifest");
 }
 
-struct CapturingReporter {
-    events: Arc<std::sync::Mutex<Vec<crate::progress::ProgressEvent>>>,
-}
-impl crate::progress::ProgressReporter for CapturingReporter {
-    fn report(&self, event: crate::progress::ProgressEvent) {
-        self.events.lock().unwrap().push(event);
-    }
-}
-
 #[tokio::test]
 async fn update_plan_tool_emits_plan_updated_event() {
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut ctx = ToolContext::zero();
-    ctx.reporter = Arc::new(CapturingReporter {
+    ctx.reporter = Arc::new(crate::test_support::CapturingReporter {
         events: Arc::clone(&events),
     });
     let args = json!({ "plan": [{ "step": "do a thing", "status": "in_progress" }] });

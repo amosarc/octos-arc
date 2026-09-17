@@ -171,54 +171,16 @@ impl LlmProvider for ReadFileStubLlm {
 /// Construct a `ProfileRuntime` wired to the stub LLM and a fresh
 /// builtin [`octos_agent::ToolRegistry`] (which includes `read_file`).
 async fn make_m11g_profile(profile_id: &str, data_dir: &std::path::Path) -> Arc<ProfileRuntime> {
-    std::fs::create_dir_all(data_dir).expect("profile data dir");
-    let memory = Arc::new(
-        octos_memory::EpisodeStore::open(data_dir)
-            .await
-            .expect("episode store"),
-    );
-    let memory_store = Arc::new(
-        octos_memory::MemoryStore::open(data_dir)
-            .await
-            .expect("memory store"),
-    );
-    let sandbox = octos_agent::SandboxConfig::default();
-    let base_tools = octos_agent::ToolRegistry::with_builtins_and_sandbox(
-        data_dir,
-        octos_agent::create_sandbox(&sandbox),
-    );
-    Arc::new(ProfileRuntime {
-        profile_id: profile_id.to_string(),
-        data_dir: data_dir.to_path_buf(),
-        session_store_root: None,
-        config: octos_cli::config::Config::default(),
-        snapshots: None,
-        llm: Arc::new(ReadFileStubLlm),
-        runtime_qos_catalog: None,
-        primary_model_id: "m11g-readfile-stub".to_string(),
-        provider_name: "stub".to_string(),
-        credentials: HashMap::new(),
-        skills_dir: None,
-        tool_policy: None,
-        default_sandbox: sandbox,
-        max_iterations: None,
-        session_defaults: None,
-        agent_profile: None,
-        format_after_edit: false,
-        tool_specs: Arc::new(base_tools),
-        human_approval_rules: None,
-        system_prompt: "test-system-prompt".to_string(),
-        prompt_parts: octos_cli::commands::gateway::prompt::GatewayPromptParts {
-            pre_memory: "test-system-prompt".to_string(),
-            post_memory: String::new(),
-        },
-        memory,
-        memory_store,
-        embedder: None,
-        memory_inject_tokens: 2500,
-        memory_refresh_enabled: false,
-        hook_executor: None,
-    })
+    octos_cli::runtime::test_fixture::profile_runtime_fixture(
+        profile_id,
+        data_dir.to_path_buf(),
+        Arc::new(ReadFileStubLlm),
+        "m11g-readfile-stub",
+        "test-system-prompt",
+        false,
+        octos_agent::SandboxConfig::default(),
+    )
+    .await
 }
 
 /// In-process equivalent of a single chat turn against the canonical

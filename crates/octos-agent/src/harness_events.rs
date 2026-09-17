@@ -94,8 +94,8 @@ fn sink_write_lock(path: &Path) -> Arc<Mutex<()>> {
 
 /// Append a single, fully-formed NDJSON line (the caller's bytes plus a
 /// trailing `\n`) to `path` in ONE `write_all`, serialized against concurrent
-/// writers via the per-path [`sink_write_lock`]. Both [`write_event_to_sink`]
-/// and [`write_event_line_to_sink`] funnel through here so EVERY sink write is
+/// writers via the per-path [`sink_write_lock`]. [`write_event_to_sink`]
+/// funnels through here so EVERY sink write is
 /// atomic at the whole-line granularity.
 fn append_line_atomic(path: &Path, line: &str) -> std::io::Result<()> {
     // Build the entire line (incl. newline) up front so the locked region is a
@@ -205,18 +205,6 @@ pub fn write_event_to_sink(raw_sink: impl AsRef<str>, event: &HarnessEvent) -> s
     // Blocker 3 — one whole line, one `write_all`, under the per-path lock so
     // concurrent emitters (heartbeat + parallel node emits) cannot interleave.
     append_line_atomic(&path, &json)
-}
-
-/// Append a pre-serialized event line to a sink without round-tripping
-/// through the [`HarnessEvent`] validator.
-///
-/// Used by the plugin protocol-v2 shim, which builds events from the wire
-/// format on a hot reader path. Callers MUST pass a single well-formed
-/// JSON object; the writer adds a trailing newline.
-pub fn write_event_line_to_sink(raw_sink: impl AsRef<str>, line: &str) -> std::io::Result<()> {
-    let path = sink_path_from_raw(raw_sink.as_ref());
-    // Blocker 3 — same atomic whole-line append as `write_event_to_sink`.
-    append_line_atomic(&path, line)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -405,16 +393,6 @@ impl HarnessEvent {
         }
     }
 
-    /// Convenience builder for a `SubAgentDispatch` event. Takes a
-    /// pre-populated [`HarnessSubAgentDispatchEvent`] so callers pay
-    /// the construction cost once and this helper stays below clippy's
-    /// argument limit.
-    pub fn sub_agent_dispatch(data: HarnessSubAgentDispatchEvent) -> Self {
-        Self {
-            schema: HARNESS_EVENT_SCHEMA_V1.to_string(),
-            payload: HarnessEventPayload::SubAgentDispatch { data },
-        }
-    }
 
     pub fn phase_event(
         session_id: impl Into<String>,

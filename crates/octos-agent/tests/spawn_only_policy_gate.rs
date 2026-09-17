@@ -27,52 +27,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use octos_agent::tools::ToolPolicy;
-use octos_agent::{Agent, AgentConfig, Tool, ToolRegistry, ToolResult};
-use octos_core::{AgentId, Message, ToolCall};
-use octos_llm::{ChatConfig, ChatResponse, LlmProvider, StopReason, TokenUsage, ToolSpec};
-use octos_memory::EpisodeStore;
+use octos_agent::{Tool, ToolRegistry, ToolResult};
+use octos_llm::LlmProvider;
 use tempfile::TempDir;
+
+mod common;
+use common::{ScriptedLlm, boot_agent, end_turn, tc, tool_use};
 
 // =========================================================================
 // Test infra
 // =========================================================================
-
-struct ScriptedLlm {
-    responses: std::sync::Mutex<Vec<ChatResponse>>,
-}
-
-impl ScriptedLlm {
-    fn new(responses: Vec<ChatResponse>) -> Self {
-        Self {
-            responses: std::sync::Mutex::new(responses),
-        }
-    }
-}
-
-#[async_trait]
-impl LlmProvider for ScriptedLlm {
-    async fn chat(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolSpec],
-        _config: &ChatConfig,
-    ) -> eyre::Result<ChatResponse> {
-        let mut r = self.responses.lock().unwrap();
-        if r.is_empty() {
-            eyre::bail!("ScriptedLlm: no more responses");
-        }
-        Ok(r.remove(0))
-    }
-    fn context_window(&self) -> u32 {
-        128_000
-    }
-    fn model_id(&self) -> &str {
-        "policy-test"
-    }
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-}
 
 /// Tool that records every invocation. Used as a probe to assert the
 /// spawn_only intercept did NOT actually run the tool when policy denies.
@@ -99,45 +63,6 @@ impl Tool for CountingTool {
             success: true,
             ..Default::default()
         })
-    }
-}
-
-fn tool_use(calls: Vec<ToolCall>) -> ChatResponse {
-    ChatResponse {
-        content: None,
-        reasoning_content: None,
-        tool_calls: calls,
-        stop_reason: StopReason::ToolUse,
-        usage: TokenUsage {
-            input_tokens: 50,
-            output_tokens: 5,
-            ..Default::default()
-        },
-        provider_index: None,
-    }
-}
-
-fn end_turn(text: &str) -> ChatResponse {
-    ChatResponse {
-        content: Some(text.into()),
-        reasoning_content: None,
-        tool_calls: vec![],
-        stop_reason: StopReason::EndTurn,
-        usage: TokenUsage {
-            input_tokens: 5,
-            output_tokens: 5,
-            ..Default::default()
-        },
-        provider_index: None,
-    }
-}
-
-fn tc(id: &str, name: &str) -> ToolCall {
-    ToolCall {
-        id: id.into(),
-        name: name.into(),
-        arguments: serde_json::json!({}),
-        metadata: None,
     }
 }
 
@@ -179,24 +104,15 @@ async fn policy_denies_bg_research_via_spawn_only_path() {
     };
     tools.set_provider_policy(policy);
 
-    let memory = Arc::new(
-        EpisodeStore::open(memory_dir.path().join(".octos"))
-            .await
-            .unwrap(),
+    let llm: Arc<dyn LlmProvider> = Arc::new(
+        ScriptedLlm::new(vec![
+            tool_use(vec![tc("call-1", "blocked_bg")]),
+            end_turn("done"),
+        ])
+        .with_model_id("policy-test"),
     );
 
-    let llm: Arc<dyn LlmProvider> = Arc::new(ScriptedLlm::new(vec![
-        tool_use(vec![tc("call-1", "blocked_bg")]),
-        end_turn("done"),
-    ]));
-
-    let agent = Agent::new(AgentId::new("policy-spawn-only"), llm, tools, memory).with_config(
-        AgentConfig {
-            save_episodes: false,
-            suppress_auto_send_files: true,
-            ..Default::default()
-        },
-    );
+    let agent = boot_agent("policy-spawn-only", &memory_dir, llm, tools).await;
 
     let response = agent
         .process_message("kick blocked spawn_only", &[], vec![])
@@ -323,23 +239,15 @@ async fn apply_policy_then_stale_call_fails_synchronously_not_async() {
     };
     tools.apply_policy(&policy);
 
-    let memory = Arc::new(
-        EpisodeStore::open(memory_dir.path().join(".octos"))
-            .await
-            .unwrap(),
+    let llm: Arc<dyn LlmProvider> = Arc::new(
+        ScriptedLlm::new(vec![
+            tool_use(vec![tc("call-stale", "stale_pipeline")]),
+            end_turn("done"),
+        ])
+        .with_model_id("policy-test"),
     );
 
-    let llm: Arc<dyn LlmProvider> = Arc::new(ScriptedLlm::new(vec![
-        tool_use(vec![tc("call-stale", "stale_pipeline")]),
-        end_turn("done"),
-    ]));
-
-    let agent =
-        Agent::new(AgentId::new("policy-stale"), llm, tools, memory).with_config(AgentConfig {
-            save_episodes: false,
-            suppress_auto_send_files: true,
-            ..Default::default()
-        });
+    let agent = boot_agent("policy-stale", &memory_dir, llm, tools).await;
 
     let response = agent
         .process_message("call stale tool", &[], vec![])

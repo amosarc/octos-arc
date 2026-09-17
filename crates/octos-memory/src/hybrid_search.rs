@@ -204,21 +204,7 @@ impl HybridIndex {
         }
     }
 
-    /// Returns true if no documents have been indexed.
-    pub fn is_empty(&self) -> bool {
-        self.ids.is_empty()
-    }
 
-    /// Total number of documents inserted into the index (including
-    /// tombstoned ones — the BM25 inverted index still has them).
-    ///
-    /// Returned to callers like
-    /// `crate::store::EpisodeStore` fallback recall paths that need
-    /// to size an inner-fetch pool exhaustively. Because BM25-only
-    /// inserts continue beyond `HNSW_CAPACITY` (HNSW gracefully
-    /// degrades to BM25-only insertion), the BM25 inverted index can
-    /// outgrow the HNSW graph; callers MUST NOT assume the corpus
-    /// size is capped at `HNSW_CAPACITY`.
     /// Snapshot of how much of this index is reachable by vector search.
     ///
     /// `len()` counts DOCUMENTS; this counts how many of them actually carry a
@@ -236,10 +222,6 @@ impl HybridIndex {
             dimension_mismatches: self.dimension_mismatches,
             dimension: self.dimension,
         }
-    }
-
-    pub fn len(&self) -> usize {
-        self.ids.len()
     }
 
     /// Insert a document with optional embedding.
@@ -342,16 +324,6 @@ impl HybridIndex {
         }
     }
 
-    /// Tombstone an entry by clearing its ID so search skips it.
-    /// Returns true if the episode was found and removed.
-    pub fn remove(&mut self, episode_id: &str) -> bool {
-        if let Some(pos) = self.ids.iter().position(|id| id == episode_id) {
-            self.ids[pos].clear(); // tombstone — HNSW indices stay stable
-            true
-        } else {
-            false
-        }
-    }
 
     /// Add an embedding to an existing document (by episode_id).
     /// Returns false if the episode_id is not found or dimension mismatches.
@@ -415,69 +387,6 @@ impl HybridIndex {
         });
         hnsw.insert((&normalized, doc_idx));
         true
-    }
-
-    /// Search the index, returning (episode_id, score) pairs sorted by descending score.
-    pub fn search(
-        &self,
-        query_text: &str,
-        query_embedding: Option<&[f32]>,
-        limit: usize,
-    ) -> Vec<(String, f32)> {
-        if self.ids.is_empty() {
-            return Vec::new();
-        }
-
-        let fetch_count = limit * 4;
-
-        // BM25 scores
-        let bm25_scores = self.bm25_score(query_text, fetch_count);
-
-        // Vector scores (skip if dimension mismatches)
-        let valid_query_emb = query_embedding
-            .filter(|e| e.len() == self.dimension)
-            .and_then(l2_normalize);
-        let vector_scores: HashMap<usize, f32> = match (&valid_query_emb, &self.hnsw) {
-            (Some(normalized), Some(hnsw)) => {
-                let neighbors = hnsw.search(normalized, fetch_count, 30);
-                let mut scores: HashMap<usize, f32> = HashMap::new();
-                for n in neighbors {
-                    // DistCosine returns 1 - cos_sim, so similarity = 1 - distance
-                    let sim: f32 = 1.0 - n.distance;
-                    scores.insert(n.d_id, sim.max(0.0));
-                }
-                scores
-            }
-            _ => HashMap::new(),
-        };
-
-        // Merge scores
-        let has_vectors = !vector_scores.is_empty();
-        let mut combined: HashMap<usize, f32> = HashMap::new();
-
-        if has_vectors {
-            for (&idx, &score) in &vector_scores {
-                *combined.entry(idx).or_default() += self.vector_weight * score;
-            }
-            for (&idx, &score) in &bm25_scores {
-                *combined.entry(idx).or_default() += self.bm25_weight * score;
-            }
-        } else {
-            // BM25 only
-            for (&idx, &score) in &bm25_scores {
-                combined.insert(idx, score);
-            }
-        }
-
-        let mut results: Vec<(String, f32)> = combined
-            .into_iter()
-            .filter(|(idx, _)| !self.ids[*idx].is_empty()) // skip tombstoned
-            .map(|(idx, score)| (self.ids[idx].clone(), score))
-            .collect();
-
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        results.truncate(limit);
-        results
     }
 
     /// Scored search with a `min_best_modality`
@@ -751,7 +660,12 @@ mod tests {
         index.insert("ep3", "rust async programming", Some(&[0.1, 0.9, 0.0, 0.0]));
 
         // Query embedding is close to ep2/ep3
-        let results = index.search("rust programming", Some(&[0.0, 1.0, 0.0, 0.0]), 3);
+        let results = index.search_scored_filtered(
+            "rust programming",
+            Some(&[0.0, 1.0, 0.0, 0.0]),
+            3,
+            None,
+        );
         assert_eq!(results.len(), 3);
         // With default weights (0.7 vector + 0.3 bm25), ep3 should rank well (has "rust" + close embedding)
     }
@@ -763,7 +677,7 @@ mod tests {
         index.insert("ep2", "hello rust", Some(&[1.0, 0.0, 0.0, 0.0]));
 
         // Should still work with BM25 for ep1
-        let results = index.search("hello", None, 2);
+        let results = index.search_scored_filtered("hello", None, 2, None);
         assert_eq!(results.len(), 2);
     }
 
@@ -1002,7 +916,7 @@ mod tests {
         let mut index = HybridIndex::new(4);
         // 3-dim vector into a 4-dim index: vector dropped, text still indexed.
         index.insert("ep1", "searchable summary text", Some(&[1.0, 0.0, 0.0]));
-        let results = index.search("searchable summary", None, 5);
+        let results = index.search_scored_filtered("searchable summary", None, 5, None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "ep1");
     }

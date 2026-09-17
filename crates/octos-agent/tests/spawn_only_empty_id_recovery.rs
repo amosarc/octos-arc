@@ -24,48 +24,12 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use octos_agent::{Agent, AgentConfig, ReadTaskOutputTool, Tool, ToolRegistry, ToolResult};
-use octos_core::{AgentId, Message, ToolCall};
-use octos_llm::{ChatConfig, ChatResponse, LlmProvider, StopReason, TokenUsage, ToolSpec};
-use octos_memory::EpisodeStore;
+use octos_agent::{ReadTaskOutputTool, Tool, ToolRegistry, ToolResult};
+use octos_llm::LlmProvider;
 use tempfile::TempDir;
 
-struct ScriptedLlm {
-    responses: Mutex<Vec<ChatResponse>>,
-}
-
-impl ScriptedLlm {
-    fn new(responses: Vec<ChatResponse>) -> Self {
-        Self {
-            responses: Mutex::new(responses),
-        }
-    }
-}
-
-#[async_trait]
-impl LlmProvider for ScriptedLlm {
-    async fn chat(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolSpec],
-        _config: &ChatConfig,
-    ) -> eyre::Result<ChatResponse> {
-        let mut r = self.responses.lock().unwrap();
-        if r.is_empty() {
-            eyre::bail!("ScriptedLlm: no more responses");
-        }
-        Ok(r.remove(0))
-    }
-    fn context_window(&self) -> u32 {
-        128_000
-    }
-    fn model_id(&self) -> &str {
-        "empty-id-recovery-test"
-    }
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-}
+mod common;
+use common::{ScriptedLlm, boot_agent, end_turn, tc, tool_use};
 
 /// A spawn_only probe whose background execution always fails — mirrors a
 /// `mofa_slides` run that hits a TOML parse error after being backgrounded.
@@ -84,45 +48,6 @@ impl Tool for FailingSpawnOnlyTool {
     }
     async fn execute(&self, _args: &serde_json::Value) -> eyre::Result<ToolResult> {
         eyre::bail!("simulated TOML parse failure at line 40")
-    }
-}
-
-fn tool_use(calls: Vec<ToolCall>) -> ChatResponse {
-    ChatResponse {
-        content: None,
-        reasoning_content: None,
-        tool_calls: calls,
-        stop_reason: StopReason::ToolUse,
-        usage: TokenUsage {
-            input_tokens: 50,
-            output_tokens: 5,
-            ..Default::default()
-        },
-        provider_index: None,
-    }
-}
-
-fn end_turn(text: &str) -> ChatResponse {
-    ChatResponse {
-        content: Some(text.into()),
-        reasoning_content: None,
-        tool_calls: vec![],
-        stop_reason: StopReason::EndTurn,
-        usage: TokenUsage {
-            input_tokens: 5,
-            output_tokens: 5,
-            ..Default::default()
-        },
-        provider_index: None,
-    }
-}
-
-fn tc(id: &str, name: &str) -> ToolCall {
-    ToolCall {
-        id: id.into(),
-        name: name.into(),
-        arguments: serde_json::json!({}),
-        metadata: None,
     }
 }
 
@@ -158,29 +83,20 @@ async fn empty_id_spawn_only_failure_still_fires_recovery_signal() {
             .push((signal.tool_name.clone(), signal.error_message.clone()));
     });
 
-    let memory = Arc::new(
-        EpisodeStore::open(memory_dir.path().join(".octos"))
-            .await
-            .unwrap(),
-    );
-
     // Turn 1: the model calls the spawn_only tool with an EMPTY tool_call_id
     // — the kimi / MiniMax via wisemodel regime. The default `chat_stream`
     // re-emits it as a `ToolCallDelta`, and `consume_stream_inner` mints the
     // synthesized `call_0` id. Turn 2 is a safety net (the foreground turn
     // ends at the spawn_only ack).
-    let llm: Arc<dyn LlmProvider> = Arc::new(ScriptedLlm::new(vec![
-        tool_use(vec![tc("", "failing_probe")]),
-        end_turn("acknowledged the failure"),
-    ]));
-
-    let agent = Agent::new(AgentId::new("empty-id-recovery"), llm, tools, memory).with_config(
-        AgentConfig {
-            save_episodes: false,
-            suppress_auto_send_files: true,
-            ..Default::default()
-        },
+    let llm: Arc<dyn LlmProvider> = Arc::new(
+        ScriptedLlm::new(vec![
+            tool_use(vec![tc("", "failing_probe")]),
+            end_turn("acknowledged the failure"),
+        ])
+        .with_model_id("empty-id-recovery-test"),
     );
+
+    let agent = boot_agent("empty-id-recovery", &memory_dir, llm, tools).await;
 
     let _ = agent
         .process_message("kick the failing probe", &[], vec![])

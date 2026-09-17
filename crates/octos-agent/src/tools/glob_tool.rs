@@ -562,7 +562,7 @@ mod tests {
     use super::*;
     
 
-    use crate::tools::test_fixture::scoped_ctx;
+    use crate::tools::test_fixture::escape_ctx;
 
     #[tokio::test]
     async fn glob_on_upload_handle_namespace_returns_guidance() {
@@ -638,13 +638,10 @@ mod tests {
         // (b) a relative `..`-traversal pattern — the `..` rejection
         //     fires at input time. Codex round-2 MINOR: the prior test
         //     only covered (a); this version covers both.
-        let workspace = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let (workspace, outside, ctx) = escape_ctx("glob-with-scope");
         std::fs::write(outside.path().join("passwd"), "root:x:0:0").unwrap();
 
-        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![]).unwrap();
         let tool = GlobTool::new(workspace.path());
-        let ctx = scoped_ctx("glob-with-scope", scope);
 
         // (a) Absolute pattern outside every zone.
         let pattern_a = format!("{}/*", outside.path().display());
@@ -689,14 +686,11 @@ mod tests {
         // safety net.
         use std::os::unix::fs::symlink;
 
-        let workspace = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let (workspace, outside, ctx) = escape_ctx("glob-with-scope");
         std::fs::write(outside.path().join("passwd"), "root:x").unwrap();
         symlink(outside.path(), workspace.path().join("escape")).unwrap();
 
-        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![]).unwrap();
         let tool = GlobTool::new(workspace.path());
-        let ctx = scoped_ctx("glob-with-scope", scope);
 
         let result = tool
             .execute_with_context(&ctx, &serde_json::json!({"pattern": "escape/*"}))

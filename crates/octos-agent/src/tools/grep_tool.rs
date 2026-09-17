@@ -483,7 +483,7 @@ mod tests {
         std::fs::write(dir.join("readme.txt"), "This is a readme file.\n").unwrap();
     }
 
-    use crate::tools::test_fixture::scoped_ctx;
+    use crate::tools::test_fixture::{escape_ctx_with_skill_zones, scoped_ctx};
 
     #[tokio::test]
     async fn test_grep_finds_matches() {
@@ -531,18 +531,12 @@ mod tests {
     async fn grep_refuses_out_of_scope_path() {
         // An explicit path outside every declared zone is refused
         // without walking it (cheaper failure mode + no leakage).
-        let workspace = tempfile::tempdir().unwrap();
         let skill = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let (workspace, outside, ctx) =
+            escape_ctx_with_skill_zones("grep-with-scope", &[skill.path()]);
         std::fs::write(outside.path().join("secret.txt"), "leaked\n").unwrap();
 
-        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![])
-            .unwrap()
-            .with_skill_read_zones(vec![skill.path().to_path_buf()])
-            .unwrap();
-
         let tool = GrepTool::new(workspace.path());
-        let ctx = scoped_ctx("grep-with-scope", scope);
 
         let result = tool
             .execute_with_context(

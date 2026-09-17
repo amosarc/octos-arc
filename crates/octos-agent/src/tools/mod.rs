@@ -767,7 +767,6 @@ pub mod send_file;
 pub mod shell;
 pub mod spawn;
 pub mod write_file;
-pub mod write_grant;
 
 pub mod check;
 pub mod check_background_tasks;
@@ -808,9 +807,6 @@ pub use send_file::SendFileTool;
 pub use shell::ShellTool;
 pub use spawn::{BackgroundResultKind, BackgroundResultPayload, SpawnTool};
 pub use write_file::WriteFileTool;
-pub use write_grant::{
-    DENIED_MARKER, WriteGrantViolation, WriteGrantViolationSink, WritePathGrant,
-};
 
 pub use check::CheckTool;
 pub use check_background_tasks::CheckBackgroundTasksTool;
@@ -1443,11 +1439,9 @@ pub(crate) async fn write_no_follow_checked(
     .unwrap_or_else(|e| Err(std::io::Error::other(e)))
 }
 
-// #1976 note: `create_only` (`O_CREAT|O_EXCL`) enforcement moved into the
-// component-wise confined `openat` walk in `tools::write_grant::open_confined`
-// (which also closes the ancestor-symlink TOCTOU a whole-path lexical open
-// cannot). A standalone leaf-only exclusive writer would re-introduce that
-// divergence, so it is intentionally absent here.
+// #1976 note: `create_only` (`O_CREAT|O_EXCL`) is intentionally absent here:
+// a standalone leaf-only exclusive writer would re-introduce the
+// ancestor-symlink TOCTOU divergence a whole-path lexical open cannot close.
 
 /// Convert a file I/O error to a ToolResult, handling symlink and not-found cases.
 pub fn file_io_error(e: std::io::Error, display_path: &str) -> ToolResult {
@@ -2020,6 +2014,31 @@ pub(crate) mod test_fixture {
         ctx.tool_id = tool_id.to_string();
         ctx.session_scope = Some(Arc::new(scope));
         ctx
+    }
+
+    /// Out-of-scope escape fixture: a workspace tempdir, an outside tempdir,
+    /// and a solo-scope `ToolContext` rooted at the workspace. Returns
+    /// `(workspace, outside, ctx)`; scenario-specific files and symlinks
+    /// stay in the test body so each security assertion remains local and
+    /// explicit.
+    pub(crate) fn escape_ctx(
+        tool_id: &str,
+    ) -> (tempfile::TempDir, tempfile::TempDir, ToolContext) {
+        escape_ctx_with_skill_zones(tool_id, &[])
+    }
+
+    /// Same fixture with additional skill read zones.
+    pub(crate) fn escape_ctx_with_skill_zones(
+        tool_id: &str,
+        skill_zones: &[&std::path::Path],
+    ) -> (tempfile::TempDir, tempfile::TempDir, ToolContext) {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let scope = octos_core::SessionScope::solo(workspace.path().to_path_buf(), vec![])
+            .unwrap()
+            .with_skill_read_zones(skill_zones.iter().map(|p| p.to_path_buf()).collect())
+            .unwrap();
+        (workspace, outside, scoped_ctx(tool_id, scope))
     }
 }
 

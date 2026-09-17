@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use eyre::{Result, WrapErr};
 use serde::Deserialize;
 
-use super::write_grant::WritePathGrant;
 use super::{ConcurrencyClass, Tool, ToolContext, ToolResult};
 use crate::policy::{FileAccessMode, FilesystemScope};
 
@@ -18,9 +17,6 @@ pub struct WriteFileTool {
     filesystem_scope: FilesystemScope,
     /// Whether writes are permitted.
     file_access: FileAccessMode,
-    /// #1976 — optional per-path write fence. `None` (default, every
-    /// pre-#1976 construction) = writes governed by scope/access alone.
-    write_grant: Option<WritePathGrant>,
     /// Partial-view overwrite guard (#1638), armed with windowed reads.
     /// `None` = the `OCTOS_READ_WINDOW` env flag decides (production);
     /// `Some` = explicit, for tests.
@@ -34,7 +30,6 @@ impl WriteFileTool {
             base_dir: base_dir.into(),
             filesystem_scope: FilesystemScope::Workspace,
             file_access: FileAccessMode::ReadWrite,
-            write_grant: None,
             window_enforcement: None,
         }
     }
@@ -66,14 +61,6 @@ impl WriteFileTool {
         self
     }
 
-    /// #1976 — bind a per-path write fence: only allowlisted
-    /// workspace-relative paths are writable (canonical match, deny-wins on
-    /// top of scope/access); under `create_only` they may be CREATED but
-    /// never overwritten (`O_CREAT|O_EXCL`).
-    pub fn with_write_grant(mut self, write_grant: WritePathGrant) -> Self {
-        self.write_grant = Some(write_grant);
-        self
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -376,180 +363,68 @@ impl WriteFileTool {
             }
         }
 
-        // #1976 — per-path write fence. SECURITY ROUND (codex): the allowlist
-        // decision and the actual open must target the SAME resolved object,
-        // or an attacker who swaps a checked ancestor dir for a symlink
-        // between check and open escapes (leaf `O_NOFOLLOW` guards only the
-        // leaf). So a fenced write does NOT reuse the generic lexical
-        // `write_no_follow` below: `check_write` returns the workspace-relative
-        // path, and `confined_write` re-opens it via a component-wise
-        // `O_NOFOLLOW` `openat` walk — a symlinked (or swapped-to-symlink)
-        // ancestor fails `ELOOP`/`ENOTDIR` at its own component. `create_only`
-        // becomes `O_CREAT|O_EXCL` on that same walked leaf.
-        let fenced = if let Some(grant) = &self.write_grant {
-            let workspace_root = ctx
-                .session_scope
-                .as_ref()
-                .map(|scope| scope.workspace().to_path_buf())
-                .unwrap_or_else(|| self.base_dir.clone());
-            let rel = match grant.check_write(&workspace_root, &path, &input.path, self.name()) {
-                Ok(rel) => rel,
-                Err(denied) => {
-                    return Ok(ToolResult {
-                        output: denied,
-                        success: false,
-                        ..Default::default()
-                    });
-                }
-            };
-            // #2193 R4: an armed, AUTHORIZED over-window overwrite must bind the
-            // truncating write to the epoch it was authorized against — even on
-            // the fenced path, which otherwise re-opens the leaf with O_TRUNC and
-            // clobbers whatever it resolves to. Only existing-file overwrites
-            // (never create_only) take the checked path.
-            match (grant.create_only(), authorized_epoch) {
-                (false, Some(expected)) => {
-                    match super::write_grant::confined_write_checked(
-                        workspace_root.clone(),
-                        rel,
-                        input.content.as_bytes().to_vec(),
-                        expected,
-                    )
+
+        // Create parent directories if needed (generic, unfenced path).
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.wrap_err_with(|| {
+                // Bound the caller-derived path so an armed Err stays under
+                // the tool-output cap (#2193 R4).
+                format!(
+                    "failed to create directories: {}",
+                    octos_core::truncated_utf8(&parent.display().to_string(), 200, "…")
+                )
+            })?;
+        }
+        // #1638 R1: when the armed guard authorized this overwrite against
+        // a specific epoch, bind the truncating write to the exact opened
+        // inode — a replacement in the authorize→truncate window is
+        // refused, not clobbered. Non-authorized writes (new files, small
+        // never-read files under today's blind semantics) take the plain
+        // O_NOFOLLOW path.
+        match authorized_epoch {
+            Some(expected) => {
+                match super::write_no_follow_checked(&path, input.content.as_bytes(), expected)
                     .await
-                    {
-                        Ok(super::CheckedWrite::Written) => {}
-                        Ok(super::CheckedWrite::EpochChanged { found }) => {
-                            if let Some(session) =
-                                ctx.parent_session_key.as_deref().filter(|s| !s.is_empty())
-                            {
-                                super::read_window::forget(session, &path);
-                            }
-                            let shown_path = octos_core::truncated_utf8(&input.path, 200, "...");
-                            return Ok(ToolResult {
-                                output: format!(
-                                    "{} write_file refused: {} changed on disk between your read \
-                                     and this write ({} bytes now), so the overwrite was not \
-                                     applied. Re-read it with read_file, then retry.",
-                                    super::read_window::PARTIAL_VIEW_OVERWRITE_PREFIX,
-                                    shown_path,
-                                    found.size,
-                                ),
-                                success: false,
-                                ..Default::default()
-                            });
+                {
+                    Ok(super::CheckedWrite::Written) => {}
+                    Ok(super::CheckedWrite::EpochChanged { found }) => {
+                        // The inode we were authorized against is gone;
+                        // forget the now-invalid coverage and refuse.
+                        if let Some(session) =
+                            ctx.parent_session_key.as_deref().filter(|s| !s.is_empty())
+                        {
+                            super::read_window::forget(session, &path);
                         }
-                        Err(e) => {
-                            return Ok(ToolResult {
-                                output: grant.map_confined_error(
-                                    &e,
-                                    &workspace_root,
-                                    &input.path,
-                                    self.name(),
-                                ),
-                                success: false,
-                                ..Default::default()
-                            });
-                        }
-                    }
-                }
-                _ => {
-                    if let Err(e) = super::write_grant::confined_write(
-                        workspace_root.clone(),
-                        rel,
-                        input.content.as_bytes().to_vec(),
-                        grant.create_only(),
-                    )
-                    .await
-                    {
+                        let shown_path = octos_core::truncated_utf8(&input.path, 200, "...");
                         return Ok(ToolResult {
-                            output: grant.map_confined_error(
-                                &e,
-                                &workspace_root,
-                                &input.path,
-                                self.name(),
+                            output: format!(
+                                "{} write_file refused: {} changed on disk between your read \
+                                 and this write ({} bytes now), so the overwrite was not \
+                                 applied. Re-read it with read_file, then retry.",
+                                super::read_window::PARTIAL_VIEW_OVERWRITE_PREFIX,
+                                shown_path,
+                                found.size,
                             ),
                             success: false,
                             ..Default::default()
                         });
                     }
+                    Err(e) => return Ok(super::file_io_error(e, &input.path)),
                 }
             }
-            true
-        } else {
-            false
-        };
-
-        if !fenced {
-            // Create parent directories if needed (generic, unfenced path).
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await.wrap_err_with(|| {
-                    // Bound the caller-derived path so an armed Err stays under
-                    // the tool-output cap (#2193 R4).
-                    format!(
-                        "failed to create directories: {}",
-                        octos_core::truncated_utf8(&parent.display().to_string(), 200, "…")
-                    )
-                })?;
-            }
-            // #1638 R1: when the armed guard authorized this overwrite against
-            // a specific epoch, bind the truncating write to the exact opened
-            // inode — a replacement in the authorize→truncate window is
-            // refused, not clobbered. Non-authorized writes (new files, small
-            // never-read files under today's blind semantics) take the plain
-            // O_NOFOLLOW path.
-            match authorized_epoch {
-                Some(expected) => {
-                    match super::write_no_follow_checked(&path, input.content.as_bytes(), expected)
-                        .await
-                    {
-                        Ok(super::CheckedWrite::Written) => {}
-                        Ok(super::CheckedWrite::EpochChanged { found }) => {
-                            // The inode we were authorized against is gone;
-                            // forget the now-invalid coverage and refuse.
-                            if let Some(session) =
-                                ctx.parent_session_key.as_deref().filter(|s| !s.is_empty())
-                            {
-                                super::read_window::forget(session, &path);
-                            }
-                            let shown_path = octos_core::truncated_utf8(&input.path, 200, "...");
-                            return Ok(ToolResult {
-                                output: format!(
-                                    "{} write_file refused: {} changed on disk between your read \
-                                     and this write ({} bytes now), so the overwrite was not \
-                                     applied. Re-read it with read_file, then retry.",
-                                    super::read_window::PARTIAL_VIEW_OVERWRITE_PREFIX,
-                                    shown_path,
-                                    found.size,
-                                ),
-                                success: false,
-                                ..Default::default()
-                            });
-                        }
-                        Err(e) => return Ok(super::file_io_error(e, &input.path)),
-                    }
-                }
-                None => {
-                    // Write file (O_NOFOLLOW atomically rejects symlinks, no TOCTOU race).
-                    if let Err(e) = super::write_no_follow(&path, input.content.as_bytes()).await {
-                        return Ok(super::file_io_error(e, &input.path));
-                    }
+            None => {
+                // Write file (O_NOFOLLOW atomically rejects symlinks, no TOCTOU race).
+                if let Err(e) = super::write_no_follow(&path, input.content.as_bytes()).await {
+                    return Ok(super::file_io_error(e, &input.path));
                 }
             }
         }
 
-        // #1976 SECURITY ROUND 2 (codex): a per-path write fence makes this a
-        // LEAF-FILE operation, not a project mutation — so the post-write
-        // processors that re-resolve the LEXICAL path are SKIPPED under a
-        // fence (a formatter, for example, would run an external tool on a
-        // lexical filename, breaching the fence). `fenced` (set on the
-        // confined-write path above) is true iff a fence is bound: reaching
-        // here with `write_grant` Some implies `fenced`.
 
         // #1774: opt-in post-edit formatting. Runs BEFORE cache invalidation
         // and the git snapshot so both observe the final on-disk content.
         // Best-effort by contract — a formatter failure never fails the write.
-        // Never runs under a fence (see above).
-        let format_note = if ctx.format_after_edit && !fenced {
+        let format_note = if ctx.format_after_edit {
             crate::format::post_edit_format_note(&path, &input.content).await
         } else {
             None
@@ -599,7 +474,7 @@ impl WriteFileTool {
 mod tests {
     use super::*;
 
-    use crate::tools::test_fixture::scoped_ctx;
+    use crate::tools::test_fixture::{escape_ctx, scoped_ctx};
 
     #[tokio::test]
     async fn test_write_file_creates_new() {
@@ -686,13 +561,10 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_refuses_out_of_scope_path() {
-        let scope_dir = tempfile::tempdir().unwrap();
-        let outside_dir = tempfile::tempdir().unwrap();
+        let (scope_dir, outside_dir, ctx) = escape_ctx("write-with-scope");
         let outside_target = outside_dir.path().join("escape.txt");
 
-        let scope = SessionScope::solo(scope_dir.path().to_path_buf(), vec![]).unwrap();
         let tool = WriteFileTool::new(scope_dir.path());
-        let ctx = scoped_ctx("write-with-scope", scope);
 
         let result = tool
             .execute_with_context(
@@ -770,14 +642,11 @@ mod tests {
         // closes that hole.
         use std::os::unix::fs::symlink;
 
-        let scope_dir = tempfile::tempdir().unwrap();
-        let outside_dir = tempfile::tempdir().unwrap();
+        let (scope_dir, outside_dir, ctx) = escape_ctx("write-with-scope");
         let link_path = scope_dir.path().join("link");
         symlink(outside_dir.path(), &link_path).unwrap();
 
-        let scope = SessionScope::solo(scope_dir.path().to_path_buf(), vec![]).unwrap();
         let tool = WriteFileTool::new(scope_dir.path());
-        let ctx = scoped_ctx("write-with-scope", scope);
 
         let result = tool
             .execute_with_context(
@@ -806,88 +675,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // #1774: post-edit formatting integration.
     // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
-    // #1976: per-path write-grant enforcement.
-    // -----------------------------------------------------------------------
-
-    fn fenced_tool(dir: &std::path::Path, patterns: &[&str], create_only: bool) -> WriteFileTool {
-        let owned: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
-        WriteFileTool::new(dir).with_write_grant(
-            crate::tools::write_grant::WritePathGrant::new(&owned, create_only)
-                .expect("test grant compiles"),
-        )
-    }
-
-    #[tokio::test]
-    async fn write_grant_allows_creating_allowlisted_file() {
-        // Acceptance (#1976): a worker granted write:["exemplar.card"],
-        // create_only CAN create exemplar.card via write_file.
-        let dir = tempfile::tempdir().unwrap();
-        let tool = fenced_tool(dir.path(), &["exemplar.card"], true);
-
-        let result = tool
-            .execute(&serde_json::json!({"path": "exemplar.card", "content": "v1\n"}))
-            .await
-            .unwrap();
-        assert!(
-            result.success,
-            "granted create must pass: {}",
-            result.output
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("exemplar.card")).unwrap(),
-            "v1\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn write_grant_denies_non_allowlisted_path() {
-        // Acceptance (#1976): the same worker CANNOT write app.md — typed
-        // `[denied]` refusal, file never created, violation never silent.
-        let dir = tempfile::tempdir().unwrap();
-        let tool = fenced_tool(dir.path(), &["exemplar.card"], true);
-
-        let result = tool
-            .execute(&serde_json::json!({"path": "app.md", "content": "nope\n"}))
-            .await
-            .unwrap();
-        assert!(!result.success);
-        assert!(
-            result
-                .output
-                .contains(crate::tools::write_grant::DENIED_MARKER),
-            "refusal must carry the [denied] class: {}",
-            result.output
-        );
-        assert!(
-            !dir.path().join("app.md").exists(),
-            "refused write must not create the file"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn write_grant_symlinked_ancestor_cannot_reach_allowlisted_name() {
-        // Acceptance (#1976): CANNOT bypass via symlink — `cards` symlinked
-        // outside the workspace makes `cards/a.card` (lexically allowlisted)
-        // resolve outside; the canonical match denies it.
-        use std::os::unix::fs::symlink;
-        let ws = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        symlink(outside.path(), ws.path().join("cards")).unwrap();
-
-        let tool = fenced_tool(ws.path(), &["cards/*.card"], false);
-        let result = tool
-            .execute(&serde_json::json!({"path": "cards/a.card", "content": "leak\n"}))
-            .await
-            .unwrap();
-        assert!(!result.success, "symlink bypass must be refused");
-        assert!(
-            !outside.path().join("a.card").exists(),
-            "nothing may land at the symlink target"
-        );
-    }
 
     #[tokio::test]
     async fn should_write_file_tool_invalidate_cache_after_write() {

@@ -12,11 +12,10 @@ mod memory_store;
 mod store;
 
 pub use episode::{Episode, EpisodeOutcome, EpisodeSource};
-pub use hybrid_search::{HybridIndex, HybridScore, VectorCoverage};
+pub use hybrid_search::{HybridScore, VectorCoverage};
 pub use memory_store::{
     DEFAULT_MAX_INJECT_TOKENS, MemoryStore, NoteKind, NoteOrigin, StagingNote,
-    UsageMap, UsageStat, is_reserved_memory_name,
-    is_valid_entry_id,
+    is_reserved_memory_name, is_valid_entry_id,
 };
 pub use store::{
     DEFAULT_DIMENSION as EPISODIC_INDEX_DIMENSION, EpisodeStore, EpisodeStoreLocked,

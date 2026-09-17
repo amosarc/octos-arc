@@ -65,12 +65,6 @@ pub enum ProgressEvent {
     /// mapper deserializes it into a `plan/updated` notification.
     PlanUpdated { plan: serde_json::Value },
 
-    /// Token usage update.
-    TokenUsage {
-        input_tokens: u32,
-        output_tokens: u32,
-    },
-
     /// Task completed.
     TaskCompleted {
         success: bool,

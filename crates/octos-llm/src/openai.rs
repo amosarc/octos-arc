@@ -1563,17 +1563,7 @@ mod tests {
     }
 
     fn msg(content: &str) -> Message {
-        Message {
-            role: MessageRole::User,
-            content: content.to_string(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        }
+        crate::types::test_msg(octos_core::MessageRole::User, content)
     }
 
     #[test]

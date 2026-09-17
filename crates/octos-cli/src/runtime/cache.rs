@@ -725,83 +725,35 @@ async fn background_sweep_loop(inner: CacheStorage, idle_ttl: Duration, shutdown
 mod tests {
     use super::*;
 
-    use std::collections::HashMap as StdHashMap;
+    
 
     use std::sync::Arc;
 
-    use octos_agent::sandbox::create_sandbox;
+    
 
-    use octos_agent::{SandboxConfig, ToolRegistry};
+    use octos_agent::SandboxConfig;
 
-    use octos_core::Message;
+    
 
-    use octos_llm::{ChatConfig, ChatResponse, LlmProvider, ToolSpec};
+    
 
-    use octos_memory::{EpisodeStore, MemoryStore};
+    
 
     use tempfile::TempDir;
 
     use crate::runtime::ProfileRuntime;
 
-    struct StubLlm;
-
-    #[async_trait::async_trait]
-    impl LlmProvider for StubLlm {
-        async fn chat(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-            _config: &ChatConfig,
-        ) -> eyre::Result<ChatResponse> {
-            Err(eyre::eyre!("stub LLM not callable in M11-C tests"))
-        }
-        fn model_id(&self) -> &str {
-            "stub-model"
-        }
-        fn provider_name(&self) -> &str {
-            "stub"
-        }
-    }
-
     async fn make_profile(data_dir: PathBuf) -> Arc<ProfileRuntime> {
-        std::fs::create_dir_all(&data_dir).unwrap();
-        let memory = Arc::new(EpisodeStore::open(&data_dir).await.unwrap());
-        let memory_store = Arc::new(MemoryStore::open(&data_dir).await.unwrap());
-        let sandbox = SandboxConfig::default();
-        let base_tools =
-            ToolRegistry::with_builtins_and_sandbox(&data_dir, create_sandbox(&sandbox));
-        Arc::new(ProfileRuntime {
-            profile_id: "_main".to_string(),
+        crate::runtime::test_fixture::profile_runtime_fixture(
+            "_main",
             data_dir,
-            session_store_root: None,
-            config: crate::config::Config::default(),
-            llm: Arc::new(StubLlm),
-            runtime_qos_catalog: None,
-            primary_model_id: "stub-model".to_string(),
-            provider_name: "stub".to_string(),
-            credentials: StdHashMap::new(),
-            skills_dir: None,
-            tool_policy: None,
-            default_sandbox: sandbox,
-            max_iterations: None,
-            session_defaults: None,
-            agent_profile: None,
-            format_after_edit: false,
-            snapshots: None,
-            tool_specs: Arc::new(base_tools),
-            human_approval_rules: None,
-            system_prompt: "test-system-prompt".to_string(),
-            prompt_parts: crate::commands::gateway::prompt::GatewayPromptParts {
-                pre_memory: "test-system-prompt".to_string(),
-                post_memory: String::new(),
-            },
-            memory,
-            memory_store,
-            embedder: None,
-            memory_inject_tokens: 2500,
-            memory_refresh_enabled: false,
-            hook_executor: None,
-        })
+            Arc::new(crate::runtime::test_fixture::StubLlm),
+            "stub-model",
+            "test-system-prompt",
+            false,
+            SandboxConfig::default(),
+        )
+        .await
     }
 
     /// A bootstrap that started BEFORE an invalidation (still holding the old

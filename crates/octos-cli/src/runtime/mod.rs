@@ -57,6 +57,8 @@ pub mod launch;
 #[cfg(feature = "api")]
 pub(crate) mod local_oup;
 pub mod profile;
+#[doc(hidden)]
+pub mod test_fixture;
 pub mod session;
 pub(crate) mod turn_policy;
 

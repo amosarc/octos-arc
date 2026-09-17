@@ -22,7 +22,9 @@ use octos_llm::{ChatResponse, LlmError, LlmErrorKind, LlmProvider, StopReason, T
 use octos_memory::EpisodeStore;
 
 use crate::AgentConfig;
-use crate::test_support::{ScriptedProvider, end_turn, plain_text_response, tool_use};
+use crate::test_support::{
+    ScriptedProvider, assistant_with_calls, end_turn, plain_text_response, tool_call, tool_use,
+};
 
 fn tool_out(tool_call_id: impl Into<String>, content: impl Into<String>) -> Message {
     Message {
@@ -691,79 +693,21 @@ fn split_tool_calls_caps_parallel_batches() {
 fn recover_shell_retry_output_prefers_diff_like_success() {
     let messages = vec![
         Message::user("show a diff"),
-        Message {
-            role: MessageRole::Assistant,
-            content: String::new(),
-            media: vec![],
-            tool_calls: Some(vec![ToolCall {
-                id: "call_shell_1".into(),
-                name: "shell".into(),
-                arguments: serde_json::json!({"command": "git diff -- notes.txt"}),
-                metadata: None,
-            }]),
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        },
+                assistant_with_calls(vec![tool_call("call_shell_1", "shell", serde_json::json!({"command": "git diff -- notes.txt"}))]),
         tool_out(
             "call_shell_1",
             "fatal: not a git repository\n\nExit code: 128",
         ),
-        Message {
-            role: MessageRole::Assistant,
-            content: String::new(),
-            media: vec![],
-            tool_calls: Some(vec![ToolCall {
-                id: "call_shell_2".into(),
-                name: "shell".into(),
-                arguments: serde_json::json!({"command": "cd /tmp && git diff -- notes.txt"}),
-                metadata: None,
-            }]),
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        },
+                assistant_with_calls(vec![
+tool_call("call_shell_2", "shell", serde_json::json!({"command": "cd /tmp && git diff -- notes.txt"}))
+        ]),
         tool_out(
             "call_shell_2",
             "diff --git a/notes.txt b/notes.txt\n--- a/notes.txt\n+++ b/notes.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n\nExit code: 0",
         ),
-        Message {
-            role: MessageRole::Assistant,
-            content: String::new(),
-            media: vec![],
-            tool_calls: Some(vec![ToolCall {
-                id: "call_shell_3".into(),
-                name: "shell".into(),
-                arguments: serde_json::json!({"command": "git status --short"}),
-                metadata: None,
-            }]),
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        },
+                assistant_with_calls(vec![tool_call("call_shell_3", "shell", serde_json::json!({"command": "git status --short"}))]),
         tool_out("call_shell_3", "(no output)\n\nExit code: 0"),
-        Message {
-            role: MessageRole::Assistant,
-            content: String::new(),
-            media: vec![],
-            tool_calls: Some(vec![ToolCall {
-                id: "call_shell_4".into(),
-                name: "shell".into(),
-                arguments: serde_json::json!({"command": "git diff -- notes.txt"}),
-                metadata: None,
-            }]),
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        },
+                assistant_with_calls(vec![tool_call("call_shell_4", "shell", serde_json::json!({"command": "git diff -- notes.txt"}))]),
         tool_out(
             "call_shell_4",
             "fatal: not a git repository\n\nExit code: 128",
@@ -804,42 +748,12 @@ fn current_user_turn_start_returns_index_of_last_user_message() {
 fn latest_tool_batch_contains_picks_up_shell_in_mixed_batch() {
     let messages = vec![
         Message::user("repair"),
-        Message {
-            role: MessageRole::Assistant,
-            content: String::new(),
-            media: vec![],
-            tool_calls: Some(vec![
-                ToolCall {
-                    id: "call_shell".into(),
-                    name: "shell".into(),
-                    arguments: serde_json::json!({"command": "ls"}),
-                    metadata: None,
-                },
-                ToolCall {
-                    id: "call_read".into(),
-                    name: "read_file".into(),
-                    arguments: serde_json::json!({"path": "x"}),
-                    metadata: None,
-                },
-            ]),
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        },
+                assistant_with_calls(vec![
+tool_call("call_shell", "shell", serde_json::json!({"command": "ls"})),
+tool_call("call_read", "read_file", serde_json::json!({"path": "x"}))
+        ]),
         tool_out("call_shell", "failed"),
-        Message {
-            role: MessageRole::Tool,
-            content: "{ \"x\": 1 }".into(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: Some("call_read".into()),
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        },
+        tool_out("call_read", "{ \"x\": 1 }"),
     ];
 
     assert!(latest_tool_batch_contains(&messages, "shell"));
@@ -974,31 +888,6 @@ fn productive_message_rejects_known_failure_prefixes() {
 // Review A F-001 — dispatch_loop_error wiring.
 // ─────────────────────────────────────────────────────────────────────
 
-/// Minimal placeholder provider for F-001 dispatch tests. The tests drive
-/// `handle_loop_error_with_dispatch` directly and never call `chat()`, so
-/// the provider's only requirement is to satisfy the trait bounds.
-struct InertProvider;
-
-#[async_trait]
-impl LlmProvider for InertProvider {
-    async fn chat(
-        &self,
-        _messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &octos_llm::ChatConfig,
-    ) -> Result<ChatResponse> {
-        unreachable!("InertProvider::chat must not be called in F-001 dispatch tests");
-    }
-
-    fn model_id(&self) -> &str {
-        "inert"
-    }
-
-    fn provider_name(&self) -> &str {
-        "inert"
-    }
-}
-
 /// Counting summarizer used to prove the `CompactAndRetry` arm of
 /// `handle_loop_error_with_dispatch` actually drives `maybe_run_turn_compaction`.
 struct CountingSummarizer {
@@ -1018,7 +907,7 @@ impl crate::summarizer::Summarizer for CountingSummarizer {
 
 async fn build_dispatch_test_agent() -> Agent {
     let dir = tempfile::tempdir().unwrap();
-    let provider: Arc<dyn LlmProvider> = Arc::new(InertProvider);
+    let provider: Arc<dyn LlmProvider> = Arc::new(crate::test_support::InertProvider);
     let tools = ToolRegistry::new();
     let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
     Agent::new(AgentId::new("test-dispatch"), provider, tools, memory)

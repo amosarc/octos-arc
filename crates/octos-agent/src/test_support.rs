@@ -1,7 +1,7 @@
 //! Crate-internal `#[cfg(test)]` scaffolding shared by the `tests` child
 //! modules (`loop_runner_tests`, `spawn_tests`). Not compiled outside tests.
 
-use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use octos_core::{Message, ToolCall};
@@ -111,4 +111,70 @@ pub(crate) fn end_turn(content: &str, input_tokens: u32, output_tokens: u32) -> 
 /// A plain single-text `EndTurn` response with zero usage.
 pub(crate) fn plain_text_response(content: &str) -> ChatResponse {
     end_turn(content, 0, 0)
+}
+
+/// A provider for tests where `chat` must never be reached — panics loudly
+/// (naming the leak) instead of answering, so a mis-wired loop fails the
+/// test rather than silently "passing" on a synthetic response.
+pub(crate) struct InertProvider;
+
+#[async_trait]
+impl LlmProvider for InertProvider {
+    async fn chat(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolSpec],
+        _config: &ChatConfig,
+    ) -> Result<ChatResponse, eyre::Report> {
+        unreachable!("InertProvider::chat must not be called")
+    }
+
+    fn model_id(&self) -> &str {
+        "inert"
+    }
+
+    fn provider_name(&self) -> &str {
+        "inert"
+    }
+}
+
+/// An `Assistant` message carrying `tool_calls`, every other field default
+/// (test scaffolding for loop-history fixtures).
+pub(crate) fn assistant_with_calls(tool_calls: Vec<ToolCall>) -> Message {
+    Message {
+        role: octos_core::MessageRole::Assistant,
+        content: String::new(),
+        media: vec![],
+        tool_calls: Some(tool_calls),
+        tool_call_id: None,
+        reasoning_content: None,
+        client_message_id: None,
+        thread_id: None,
+        timestamp: chrono::Utc::now(),
+    }
+}
+
+/// A single tool call with JSON arguments and no metadata (test scaffolding).
+pub(crate) fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> ToolCall {
+    ToolCall {
+        id: id.into(),
+        name: name.into(),
+        arguments,
+        metadata: None,
+    }
+}
+
+/// Test reporter capturing every [`crate::progress::ProgressEvent`] so
+/// assertions can branch on event kind without parsing JSON.
+pub(crate) struct CapturingReporter {
+    pub(crate) events: Arc<StdMutex<Vec<crate::progress::ProgressEvent>>>,
+}
+
+impl crate::progress::ProgressReporter for CapturingReporter {
+    fn report(&self, event: crate::progress::ProgressEvent) {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(event);
+    }
 }

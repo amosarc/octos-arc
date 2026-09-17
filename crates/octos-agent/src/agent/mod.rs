@@ -1276,7 +1276,7 @@ mod profile_integration_tests {
 
     use super::*;
     use octos_core::AgentId;
-    use octos_llm::{ChatResponse, LlmProvider, ToolSpec};
+    use octos_llm::LlmProvider;
     use octos_memory::EpisodeStore;
 
     #[test]
@@ -1289,33 +1289,13 @@ mod profile_integration_tests {
         assert_eq!(clamp_env_secs(None, 1200, 0), 1200);
     }
 
-    struct NoopProvider;
-
-    #[async_trait::async_trait]
-    impl LlmProvider for NoopProvider {
-        async fn chat(
-            &self,
-            _messages: &[octos_core::Message],
-            _tools: &[ToolSpec],
-            _config: &octos_llm::ChatConfig,
-        ) -> eyre::Result<ChatResponse> {
-            eyre::bail!("unused in profile integration tests")
-        }
-        fn model_id(&self) -> &str {
-            "mock"
-        }
-        fn provider_name(&self) -> &str {
-            "mock"
-        }
-    }
-
     async fn agent_default(cwd: &std::path::Path) -> Agent {
         let memory = Arc::new(
             EpisodeStore::open(cwd.join("memory-default"))
                 .await
                 .expect("episode store"),
         );
-        let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
+        let provider: Arc<dyn LlmProvider> = Arc::new(crate::test_support::InertProvider);
         let tools = ToolRegistry::with_builtins(cwd);
         Agent::new(AgentId::new("default"), provider, tools, memory)
     }
@@ -1328,7 +1308,7 @@ mod profile_integration_tests {
                 .await
                 .expect("episode store"),
         );
-        let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
+        let provider: Arc<dyn LlmProvider> = Arc::new(crate::test_support::InertProvider);
 
         let profile = ProfileDefinition::builtin(name).expect("builtin profile");
         let mut tools = ToolRegistry::with_builtins(cwd);

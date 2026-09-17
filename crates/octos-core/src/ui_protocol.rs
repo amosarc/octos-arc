@@ -613,12 +613,6 @@ impl RpcError {
         }))
     }
 
-    /// Result-side counterpart to `INVALID_PARAMS`. See
-    /// [`rpc_error_codes::MALFORMED_RESULT`] for rationale.
-    pub fn malformed_result(message: impl Into<String>) -> Self {
-        Self::new(rpc_error_codes::MALFORMED_RESULT, message)
-    }
-
     /// Spec §10 / M9-FIX-04 backpressure signal. Optional `retry_after_ms`
     /// hint is attached to `data` when supplied.
     pub fn rate_limited(message: impl Into<String>, retry_after_ms: Option<u64>) -> Self {

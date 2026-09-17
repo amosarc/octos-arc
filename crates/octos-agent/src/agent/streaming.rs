@@ -711,14 +711,14 @@ mod tests {
 
     use std::sync::Arc;
 
-    use async_trait::async_trait;
-    use eyre::Result;
+    
+    
     use futures::StreamExt;
     use futures::stream;
-    use octos_core::{AgentId, Message};
+    use octos_core::AgentId;
     use octos_llm::{
-        ChatConfig, ChatResponse, ChatStream, LlmProvider, StopReason, StreamError, StreamEvent,
-        TokenUsage as LlmTokenUsage, ToolSpec,
+        ChatStream, LlmProvider, StopReason, StreamError, StreamEvent,
+        TokenUsage as LlmTokenUsage,
     };
     use octos_memory::EpisodeStore;
     use tempfile::TempDir;
@@ -727,34 +727,12 @@ mod tests {
 
     use crate::tools::ToolRegistry;
 
-    struct NoopProvider;
-
-    #[async_trait]
-    impl LlmProvider for NoopProvider {
-        async fn chat(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-            _config: &ChatConfig,
-        ) -> Result<ChatResponse> {
-            eyre::bail!("chat() unused in streaming tests")
-        }
-
-        fn model_id(&self) -> &str {
-            "mock"
-        }
-
-        fn provider_name(&self) -> &str {
-            "mock"
-        }
-    }
-
     /// Build a bare `Agent` whose backing provider is unused — the streaming
     /// tests drive `consume_stream_inner` with hand-built streams.
     async fn build_test_agent() -> (Agent, TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-        let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
+        let provider: Arc<dyn LlmProvider> = Arc::new(crate::test_support::InertProvider);
         let tools = ToolRegistry::new();
         let agent = Agent::new(AgentId::new("stream-test"), provider, tools, memory);
         (agent, dir)

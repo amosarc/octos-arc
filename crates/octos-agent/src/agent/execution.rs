@@ -823,7 +823,7 @@ impl Agent {
                 // synchronously within the spawning turn inserts the id into
                 // the process-global live-set before the turn returns (turns
                 // are serialized per session, so this completes before any
-                // next-turn `enable_persistence` sweep). The guard is MOVED
+                // later supervisor work reads the live-set). The guard is MOVED
                 // into the future below so its Drop — which clears the live-set
                 // and drives an unfinished task to Failed (so the TUI task
                 // count decrements instead of hanging on "N running") — still
@@ -2797,31 +2797,12 @@ mod tests {
     #[tokio::test]
     async fn compose_system_prompt_is_byte_identical_when_no_plan_installed() {
         use octos_core::AgentId;
-        use octos_llm::{ChatResponse, LlmProvider, ToolSpec};
+        use octos_llm::LlmProvider;
         use octos_memory::EpisodeStore;
-
-        struct NoopProvider;
-        #[async_trait::async_trait]
-        impl LlmProvider for NoopProvider {
-            async fn chat(
-                &self,
-                _messages: &[octos_core::Message],
-                _tools: &[ToolSpec],
-                _config: &octos_llm::ChatConfig,
-            ) -> eyre::Result<ChatResponse> {
-                eyre::bail!("unused")
-            }
-            fn model_id(&self) -> &str {
-                "mock"
-            }
-            fn provider_name(&self) -> &str {
-                "mock"
-            }
-        }
 
         let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(EpisodeStore::open(dir.path().join("mem")).await.unwrap());
-        let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
+        let provider: Arc<dyn LlmProvider> = Arc::new(crate::test_support::InertProvider);
         let agent = crate::agent::Agent::new(
             AgentId::new("planctl-p0"),
             provider,
@@ -2997,36 +2978,12 @@ mod tests {
     use async_trait::async_trait;
     use octos_core::{AgentId, ToolCall};
     use octos_llm::{
-        ChatConfig, ChatResponse, LlmProvider, StopReason, TokenUsage as LlmTokenUsage, ToolSpec,
+        ChatResponse, LlmProvider, StopReason, TokenUsage as LlmTokenUsage,
     };
     use octos_memory::EpisodeStore;
 
     use crate::agent::{Agent, AgentConfig};
     use crate::tools::{Tool, ToolRegistry, ToolResult};
-
-    /// `execute_tools` never talks to the LLM, so the provider only has to
-    /// satisfy the trait bounds (mirrors loop_runner's `InertProvider`).
-    struct NoChatProvider;
-
-    #[async_trait]
-    impl LlmProvider for NoChatProvider {
-        async fn chat(
-            &self,
-            _messages: &[octos_core::Message],
-            _tools: &[ToolSpec],
-            _config: &ChatConfig,
-        ) -> eyre::Result<ChatResponse> {
-            unreachable!("execute_tools must not call the provider");
-        }
-
-        fn model_id(&self) -> &str {
-            "inert"
-        }
-
-        fn provider_name(&self) -> &str {
-            "inert"
-        }
-    }
 
     /// Completes immediately with a distinctive real output.
     struct InstantTool;
@@ -3175,7 +3132,7 @@ mod tests {
         config: AgentConfig,
     ) -> (Vec<octos_core::Message>, Vec<(String, bool)>) {
         let dir = tempfile::tempdir().unwrap();
-        let provider: Arc<dyn LlmProvider> = Arc::new(NoChatProvider);
+        let provider: Arc<dyn LlmProvider> = Arc::new(crate::test_support::InertProvider);
         let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
         let agent = Agent::new(AgentId::new("batch"), provider, tools, memory).with_config(config);
         let response = ChatResponse {
@@ -3292,7 +3249,7 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(InstantTool);
         tools.register(SleepingTool);
-        let provider: Arc<dyn LlmProvider> = Arc::new(NoChatProvider);
+        let provider: Arc<dyn LlmProvider> = Arc::new(crate::test_support::InertProvider);
         let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
         let agent = Agent::new(AgentId::new("batch-timeout"), provider, tools, memory).with_config(
             AgentConfig {
@@ -3402,7 +3359,7 @@ mod tests {
         manager: Arc<crate::snapshot::SnapshotManager>,
         memory_dir: &std::path::Path,
     ) -> Agent {
-        let provider: Arc<dyn LlmProvider> = Arc::new(NoChatProvider);
+        let provider: Arc<dyn LlmProvider> = Arc::new(crate::test_support::InertProvider);
         let memory = Arc::new(EpisodeStore::open(memory_dir.join("memory")).await.unwrap());
         Agent::new(AgentId::new("snapshotter"), provider, tools, memory)
             .with_config(AgentConfig {

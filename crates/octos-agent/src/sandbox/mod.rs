@@ -645,19 +645,6 @@ pub enum SandboxBackendChoice {
     Docker,
 }
 
-impl SandboxBackendChoice {
-    /// Stable human-readable label (`octos doctor`'s sandbox row).
-    fn label(self) -> &'static str {
-        match self {
-            SandboxBackendChoice::Macos => "macOS Seatbelt (sandbox-exec)",
-            SandboxBackendChoice::Bwrap => "bubblewrap (bwrap)",
-            SandboxBackendChoice::Landlock => "Linux container helper (Landlock/seccomp)",
-            SandboxBackendChoice::AppContainer => "Windows AppContainer",
-            SandboxBackendChoice::Docker => "Docker",
-        }
-    }
-}
-
 /// Why a resolution yielded NO confinement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnconfinedReason {
@@ -1033,9 +1020,7 @@ pub fn create_sandbox(config: &SandboxConfig) -> Box<dyn Sandbox> {
 /// construction on this host repeats the same fact, and constructions happen
 /// per session/registry — the old per-construction warning was log spam in
 /// multi-session gateways, which is exactly how it came to be tuned out.
-/// Never silent: `octos doctor` reports the same resolution on demand
-/// ([`auto_sandbox_kind`]), and `sandbox.fail_closed` upgrades this
-/// degradation to a refusal.
+/// `sandbox.fail_closed` upgrades this degradation to a refusal.
 fn warn_auto_unconfined_once(in_container: bool) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
@@ -1072,23 +1057,6 @@ fn running_in_container() -> bool {
     let dockerenv = Path::new("/.dockerenv").exists();
     let cgroup = std::fs::read_to_string("/proc/1/cgroup").unwrap_or_default();
     container_markers_present(dockerenv, &cgroup)
-}
-
-/// Which backend [`SandboxMode::Auto`] would select on this host — a stable
-/// human-readable label plus whether that selection actually sandboxes
-/// (`false` = [`NoSandbox`]). Runs the SAME resolution as [`create_sandbox`]
-/// over a default config (on Linux the bwrap probe actually runs
-/// `bwrap --version`), reported instead of instantiated. Used by
-/// `octos doctor` so its sandbox row reflects the real runtime selection
-/// rather than a PATH existence guess; the boolean keeps callers from
-/// sniffing the label text for status.
-pub fn auto_sandbox_kind() -> (&'static str, bool) {
-    match decide_sandbox(&SandboxConfig::default(), HostOs::current(), &RealHostProbe) {
-        SandboxDecision::Confine(choice) => (choice.label(), true),
-        SandboxDecision::Unconfined(_) | SandboxDecision::Refuse(_) => {
-            ("none — shell commands would run UNSANDBOXED", false)
-        }
-    }
 }
 
 /// Construct the decided backend. The Landlock/AppContainer types only exist

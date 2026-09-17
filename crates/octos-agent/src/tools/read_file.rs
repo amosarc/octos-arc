@@ -800,7 +800,7 @@ mod tests {
         assert_eq!(tool.concurrency_class(), ConcurrencyClass::Safe);
     }
 
-    use crate::tools::test_fixture::scoped_ctx;
+    use crate::tools::test_fixture::escape_ctx;
 
     #[tokio::test]
     async fn invalid_args_error_names_each_problem_with_did_you_mean() {
@@ -966,20 +966,17 @@ mod tests {
     // Phase 2-C: SessionScope integration tests for ReadFileTool.
     // -----------------------------------------------------------------------
 
-    use octos_core::SessionScope;
+    
 
     #[tokio::test]
     async fn read_file_refuses_out_of_scope_path() {
         // An absolute path outside every declared zone classifies as
         // `OutOfScope` and must be refused.
-        let scope_dir = tempfile::tempdir().unwrap();
-        let outside_dir = tempfile::tempdir().unwrap();
+        let (scope_dir, outside_dir, ctx) = escape_ctx("read-with-scope");
         let outside_file = outside_dir.path().join("secret.txt");
         std::fs::write(&outside_file, "secret\n").unwrap();
 
-        let scope = SessionScope::solo(scope_dir.path().to_path_buf(), vec![]).unwrap();
         let tool = ReadFileTool::new(scope_dir.path());
-        let ctx = scoped_ctx("read-with-scope", scope);
 
         let result = tool
             .execute_with_context(
@@ -1008,17 +1005,14 @@ mod tests {
         // file at the symlink's real location.
         use std::os::unix::fs::symlink;
 
-        let scope_dir = tempfile::tempdir().unwrap();
-        let outside_dir = tempfile::tempdir().unwrap();
+        let (scope_dir, outside_dir, ctx) = escape_ctx("read-with-scope");
         std::fs::write(outside_dir.path().join("secret.txt"), "exfiltrated\n").unwrap();
 
         // <scope>/link -> <outside>
         let link_path = scope_dir.path().join("link");
         symlink(outside_dir.path(), &link_path).unwrap();
 
-        let scope = SessionScope::solo(scope_dir.path().to_path_buf(), vec![]).unwrap();
         let tool = ReadFileTool::new(scope_dir.path());
-        let ctx = scoped_ctx("read-with-scope", scope);
 
         let result = tool
             .execute_with_context(&ctx, &serde_json::json!({"path": "link/secret.txt"}))

@@ -19,79 +19,55 @@ use octos_agent::workspace_policy::{
 use octos_agent::{COMPACTION_POLICY_SCHEMA_VERSION, WORKSPACE_POLICY_SCHEMA_VERSION};
 use octos_core::{Message, MessageRole, ToolCall};
 
-fn user_msg(content: &str) -> Message {
+/// Single kernel for the role-specific factories below: the 9-field
+/// `Message` literal varies only in role / tool_calls / tool_call_id.
+fn make_msg(
+    role: MessageRole,
+    content: &str,
+    tool_calls: Option<Vec<ToolCall>>,
+    tool_call_id: Option<&str>,
+) -> Message {
     Message {
-        role: MessageRole::User,
+        role,
         content: content.to_string(),
         media: vec![],
-        tool_calls: None,
-        tool_call_id: None,
+        tool_calls,
+        tool_call_id: tool_call_id.map(|s| s.to_string()),
         reasoning_content: None,
         client_message_id: None,
         thread_id: None,
         timestamp: chrono::Utc::now(),
     }
+}
+
+fn user_msg(content: &str) -> Message {
+    make_msg(MessageRole::User, content, None, None)
 }
 
 fn assistant_msg(content: &str) -> Message {
-    Message {
-        role: MessageRole::Assistant,
-        content: content.to_string(),
-        media: vec![],
-        tool_calls: None,
-        tool_call_id: None,
-        reasoning_content: None,
-        client_message_id: None,
-        thread_id: None,
-        timestamp: chrono::Utc::now(),
-    }
+    make_msg(MessageRole::Assistant, content, None, None)
 }
 
 fn assistant_tool_call(tool_name: &str, tool_id: &str, args: serde_json::Value) -> Message {
-    Message {
-        role: MessageRole::Assistant,
-        content: String::new(),
-        media: vec![],
-        tool_calls: Some(vec![ToolCall {
+    make_msg(
+        MessageRole::Assistant,
+        "",
+        Some(vec![ToolCall {
             id: tool_id.to_string(),
             name: tool_name.to_string(),
             arguments: args,
             metadata: None,
         }]),
-        tool_call_id: None,
-        reasoning_content: None,
-        client_message_id: None,
-        thread_id: None,
-        timestamp: chrono::Utc::now(),
-    }
+        None,
+    )
 }
 
 fn tool_result(tool_id: &str, content: &str) -> Message {
-    Message {
-        role: MessageRole::Tool,
-        content: content.to_string(),
-        media: vec![],
-        tool_calls: None,
-        tool_call_id: Some(tool_id.to_string()),
-        reasoning_content: None,
-        client_message_id: None,
-        thread_id: None,
-        timestamp: chrono::Utc::now(),
-    }
+    make_msg(MessageRole::Tool, content, None, Some(tool_id))
 }
 
 fn system_msg(content: &str) -> Message {
-    Message {
-        role: MessageRole::System,
-        content: content.to_string(),
-        media: vec![],
-        tool_calls: None,
-        tool_call_id: None,
-        reasoning_content: None,
-        client_message_id: None,
-        thread_id: None,
-        timestamp: chrono::Utc::now(),
-    }
+    make_msg(MessageRole::System, content, None, None)
 }
 
 fn policy_with_compaction(compaction: CompactionPolicy) -> WorkspacePolicy {

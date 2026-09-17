@@ -254,35 +254,13 @@ mod tests {
     async fn test_agent(max_timeout: Option<Duration>) -> super::Agent {
         use super::super::Agent;
         use octos_core::AgentId;
-        use octos_llm::{ChatResponse, LlmProvider, ToolSpec};
+        use octos_llm::LlmProvider;
         use octos_memory::EpisodeStore;
         use std::sync::Arc;
 
-        struct NoopProvider;
-
-        #[async_trait::async_trait]
-        impl LlmProvider for NoopProvider {
-            async fn chat(
-                &self,
-                _messages: &[octos_core::Message],
-                _tools: &[ToolSpec],
-                _config: &octos_llm::ChatConfig,
-            ) -> eyre::Result<ChatResponse> {
-                eyre::bail!("not used in budget tests")
-            }
-
-            fn model_id(&self) -> &str {
-                "mock"
-            }
-
-            fn provider_name(&self) -> &str {
-                "mock"
-            }
-        }
-
         let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-        let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
+        let provider: Arc<dyn LlmProvider> = Arc::new(crate::test_support::InertProvider);
         let tools = crate::tools::ToolRegistry::new();
         let mut agent = Agent::new(AgentId::new("test-agent"), provider, tools, memory);
         let config = AgentConfig {

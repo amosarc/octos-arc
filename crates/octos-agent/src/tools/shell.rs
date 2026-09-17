@@ -50,15 +50,6 @@ pub struct ShellTool {
     /// its owning session in `/ps`). Falls back to
     /// [`ToolContext::parent_session_key`] when unset.
     session_key: Option<String>,
-    /// Task-ledger path recorded as lineage on registered background tasks so
-    /// they can be restored across a restart, mirroring the spawn tool.
-    /// When `false`, a background/detached command — an explicit
-    /// `background: true` arg OR a trailing `&` — is refused outright instead
-    /// of being spawned detached. A detached child outlives the agent turn and
-    /// dodges any per-attempt deadline, so a closed, non-interactive worker
-    /// (e.g. the fleet task-worker) sets this `false` to stay replay-safe.
-    /// Defaults to `true` — unchanged behaviour for every existing caller.
-    background_allowed: bool,
     /// Optional hard CEILING on a single command's effective timeout. When set,
     /// the per-command timeout is `min(requested-or-default, max_timeout)` — an
     /// upper bound that overrides a LARGER LLM-provided `timeout_secs`, so a
@@ -80,7 +71,6 @@ impl ShellTool {
             sandbox: Arc::new(NoSandbox),
             task_supervisor: None,
             session_key: None,
-            background_allowed: true,
             max_timeout: None,
         }
     }
@@ -90,25 +80,13 @@ impl ShellTool {
     /// The effective timeout becomes `min(requested-or-default, cap_secs)`, so
     /// this overrides a LARGER LLM-provided `timeout_secs` (which the agent
     /// loop can otherwise raise up to the outer 600s clamp). A closed worker
-    /// sets this to its attempt deadline so — together with
-    /// `with_background_allowed(false)` — no single foreground command can
+    /// sets this to its attempt deadline so no single foreground command can
     /// outlive the deadline. `cap_secs` is floored to 1. Default: no extra cap.
     pub fn with_max_timeout_secs(mut self, cap_secs: u64) -> Self {
         self.max_timeout = Some(Duration::from_secs(cap_secs.max(1)));
         self
     }
 
-    /// Allow or forbid background/detached execution (default: allowed).
-    ///
-    /// With `allowed = false`, any background request — an explicit
-    /// `background: true` arg or a trailing `&` — is refused with a failed
-    /// [`ToolResult`] rather than spawned detached. A closed worker that must
-    /// not outlive its per-attempt deadline (the fleet task-worker) sets this
-    /// so a `sh -c "cmd &"` cannot orphan work past the attempt.
-    pub fn with_background_allowed(mut self, allowed: bool) -> Self {
-        self.background_allowed = allowed;
-        self
-    }
 
     /// Set a custom command policy.
     /// #28b — set the bash file-writes knob (defaults to `Allow`).
@@ -779,29 +757,6 @@ impl Tool for ShellTool {
                 }
             }
             Decision::Allow => {}
-        }
-
-        // A closed worker (`background_allowed == false`) refuses the two
-        // string-detectable ways to detach: the explicit `background: true`
-        // arg and a trailing `&` (checked before the background branch below,
-        // so neither falls through to a foreground run that self-detaches).
-        // This is best-effort defense-in-depth, NOT a boundary: arbitrary
-        // shell-internal backgrounding (`sleep 600 & true`, `sh -c "cmd &"`)
-        // cannot be caught by string inspection — the SANDBOX's process-group
-        // teardown is what actually bounds a detached child.
-        if is_background_command(&input.command, input.background) && !self.background_allowed {
-            tracing::warn!(
-                command = %input.command,
-                "background/detached shell execution is disabled for this worker",
-            );
-            return Ok(ToolResult {
-                output: format!(
-                    "background/detached execution is disabled for this worker: {}",
-                    input.command
-                ),
-                success: false,
-                ..Default::default()
-            });
         }
 
         // Background execution: a trailing `&` or an explicit `background: true`

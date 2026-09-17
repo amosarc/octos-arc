@@ -207,26 +207,11 @@ fn should_emit_failure_signal_only_after_synth_ack_recorded_for_tool_call_id() {
 
 // ── F004 B2: TaskSupervisor → ToolProgress bridge ─────────────────────
 
-/// Test reporter that captures every reported event so the bridge
-/// assertions can branch on event kind without parsing JSON.
-struct CapturingReporter {
-    events: Arc<StdMutex<Vec<crate::progress::ProgressEvent>>>,
-}
-
-impl crate::progress::ProgressReporter for CapturingReporter {
-    fn report(&self, event: crate::progress::ProgressEvent) {
-        self.events
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(event);
-    }
-}
-
 fn collect_progress_events(
     supervisor: &TaskSupervisor,
 ) -> Arc<StdMutex<Vec<crate::progress::ProgressEvent>>> {
     let events = Arc::new(StdMutex::new(Vec::new()));
-    let reporter = Arc::new(CapturingReporter {
+    let reporter = Arc::new(crate::test_support::CapturingReporter {
         events: Arc::clone(&events),
     });
     supervisor.set_progress_reporter(reporter);
@@ -414,13 +399,11 @@ fn terminal_guard_marks_failed_when_dropped_while_active() {
 // ── Orphan-sweep liveness gate (fix/orphan-sweep-liveness-gate) ──
 //
 // The WS turn path rebuilds a BRAND-NEW per-turn `TaskSupervisor`
-// every turn and calls `enable_persistence(...)` over the SHARED
-// per-session ledger. `enable_persistence`'s orphan-sweep ASSUMES
-// "non-terminal ⇒ no live worker", so it FALSELY marks a still-Running
-// DETACHED spawn_only task (a detached bg_research run, up to ~3600s)
-// as "orphaned across restart" — even though the worker is alive on the
-// PREVIOUS turn's supervisor and will mark_completed shortly. The fix
-// gates the sweep on a process-global live-set that survives the
-// per-turn supervisor rebuild and is empty after a true cross-process
-// restart.
+// every turn. A still-Running DETACHED spawn_only task (a detached
+// bg_research run, up to ~3600s) is alive on the PREVIOUS turn's
+// supervisor and will mark_completed shortly. The process-global
+// live-set records that liveness across the per-turn supervisor
+// rebuild and empties only on true termination or a cross-process
+// restart, so live-set consumers (the detached-fanout cap) never
+// mistake it for gone.
 

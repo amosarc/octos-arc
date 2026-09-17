@@ -233,7 +233,7 @@ mod tests {
     
     use tempfile::TempDir;
 
-    use crate::tools::test_fixture::scoped_ctx;
+    use crate::tools::test_fixture::{escape_ctx_with_skill_zones, scoped_ctx};
 
     #[tokio::test]
     async fn test_list_dir() {
@@ -290,17 +290,11 @@ mod tests {
     async fn list_dir_outside_workspace_and_skill_zones_refused() {
         // A dir entirely outside every declared zone classifies as
         // `OutOfScope` and must be refused.
-        let workspace = TempDir::new().unwrap();
         let skill = TempDir::new().unwrap();
-        let outside = TempDir::new().unwrap();
-
-        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![])
-            .unwrap()
-            .with_skill_read_zones(vec![skill.path().to_path_buf()])
-            .unwrap();
+        let (workspace, outside, ctx) =
+            escape_ctx_with_skill_zones("list-dir-with-scope", &[skill.path()]);
 
         let tool = ListDirTool::new(workspace.path());
-        let ctx = scoped_ctx("list-dir-with-scope", scope);
 
         let result = tool
             .execute_with_context(
@@ -326,9 +320,9 @@ mod tests {
         // symlink target so the entry is dropped.
         use std::os::unix::fs::symlink;
 
-        let workspace = TempDir::new().unwrap();
         let skill = TempDir::new().unwrap();
-        let outside = TempDir::new().unwrap();
+        let (workspace, outside, ctx) =
+            escape_ctx_with_skill_zones("list-dir-with-scope", &[skill.path()]);
         std::fs::write(outside.path().join("secret"), "exfil").unwrap();
 
         // Real entry inside the skill_dir (should remain).
@@ -336,13 +330,7 @@ mod tests {
         // Symlink pointing outside every declared zone (should be dropped).
         symlink(outside.path(), skill.path().join("escape")).unwrap();
 
-        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![])
-            .unwrap()
-            .with_skill_read_zones(vec![skill.path().to_path_buf()])
-            .unwrap();
-
         let tool = ListDirTool::new(workspace.path());
-        let ctx = scoped_ctx("list-dir-with-scope", scope);
 
         let result = tool
             .execute_with_context(

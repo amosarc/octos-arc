@@ -130,12 +130,6 @@ impl SubAgentOutputRouter {
         self
     }
 
-    /// Override the in-memory preview cap (builder-style).
-    #[must_use]
-    pub fn with_preview_bytes(mut self, cap: usize) -> Self {
-        self.preview_cap = cap;
-        self
-    }
 
     /// Resolve the per-task output file path.
     ///

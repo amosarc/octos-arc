@@ -171,7 +171,7 @@ impl Agent {
     ///
     /// AppUI/session runtimes that own a durable context ledger replace the
     /// prompt with their canonical `ContextManager::for_prompt` generation.
-    /// When this bridge is present, the legacy/tiered compaction paths above
+    /// When this bridge is present, the compaction paths above
     /// are disabled so only one component owns prompt compaction.
     pub(super) fn prepare_prompt_with_context_manager(
         &self,
