@@ -187,7 +187,7 @@ pub const SHELL_SPIRAL_VARIANT: &str = "shell_spiral";
 /// so the caller never silently exceeds a bucket.
 ///
 /// Fields are `pub` for direct reads and test/guard-path mutations, but the
-/// delta-merge (`saturating_add_turn_delta`) relies on every bucket being
+/// saturation arithmetic relies on every bucket being
 /// append-only: only ever increment, never decrement or reset (see its doc
 /// comment).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,60 +215,9 @@ pub struct LoopRetryCounters {
     pub shell_spiral: u32,
 }
 
-impl LoopRetryCounters {
-    /// Add another turn's per-bucket increments (`turn` relative to the
-    /// `base` it loaded from) onto `self` (#1655). Buckets only ever
-    /// increment, so `saturating_sub` yields the turn's own increments and
-    /// two overlapping turns both land in the merged state.
-    ///
-    /// Monotonicity is a load-bearing convention here (#2221): if a future
-    /// change ever decrements a bucket, `saturating_sub` clamps the negative
-    /// delta to zero and the decrement is silently dropped from the merge.
-    /// Bucket mutations must therefore only ever increment — all built-in
-    /// mutations go through `observe*` / `observe_shell_spiral`, which do.
-    fn saturating_add_turn_delta(&mut self, base: &Self, turn: &Self) {
-        self.rate_limited = self
-            .rate_limited
-            .saturating_add(turn.rate_limited.saturating_sub(base.rate_limited));
-        self.context_overflow = self
-            .context_overflow
-            .saturating_add(turn.context_overflow.saturating_sub(base.context_overflow));
-        self.authentication = self
-            .authentication
-            .saturating_add(turn.authentication.saturating_sub(base.authentication));
-        self.quota = self
-            .quota
-            .saturating_add(turn.quota.saturating_sub(base.quota));
-        self.invalid_request = self
-            .invalid_request
-            .saturating_add(turn.invalid_request.saturating_sub(base.invalid_request));
-        self.content_filtered = self
-            .content_filtered
-            .saturating_add(turn.content_filtered.saturating_sub(base.content_filtered));
-        self.provider_unavailable = self.provider_unavailable.saturating_add(
-            turn.provider_unavailable
-                .saturating_sub(base.provider_unavailable),
-        );
-        self.network = self
-            .network
-            .saturating_add(turn.network.saturating_sub(base.network));
-        self.timeout = self
-            .timeout
-            .saturating_add(turn.timeout.saturating_sub(base.timeout));
-        self.tool_execution = self
-            .tool_execution
-            .saturating_add(turn.tool_execution.saturating_sub(base.tool_execution));
-        self.internal = self
-            .internal
-            .saturating_add(turn.internal.saturating_sub(base.internal));
-        self.policy = self
-            .policy
-            .saturating_add(turn.policy.saturating_sub(base.policy));
-        self.shell_spiral = self
-            .shell_spiral
-            .saturating_add(turn.shell_spiral.saturating_sub(base.shell_spiral));
-    }
-}
+/// Monotonicity is a load-bearing convention for the retry counters (#2221):
+/// bucket mutations must only ever increment — all built-in mutations go
+/// through `observe*` / `observe_shell_spiral`, which do.
 
 /// Loop-level retry state machine. Owns one bounded counter per
 /// [`HarnessError`] variant plus the shell-spiral synthetic bucket, and
@@ -397,20 +346,6 @@ impl LoopRetryState {
     ///
     /// When `self == base` (no concurrent writer) the result is exactly
     /// `turn`, keeping single-agent behaviour byte-identical.
-    pub fn merge_turn_delta(&mut self, base: &Self, turn: &Self) {
-        self.counters
-            .saturating_add_turn_delta(&base.counters, &turn.counters);
-        self.grace_calls_fired = self.grace_calls_fired.saturating_add(
-            turn.grace_calls_fired
-                .saturating_sub(base.grace_calls_fired),
-        );
-        let productive_delta = i64::from(turn.productive_tool_calls_since_last_grace)
-            - i64::from(base.productive_tool_calls_since_last_grace);
-        self.productive_tool_calls_since_last_grace =
-            (i64::from(self.productive_tool_calls_since_last_grace) + productive_delta)
-                .clamp(0, i64::from(u32::MAX)) as u32;
-        self.limits = turn.limits;
-    }
 
     /// Emit a structured `HarnessEventPayload::Retry` event carrying the
     /// variant + decision pair. Returns the constructed event so the caller

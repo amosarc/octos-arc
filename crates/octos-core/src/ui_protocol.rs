@@ -178,12 +178,6 @@ pub const UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1: &str = "projection.envelop
 /// background-child completions.
 pub const UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2: &str = "projection.envelope.v2";
 
-/// Required feature flag for UPCR-2026-021 M15 autonomy inspection/control.
-pub const UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1: &str = "coding.autonomy.v1";
-
-/// Optional M15 feature flag for backend-owned agent lifecycle controls.
-pub const UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1: &str = "coding.agent_control.v1";
-
 /// Feature flag for backend-owned context generation, checkpoint, and
 /// compaction lifecycle inspection.
 pub const UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1: &str = "context.lifecycle.v1";
@@ -195,16 +189,6 @@ pub const UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1: &str = "context.lifecycle.v1
 /// are meaningful. Clients that do not negotiate it must continue to treat
 /// those additive fields as opaque/absent.
 pub const UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1: &str = "context.semantic_cache.v1";
-
-/// #965 / UPCR-2026-019 — spec-canonical feature name for the
-/// supervised-task inspection surface (`task/list`, `task/updated`,
-/// `task/output/read`, `agent/list`, `agent/status/read`, `agent/output/read`,
-/// `agent/interrupt`, `agent/close`). The methods themselves stay gated on
-/// [`UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1`] so older clients keep
-/// working; this constant is advertised in parallel so the protocol
-/// vocabulary matches the M13-A spec strings.
-pub const UI_PROTOCOL_FEATURE_HARNESS_TASK_SUPERVISION_INSPECTION_V1: &str =
-    "harness.task_supervision_inspection.v1";
 
 /// #965 / UPCR-2026-019 — spec-canonical feature name for the
 /// supervised-task artifact surface (`task/artifact/list`, `task/artifact/read`,
@@ -223,16 +207,6 @@ pub const UI_PROTOCOL_FEATURE_HARNESS_TASK_SUPERVISION_INSPECTION_V1: &str =
 pub const UI_PROTOCOL_FEATURE_USER_QUESTION_V1: &str = "user_question.v1";
 
 /// Feature flag for streamed voice-reply audio. When negotiated, the server
-/// #2019 — feature flag for the HUMAN sink over background events that
-/// otherwise only wake the model. Monitor event lines (#1977) and claimed
-/// fleet outbox events already exist, are already durable, and already have
-/// producers — but their sole consumer is the model, so a monitor that fires
-/// forty times during a loop is invisible to the user. When negotiated, the
-/// server additionally pushes `background/activity` notifications carrying the
-/// origin-attributed event text. Purely additive: the model is woken exactly
-/// as before, and this stream is NEVER fed back into model context.
-pub const UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1: &str = "event.background_activity.v1";
-
 /// Feature flag for the model-authored plan/todo checklist. When negotiated,
 /// the server pushes `plan/updated` notifications carrying the agent's current
 /// ordered checklist (the `update_plan` tool's live state), and replays the
@@ -257,14 +231,10 @@ pub const UI_PROTOCOL_KNOWN_FEATURES: &[&str] = &[
     UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1,
     UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1,
     UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2,
-    UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
-    UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1,
     UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
     UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
-    UI_PROTOCOL_FEATURE_HARNESS_TASK_SUPERVISION_INSPECTION_V1,
     UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
     UI_PROTOCOL_FEATURE_PLAN_TODOS_V1,
-    UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1,
 ];
 
 /// Returns the feature flag that gates `method` per spec § 7 capability
@@ -452,27 +422,6 @@ pub mod rpc_error_codes {
     /// REST 404 was force-mapped to `UNKNOWN_SESSION` regardless of
     /// resource kind.
     pub const RESOURCE_NOT_FOUND: i64 = -32170;
-}
-
-/// UPCR-2026-021 autonomy runtime error kind registry.
-pub mod autonomy_error_kinds {
-    pub const AGENT_NOT_FOUND: &str = "agent_not_found";
-    pub const AGENT_CONTROL_FORBIDDEN: &str = "agent_control_forbidden";
-    pub const AGENT_CONTROL_UNAVAILABLE: &str = "agent_control_unavailable";
-    pub const AGENT_ARTIFACT_DENIED: &str = "agent_artifact_denied";
-    pub const LOOP_RUNTIME_UNAVAILABLE: &str = "loop_runtime_unavailable";
-    pub const LOOP_NOT_FOUND: &str = "loop_not_found";
-    pub const LOOP_INVALID_INTERVAL: &str = "loop_invalid_interval";
-    pub const LOOP_PROMPT_EMPTY: &str = "loop_prompt_empty";
-    pub const LOOP_BUSY: &str = "loop_busy";
-    pub const LOOP_SLASH_DENIED: &str = "loop_slash_denied";
-    pub const LOOP_POLICY_DENIED: &str = "loop_policy_denied";
-    // #1977 monitor runtime typed errors, mirroring the loop_* family.
-    pub const MONITOR_NOT_FOUND: &str = "monitor_not_found";
-    pub const MONITOR_INVALID_SPEC: &str = "monitor_invalid_spec";
-    pub const MONITOR_POLICY_DENIED: &str = "monitor_policy_denied";
-    pub const MONITOR_FLOODED: &str = "monitor_flooded";
-    pub const AUTONOMY_QUOTA_EXCEEDED: &str = "autonomy_quota_exceeded";
 }
 
 /// Logical event-ledger cursor used for resumable UI notification consumption.
@@ -995,12 +944,6 @@ pub mod methods {
     pub const CONTEXT_COMPACTION_STARTED: &str = "context/compaction_started";
     /// M16 `context.lifecycle.v1`: prompt normalization report notification.
     pub const CONTEXT_NORMALIZATION_REPORTED: &str = "context/normalization_reported";
-    /// #2019 `background/activity` — the HUMAN sink over background events
-    /// that today only wake the model (monitor event lines, claimed fleet
-    /// outbox events). Origin-attributed, durable, capped, and NEVER routed
-    /// back into model context. Gated on
-    /// [`super::UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1`].
-    pub const BACKGROUND_ACTIVITY: &str = "background/activity";
 }
 
 /// Reason codes for `approval/cancelled` notifications. The registry is
@@ -1058,7 +1001,6 @@ pub const UI_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &[
     methods::CONTEXT_COMPACTION_COMPLETED,
     methods::CONTEXT_COMPACTION_STARTED,
     methods::CONTEXT_NORMALIZATION_REPORTED,
-    methods::BACKGROUND_ACTIVITY,
 ];
 
 /// Request methods currently handled by the first server/runtime slice.
@@ -1146,8 +1088,6 @@ impl UiProtocolCapabilities {
             UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1,
             UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1,
             UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1,
-            UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
-            UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1,
             UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
             UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
             UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
@@ -1210,15 +1150,9 @@ impl UiProtocolCapabilities {
             .into_iter()
             .map(|feature| feature.as_ref().to_owned())
             .collect();
-        let autonomy_base_requested = requested
-            .iter()
-            .any(|feature| feature == UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1);
         let supported_features: Vec<String> = UI_PROTOCOL_KNOWN_FEATURES
             .iter()
-            .filter(|feature| {
-                requested.iter().any(|requested| requested == **feature)
-                    && (autonomy_base_requested || !is_autonomy_optional_feature(feature))
-            })
+            .filter(|feature| requested.iter().any(|requested| requested == **feature))
             .map(|feature| (*feature).to_owned())
             .collect();
         let supported_methods: Vec<String> = UI_PROTOCOL_FIRST_SERVER_METHODS
@@ -1281,10 +1215,6 @@ impl UiProtocolCapabilities {
             .iter()
             .find(|report| report.method == method)
     }
-}
-
-fn is_autonomy_optional_feature(feature: &str) -> bool {
-    matches!(feature, UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1)
 }
 
 /// Result of comparing a server's advertised [`UiProtocolCapabilities`] against
@@ -4677,49 +4607,6 @@ pub struct FileAttachedEvent {
 /// fires forty times during a self-critic loop is visible rather than a silent
 /// session.
 ///
-/// Contract:
-/// - `session_id` is **required** and is the routing key. Activity without one
-///   renders in whichever session happens to be focused (octos-tui#461, #466,
-///   #483) — the exact bug class this event must not re-ship.
-/// - `origin_kind` + `origin_id` (+ optional `origin_label`) attribute the
-///   line. An unattributed monitor/peer line reads as the master speaking.
-/// - The stream is CAPPED per origin. `dropped_count` reports events the cap
-///   suppressed and that this event accounts for; `suppressed` marks the
-///   explicit drop MARKER row (silent truncation reads as "nothing more
-///   happened").
-/// - Durable (ledger-appended) so a client disconnected mid-loop replays the
-///   stream instead of losing its middle.
-/// - This payload is NEVER routed back into model context. It exists so the
-///   human can see what the model was woken by; feeding it back would be a
-///   compaction/cost problem and would make the loop observe itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackgroundActivityEvent {
-    /// REQUIRED routing key — the session whose master this event woke.
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    /// Emitter class. Open registry; today `"monitor"` or `"fleet"`.
-    pub origin_kind: String,
-    /// Stable id of the emitter within its class (monitor id / fleet id).
-    pub origin_id: String,
-    /// Human label for the emitter (monitor name, peer slug, …). Clients fall
-    /// back to `origin_id` when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin_label: Option<String>,
-    /// The observed event text (one monitor line, or one fleet event summary).
-    pub text: String,
-    /// Wall-clock emission time, ms since the Unix epoch.
-    pub emitted_at_ms: i64,
-    /// Events this origin's cap suppressed, accounted for by THIS event.
-    /// `None`/`0` when nothing was dropped.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dropped_count: Option<u64>,
-    /// `true` when this row IS the cap's visible drop marker rather than an
-    /// observed event line.
-    #[serde(default)]
-    pub suppressed: bool,
-}
-
 /// Draft notification payloads for UI protocol v1.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)]
@@ -4758,9 +4645,6 @@ pub enum UiNotification {
     ContextCompactionStarted(ContextCompactionStartedEvent),
     /// M16: prompt normalization lifecycle event.
     ContextNormalizationReported(ContextNormalizationReportedEvent),
-    /// #2019: a background event that woke the model, surfaced to the HUMAN.
-    /// See [`BackgroundActivityEvent`].
-    BackgroundActivity(BackgroundActivityEvent),
     /// UPCR-2026-014 (M9-γ) canonical projection envelope (`projection/envelope`).
     /// Spec § 14. Capability-gated on `projection.envelope.v1`; the
     /// per-connection live filter keeps legacy and envelope deliveries
@@ -4815,7 +4699,6 @@ impl UiNotification {
             Self::ContextCompactionCompleted(_) => methods::CONTEXT_COMPACTION_COMPLETED,
             Self::ContextCompactionStarted(_) => methods::CONTEXT_COMPACTION_STARTED,
             Self::ContextNormalizationReported(_) => methods::CONTEXT_NORMALIZATION_REPORTED,
-            Self::BackgroundActivity(_) => methods::BACKGROUND_ACTIVITY,
             Self::Envelope(_) => methods::PROJECTION_ENVELOPE,
             Self::EnvelopeV2(_) => methods::PROJECTION_ENVELOPE,
         }
@@ -4848,7 +4731,6 @@ impl UiNotification {
             Self::ContextCompactionCompleted(event) => &event.session_id,
             Self::ContextCompactionStarted(event) => &event.session_id,
             Self::ContextNormalizationReported(event) => &event.session_id,
-            Self::BackgroundActivity(event) => &event.session_id,
             Self::Envelope(event) => &event.session_id,
             Self::EnvelopeV2(event) => &event.session_id,
         }
@@ -4970,7 +4852,6 @@ impl UiNotification {
             // and routing keys off `session_id` (the originating session).
             // #2019: routing keys off `session_id` like every other
             // session-scoped notification; the origin fields are payload.
-            Self::BackgroundActivity(params) => serde_json::to_value(params),
             // UPCR-2026-014 (M9-γ) + feat(envelope-wire-routing): the wire
             // shape per spec § 14.1 is the bare `Envelope` fields FLATTENED
             // with the routing keys `session_id` (the bare base key) +
@@ -5084,9 +4965,6 @@ impl UiNotification {
             methods::CONTEXT_NORMALIZATION_REPORTED => Ok(Self::ContextNormalizationReported(
                 decode_params(method, params)?,
             )),
-            methods::BACKGROUND_ACTIVITY => {
-                Ok(Self::BackgroundActivity(decode_params(method, params)?))
-            }
             // UPCR-2026-014 (M9-γ) + feat(envelope-wire-routing): decode
             // the FLATTENED wire frame — bare Envelope keys plus the
             // routing keys `session_id` + `topic`. Backward-compatible:

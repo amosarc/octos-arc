@@ -5,7 +5,6 @@
 //! TODO: Wire `SessionStateHandle` and `SessionUsage` into the agent loop
 //! (`agent.rs`) to enforce `max_turns` and per-tool limits at runtime.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -71,52 +70,6 @@ impl Default for SessionStateHandle {
     }
 }
 
-/// Per-session configuration limits (A5).
-#[derive(Debug, Clone, Default)]
-pub struct SessionLimits {
-    /// Maximum LLM call turns per session. None = use AgentConfig.max_iterations.
-    pub max_turns: Option<u32>,
-    /// Maximum parallel tool execution rounds. None = unlimited.
-    pub max_tool_rounds: Option<u32>,
-    /// Per-tool execution limits (tool_name → max_calls). Empty = unlimited.
-    pub per_tool_limits: HashMap<String, u32>,
-}
-
-/// Tracks per-session usage against SessionLimits.
-#[derive(Debug, Default)]
-pub struct SessionUsage {
-    pub tool_rounds: u32,
-    pub tool_calls: HashMap<String, u32>,
-}
-
-impl SessionUsage {
-    /// Check if a tool call is allowed by the session limits.
-    pub fn check_tool_allowed(&self, tool_name: &str, limits: &SessionLimits) -> bool {
-        if let Some(max_rounds) = limits.max_tool_rounds {
-            if self.tool_rounds >= max_rounds {
-                return false;
-            }
-        }
-        if let Some(&max_calls) = limits.per_tool_limits.get(tool_name) {
-            let used = self.tool_calls.get(tool_name).copied().unwrap_or(0);
-            if used >= max_calls {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Record a tool call.
-    pub fn record_tool_call(&mut self, tool_name: &str) {
-        *self.tool_calls.entry(tool_name.to_string()).or_insert(0) += 1;
-    }
-
-    /// Record a tool round (one batch of parallel tool calls).
-    pub fn record_tool_round(&mut self) {
-        self.tool_rounds += 1;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,40 +108,4 @@ mod tests {
         assert_eq!(SessionState::Closed.to_string(), "closed");
     }
 
-    #[test]
-    fn should_allow_unlimited_tool_calls() {
-        let usage = SessionUsage::default();
-        let limits = SessionLimits::default();
-        assert!(usage.check_tool_allowed("shell", &limits));
-    }
-
-    #[test]
-    fn should_enforce_per_tool_limits() {
-        let mut usage = SessionUsage::default();
-        let limits = SessionLimits {
-            per_tool_limits: [("shell".into(), 2)].into(),
-            ..Default::default()
-        };
-        assert!(usage.check_tool_allowed("shell", &limits));
-        usage.record_tool_call("shell");
-        assert!(usage.check_tool_allowed("shell", &limits));
-        usage.record_tool_call("shell");
-        assert!(!usage.check_tool_allowed("shell", &limits));
-        // Other tools unaffected
-        assert!(usage.check_tool_allowed("read_file", &limits));
-    }
-
-    #[test]
-    fn should_enforce_max_tool_rounds() {
-        let mut usage = SessionUsage::default();
-        let limits = SessionLimits {
-            max_tool_rounds: Some(3),
-            ..Default::default()
-        };
-        for _ in 0..3 {
-            assert!(usage.check_tool_allowed("shell", &limits));
-            usage.record_tool_round();
-        }
-        assert!(!usage.check_tool_allowed("shell", &limits));
-    }
 }

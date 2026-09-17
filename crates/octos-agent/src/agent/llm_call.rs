@@ -13,7 +13,7 @@ use tracing::{debug, info, trace, warn};
 
 use super::Agent;
 use super::prompt_cache::{build_prompt_cache_context, fingerprint_prompt};
-use super::turn_state::{LoopRetryReason, LoopTurnState};
+use super::turn_state::LoopTurnState;
 use crate::hooks::{HookEvent, HookPayload, HookResult};
 use crate::progress::ProgressEvent;
 
@@ -344,9 +344,6 @@ impl Agent {
                         } else {
                             "empty response (no content or tool_calls)"
                         };
-                        turn.record_retry(LoopRetryReason::ProviderFailover {
-                            reason: format!("streaming retries exhausted: {reason}"),
-                        });
                         self.llm.report_late_failure();
 
                         // Try one final non-streaming call — this goes through
@@ -444,10 +441,6 @@ impl Agent {
                     } else {
                         "empty response (no content/tool_calls)"
                     };
-                    turn.record_retry(LoopRetryReason::EmptyResponse {
-                        attempt: attempt + 1,
-                        reason: reason.to_string(),
-                    });
                     warn!(
                         attempt = attempt + 1,
                         max = retry_max,
@@ -496,10 +489,6 @@ impl Agent {
                                 bumped_config = Some(c);
                             }
                         }
-                        turn.record_retry(LoopRetryReason::StreamError {
-                            attempt: attempt + 1,
-                            error: e.to_string(),
-                        });
                         warn!(
                             attempt = attempt + 1,
                             max = retry_max,
@@ -526,9 +515,6 @@ impl Agent {
                         tokio::time::sleep(delay).await;
                     } else if attempt == retry_max {
                         // Stream retries exhausted.
-                        turn.record_retry(LoopRetryReason::ProviderFailover {
-                            reason: "stream retries exhausted".to_string(),
-                        });
                         self.llm.report_late_failure();
 
                         // Try non-streaming with full fallback chain

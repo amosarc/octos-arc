@@ -24,8 +24,6 @@ pub struct WorkspacePolicy {
     #[serde(default = "default_workspace_policy_schema_version")]
     pub schema_version: u32,
     pub workspace: WorkspacePolicyWorkspace,
-    pub version_control: WorkspaceVersionControlPolicy,
-    pub tracking: WorkspaceTrackingPolicy,
     #[serde(default)]
     pub artifacts: WorkspaceArtifactsPolicy,
     #[serde(default)]
@@ -130,31 +128,6 @@ impl WorkspacePolicyKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceVersionControlPolicy {
-    pub provider: WorkspaceVersionControlProvider,
-    pub auto_init: bool,
-    pub trigger: WorkspaceSnapshotTrigger,
-    pub fail_on_error: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum WorkspaceVersionControlProvider {
-    Git,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkspaceSnapshotTrigger {
-    TurnEnd,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceTrackingPolicy {
-    pub ignore: Vec<String>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WorkspaceArtifactsPolicy {
     #[serde(flatten)]
@@ -202,15 +175,6 @@ impl WorkspacePolicy {
             schema_version: WORKSPACE_POLICY_SCHEMA_VERSION,
             workspace: WorkspacePolicyWorkspace {
                 kind: WorkspacePolicyKind::Session,
-            },
-            version_control: WorkspaceVersionControlPolicy {
-                provider: WorkspaceVersionControlProvider::Git,
-                auto_init: false,
-                trigger: WorkspaceSnapshotTrigger::TurnEnd,
-                fail_on_error: false,
-            },
-            tracking: WorkspaceTrackingPolicy {
-                ignore: vec!["tmp/**".into(), ".DS_Store".into()],
             },
             artifacts: WorkspaceArtifactsPolicy::default(),
             spawn_tasks: BTreeMap::new(),

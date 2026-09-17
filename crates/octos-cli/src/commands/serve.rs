@@ -416,7 +416,6 @@ impl ServeCommand {
             session_cache,
             profile_skill_mutation_locks: Arc::new(crate::api::ProfileSkillMutationLocks::new()),
             sessions,
-            started_at: chrono::Utc::now(),
             profile_store: Some(profile_store.clone()),
             host_memory: config.memory.clone(),
             solo_login_enabled: solo_login_enabled_flag,
@@ -452,15 +451,6 @@ impl ServeCommand {
         // restored goal/loop continuations now drain even while the stdio
         // client is idle or detached, instead of waiting for connection ticks.
         // Everything the drain needs (the full AppState) is constructed above.
-
-        // #2019 — install the HUMAN sink over background events that today
-        // only wake the model (monitor event lines, claimed fleet outbox
-        // events). Spawned here, next to (and before) the global drain, so
-        // both `serve --stdio` and the HTTP serve get it: the producers are
-        // the connection-independent watcher tasks and the outbox consumer,
-        // so the sink must not be per-connection either. Purely additive —
-        // it changes nothing about how or when the model is woken.
-        crate::api::ui_protocol_transport::spawn_background_activity_sink(state.clone());
 
         crate::api::ui_protocol_transport::stdio_connection(state).await?;
 

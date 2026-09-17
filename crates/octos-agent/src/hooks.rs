@@ -41,8 +41,6 @@ pub enum HookEvent {
     AfterToolCall,
     BeforeLlmCall,
     AfterLlmCall,
-    OnResume,
-    OnTurnEnd,
     BeforeSpawnVerify,
     OnSpawnVerify,
     OnSpawnComplete,
@@ -62,8 +60,6 @@ impl HookEvent {
             HookEvent::AfterToolCall => "after_tool_call",
             HookEvent::BeforeLlmCall => "before_llm_call",
             HookEvent::AfterLlmCall => "after_llm_call",
-            HookEvent::OnResume => "on_resume",
-            HookEvent::OnTurnEnd => "on_turn_end",
             HookEvent::BeforeSpawnVerify => "before_spawn_verify",
             HookEvent::OnSpawnVerify => "on_spawn_verify",
             HookEvent::OnSpawnComplete => "on_spawn_complete",
@@ -299,24 +295,6 @@ fn sanitize_payload(
 }
 
 impl HookPayload {
-    /// Payload for a session resume hook.
-    pub fn on_resume(ctx: Option<&HookContext>) -> Self {
-        let mut p = Self::empty(HookEvent::OnResume);
-        p.apply_context(ctx);
-        p
-    }
-
-    /// Payload for a turn-end hook.
-    pub fn on_turn_end(turn_summary: impl Into<String>, ctx: Option<&HookContext>) -> Self {
-        let turn_summary = truncate_string(&turn_summary.into(), MAX_PAYLOAD_FIELD_BYTES);
-        let mut p = Self {
-            turn_summary: Some(turn_summary),
-            ..Self::empty(HookEvent::OnTurnEnd)
-        };
-        p.apply_context(ctx);
-        p
-    }
-
     /// Payload for a `user_prompt_submit` hook.
     ///
     /// Fires once when a real user prompt enters a turn, before the first LLM
@@ -1420,14 +1398,6 @@ mod tests {
     #[test]
     fn test_lifecycle_payloads_truncate_large_text_fields() {
         let large = "x".repeat(MAX_PAYLOAD_FIELD_BYTES * 2);
-
-        let turn_end = HookPayload::on_turn_end(large.clone(), None);
-        assert!(
-            turn_end
-                .turn_summary
-                .as_deref()
-                .is_some_and(|value| value.ends_with("... (truncated)"))
-        );
 
         let failure = HookPayload::on_spawn_failure(
             "task-1",

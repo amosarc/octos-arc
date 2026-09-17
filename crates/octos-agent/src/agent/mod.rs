@@ -35,7 +35,6 @@ use crate::file_state_cache::FileStateCache;
 use crate::hooks::{HookContext, HookExecutor};
 use crate::progress::{ProgressReporter, SilentReporter};
 use crate::prompt_context::PromptContextManager;
-use crate::session::{SessionLimits, SessionUsage};
 use crate::tools::ToolRegistry;
 
 pub use message_repair::normalize_tool_call_id;
@@ -378,10 +377,6 @@ pub struct Agent {
     /// re-engagement before the turn ends), the duplicate warning is replaced
     /// by a terminal error so the loop cannot keep emitting identical noise.
     pub(super) loop_detected_recently: Arc<AtomicBool>,
-    /// Optional per-session runtime limits for tool rounds and per-tool calls.
-    pub(super) session_limits: Option<SessionLimits>,
-    /// Mutable usage tracked against `session_limits`.
-    pub(super) session_usage: std::sync::Mutex<SessionUsage>,
     /// Harness M6.3 compaction contract. When present, the loop performs
     /// preflight compaction before the first LLM call, swaps the summarizer
     /// flavour declared in policy, prunes old tool results to typed
@@ -391,14 +386,6 @@ pub struct Agent {
     /// Workspace policy associated with the compaction runner (used by the
     /// post-compaction validator rail to resolve preserved artifacts).
     pub(super) compaction_workspace: Option<crate::workspace_policy::WorkspacePolicy>,
-    /// Cross-turn persistent retry bucket state (Review A F-015). When
-    /// present, the loop uses this shared state instead of constructing a
-    /// fresh `LoopRetryState` per `process_message` / `run_task`. Callers
-    /// (e.g. `SessionActor`) own the save/load lifecycle via the
-    /// `LoopRetryState::Serialize + Deserialize` impls. Absent = legacy
-    /// per-turn-reset behaviour, identical to every pre-F-015 caller.
-    pub(super) persistent_retry_state:
-        Option<Arc<std::sync::Mutex<crate::agent::loop_state::LoopRetryState>>>,
     /// M8.2 agent manifest registry shared with tools via `ToolContext`.
     /// Shared behind an `Arc` so every per-tool `ToolContext::agent_definitions`
     /// clone is O(1). When left at the default (empty registry) the agent
@@ -413,13 +400,6 @@ pub struct Agent {
     /// preferences. `None` means no profile was explicitly applied — the
     /// agent runs in legacy pre-M8.3 mode.
     pub(super) profile: Option<Arc<crate::profile::ProfileDefinition>>,
-    /// Three-tier compaction runner (harness M8.5). Optional — when wired,
-    /// the loop runs tier 1 (micro-compaction) at the top of each iteration
-    /// and decorates Anthropic requests with the tier-2
-    /// `context_management` payload. Tier 3 delegates to the existing
-    /// [`crate::compaction::CompactionRunner`] wrapped as a
-    /// [`crate::compaction_tiered::FullCompactor`].
-    pub(super) tiered_compaction: Option<Arc<crate::compaction_tiered::TieredCompactionRunner>>,
     /// Measurement only (`OCTOS_APPEND_ONLY_AUDIT=1`). Held here rather than
     /// on the per-turn state because the rewrite path we know about —
     /// `truncate_old_tool_results` — only collapses tool results BEFORE the
@@ -438,15 +418,6 @@ pub struct Agent {
     /// it on terminal completion. `None` keeps pre-M8.7 behaviour.
     pub(super) subagent_summary_generator:
         Option<Arc<crate::subagent_summary::AgentSummaryGenerator>>,
-    /// Session-cumulative usage base shared with the owning session
-    /// actor. The actor folds each completed run back in (priced at the
-    /// model that ran it); `emit_cost_update` READS it so the `session_*`
-    /// figures on
-    /// `ProgressEvent::CostUpdate` cover the whole session — surviving
-    /// per-turn resets, provider failover, and the runtime-cache
-    /// eviction a `profile/llm/select` model switch triggers. `None`
-    /// (chat mode, sub-agents) keeps emissions turn-scoped.
-    pub(super) session_usage_base: Option<crate::session_usage::SharedSessionUsage>,
     /// M8 parity: optional parent session key. When the agent is owned
     /// by a session actor, this carries the session key down through
     /// `ToolContext.parent_session_key` so spawn children / pipeline
@@ -543,19 +514,14 @@ impl Agent {
             harness_event_sink: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             loop_detected_recently: Arc::new(AtomicBool::new(false)),
-            session_limits: None,
-            session_usage: std::sync::Mutex::new(SessionUsage::default()),
             compaction_runner: None,
             compaction_workspace: None,
-            persistent_retry_state: None,
             agent_definitions: Arc::new(crate::agents::AgentDefinitions::new()),
             file_state_cache: None,
             profile: None,
-            tiered_compaction: None,
             append_only_audit: Default::default(),
             subagent_output_router: None,
             subagent_summary_generator: None,
-            session_usage_base: None,
             parent_session_key: None,
             prompt_cache_epoch_id: None,
             convergence_intervals: None,
@@ -598,19 +564,14 @@ impl Agent {
             harness_event_sink: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             loop_detected_recently: Arc::new(AtomicBool::new(false)),
-            session_limits: None,
-            session_usage: std::sync::Mutex::new(SessionUsage::default()),
             compaction_runner: None,
             compaction_workspace: None,
-            persistent_retry_state: None,
             agent_definitions: Arc::new(crate::agents::AgentDefinitions::new()),
             file_state_cache: None,
             profile: None,
-            tiered_compaction: None,
             append_only_audit: Default::default(),
             subagent_output_router: None,
             subagent_summary_generator: None,
-            session_usage_base: None,
             parent_session_key: None,
             prompt_cache_epoch_id: None,
             convergence_intervals: None,
@@ -720,17 +681,6 @@ impl Agent {
         })
     }
 
-    /// Set the shutdown signal.
-    pub fn with_shutdown(mut self, shutdown: Arc<AtomicBool>) -> Self {
-        self.shutdown = shutdown;
-        self
-    }
-
-    /// Cancellation handle for embedders using the canonical session agent.
-    pub fn shutdown_signal(&self) -> Arc<AtomicBool> {
-        self.shutdown.clone()
-    }
-
     /// Enable M8.4's [`FileStateCache`] for file tools.
     ///
     /// When set, file tools like `read_file`, `write_file`, `edit_file`, and
@@ -785,18 +735,6 @@ impl Agent {
         self.subagent_summary_generator.as_ref()
     }
 
-    /// Share a session-cumulative usage base with this agent. The owner
-    /// (session actor) folds completed
-    /// runs; the agent only reads it when emitting cost updates, so the
-    /// wire's `session_*` figures cover the whole session instead of
-    /// resetting every turn. See [`crate::session_usage`].
-    pub fn with_session_usage_base(
-        mut self,
-        usage: crate::session_usage::SharedSessionUsage,
-    ) -> Self {
-        self.session_usage_base = Some(usage);
-        self
-    }
 
     /// Record the owning session key so pipeline workers / spawn
     /// children can register child tasks against the parent session
@@ -921,17 +859,9 @@ impl Agent {
     /// Returns the attached snapshot manager, if any. Lets hosts (and the
     /// follow-up UI/RPC surface) list/restore snapshots for this agent's
     /// workspace.
-    pub fn snapshot_manager(&self) -> Option<Arc<crate::snapshot::SnapshotManager>> {
-        self.snapshot_manager.clone()
-    }
-
+    
     /// Set per-session runtime limits for tool execution.
-    pub fn with_session_limits(mut self, limits: SessionLimits) -> Self {
-        self.session_limits = Some(limits);
-        self.session_usage = std::sync::Mutex::new(SessionUsage::default());
-        self
-    }
-
+    
     /// Wire the declarative compaction runner (harness M6.3). Optional — when
     /// absent, the loop falls back to the legacy extractive trim path.
     pub fn with_compaction_runner(
@@ -974,42 +904,7 @@ impl Agent {
     /// sequence of transient rate-limits spread across two turns never
     /// triggers the per-bucket exhaustion path because the counters reset
     /// on every turn boundary.
-    pub fn with_persistent_retry_state(
-        mut self,
-        state: Arc<std::sync::Mutex<crate::agent::loop_state::LoopRetryState>>,
-    ) -> Self {
-        self.persistent_retry_state = Some(state);
-        self
-    }
-
-    /// Access the attached persistent retry state, if any. Exposed so
-    /// session actors can snapshot/serialize the bucket counters at turn
-    /// boundaries without having to plumb the handle back through a
-    /// separate field.
-    pub fn persistent_retry_state(
-        &self,
-    ) -> Option<Arc<std::sync::Mutex<crate::agent::loop_state::LoopRetryState>>> {
-        self.persistent_retry_state.clone()
-    }
-
-    /// Wire the M8.5 three-tier compaction runner. Tier 1 runs at the top
-    /// of every loop iteration; tier 2 decorates outgoing Anthropic
-    /// requests; tier 3 is the existing declarative runner wrapped behind a
-    /// [`crate::compaction_tiered::FullCompactor`].
-    pub fn with_tiered_compaction(
-        mut self,
-        runner: Arc<crate::compaction_tiered::TieredCompactionRunner>,
-    ) -> Self {
-        self.tiered_compaction = Some(runner);
-        self
-    }
-
-    /// Access the attached three-tier compaction runner, if any.
-    pub fn tiered_compaction(
-        &self,
-    ) -> Option<Arc<crate::compaction_tiered::TieredCompactionRunner>> {
-        self.tiered_compaction.clone()
-    }
+    
 
     /// Update the session ID in the hook context (call before each message).
     pub fn set_session_id(&self, session_id: &str) {

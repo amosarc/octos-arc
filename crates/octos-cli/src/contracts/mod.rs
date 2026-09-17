@@ -1,8 +1,8 @@
 //! Process-global interactive-contract stores.
 //!
-//! Lifted verbatim out of the `api`-gated `api::ui_protocol` tree (Phase 3 of
-//! bringing peer-agent goal into `octos chat`, mirroring the Phase 0 autonomy
-//! extraction). Nothing here touches axum, `AppState`, or `WsConnection`: an
+//! Lifted verbatim out of the `api`-gated `api::ui_protocol` tree so
+//! `octos chat` can share the same registries. Nothing here touches axum,
+//! `AppState`, or `WsConnection`: an
 //! approval / user-question / diff-preview / approval-scope entry is a plain
 //! in-memory registry keyed by `SessionKey`, holding a `tokio::sync::oneshot`
 //! the blocked tool awaits.

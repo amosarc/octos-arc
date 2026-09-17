@@ -2318,28 +2318,6 @@ async fn empty_max_tokens_recovers_when_retry_succeeds() {
     assert_eq!(response.content, "recovered answer");
 }
 
-#[test]
-fn should_write_back_exact_state_when_no_concurrent_writer() {
-    // Single-agent regression: with no concurrent writer the drop must
-    // reproduce today's byte-for-byte write-back, including the grace-call
-    // reset of `productive_tool_calls_since_last_grace` (a non-monotonic
-    // field, so a naive max-merge would corrupt it).
-    let handle = Arc::new(StdMutex::new(LoopRetryState {
-        productive_tool_calls_since_last_grace: 3,
-        ..Default::default()
-    }));
-    {
-        let mut guard = PersistentRetryStateGuard::new(Some(handle.clone()));
-        guard.observe_budget_exhaustion(); // fires the grace call, resets the counter
-        guard.counters.timeout += 1;
-    }
-
-    let shared = handle.lock().unwrap();
-    assert_eq!(shared.productive_tool_calls_since_last_grace, 0);
-    assert_eq!(shared.grace_calls_fired, 1);
-    assert_eq!(shared.counters.timeout, 1);
-}
-
 /// #48b — the exhausted error text STARTS WITH the stable marker and carries
 /// the limit/observed payload (the CLI terminal path keys on this prefix to
 /// emit `malformed_exhausted` instead of a generic turn_error row).

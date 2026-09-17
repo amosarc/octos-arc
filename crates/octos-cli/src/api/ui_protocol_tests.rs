@@ -2008,28 +2008,9 @@ async fn session_open_replays_pending_approval_after_reconnect_without_cursor() 
     assert_eq!(outcome.pending_approvals[0].approval_id, approval_id);
 }
 
-/// Build a #2019 human-sink background-activity event.
-fn background_activity_for(
-    session_id: &SessionKey,
-    origin_id: &str,
-    text: &str,
-) -> octos_core::ui_protocol::BackgroundActivityEvent {
-    octos_core::ui_protocol::BackgroundActivityEvent {
-        session_id: session_id.clone(),
-        profile_id: Some("main".into()),
-        origin_kind: "monitor".into(),
-        origin_id: origin_id.into(),
-        origin_label: Some("ci-tail".into()),
-        text: text.into(),
-        emitted_at_ms: 1_760_000_000_000,
-        dropped_count: None,
-        suppressed: false,
-    }
-}
-
-/// Capability-gated notifications (`plan.todos.v1`, `event.background_activity.v1`)
+/// Capability-gated notifications (`plan.todos.v1`)
 /// never reach a connection that did not negotiate them — on the live broadcast
-/// OR reconnect replay (both call this filter); #2019 migration trap.
+/// OR reconnect replay (both call this filter).
 #[test]
 fn capability_gated_notifications_require_negotiation() {
     use octos_core::ui_protocol::{PlanUpdatedEvent, UiPlanRecord};
@@ -2053,18 +2034,6 @@ fn capability_gated_notifications_require_negotiation() {
     };
     assert!(live_event_passes_capability_filter(&plan, negotiated));
 
-    let activity = UiProtocolLedgerEvent::Notification(UiNotification::BackgroundActivity(
-        background_activity_for(&SessionKey("local:test".into()), "monitor_01", "boom"),
-    ));
-    assert!(
-        !live_event_passes_capability_filter(&activity, ConnectionUiFeatures::default()),
-        "a connection without event.background_activity.v1 must never receive it"
-    );
-    let negotiated = ConnectionUiFeatures {
-        background_activity: true,
-        ..Default::default()
-    };
-    assert!(live_event_passes_capability_filter(&activity, negotiated));
 }
 #[tokio::test]
 async fn session_open_rejects_cwd_without_negotiated_feature() {

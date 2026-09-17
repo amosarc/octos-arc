@@ -20,9 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use super::repo_key::RepoKey;
 
-// Locking uses `fs2::FileExt` (MSRV 1.85; std's flock methods are 1.89+)
-// — see the goal-notes twin in autonomy/monitor_runtime.rs for the full
-// serialization rationale. Calls are fully qualified
+// Locking uses `fs2::FileExt` (MSRV 1.85; std's flock methods are 1.89+).
+// Calls are fully qualified
 // (`fs2::FileExt::try_lock_exclusive`) so they never resolve to the newer
 // same-named std::fs::File methods; no trait import is needed for the
 // fully-qualified form.

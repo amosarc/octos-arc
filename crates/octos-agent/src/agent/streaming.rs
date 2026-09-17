@@ -640,32 +640,16 @@ impl Agent {
                 )
             })
         });
-        // Session figures = completed-runs base + this turn so far.
-        //
-        // The base comes from the shared session-usage handle (folded per
-        // completed run by the session actor — each run priced at the
-        // model that ran it), so the wire's
-        // `session_*` fields survive per-turn resets and the runtime
-        // rebuild a `profile/llm/select` switch triggers. The turn part
-        // uses `LoopTurnState`'s per-response spend, NOT
+        // Session figures = this turn so far. The turn part uses
+        // `LoopTurnState`'s per-response spend, NOT
         // `pricing.cost(turn totals)` — the old form re-priced the whole
         // turn at the latest answering model whenever failover switched
-        // models mid-turn. Without an injected handle (chat mode,
-        // sub-agents) the base is zero and the figures stay turn-scoped.
+        // models mid-turn.
         let total_usage = turn.total_usage();
-        let base = self
-            .session_usage_base
-            .as_ref()
-            .map(|handle| handle.snapshot())
-            .unwrap_or_default();
-        let session_input_tokens = base
-            .input_tokens
-            .saturating_add(u64::from(total_usage.input_tokens));
-        let session_output_tokens = base
-            .output_tokens
-            .saturating_add(u64::from(total_usage.output_tokens));
-        let session_cost = (turn.has_priced_usage() || base.priced_runs > 0)
-            .then(|| base.spend_usd + turn.spend_usd());
+        let session_input_tokens = u64::from(total_usage.input_tokens);
+        let session_output_tokens = u64::from(total_usage.output_tokens);
+        let session_cost =
+            turn.has_priced_usage().then(|| turn.spend_usd());
         // Carry the model id so chat clients can render
         // `model · tokens_in / tokens_out · duration` footers. Skip the
         // synthesis if the provider returns an empty identifier — empty

@@ -33,8 +33,7 @@ use octos_core::ui_protocol::{
     TurnErrorPartialResult, TurnId, TurnInterruptParams, TurnInterruptResult, TurnLifecycleState,
     TurnSessionResult, TurnStartParams, TurnStateGetParams, TurnStateGetResult, TurnTerminalError,
     TurnTerminalOutcome, UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
-    UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1, UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1,
-    UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1, UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
+    UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
     UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1, UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1,
     UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1, UI_PROTOCOL_FEATURE_PLAN_TODOS_V1,
     UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1, UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2,
@@ -429,6 +428,7 @@ pub(crate) struct WsConnection {
 }
 
 impl WsConnection {
+    #[cfg(test)]
     pub(crate) fn new(writer: mpsc::Sender<WsMessage>) -> Self {
         Self {
             writer,
@@ -1136,12 +1136,6 @@ struct ConnectionUiFeatures {
     /// replays the latest snapshot on `session/open`. Otherwise the plan rides
     /// out only on the legacy `tool/completed` `structured_metadata` path.
     plan_todos: bool,
-    /// #2019 `event.background_activity.v1`: the HUMAN sink over background
-    /// events that today only wake the model (monitor event lines, claimed
-    /// fleet outbox events). Not negotiated → the connection never receives
-    /// `background/activity`, so a client that cannot render it never sees an
-    /// "unknown notification" (the ui-protocol v2 migration trap).
-    background_activity: bool,
     /// UPCR-2026-014 M9-γ `projection.envelope.v1` negotiated. When set,
     /// the client opts in to the historical v1 envelope shape (spec
     /// § 14) for projected events. γ-1 wires capability negotiation
@@ -1156,11 +1150,6 @@ struct ConnectionUiFeatures {
     /// When set, the connection receives the cursor-stamped v2 projection
     /// wire shape and neither legacy nor v1 projection frames.
     projection_envelope_v2: bool,
-    /// UPCR-2026-021 M15 autonomy capability root. Optional agent and loop
-    /// groups are honoured only when this base capability is negotiated too.
-    coding_autonomy_v1: bool,
-    /// UPCR-2026-021 M15 agent lifecycle inspection/control group.
-    coding_agent_control_v1: bool,
     /// M16 backend-owned context generation/checkpoint/compaction lifecycle.
     context_lifecycle_v1: bool,
     /// UPCR-2026-029 additive semantic-context/provider-cache diagnostics.
@@ -1198,7 +1187,6 @@ impl ConnectionUiFeatures {
             spawn_complete: true,
             file_attached: true,
             plan_todos: true,
-            background_activity: true,
             // Do NOT auto-enable `projection.envelope.v1` for stdio
             // connections. Legacy `turn/completed` is the turn-lifecycle
             // source for clients that do not consume `projection/envelope`
@@ -1215,8 +1203,6 @@ impl ConnectionUiFeatures {
             // default-only change, not a capability removal.
             projection_envelope: false,
             projection_envelope_v2: false,
-            coding_autonomy_v1: true,
-            coding_agent_control_v1: true,
             context_lifecycle_v1: true,
             // Cache diagnostics are strictly opt-in. Stdio sends a server
             // capability slice before `client_hello`, so enabling this by
@@ -1250,11 +1236,8 @@ impl ConnectionUiFeatures {
             spawn_complete: has(UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1),
             file_attached: has(UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1),
             plan_todos: has(UI_PROTOCOL_FEATURE_PLAN_TODOS_V1),
-            background_activity: has(UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1),
             projection_envelope: has(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1),
             projection_envelope_v2: has(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2),
-            coding_autonomy_v1: has(UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1),
-            coding_agent_control_v1: has(UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1),
             context_lifecycle_v1: has(UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1),
             context_semantic_cache_v1: has(UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1),
             user_question_v1: has(UI_PROTOCOL_FEATURE_USER_QUESTION_V1),
@@ -1311,20 +1294,11 @@ impl ConnectionUiFeatures {
         if self.plan_todos {
             requested.push(UI_PROTOCOL_FEATURE_PLAN_TODOS_V1);
         }
-        if self.background_activity {
-            requested.push(UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1);
-        }
         if self.projection_envelope {
             requested.push(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1);
         }
         if self.projection_envelope_v2 {
             requested.push(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2);
-        }
-        if self.coding_autonomy_v1 {
-            requested.push(UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1);
-            if self.coding_agent_control_v1 {
-                requested.push(UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1);
-            }
         }
         if self.context_lifecycle_v1 {
             requested.push(UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1);
@@ -1336,10 +1310,6 @@ impl ConnectionUiFeatures {
             requested.push(UI_PROTOCOL_FEATURE_USER_QUESTION_V1);
         }
         UiProtocolCapabilities::for_negotiated_features(requested)
-    }
-
-    fn agent_control_available(self) -> bool {
-        !self.header_present || (self.coding_autonomy_v1 && self.coding_agent_control_v1)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1429,17 +1399,6 @@ impl ConnectionUiFeatures {
                     UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
                 );
             }
-        }
-        // #965 / UPCR-2026-019 — advertise the M13-A canonical capability
-        // names alongside the consolidated `coding.agent_control.v1` so
-        // clients that look for the spec strings find them. The methods
-        // themselves still gate on `coding.agent_control.v1`, so older
-        // clients negotiating only that flag keep working unchanged.
-        if self.agent_control_available() {
-            push_capability_feature(
-                &mut capabilities.supported_features,
-                octos_core::ui_protocol::UI_PROTOCOL_FEATURE_HARNESS_TASK_SUPERVISION_INSPECTION_V1,
-            );
         }
         if supports_local_solo_profile_create(state) {
             push_capability_feature(
@@ -9687,9 +9646,6 @@ fn ledger_event_matches_profile_scope(
         // which is exactly why filtering is gated on
         // `connection_filterable_profile_scope`, under which the two resolutions
         // provably agree.
-        UiNotification::BackgroundActivity(activity) => {
-            optional_profile_scope_matches(activity.profile_id.as_deref(), profile_id)
-        }
         _ => true,
     }
 }
@@ -10233,16 +10189,6 @@ fn live_event_passes_capability_filter(
     // routes call this filter.
     if !features.plan_todos {
         if let UiProtocolLedgerEvent::Notification(UiNotification::PlanUpdated(_)) = event {
-            return false;
-        }
-    }
-    // #2019 `event.background_activity.v1` gate. The human sink is a NEW
-    // notification shape; a client that did not negotiate it cannot render it
-    // and would report "unknown UI protocol notification" — the exact
-    // ui-protocol-v2-migration trap this pairing exists to avoid. Applies on
-    // both the live broadcast and reconnect replay (both call this filter).
-    if !features.background_activity {
-        if let UiProtocolLedgerEvent::Notification(UiNotification::BackgroundActivity(_)) = event {
             return false;
         }
     }
@@ -12176,50 +12122,6 @@ async fn active_turn_sessions(
 /// a full queue drops the event, bumps a metric, and logs. Generous enough
 /// that only a genuinely pathological burst reaches it, and the per-origin cap
 /// in `autonomy::human_events` already emits a VISIBLE marker long before.
-const BACKGROUND_ACTIVITY_QUEUE_CAPACITY: usize = 512;
-
-/// #2019 — install the process-global HUMAN sink for background events that
-/// today only wake the model, and spawn its drain task.
-///
-/// Monitor event lines (#1977) and claimed fleet outbox events already exist,
-/// are already durable, and already have producers — with exactly ONE
-/// consumer, the model. This adds the second consumer, the user, WITHOUT
-/// touching how or when the model is woken.
-///
-/// Shape:
-/// - Producers call the sync, non-blocking
-///   [`crate::autonomy::human_events::emit_background_activity`], which caps
-///   per origin and hands the event to the installed sink.
-/// - The sink is a bounded-channel `try_send`. A full queue DROPS and logs; it
-///   must never stall a watcher task or the outbox consumer.
-/// - The drain task appends each event to the durable per-session ledger via
-///   [`send_notification_durable`] over a DETACHED connection, mirroring
-///   `PeerStaged`. The append (ring + disk + `publish_live`) is
-///   connection-independent, so a client disconnected mid-loop replays the
-///   stream by cursor on reconnect instead of losing its middle; connected
-///   clients receive it on their session's live forwarder, which applies their
-///   own `event.background_activity.v1` capability filter.
-///
-/// Nothing here is routed back into model context.
-pub(crate) fn spawn_background_activity_sink(state: Arc<AppState>) {
-    let (_tx, mut rx) = mpsc::channel::<octos_core::ui_protocol::BackgroundActivityEvent>(
-        BACKGROUND_ACTIVITY_QUEUE_CAPACITY,
-    );
-    tokio::spawn(async move {
-        // Detached connection: there is no live peer. Outbound frames are
-        // discarded by a drain task (the durable record is the ledger); keep
-        // the receiver alive so sends never backpressure-fail.
-        let (writer_tx, mut writer_rx) = mpsc::channel::<WsMessage>(WS_WRITER_CHANNEL_CAPACITY);
-        tokio::spawn(async move { while writer_rx.recv().await.is_some() {} });
-        let ws = WsConnection::new(writer_tx);
-        let ledger = event_ledger(&state).await;
-        info!("background activity human sink started (#2019)");
-        while let Some(event) = rx.recv().await {
-            let _ =
-                send_notification_durable(&ws, &ledger, UiNotification::BackgroundActivity(event));
-        }
-    });
-}
 
 async fn handle_turn_interrupt(
     ws: &WsConnection,
@@ -14944,7 +14846,6 @@ async fn run_standalone_turn(
     // Session-cumulative usage base for cost emissions: starts empty now
     // that the persistent usage ledger is retired, so emitted `session_*`
     // figures cover the live turn only.
-    let session_usage_base = octos_agent::SharedSessionUsage::default();
 
     // Source the per-session primitives from the SessionRuntime.
     //
@@ -15810,9 +15711,7 @@ async fn run_standalone_turn(
     )
     .with_config(agent_config.clone())
     .with_system_prompt(stable_system_prompt)
-    .with_prompt_cache_epoch_id(prompt_cache_epoch_id)
-    .with_session_usage_base(session_usage_base.clone())
-    // #1696 soak fix: thread the session key into every ToolContext this
+    .with_prompt_cache_epoch_id(prompt_cache_epoch_id)    // #1696 soak fix: thread the session key into every ToolContext this
     // turn builds. Without it anything reading
     // `ToolContext::parent_session_key` sees no session on AppUI turns
     // while the gateway actor path carried it fine.
@@ -19657,10 +19556,6 @@ fn ledger_event_cursor(event: &UiProtocolLedgerEvent) -> Option<UiCursor> {
             | UiNotification::ContextCompactionCompleted(_)
             | UiNotification::ContextCompactionStarted(_)
             | UiNotification::ContextNormalizationReported(_)
-            // #2019: the human sink carries an origin + text + timestamp, not
-            // a replay cursor; the surrounding ledger event's cursor is what
-            // a reconnecting client resumes from.
-            | UiNotification::BackgroundActivity(_)
             // UPCR-2026-014 M9-γ: envelopes carry their OWN per-thread
             // `seq` allocated by `ThreadSeqAllocator`, not the per-session
             // `UiCursor` the legacy ledger replay uses. The durable

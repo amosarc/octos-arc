@@ -58,8 +58,6 @@ url = { workspace = true }
 dirs = { workspace = true }
 sha2 = { workspace = true }
 libc = { workspace = true }
-gix = { workspace = true, optional = true }
-similar = { workspace = true, optional = true }
 tree-sitter = { workspace = true, optional = true }
 tree-sitter-rust = { workspace = true, optional = true }
 tree-sitter-python = { workspace = true, optional = true }
@@ -94,7 +92,6 @@ keyring = { workspace = true, features = ["windows-native"] }
 rustix = { workspace = true }
 
 [features]
-git = ["dep:gix", "dep:similar"]
 # `ast` is a default feature: the testgen pipeline (host-side test-case
 # generation) hard-depends on tree-sitter contract extraction, and a
 # no-ast build would silently lose the coding-agent's test capability.

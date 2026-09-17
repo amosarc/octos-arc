@@ -19,7 +19,7 @@ use super::convergence::{
 use super::loop_compaction::{prepare_conversation_messages, prepare_task_messages};
 use super::loop_state::{LoopDecision, LoopRetryState, SHELL_SPIRAL_VARIANT};
 use super::message_repair::sanitize_tool_call_id;
-use super::turn_state::{LoopRetryReason, LoopTurnState, attach_partial_usage};
+use super::turn_state::{LoopTurnState, attach_partial_usage};
 use super::{Agent, AssistantSegmentProvenance, ConversationResponse, TASK_REPORTER, TokenTracker};
 use crate::harness_errors::HarnessError;
 use crate::harness_events::write_event_to_sink;
@@ -27,7 +27,6 @@ use crate::hooks::{HookEvent, HookPayload, HookResult};
 use crate::loop_detect::LoopDetector;
 use crate::progress::ProgressEvent;
 use crate::prompt_context::PromptContextPhase;
-use crate::session::SessionLimits;
 use crate::tools::{TURN_ATTACHMENT_CTX, TurnAttachmentContext};
 
 const MAX_PARALLEL_TOOL_CALLS_PER_BATCH: usize = 8;
@@ -131,53 +130,6 @@ fn split_tool_calls(
     tool_calls.chunks(batch_size).collect()
 }
 
-/// M8.5 tier 1 safety helper: collect the set of `tool_call_id`s that are
-/// currently in an unresolved state (i.e. an assistant tool call whose
-/// matching [`MessageRole::Tool`] reply has not landed yet). Those IDs are
-/// passed to the tier-1 prune pass as "protected" so we never drop a tool
-/// result that a pending retry/contract-gate handler still needs.
-///
-/// Works purely off the message list so it also covers contract-gated
-/// artifacts that are referenced by message indices — content-clearing
-/// preserves indices, but full pruning would not, so the prune pass
-/// explicitly skips these.
-fn collect_protected_tool_call_ids(messages: &[Message]) -> Vec<String> {
-    let mut requested: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for msg in messages {
-        match msg.role {
-            MessageRole::Assistant => {
-                if let Some(ref calls) = msg.tool_calls {
-                    for call in calls {
-                        requested.insert(call.id.clone());
-                    }
-                }
-            }
-            MessageRole::Tool => {
-                if let Some(ref id) = msg.tool_call_id {
-                    answered.insert(id.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-    requested.difference(&answered).cloned().collect()
-}
-
-/// M8.5 tier 2 helper: returns a `ChatConfig` with the agent's tier-2
-/// `context_management` payload attached when the active provider is
-/// Anthropic-flavoured.  Returns a clone with the field left as-is in every
-/// other case so non-Anthropic providers never see the Anthropic-only
-/// header.
-fn with_tier2_context_management(config: &ChatConfig, agent: &Agent) -> ChatConfig {
-    let Some(payload) = agent.build_tier2_context_management() else {
-        return config.clone();
-    };
-    let mut out = config.clone();
-    out.context_management = Some(payload);
-    out
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShellRetryRecoveryKind {
     DiffLikeSuccess,
@@ -230,66 +182,6 @@ pub(crate) enum LoopErrorAction {
 /// Sessions that do not attach a handle see the legacy reset-per-turn
 /// behaviour — the guard just owns a fresh `LoopRetryState` and writes
 /// nowhere on drop.
-struct PersistentRetryStateGuard {
-    state: super::loop_state::LoopRetryState,
-    /// Snapshot taken at construction. `Drop` merges only the delta the
-    /// loop applied on top of it, and skips the write entirely when the
-    /// loop left the state untouched, so a clean turn can never clobber a
-    /// concurrent turn's increments (#1655).
-    loaded: super::loop_state::LoopRetryState,
-    handle: Option<Arc<std::sync::Mutex<super::loop_state::LoopRetryState>>>,
-}
-
-/// Lock the shared retry state. A panicked prior holder poisons the mutex;
-/// recover the inner state with a warning instead of silently swallowing
-/// the corruption signal (#1655).
-fn lock_persistent_retry_state(
-    handle: &Arc<std::sync::Mutex<super::loop_state::LoopRetryState>>,
-) -> std::sync::MutexGuard<'_, super::loop_state::LoopRetryState> {
-    handle.lock().unwrap_or_else(|poisoned| {
-        warn!("persistent retry state mutex poisoned; recovering inner state");
-        poisoned.into_inner()
-    })
-}
-
-impl PersistentRetryStateGuard {
-    fn new(handle: Option<Arc<std::sync::Mutex<super::loop_state::LoopRetryState>>>) -> Self {
-        let state = handle
-            .as_ref()
-            .map(|h| lock_persistent_retry_state(h).clone())
-            .unwrap_or_default();
-        let loaded = state.clone();
-        Self {
-            state,
-            loaded,
-            handle,
-        }
-    }
-}
-
-impl std::ops::Deref for PersistentRetryStateGuard {
-    type Target = super::loop_state::LoopRetryState;
-    fn deref(&self) -> &Self::Target {
-        &self.state
-    }
-}
-
-impl std::ops::DerefMut for PersistentRetryStateGuard {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.state
-    }
-}
-
-impl Drop for PersistentRetryStateGuard {
-    fn drop(&mut self) {
-        if let Some(handle) = &self.handle {
-            if self.state != self.loaded {
-                lock_persistent_retry_state(handle).merge_turn_delta(&self.loaded, &self.state);
-            }
-        }
-    }
-}
-
 impl Agent {
     /// Classify a raw error escaping the agent loop into a `HarnessError`,
     /// increment the `octos_loop_error_total{variant, recovery}` counter, and
@@ -587,66 +479,6 @@ impl Agent {
         }
     }
 
-    fn enforce_session_limits_on_tool_calls(
-        &self,
-        response: &ChatResponse,
-    ) -> (ChatResponse, Vec<Message>) {
-        let Some(limits) = self.session_limits.as_ref() else {
-            return (response.clone(), Vec::new());
-        };
-        if response.tool_calls.is_empty() {
-            return (response.clone(), Vec::new());
-        }
-
-        let mut usage = self.session_usage.lock().unwrap_or_else(|e| e.into_inner());
-        let round_allowed = limits
-            .max_tool_rounds
-            .is_none_or(|max_rounds| usage.tool_rounds < max_rounds);
-
-        let mut allowed_calls = Vec::new();
-        let mut blocked_messages = Vec::new();
-        let mut recorded_round = false;
-
-        for tool_call in &response.tool_calls {
-            if !round_allowed {
-                blocked_messages.push(session_limit_message(
-                    tool_call,
-                    format!(
-                        "[SESSION LIMIT] Tool '{}' exceeded the workflow tool-round budget. Do not retry this tool in this run.",
-                        tool_call.name
-                    ),
-                ));
-                continue;
-            }
-
-            let call_allowed = check_per_tool_limit(&usage, tool_call.name.as_str(), limits);
-            if call_allowed {
-                if !recorded_round {
-                    usage.record_tool_round();
-                    recorded_round = true;
-                }
-                usage.record_tool_call(&tool_call.name);
-                allowed_calls.push(tool_call.clone());
-            } else {
-                let max_calls = limits
-                    .per_tool_limits
-                    .get(&tool_call.name)
-                    .copied()
-                    .unwrap_or_default();
-                blocked_messages.push(session_limit_message(
-                    tool_call,
-                    format!(
-                        "[SESSION LIMIT] Tool '{}' exceeded its workflow limit (max {}). Do not retry this tool in this run.",
-                        tool_call.name, max_calls
-                    ),
-                ));
-            }
-        }
-
-        let mut limited = response.clone();
-        limited.tool_calls = allowed_calls;
-        (limited, blocked_messages)
-    }
 
     /// Build a `ChatConfig` with optional `chat_max_tokens` / `chat_temperature`
     /// overrides from `AgentConfig`. Delegates to [`build_chat_config`].
@@ -979,7 +811,7 @@ impl Agent {
                 // the shared handle on construction and writes back on drop,
                 // so bucket counters carry across turns for the same session.
                 let mut retry_state =
-                    PersistentRetryStateGuard::new(self.persistent_retry_state.clone());
+                    LoopRetryState::default();
                 let mut loop_detector = LoopDetector::new(12);
                 // #27d — turn-local malformed-tool-call feedback counter.
                 let mut malformed_feedback_used: u32 = 0;
@@ -1120,8 +952,7 @@ impl Agent {
                             &mut retry_state,
                             stop_iteration,
                         ) {
-                            turn.record_budget_stop(&stop);
-                            // Skip system prompt + history; return only new messages
+                                                        // Skip system prompt + history; return only new messages
                             return Ok(ConversationResponse {
                                 content: stop.message(),
                                 reasoning_content: None,
@@ -1191,12 +1022,6 @@ impl Agent {
                             self.save_conversation_episode(summary).await;
                         }
                     }
-                    // Harness M8.5 tier 1: cheap in-place stale/oversized
-                    // tool-result pruning. Runs every iteration (including
-                    // the first so large bootstrap payloads shrink before
-                    // tier 3 considers whether to summarise).
-                    let protected_ids = collect_protected_tool_call_ids(&messages);
-                    self.run_tier1_compaction(&mut messages, &protected_ids, tier1_pass(iteration));
                     // #2135 review P1: a provider that learns its true
                     // context window asynchronously (the local probe) must
                     // resolve BEFORE the trim below reads context_window() —
@@ -1204,7 +1029,7 @@ impl Agent {
                     // against the stale catalog value. No-op (immediate) for
                     // every other provider and once resolved.
                     self.llm.ensure_ready().await;
-                    prepare_conversation_messages(self, &mut messages, &mut turn);
+                    prepare_conversation_messages(self, &mut messages);
                     // Harness M6.3: post-prep compaction pass so the declarative
                     // runner sees the final shape of the conversation (after
                     // tool-pair repair + system-message normalization). This
@@ -1256,7 +1081,7 @@ impl Agent {
                     // providers ignore `context_management` via
                     // `skip_serializing_if`. Built BEFORE the checkpoint so the
                     // reflection request derives from the exact action config.
-                    let call_config = with_tier2_context_management(&config, self);
+                    let call_config = config.clone();
 
                     // A convergence threshold is a soft checkpoint, never a
                     // terminal budget. Run one private, tools-disabled LLM
@@ -1411,9 +1236,6 @@ impl Agent {
                         Err(e) if e.to_string().contains("empty response after") => {
                             // Empty response after retries -- try once more (adaptive router
                             // may select a different provider on this second attempt).
-                            turn.record_retry(LoopRetryReason::ProviderFailover {
-                                reason: "adaptive failover after empty response".to_string(),
-                            });
                             warn!(error = %e, "retrying LLM call for adaptive failover");
                             self.reporter().report(ProgressEvent::LlmStatus {
                                 message: "Switching provider...".to_string(),
@@ -1487,9 +1309,6 @@ impl Agent {
                                          {malformed_feedback_used}/{MALFORMED_TOOLCALL_FEEDBACK_LIMIT}): {e:#}"
                                     );
                                     messages.push(Message::user(diagnostic));
-                                    turn.record_retry(LoopRetryReason::ProviderFailover {
-                                        reason: "malformed tool-call feedback".to_string(),
-                                    });
                                     tracing::warn!(
                                         attempt = malformed_feedback_used,
                                         limit = MALFORMED_TOOLCALL_FEEDBACK_LIMIT,
@@ -2353,7 +2172,7 @@ impl Agent {
             // task buckets survive across repeated `run_task` invocations on
             // the same session (the guard's `Drop` impl writes back).
             let mut retry_state =
-                PersistentRetryStateGuard::new(self.persistent_retry_state.clone());
+                LoopRetryState::default();
             // PR #1363: task-loop gets its own detector so handle_tool_use
             // can run the no-progress soft check on tool results here too.
             // Matches the conversation-loop's window of 12.
@@ -2368,8 +2187,7 @@ impl Agent {
                         &mut retry_state,
                         stop_iteration,
                     ) {
-                        turn.record_budget_stop(&stop);
-                        self.report_budget_stop(&stop, stop_iteration);
+                                                self.report_budget_stop(&stop, stop_iteration);
                         // #27e (R2) — checkpoint a DIRTY worktree before the
                         // turn ends: auto-commit (local only), staged
                         // result.md (atomic), distinct budget_exhausted
@@ -2408,15 +2226,11 @@ impl Agent {
                 // RFC-0 (#1289): LRU tool deferral removed — every enabled
                 // tool is emitted every turn (full schema).
                 let tools_spec = self.tools.specs();
-                // M8.5 tier 1: also runs in task mode so background workers
-                // benefit from the same cheap shrinkage before their LLM call.
-                let protected_ids = collect_protected_tool_call_ids(&messages);
-                self.run_tier1_compaction(&mut messages, &protected_ids, tier1_pass(iteration));
                 // #2135 re-review P1: task mode (delegated workers, MCP task
                 // runs) sizes its prompt here too — resolve a lazily-probed
                 // window before the trim reads context_window().
                 self.llm.ensure_ready().await;
-                prepare_task_messages(self, &mut messages, &mut turn);
+                prepare_task_messages(self, &mut messages);
                 self.prepare_prompt_with_context_manager(
                     &mut messages,
                     if iteration == 1 {
@@ -2429,7 +2243,7 @@ impl Agent {
                 let total_usage = turn.total_usage().clone();
 
                 // M8.5 tier 2: decorate the config with the Anthropic header.
-                let call_config = with_tier2_context_management(&config, self);
+                let call_config = config.clone();
                 let (mut response, _streamed, attributed_cost) = match self
                     .call_llm_with_hooks(
                         &messages,
@@ -2927,8 +2741,7 @@ impl Agent {
             }
         }
 
-        let (limited_response, blocked_messages) =
-            self.enforce_session_limits_on_tool_calls(&response);
+        let (limited_response, blocked_messages) = (response.clone(), Vec::new());
         let tool_batches = split_tool_calls(
             &limited_response.tool_calls,
             MAX_PARALLEL_TOOL_CALLS_PER_BATCH,
@@ -3285,31 +3098,6 @@ fn is_productive_tool_message(content: &str) -> bool {
     // messages like "File too large..." or "Symlinks are not allowed" fall
     // under this bound so they never inflate the productive counter.
     trimmed.len() >= 128 && !trimmed.to_ascii_lowercase().contains("failed to")
-}
-
-fn check_per_tool_limit(
-    usage: &crate::session::SessionUsage,
-    tool_name: &str,
-    limits: &SessionLimits,
-) -> bool {
-    limits
-        .per_tool_limits
-        .get(tool_name)
-        .is_none_or(|max_calls| usage.tool_calls.get(tool_name).copied().unwrap_or(0) < *max_calls)
-}
-
-fn session_limit_message(tool_call: &octos_core::ToolCall, content: String) -> Message {
-    Message {
-        role: MessageRole::Tool,
-        content,
-        media: vec![],
-        tool_calls: None,
-        tool_call_id: Some(tool_call.id.clone()),
-        reasoning_content: None,
-        client_message_id: None,
-        thread_id: None,
-        timestamp: chrono::Utc::now(),
-    }
 }
 
 fn merge_tool_messages_in_order(
@@ -3811,16 +3599,6 @@ fn is_useful_shell_output(content: &str) -> bool {
 
 /// Tier-1 pass for this iteration (spec kv-cache-friendly-compaction): the
 /// turn's first call may rewrite deep history (stale pruning); later
-/// iterations only clear oversized results near the prefix tail, keeping the
-/// provider prefix cache (KV) valid across the turn's iterations.
-fn tier1_pass(iteration: u32) -> crate::compaction_tiered::Tier1Pass {
-    if iteration == 1 {
-        crate::compaction_tiered::Tier1Pass::Full
-    } else {
-        crate::compaction_tiered::Tier1Pass::OversizedOnly
-    }
-}
-
 fn is_successful_shell_output(content: &str) -> bool {
     content.contains("Exit code: 0")
 }

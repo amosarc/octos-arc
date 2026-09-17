@@ -12,7 +12,6 @@ use super::message_repair::{
     normalize_system_messages, normalize_tool_call_ids, repair_message_order, repair_tool_pairs,
     synthesize_missing_tool_results, truncate_old_tool_results,
 };
-use super::turn_state::{LoopRepairReason, LoopTurnState};
 
 /// Prepare a conversation turn for the next model call.
 ///
@@ -24,25 +23,16 @@ use super::turn_state::{LoopRepairReason, LoopTurnState};
 /// 4. synthesize missing tool results as a last resort
 /// 5. truncate old tool outputs
 /// 6. normalize tool call IDs
-pub(crate) fn prepare_conversation_messages(
-    agent: &Agent,
-    messages: &mut Vec<Message>,
-    turn: &mut LoopTurnState,
-) {
+pub(crate) fn prepare_conversation_messages(agent: &Agent, messages: &mut Vec<Message>) {
     if agent.trim_to_context_window(messages) {
-        turn.record_repair(LoopRepairReason::ContextTrimmed);
     }
     if normalize_system_messages(messages) {
-        turn.record_repair(LoopRepairReason::SystemMessagesNormalized);
     }
     if repair_message_order(messages) {
-        turn.record_repair(LoopRepairReason::MessageOrderRepaired);
     }
     if repair_tool_pairs(messages) {
-        turn.record_repair(LoopRepairReason::ToolPairsRepaired);
     }
     if synthesize_missing_tool_results(messages) {
-        turn.record_repair(LoopRepairReason::MissingToolResultsSynthesized);
     }
     // With a caller-owned ContextManager the bridge replaces the vector with
     // its canonical frame before the model call, so this truncation cannot
@@ -52,10 +42,8 @@ pub(crate) fn prepare_conversation_messages(
     // which then re-records the whole conversation as duplicates. Tool-output
     // bounding is the ContextManager's job there (ToolOutputPolicy).
     if agent.prompt_context_manager.is_none() && truncate_old_tool_results(messages) {
-        turn.record_repair(LoopRepairReason::OldToolResultsTruncated);
     }
     if normalize_tool_call_ids(messages) {
-        turn.record_repair(LoopRepairReason::ToolCallIdsNormalized);
     }
 }
 
@@ -67,19 +55,12 @@ pub(crate) fn prepare_conversation_messages(
 /// a mid-transcript `System` note after assistant/tool rows (codex
 /// pre-merge P2). The chat path already runs it via
 /// `prepare_conversation_messages`; mirror it here.
-pub(crate) fn prepare_task_messages(
-    agent: &Agent,
-    messages: &mut Vec<Message>,
-    turn: &mut LoopTurnState,
-) {
+pub(crate) fn prepare_task_messages(agent: &Agent, messages: &mut Vec<Message>) {
     if agent.trim_to_context_window(messages) {
-        turn.record_repair(LoopRepairReason::ContextTrimmed);
     }
     if normalize_system_messages(messages) {
-        turn.record_repair(LoopRepairReason::SystemMessagesNormalized);
     }
     if normalize_tool_call_ids(messages) {
-        turn.record_repair(LoopRepairReason::ToolCallIdsNormalized);
     }
 }
 
@@ -93,7 +74,6 @@ mod tests {
     use octos_llm::{ChatConfig, ChatResponse, LlmProvider, ToolSpec};
     use octos_memory::EpisodeStore;
     use std::sync::Arc;
-    use std::time::Instant;
     use tempfile::TempDir;
 
     use crate::prompt_context::{
@@ -251,7 +231,6 @@ mod tests {
     #[tokio::test]
     async fn should_budget_oversized_tool_outputs_deterministically() {
         let (_dir, agent) = setup_agent(300).await;
-        let mut turn = LoopTurnState::new(Instant::now());
         let huge = "x".repeat(5_000);
         let base = vec![
             sys("prompt"),
@@ -266,9 +245,8 @@ mod tests {
 
         let mut first = base.clone();
         let mut second = base.clone();
-        prepare_conversation_messages(&agent, &mut first, &mut turn);
-        let mut second_turn = LoopTurnState::new(Instant::now());
-        prepare_conversation_messages(&agent, &mut second, &mut second_turn);
+        prepare_conversation_messages(&agent, &mut first);
+        prepare_conversation_messages(&agent, &mut second);
 
         assert_eq!(projection(&first), projection(&second));
         let truncated_tool = first
@@ -281,21 +259,12 @@ mod tests {
                 .contains("[... truncated for brevity]")
         );
         assert!(truncated_tool.content.len() <= 830);
-        assert!(!turn.repair_reasons().is_empty());
-        assert!(
-            turn.repair_reasons()
-                .contains(&LoopRepairReason::ContextTrimmed)
-                || turn
-                    .repair_reasons()
-                    .contains(&LoopRepairReason::OldToolResultsTruncated)
-        );
     }
 
     #[tokio::test]
     async fn context_managed_agent_skips_legacy_context_trimming() {
         let (_dir, agent) = setup_agent(120).await;
         let agent = agent.with_prompt_context_manager(Arc::new(NoopPromptContextManager));
-        let mut turn = LoopTurnState::new(Instant::now());
         let mut messages = vec![sys("prompt")];
         for index in 0..12 {
             messages.push(user(&format!("old filler {index} {}", "x".repeat(80))));
@@ -304,19 +273,13 @@ mod tests {
         messages.push(user("current question"));
         let original_len = messages.len();
 
-        prepare_conversation_messages(&agent, &mut messages, &mut turn);
+        prepare_conversation_messages(&agent, &mut messages);
         agent.prepare_prompt_with_context_manager(&mut messages, PromptContextPhase::TurnStart, 1);
 
         assert_eq!(
             messages.len(),
             original_len,
             "ContextManager-owned sessions must not run the legacy extractive trim before the context bridge"
-        );
-        assert!(
-            !turn
-                .repair_reasons()
-                .contains(&LoopRepairReason::ContextTrimmed),
-            "legacy ContextTrimmed repair should stay absent when ContextManager owns prompt compaction"
         );
     }
 
@@ -331,7 +294,6 @@ mod tests {
     async fn context_managed_agent_skips_old_tool_result_truncation() {
         let (_dir, agent) = setup_agent(1_000_000).await;
         let agent = agent.with_prompt_context_manager(Arc::new(NoopPromptContextManager));
-        let mut turn = LoopTurnState::new(Instant::now());
         let old_tool_output = "z".repeat(2_000);
         let mut messages = vec![
             sys("prompt"),
@@ -342,7 +304,7 @@ mod tests {
             user("current question"),
         ];
 
-        prepare_conversation_messages(&agent, &mut messages, &mut turn);
+        prepare_conversation_messages(&agent, &mut messages);
 
         let tool = messages
             .iter()
@@ -353,18 +315,11 @@ mod tests {
             "ContextManager-owned sessions must not run the legacy old-tool-result \
              truncation before the context bridge — it breaks bridge coverage matching"
         );
-        assert!(
-            !turn
-                .repair_reasons()
-                .contains(&LoopRepairReason::OldToolResultsTruncated),
-            "OldToolResultsTruncated repair must stay absent when ContextManager owns prompt compaction"
-        );
     }
 
     #[tokio::test]
     async fn should_preserve_tool_result_validity_after_compaction() {
         let (_dir, agent) = setup_agent(300).await;
-        let mut turn = LoopTurnState::new(Instant::now());
         let huge = "y".repeat(5_000);
         let mut messages = vec![
             sys("prompt"),
@@ -377,7 +332,7 @@ mod tests {
             user("current question"),
         ];
 
-        prepare_conversation_messages(&agent, &mut messages, &mut turn);
+        prepare_conversation_messages(&agent, &mut messages);
 
         let assistant_idx = messages
             .iter()

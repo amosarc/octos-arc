@@ -47,24 +47,13 @@
 //! # Applied vs recorded settings
 //!
 //! M8.3 deliberately scopes its behaviour to "schema + loader + tool
-//! filter". Some profile fields are populated today but *recorded, not
-//! enforced* until a follow-up milestone wires them in:
-//!
-//! - `compaction_policy` — the tier overrides are parsed and exposed via
-//!   [`ProfileDefinition::compaction_policy`], but the runtime still uses
-//!   the workspace compaction runner from M6.3. M8.5's tiered runner is
-//!   where the profile override becomes active.
-//! - `model_preferences` — parsed and exposed, but the provider chain does
-//!   not yet consult them. A future milestone wires the preferences into
-//!   the adaptive router's lane-scoring input.
-//! - `mcp_servers` — only the ids are captured. Actual server config
-//!   resolution is a follow-up milestone. `coding` ship with
-//!   an empty list so no behaviour change falls out of this.
+//! filter". The `mcp_servers` field only captures ids — actual server
+//! config resolution is a follow-up milestone. `coding` ships with
+//! an empty list so no behaviour change falls out of this.
 //!
 //! The `permissions` stub also lands in a minimal form (default /
 //! restricted) so M8.4 can extend it without schema churn.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use eyre::{Result, WrapErr};
@@ -185,41 +174,6 @@ pub enum PermissionMode {
 
 /// Profile-level override for the M8.5 tiered compaction runner.
 ///
-/// Today this struct is *recorded only* — the runtime keeps using the
-/// workspace compaction policy from M6.3. Once the M8.5 runner is wired,
-/// the fields become live tier overrides.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ProfileCompactionPolicy {
-    /// Optional target token budget for the final compacted conversation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_budget: Option<u32>,
-    /// Optional trigger threshold (turns or tokens, interpreted by the
-    /// runner). `None` leaves the runner default in place.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preflight_threshold: Option<u32>,
-    /// Optional tiers map (tier-id -> token budget). Free-form today;
-    /// M8.5 will define the tier id vocabulary.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub tiers: HashMap<String, u32>,
-}
-
-/// Model-name hints consulted by the provider chain. Today these are
-/// recorded but not enforced — a follow-up milestone wires them into
-/// adaptive routing.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ModelPreferences {
-    /// Default model id (e.g. `"anthropic/claude-sonnet-4"`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default: Option<String>,
-    /// Low-latency model id (cheap, fast). May be used for background
-    /// worker dispatch in a follow-up.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fast: Option<String>,
-    /// Highest-capability model id. Reserved for orchestrator turns.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub strong: Option<String>,
-}
-
 /// A single profile manifest.
 ///
 /// Field layout and naming mirrors the runtime plan's "profile envelope".
@@ -246,13 +200,6 @@ pub struct ProfileDefinition {
     /// Coarse permission tier. Defaults to [`PermissionMode::Default`].
     #[serde(default)]
     pub permissions: PermissionMode,
-    /// Optional override for the M8.5 tiered compaction runner. Recorded
-    /// only today.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction_policy: Option<ProfileCompactionPolicy>,
-    /// Optional model preferences. Recorded only today.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_preferences: Option<ModelPreferences>,
     /// Path within the profile dir to a system-prompt template file.
     /// Resolved against the profile's parent directory at load time; left
     /// as-is in the struct so tests and callers can inspect the raw hint.
@@ -273,8 +220,6 @@ impl Default for ProfileDefinition {
             tools: ProfileTools::default(),
             mcp_servers: Vec::new(),
             permissions: PermissionMode::default(),
-            compaction_policy: None,
-            model_preferences: None,
             system_prompt_template: None,
             agents: Vec::new(),
         }
@@ -475,8 +420,6 @@ mod tests {
         assert!(matches!(def.tools, ProfileTools::Default));
         assert!(def.mcp_servers.is_empty());
         assert_eq!(def.permissions, PermissionMode::Default);
-        assert!(def.compaction_policy.is_none());
-        assert!(def.model_preferences.is_none());
         assert!(def.system_prompt_template.is_none());
         assert!(def.agents.is_empty());
     }
@@ -578,7 +521,6 @@ mod tests {
         }
         // Today's coding default carries no compaction or permission
         // override — those live at the workspace / app-state level.
-        assert!(coding.compaction_policy.is_none());
         assert_eq!(coding.permissions, PermissionMode::Default);
         // Agents preloaded match the M8.2 built-in set so spawn() can
         // resolve them by id.

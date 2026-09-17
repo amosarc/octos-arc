@@ -23,7 +23,7 @@ pub use env_hygiene::{
     sanitize_git_command_env,
 };
 pub use error::{Error, ErrorKind, Result};
-pub use gateway::{InboundMessage, METADATA_SENDER_USER_ID, MessageOrigin, OutboundMessage};
+pub use gateway::{InboundMessage, MessageOrigin, OutboundMessage};
 pub use git_worktree::clear_worktree_admin_entry;
 pub use session_scope::{
     DEFAULT_MULTI_TENANT_SHARED_ZONE_NAMES, MULTI_TENANT_USERS_DIR_NAME,

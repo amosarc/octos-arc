@@ -15,7 +15,6 @@ pub mod pricing;
 mod provider;
 mod retry;
 pub mod sse;
-pub mod stream_accumulator;
 mod types;
 pub mod vision;
 
@@ -36,7 +35,7 @@ pub use cache_manifest::{
     with_router_context,
 };
 pub use catalog::{
-    ModelCapabilities, ModelCatalog, ModelCatalogEntry, ModelCost, ModelInfo, ModelType, QosCatalog,
+    ModelCatalogEntry, ModelType, QosCatalog,
 };
 pub use config::{
     CacheRetention, ChatConfig, PromptCacheContext, ReasoningEffort, ResponseFormat,
@@ -53,7 +52,6 @@ pub use provider::{
     operational_error_message, transport_error_message,
 };
 pub use retry::{RetryConfig, RetryProvider};
-pub use stream_accumulator::StreamAccumulator;
 pub use types::{
     CacheLane, ChatResponse, ChatStream, ProviderMetadata, SemanticCheckpointReport, StopReason,
     StreamEvent, ThinkTagStreamSplitter, TokenUsage, ToolSpec, strip_think_tags,

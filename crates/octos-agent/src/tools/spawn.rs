@@ -2243,9 +2243,7 @@ fn deliverable_artifact_glob(deliverable: Option<&str>) -> Option<String> {
 /// artifact-glob resolution.
 fn seed_deliverable_contract(output_dir: &Path, artifact_glob: &str) -> Result<()> {
     use crate::workspace_policy::{
-        WorkspaceArtifactsPolicy, WorkspacePolicy, WorkspacePolicyKind, WorkspacePolicyWorkspace,
-        WorkspaceSnapshotTrigger, WorkspaceTrackingPolicy, WorkspaceVersionControlPolicy,
-        WorkspaceVersionControlProvider, write_workspace_policy,
+        WorkspaceArtifactsPolicy, WorkspacePolicy, WorkspacePolicyKind, WorkspacePolicyWorkspace, write_workspace_policy,
     };
     use std::collections::BTreeMap;
 
@@ -2261,13 +2259,6 @@ fn seed_deliverable_contract(output_dir: &Path, artifact_glob: &str) -> Result<(
         workspace: WorkspacePolicyWorkspace {
             kind: WorkspacePolicyKind::Session,
         },
-        version_control: WorkspaceVersionControlPolicy {
-            provider: WorkspaceVersionControlProvider::Git,
-            auto_init: false,
-            trigger: WorkspaceSnapshotTrigger::TurnEnd,
-            fail_on_error: false,
-        },
-        tracking: WorkspaceTrackingPolicy { ignore: Vec::new() },
         artifacts: WorkspaceArtifactsPolicy {
             entries: BTreeMap::from([(
                 PRIMARY_CONTRACT_ARTIFACT.to_string(),

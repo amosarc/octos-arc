@@ -154,9 +154,7 @@ pub struct AppState {
     pub sessions: Option<Arc<tokio::sync::Mutex<octos_bus::SessionManager>>>,
 
     /// Server start time.
-    pub started_at: chrono::DateTime<chrono::Utc>,
-
-    pub ui_protocol: UiProtocolRuntimeResources,
+     pub ui_protocol: UiProtocolRuntimeResources,
 
     /// Opt-in for the no-password "solo" REST login (`/api/auth/solo*`).
     /// OFF by default; set by `octos serve --solo` / `OCTOS_SOLO_LOGIN=1`.
@@ -246,7 +244,6 @@ impl AppState {
             )),
             profile_skill_mutation_locks: Arc::new(ProfileSkillMutationLocks::new()),
             sessions: None,
-            started_at: chrono::Utc::now(),
             profile_store: None,
             solo_login_enabled: false,
             dangerous_default_permissions: false,

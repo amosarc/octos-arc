@@ -40,9 +40,9 @@ pub(crate) mod context_manager;
 // process-global `contract_stores()` the serve WS path uses so a peer's parked
 // oneshot and the master's `peer_respond` meet in one registry.
 //
-// Most of the surface is still reached only from the `api` WS handlers, so an
+// Most of the surface is still reached only from the `api` handlers, so an
 // unfeatured build sees it as dead — an artifact of the consumer being absent,
-// not of the code being unreachable (same rationale as `autonomy`).
+// not of the code being unreachable.
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub(crate) mod contracts;
 #[cfg(feature = "api")]

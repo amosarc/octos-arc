@@ -82,7 +82,6 @@ impl InboundMessage {
 
 /// Metadata key carrying the sender identity on outbound messages
 /// (channel-adapter identity assertion).
-pub const METADATA_SENDER_USER_ID: &str = "sender_user_id";
 
 #[cfg(test)]
 mod tests {

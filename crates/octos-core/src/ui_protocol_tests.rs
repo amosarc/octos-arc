@@ -424,53 +424,6 @@ fn ui_notification_builds_and_parses_json_rpc_notification() {
     assert_eq!(decoded, event);
 }
 
-/// #2019 — `background/activity` is the HUMAN sink over events that today
-/// only wake the model. The routing key is the session that OWNS the emitter,
-/// and it must survive the wire boundary intact: an event that loses (or never
-/// carries) `session_id` renders in whichever session happens to be focused
-/// (octos-tui#461/#466/#483). Attribution and the visible drop marker must
-/// survive too.
-#[test]
-fn should_route_on_owning_session_when_background_activity_crosses_the_wire() {
-    let owner = SessionKey("dev:local:tui#coding".into());
-    let other = SessionKey("dev:local:tui#review".into());
-    let event = BackgroundActivityEvent {
-        session_id: owner.clone(),
-        profile_id: Some("dev".into()),
-        origin_kind: "monitor".into(),
-        origin_id: "mon-7".into(),
-        origin_label: Some("ci-tail".into()),
-        text: "ERROR bus test flaked".into(),
-        emitted_at_ms: 1_760_000_000_000,
-        dropped_count: None,
-        suppressed: false,
-    };
-    let notification = UiNotification::BackgroundActivity(event.clone());
-
-    assert_eq!(notification.method(), methods::BACKGROUND_ACTIVITY);
-    assert!(UI_PROTOCOL_NOTIFICATION_METHODS.contains(&methods::BACKGROUND_ACTIVITY));
-    assert!(UI_PROTOCOL_KNOWN_FEATURES.contains(&UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1));
-
-    let rpc = notification
-        .clone()
-        .into_rpc_notification()
-        .expect("serialize background/activity");
-    assert_eq!(rpc.method, methods::BACKGROUND_ACTIVITY);
-    // ROUTING, not merely emission: the wire frame names the OWNING session,
-    // never the sibling a client might happen to have focused.
-    assert_eq!(rpc.params["session_id"], owner.0);
-    assert_ne!(rpc.params["session_id"], other.0);
-    // Attribution rides along — an unattributed line reads as the master.
-    assert_eq!(rpc.params["origin_kind"], "monitor");
-    assert_eq!(rpc.params["origin_id"], "mon-7");
-    assert_eq!(rpc.params["origin_label"], "ci-tail");
-
-    let decoded = UiNotification::from_rpc_notification(rpc).expect("decode background/activity");
-    assert_eq!(decoded, notification);
-    assert_eq!(decoded.session_id(), &owner);
-    assert_eq!(decoded.topic(), Some("coding"));
-}
-
 // ----- M9-FIX-08 approval/cancelled wire registration -----
 
 #[test]
@@ -1245,21 +1198,6 @@ fn tool_started_topic_field_round_trips_on_the_wire() {
         wire["params"].get("topic").is_none(),
         "absent topic field must stay omitted on the wire (no v0 breakage)"
     );
-}
-
-/// #1977 — monitor typed error kinds mirror the loop_* error family shape.
-#[test]
-fn monitor_error_kinds_are_registered() {
-    assert_eq!(autonomy_error_kinds::MONITOR_NOT_FOUND, "monitor_not_found");
-    assert_eq!(
-        autonomy_error_kinds::MONITOR_INVALID_SPEC,
-        "monitor_invalid_spec"
-    );
-    assert_eq!(
-        autonomy_error_kinds::MONITOR_POLICY_DENIED,
-        "monitor_policy_denied"
-    );
-    assert_eq!(autonomy_error_kinds::MONITOR_FLOODED, "monitor_flooded");
 }
 
 #[test]

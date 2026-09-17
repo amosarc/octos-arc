@@ -790,7 +790,6 @@ pub mod mcp_agent;
 pub mod memory_note;
 pub mod read_file;
 pub mod read_task_output;
-pub mod recall;
 pub mod recall_memory;
 pub mod record_memory_use;
 pub(crate) mod replacer;
@@ -804,8 +803,6 @@ pub mod write_grant;
 pub mod check;
 pub mod check_background_tasks;
 
-#[cfg(feature = "git")]
-pub mod git;
 
 #[cfg(feature = "ast")]
 pub mod code_structure;
@@ -835,7 +832,6 @@ pub use mcp_agent::{
 pub use memory_note::MemoryNoteTool;
 pub use read_file::ReadFileTool;
 pub use read_task_output::ReadTaskOutputTool;
-pub use recall::{RecallTool, ToolOutputLedger};
 pub use recall_memory::RecallMemoryTool;
 pub use record_memory_use::RecordMemoryUseTool;
 pub use save_memory::SaveMemoryTool;
@@ -850,8 +846,6 @@ pub use write_grant::{
 pub use check::CheckTool;
 pub use check_background_tasks::CheckBackgroundTasksTool;
 
-#[cfg(feature = "git")]
-pub use git::GitTool;
 
 #[cfg(feature = "ast")]
 pub use code_structure::CodeStructureTool;

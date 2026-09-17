@@ -1248,8 +1248,6 @@ impl ToolRegistry {
         // executes build.rs/proc-macros (project-controlled code), so it
         // must be confined like any shell command (#1607).
         registry.register(super::CheckTool::new(cwd).with_shared_sandbox(registry.sandbox.clone()));
-        #[cfg(feature = "git")]
-        registry.register(super::GitTool::new(cwd));
         #[cfg(feature = "ast")]
         registry.register(CodeStructureTool::new(cwd));
         // testgen: host-first test-case pipeline (scaffold + verify).
@@ -1357,8 +1355,6 @@ impl ToolRegistry {
         // must follow `rebind_cwd` so a session targeting a new project root
         // does not leak previously bound paths.
         "view_image",
-        #[cfg(feature = "git")]
-        "git",
         #[cfg(feature = "ast")]
         "code_structure",
         #[cfg(feature = "ast")]
@@ -1446,8 +1442,6 @@ impl ToolRegistry {
         // tools — and it re-binds to the NEW session sandbox stored just
         // above, in lockstep with the shell/exec/bash re-registrations.
         registry.register(super::CheckTool::new(cwd).with_shared_sandbox(registry.sandbox.clone()));
-        #[cfg(feature = "git")]
-        registry.register(super::GitTool::new(cwd));
         #[cfg(feature = "ast")]
         registry.register(CodeStructureTool::new(cwd));
         #[cfg(feature = "ast")]

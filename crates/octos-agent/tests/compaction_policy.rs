@@ -14,8 +14,6 @@ use octos_agent::compaction::{
 };
 use octos_agent::workspace_policy::{
     WorkspaceArtifactsPolicy, WorkspacePolicy, WorkspacePolicyKind, WorkspacePolicyWorkspace,
-    WorkspaceSnapshotTrigger, WorkspaceTrackingPolicy, WorkspaceVersionControlPolicy,
-    WorkspaceVersionControlProvider,
 };
 
 use octos_agent::{COMPACTION_POLICY_SCHEMA_VERSION, WORKSPACE_POLICY_SCHEMA_VERSION};
@@ -102,13 +100,6 @@ fn policy_with_compaction(compaction: CompactionPolicy) -> WorkspacePolicy {
         workspace: WorkspacePolicyWorkspace {
             kind: WorkspacePolicyKind::Session,
         },
-        version_control: WorkspaceVersionControlPolicy {
-            provider: WorkspaceVersionControlProvider::Git,
-            auto_init: false,
-            trigger: WorkspaceSnapshotTrigger::TurnEnd,
-            fail_on_error: false,
-        },
-        tracking: WorkspaceTrackingPolicy { ignore: vec![] },
         artifacts: WorkspaceArtifactsPolicy {
             entries: BTreeMap::from([
                 ("primary".into(), "output/deck.pptx".into()),

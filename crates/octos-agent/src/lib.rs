@@ -13,7 +13,6 @@ pub mod agents;
 pub mod approval;
 pub mod behaviour;
 pub mod compaction;
-pub mod compaction_tiered;
 pub mod context_log;
 pub mod dispatch_policy;
 pub mod file_state_cache;
@@ -36,7 +35,6 @@ pub mod role_template;
 pub mod sandbox;
 mod sanitize;
 pub mod session;
-pub mod session_usage;
 mod shell_analysis;
 pub mod skills;
 pub mod snapshot;
@@ -83,11 +81,6 @@ pub use approval::{
     HumanApprovalRules, PendingApproval, PendingApprovalDraft,
     PendingApprovalStore as HumanPendingApprovalStore, digest_tool_args,
 };
-pub use compaction_tiered::{
-    ApiMicroCompactionConfig, DEFAULT_TIER1_MAX_AGE_TURNS, DEFAULT_TIER1_MAX_SIZE_BYTES_PER_RESULT,
-    DEFAULT_TIER2_KEEP_LAST_N_TURNS, FullCompactor, MicroCompactionPolicy, Tier1Report,
-    Tier3Report, TieredCompactionRunner, is_anthropic_provider,
-};
 pub use dispatch_policy::{
     DispatchBackendMetadata, DispatchPolicy, DispatchTarget, GateDenial, enforce_dispatch_gates,
     enforce_dispatch_gates_for_backend,
@@ -128,8 +121,7 @@ pub use role_template::{
     UnknownModelPreference,
 };
 pub use sandbox::{Sandbox, SandboxConfig, SandboxMode, create_sandbox};
-pub use session::{SessionLimits, SessionState, SessionStateHandle, SessionUsage};
-pub use session_usage::{SessionUsageHandle, SessionUsageSnapshot, SharedSessionUsage};
+pub use session::{SessionState, SessionStateHandle};
 pub use skills::{SkillFilter, SkillInfo, SkillsLoader};
 pub use snapshot::{
     DEFAULT_SNAPSHOT_KEEP_LAST, SnapshotConfig, SnapshotId, SnapshotInfo, SnapshotManager,
@@ -165,8 +157,7 @@ pub use tools::{
 pub use turn::{Turn, TurnKind, turns_to_messages};
 pub use workspace_policy::{
     CompactionPolicy, CompactionSummarizerKind, WORKSPACE_POLICY_FILE, WorkspaceArtifactsPolicy,
-    WorkspacePolicy, WorkspacePolicyKind, WorkspaceSnapshotTrigger, WorkspaceSpawnTaskPolicy,
-    WorkspaceTrackingPolicy, WorkspaceVersionControlPolicy, WorkspaceVersionControlProvider,
+    WorkspacePolicy, WorkspacePolicyKind, WorkspaceSpawnTaskPolicy,
     read_workspace_policy, workspace_policy_path, write_workspace_policy,
 };
 

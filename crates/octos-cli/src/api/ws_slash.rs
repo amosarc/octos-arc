@@ -175,9 +175,9 @@ async fn handle_clear(ctx: &SlashCommandContext) -> String {
 /// project template under `<data_dir>/users/<encoded_base>/workspace/`.
 /// Other names emit a "switched to session: <name>" acknowledgement.
 ///
-/// Mirrors `gateway_dispatcher.rs:107-220` minus the gateway-only
-/// `active_sessions.switch_to` + `touch_user_session` bookkeeping
-/// (which doesn't apply to the WS transport — see module-level doc).
+/// `/new <topic>` — switch this connection to a fresh topic session.
+/// A bare `/new` delegates to `/clear` (wipe history in place); the SPA
+/// provides session switching via its sidebar.
 async fn handle_new(ctx: &SlashCommandContext, name_arg: &str) -> String {
     if name_arg.is_empty() {
         // Bare `/new` matches the gateway path's `/clear` shape — wipe

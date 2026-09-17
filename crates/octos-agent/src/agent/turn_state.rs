@@ -8,53 +8,6 @@ use super::activity::LoopActivityState;
 use super::budget::BudgetStop;
 use super::{Agent, TokenTracker};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LoopBudgetStopKind {
-    Shutdown,
-    MaxIterations,
-    MaxTokens,
-    ActivityTimeout,
-    IdleProgressTimeout,
-}
-
-impl From<&BudgetStop> for LoopBudgetStopKind {
-    fn from(value: &BudgetStop) -> Self {
-        match value {
-            BudgetStop::Shutdown => Self::Shutdown,
-            BudgetStop::MaxIterations { .. } => Self::MaxIterations,
-            BudgetStop::MaxTokens { .. } => Self::MaxTokens,
-            BudgetStop::ActivityTimeout { .. } => Self::ActivityTimeout,
-            BudgetStop::IdleProgressTimeout { .. } => Self::IdleProgressTimeout,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LoopTerminalReason {
-    Budget {
-        kind: LoopBudgetStopKind,
-        message: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LoopRetryReason {
-    EmptyResponse { attempt: u32, reason: String },
-    StreamError { attempt: u32, error: String },
-    ProviderFailover { reason: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LoopRepairReason {
-    ContextTrimmed,
-    SystemMessagesNormalized,
-    MessageOrderRepaired,
-    ToolPairsRepaired,
-    MissingToolResultsSynthesized,
-    OldToolResultsTruncated,
-    ToolCallIdsNormalized,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct LoopTurnState {
     started_at: Instant,
@@ -71,9 +24,6 @@ pub(crate) struct LoopTurnState {
     /// is genuinely $0 so far" from "no model in this turn had catalog
     /// pricing" — emission hides the cost line in the latter case.
     priced_usage: bool,
-    retry_reasons: Vec<LoopRetryReason>,
-    repair_reasons: Vec<LoopRepairReason>,
-    terminal_reason: Option<LoopTerminalReason>,
 }
 
 impl LoopTurnState {
@@ -84,9 +34,6 @@ impl LoopTurnState {
             total_usage: TokenUsage::default(),
             turn_spend_usd: 0.0,
             priced_usage: false,
-            retry_reasons: Vec::new(),
-            repair_reasons: Vec::new(),
-            terminal_reason: None,
         }
     }
 
@@ -118,16 +65,6 @@ impl LoopTurnState {
     /// `ConversationResponse::estimated_spend_usd` carries.
     pub(crate) fn priced_spend(&self) -> Option<f64> {
         self.priced_usage.then_some(self.turn_spend_usd)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn retry_reasons(&self) -> &[LoopRetryReason] {
-        &self.retry_reasons
-    }
-
-    #[cfg(test)]
-    pub(crate) fn repair_reasons(&self) -> &[LoopRepairReason] {
-        &self.repair_reasons
     }
 
     /// Record one response's usage. `estimated_cost_usd` is that usage
@@ -190,27 +127,14 @@ impl LoopTurnState {
         );
     }
 
-    pub(crate) fn record_retry(&mut self, reason: LoopRetryReason) {
-        self.retry_reasons.push(reason);
-    }
-
-    pub(crate) fn record_repair(&mut self, reason: LoopRepairReason) {
-        self.repair_reasons.push(reason);
-    }
-
+    
+    
     pub(crate) fn check_budget(
         &self,
         agent: &Agent,
         activity: &LoopActivityState,
     ) -> Option<BudgetStop> {
         agent.check_budget(self.iteration, self.started_at, &self.total_usage, activity)
-    }
-
-    pub(crate) fn record_budget_stop(&mut self, stop: &BudgetStop) {
-        self.terminal_reason = Some(LoopTerminalReason::Budget {
-            kind: LoopBudgetStopKind::from(stop),
-            message: stop.message(),
-        });
     }
 
     // NOTE: `attach_partial_usage` / `PartialTurnUsage` (below) is how an
@@ -322,26 +246,6 @@ mod tests {
     }
 
     #[test]
-    fn records_explicit_budget_terminal_reason() {
-        let mut state = LoopTurnState::new(Instant::now());
-        assert_eq!(state.iteration(), 0);
-
-        state.advance_iteration();
-        state.record_budget_stop(&BudgetStop::MaxTokens {
-            used: 120,
-            limit: 100,
-        });
-
-        assert_eq!(
-            state.terminal_reason.clone(),
-            Some(LoopTerminalReason::Budget {
-                kind: LoopBudgetStopKind::MaxTokens,
-                message: "Token budget exceeded (120 of 100).".to_string(),
-            })
-        );
-    }
-
-    #[test]
     fn should_sum_per_response_costs_when_usage_recorded_across_models() {
         let mut state = LoopTurnState::new(Instant::now());
         assert!(!state.has_priced_usage());
@@ -387,40 +291,5 @@ mod tests {
         assert_eq!(state.total_usage().reasoning_tokens, 30);
         assert_eq!(state.total_usage().cache_read_tokens, 4_000);
         assert_eq!(state.total_usage().cache_write_tokens, 850);
-    }
-
-    #[test]
-    fn records_retry_and_repair_history() {
-        let mut state = LoopTurnState::new(Instant::now());
-
-        state.record_retry(LoopRetryReason::EmptyResponse {
-            attempt: 1,
-            reason: "empty response".to_string(),
-        });
-        state.record_retry(LoopRetryReason::ProviderFailover {
-            reason: "streaming retries exhausted".to_string(),
-        });
-        state.record_repair(LoopRepairReason::ContextTrimmed);
-        state.record_repair(LoopRepairReason::ToolCallIdsNormalized);
-
-        assert_eq!(
-            state.retry_reasons(),
-            &[
-                LoopRetryReason::EmptyResponse {
-                    attempt: 1,
-                    reason: "empty response".to_string(),
-                },
-                LoopRetryReason::ProviderFailover {
-                    reason: "streaming retries exhausted".to_string(),
-                },
-            ]
-        );
-        assert_eq!(
-            state.repair_reasons(),
-            &[
-                LoopRepairReason::ContextTrimmed,
-                LoopRepairReason::ToolCallIdsNormalized,
-            ]
-        );
     }
 }

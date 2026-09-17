@@ -65,7 +65,6 @@ rustix = { version = "1.1", features = ["process"] }
 # out, but never silently fall back to independent chat/ACP agent loops.
 default = ["api"]
 api = ["dep:tokio-util"]
-git = ["octos-agent/git"]
 ast = ["octos-agent/ast"]
 
 [lints]

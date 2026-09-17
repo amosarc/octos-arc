@@ -71,6 +71,7 @@ pub fn parse_sse_response(response: reqwest::Response) -> impl Stream<Item = Sse
 }
 
 /// Parse SSE events from raw string chunks (for testing and non-reqwest streams).
+#[cfg(test)]
 pub fn parse_sse_strings(
     chunks: impl Stream<Item = String> + Send + 'static,
 ) -> impl Stream<Item = SseEvent> + Send {
@@ -136,6 +137,7 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Try to extract one complete SSE event from a string buffer.
+#[cfg(test)]
 fn try_extract_event(buffer: &mut String) -> Option<SseEvent> {
     loop {
         let mut found = false;
