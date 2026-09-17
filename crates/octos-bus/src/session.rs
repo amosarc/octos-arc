@@ -764,12 +764,6 @@ impl Session {
         }
     }
 
-    /// Sort messages by timestamp. Used after concurrent writes (speculative
-    /// overflow) to restore chronological order. Stable sort preserves
-    /// insertion order for messages with identical timestamps.
-    pub fn sort_by_timestamp(&mut self) {
-        self.messages.sort_by_key(|m| m.timestamp);
-    }
 
     fn merge_child_contract(update: ChildSessionContract, existing: &mut ChildSessionContract) {
         existing.task_label = update.task_label;
@@ -801,117 +795,9 @@ impl Session {
         }
     }
 
-    /// Insert or update a durable child-session contract.
-    pub fn upsert_child_contract(&mut self, contract: ChildSessionContract) -> bool {
-        if let Some(existing) = self
-            .child_contracts
-            .iter_mut()
-            .find(|existing| existing.task_id == contract.task_id)
-        {
-            Self::merge_child_contract(contract, existing);
-            true
-        } else {
-            self.child_contracts.push(contract);
-            false
-        }
-    }
 
-    /// Group session messages into [`Thread`] units keyed by `thread_id`
-    /// (M8.10 PR #1). Each thread is rooted on its `User` message; the
-    /// matching assistant + tool replies follow in `responses`. Threads are
-    /// returned in `user_msg.timestamp` order so callers can render the
-    /// chat as a list of threads without an extra sort.
-    ///
-    /// Messages whose `thread_id` is `None` (system messages, or the rare
-    /// case where neither the new write path nor [`synthesize_thread_ids`]
-    /// produced an id — e.g. a partially loaded session) are skipped here:
-    /// they don't belong to any user-rooted thread by definition.
-    ///
-    /// Multiple user messages sharing a thread_id (shouldn't happen under
-    /// the new write path but is theoretically possible across legacy
-    /// transcripts) collapse to the first one; the rest become responses.
-    pub fn threads(&self) -> Vec<Thread> {
-        use std::collections::BTreeMap;
-
-        // Group messages by thread_id, preserving insertion order so we
-        // pick the first User message as the root.
-        let mut groups: BTreeMap<String, Vec<&Message>> = BTreeMap::new();
-        let mut order: Vec<String> = Vec::new();
-        for msg in &self.messages {
-            let Some(thread_id) = msg.thread_id.as_ref() else {
-                continue;
-            };
-            if !groups.contains_key(thread_id) {
-                order.push(thread_id.clone());
-            }
-            groups.entry(thread_id.clone()).or_default().push(msg);
-        }
-
-        let mut threads: Vec<Thread> = Vec::with_capacity(order.len());
-        for (intra_thread_seq, thread_id) in order.into_iter().enumerate() {
-            let messages = groups.remove(&thread_id).unwrap_or_default();
-            // First User message roots the thread; everything else lands in
-            // responses (preserves order of appearance).
-            let mut user_msg: Option<Message> = None;
-            let mut responses: Vec<Message> = Vec::with_capacity(messages.len());
-            for msg in messages {
-                if user_msg.is_none() && matches!(msg.role, octos_core::MessageRole::User) {
-                    user_msg = Some(msg.clone());
-                } else {
-                    responses.push(msg.clone());
-                }
-            }
-            // If no User message was found (e.g. orphan thread on legacy
-            // assistant-primer transcripts), promote the first message of
-            // any role so the thread still has an anchor.
-            let user_msg = match user_msg {
-                Some(m) => m,
-                None => {
-                    if responses.is_empty() {
-                        continue;
-                    }
-                    responses.remove(0)
-                }
-            };
-            threads.push(Thread {
-                id: thread_id,
-                user_msg,
-                responses,
-                intra_thread_seq: intra_thread_seq as u32,
-            });
-        }
-
-        // Order by user_msg.timestamp so threads render chronologically.
-        threads.sort_by_key(|t| t.user_msg.timestamp);
-        for (i, t) in threads.iter_mut().enumerate() {
-            t.intra_thread_seq = i as u32;
-        }
-        threads
-    }
 }
 
-/// A thread of messages rooted on a single user turn (M8.10 PR #1).
-///
-/// Threads group `Message`s by their `thread_id`: the `User` message that
-/// rooted the turn lives in `user_msg`, and every `Assistant`/`Tool` reply
-/// inheriting the same `thread_id` lands in `responses`. The web client
-/// renders chat history as `Vec<Thread>` so users can collapse/expand each
-/// turn without extra round-trips.
-#[derive(Debug, Clone)]
-pub struct Thread {
-    /// Stable thread key (the rooting user message's `client_message_id`
-    /// going forward, or a `synth_{seq}` value synthesized at load time
-    /// for legacy records that pre-date the field).
-    pub id: String,
-    /// The user message that rooted this thread.
-    pub user_msg: Message,
-    /// Assistant + tool messages inheriting this thread's id, in
-    /// chronological order of appearance in the JSONL.
-    pub responses: Vec<Message>,
-    /// 0-based index of the thread within the session, ordered by
-    /// `user_msg.timestamp`.
-    pub intra_thread_seq: u32,
-}
 
 /// Default maximum number of sessions kept in memory.
 const DEFAULT_MAX_SESSIONS: usize = 1000;
@@ -919,86 +805,9 @@ const DEFAULT_MAX_SESSIONS: usize = 1000;
 /// Maximum session file size we'll load (10 MB). Prevents OOM on corrupted/adversarial files.
 const MAX_SESSION_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
-/// One row of the title/recency session listing:
-/// `(session_key, message_count, title, updated_at)`. `title` and `updated_at`
-/// are `None` for legacy files that pre-date those meta fields (with `updated_at`
-/// falling back to the JSONL mtime when available).
-pub type SessionTitleMetaRow = (
-    String,
-    usize,
-    Option<String>,
-    Option<DateTime<Utc>>,
-    Option<String>,
-);
 
-/// Byte budget for the `last_prompt` preview surfaced on `session/list`.
-/// UTF-8 safe truncation (see [`last_user_prompt_from_jsonl`]) keeps this a
-/// soft ~100-character cap; multibyte scripts yield fewer characters.
-const LAST_PROMPT_PREVIEW_BYTES: usize = 100;
 
-/// Extract the text of the MOST RECENT user message from an already-loaded
-/// session JSONL transcript, truncated to [`LAST_PROMPT_PREVIEW_BYTES`].
-///
-/// Cheap by construction: the listing walk already loads the whole file into
-/// memory to parse the first (`SessionMeta`) line, so this reuses that same
-/// `content` string and adds no extra I/O. It scans lines from the tail and
-/// returns the first that decodes as a [`Message`] with `role == User`, so a
-/// typical transcript only decodes the trailing assistant/tool reply plus the
-/// last user line before short-circuiting. Control records (rollback markers)
-/// and the leading meta line never decode as a user `Message`, so they are
-/// skipped implicitly. Returns `None` when the session has no user message.
-///
-/// Honors `/rewind`: a rolled-back session keeps its dropped rows on disk
-/// (removed only by [`fold_session_timeline`] at load), so previewing the raw
-/// last line could show a prompt hydrate no longer shows (codex P2). When a
-/// rollback marker is present the timeline is folded first; the common
-/// (unrewound) case stays a cheap O(tail) reverse scan.
-fn last_user_prompt_from_jsonl(content: &str) -> Option<String> {
-    // The rollback control record serializes as `{"kind":"rollback",…}`.
-    if content.contains("\"rollback\"") {
-        return assemble_session_messages(content.lines())
-            .iter()
-            .rev()
-            .find(|message| matches!(message.role, MessageRole::User))
-            .and_then(|message| last_prompt_preview(&message.content));
-    }
-    for line in content.lines().rev() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        // Cheap pre-filter: a serialized user `Message` always contains the
-        // `"role":"user"` token (role is the first field, lowercase-renamed).
-        // This lets us skip full JSON decode of large assistant/tool blobs.
-        if !line.contains("\"role\":\"user\"") {
-            continue;
-        }
-        if let Ok(message) = serde_json::from_str::<Message>(line) {
-            if matches!(message.role, MessageRole::User) {
-                if let Some(preview) = last_prompt_preview(&message.content) {
-                    return Some(preview);
-                }
-            }
-        }
-    }
-    None
-}
 
-/// Content-part-unwrapped, trimmed, byte-truncated preview of a user message's
-/// content, or `None` when it is empty. `[{"type":"text","text":"…"}]` content
-/// parts (codex P2) surface their inner text, never the raw JSON wrapper.
-fn last_prompt_preview(content: &str) -> Option<String> {
-    let text = content_display_text(content);
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
-    }
-    Some(octos_core::truncated_utf8(
-        text,
-        LAST_PROMPT_PREVIEW_BYTES,
-        "…",
-    ))
-}
 
 pub struct SessionManager {
     sessions_dir: PathBuf,
@@ -1040,171 +849,10 @@ impl SessionManager {
         self.list_sessions_inner(false)
     }
 
-    /// Like [`Self::list_sessions`] but also returns persisted title.
-    ///
-    /// None for sessions persisted before #617. Used by the gateway's
-    /// `GET /sessions` endpoint to surface server-authoritative titles.
-    pub fn list_sessions_with_title(&self) -> Vec<(String, usize, Option<String>)> {
-        self.list_sessions_inner_with_title(false)
-            .into_iter()
-            .map(|(id, count, title, _updated_at, _last_prompt)| (id, count, title))
-            .collect()
-    }
 
-    /// List only top-level sessions — those whose topic is empty (the
-    /// canonical `default.jsonl` per user dir) or a user-facing topic such
-    /// as `research`. Internal runtime topics (`child-*` spawn fanouts and
-    /// `*.tasks` background-task ledgers) are skipped at the directory walk,
-    /// before any line counting, so the cost stays O(top-level sessions)
-    /// regardless of how many child sessions a parent has accumulated.
-    ///
-    /// This is the helper that should back the user-facing
-    /// `GET /api/sessions` path. Child sessions are surfaced only when an
-    /// individual session's history is explicitly opened via
-    /// `/api/sessions/{id}/messages`.
-    pub fn list_top_level_sessions(&self) -> Vec<(String, usize)> {
-        self.list_sessions_inner(true)
-    }
 
-    /// Like [`Self::list_top_level_sessions`] but also returns the persisted
-    /// title for each session (None when the file has no `title` field, e.g.
-    /// pre-#617 sessions).
-    pub fn list_top_level_sessions_with_title(&self) -> Vec<(String, usize, Option<String>)> {
-        self.list_sessions_inner_with_title(true)
-            .into_iter()
-            .map(|(id, count, title, _updated_at, _last_prompt)| (id, count, title))
-            .collect()
-    }
 
-    /// Like [`Self::list_top_level_sessions_with_title`] but also returns each
-    /// session's recency timestamp and a preview of its most recent user
-    /// prompt:
-    /// - `updated_at`: `SessionMeta.updated_at`, or the JSONL file's mtime when
-    ///   the meta line is missing/unparseable (the LATER of the two when both
-    ///   exist), or `None` when neither is available. Backs the `updated_at`
-    ///   field on the WS `session/list` RPC so clients can sort by recency.
-    /// - `last_prompt`: the truncated text of the session's most recent
-    ///   user-role message (see [`last_user_prompt_from_jsonl`]), or `None`
-    ///   when the session has no user message. Backs the `last_prompt` field on
-    ///   `session/list` so the `/resume` picker can preview each session.
-    pub fn list_top_level_sessions_with_meta(&self) -> Vec<SessionTitleMetaRow> {
-        self.list_sessions_inner_with_title(true)
-    }
 
-    fn list_sessions_inner_with_title(
-        &self,
-        skip_internal_topics: bool,
-    ) -> Vec<SessionTitleMetaRow> {
-        // Reuse the path discovery from list_sessions_inner, but read each
-        // file's first line to extract the title alongside the line count.
-        let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
-
-        let push_with_title = |path: &Path,
-                               session_key: String,
-                               seen: &mut std::collections::HashSet<String>,
-                               out: &mut Vec<SessionTitleMetaRow>| {
-            if seen.contains(&session_key) {
-                return;
-            }
-            // Load the file once (the listing already pays this cost to parse
-            // the first `SessionMeta` line for the title) and reuse the same
-            // in-memory content for both the meta read and the `last_prompt`
-            // preview — no extra I/O beyond the single read.
-            let content = std::fs::read_to_string(path).ok();
-            let (title, meta_updated_at) = content
-                .as_deref()
-                .and_then(|c| {
-                    c.lines()
-                        .next()
-                        .and_then(|first| serde_json::from_str::<SessionMeta>(first).ok())
-                })
-                .map(|meta| (meta.title, Some(meta.updated_at)))
-                .unwrap_or((None, None));
-            // Recency for the `session/list` sort. `SessionMeta.updated_at` is
-            // only rewritten on create / rename / summary rewrite — NOT on an
-            // ordinary message append — so an active chat's meta timestamp goes
-            // stale while its JSONL file mtime keeps advancing. Take the LATER
-            // of the two (codex P2) so recency tracks real writes; the file
-            // mtime alone also covers the missing / unparseable-meta case.
-            let file_mtime = std::fs::metadata(path)
-                .ok()
-                .and_then(|meta| meta.modified().ok())
-                .map(DateTime::<Utc>::from);
-            let updated_at = match (meta_updated_at, file_mtime) {
-                (Some(meta_at), Some(mtime)) => Some(meta_at.max(mtime)),
-                (Some(only), None) | (None, Some(only)) => Some(only),
-                (None, None) => None,
-            };
-            // Reuse the already-loaded `content` (no extra I/O) to preview the
-            // session's most recent user prompt for the `/resume` picker.
-            let last_prompt = content.as_deref().and_then(last_user_prompt_from_jsonl);
-            let count = Self::count_lines(path);
-            seen.insert(session_key.clone());
-            out.push((session_key, count, title, updated_at, last_prompt));
-        };
-
-        if let Ok(entries) = std::fs::read_dir(&self.sessions_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                let Some(name) = path.file_stem().and_then(|n| n.to_str()) else {
-                    continue;
-                };
-                let decoded = Self::decode_filename(name);
-                if skip_internal_topics && Self::is_internal_session_key(&decoded) {
-                    continue;
-                }
-                push_with_title(&path, decoded, &mut seen, &mut result);
-            }
-        }
-
-        let users_dir = self
-            .sessions_dir
-            .parent()
-            .unwrap_or(&self.sessions_dir)
-            .join("users");
-        if let Ok(user_entries) = std::fs::read_dir(&users_dir) {
-            for user_entry in user_entries.flatten() {
-                let user_path = user_entry.path();
-                if !user_path.is_dir() {
-                    continue;
-                }
-                let base_key_encoded = match user_path.file_name().and_then(|n| n.to_str()) {
-                    Some(n) => n,
-                    None => continue,
-                };
-                let base_key = Self::decode_filename(base_key_encoded);
-                let sessions_subdir = user_path.join("sessions");
-                if let Ok(session_files) = std::fs::read_dir(&sessions_subdir) {
-                    for file_entry in session_files.flatten() {
-                        let file_path = file_entry.path();
-                        if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                            continue;
-                        }
-                        let topic_encoded = match file_path.file_stem().and_then(|n| n.to_str()) {
-                            Some(n) => n,
-                            None => continue,
-                        };
-                        let topic = Self::decode_filename(topic_encoded);
-                        if skip_internal_topics && Self::is_internal_session_topic(&topic) {
-                            continue;
-                        }
-                        let session_key = if topic == "default" {
-                            base_key.clone()
-                        } else {
-                            format!("{base_key}#{topic}")
-                        };
-                        push_with_title(&file_path, session_key, &mut seen, &mut result);
-                    }
-                }
-            }
-        }
-
-        result
-    }
 
     fn list_sessions_inner(&self, skip_internal_topics: bool) -> Vec<(String, usize)> {
         let mut seen = std::collections::HashSet::new();
@@ -2025,57 +1673,12 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Number of sessions currently in memory.
-    pub fn cache_len(&self) -> usize {
-        self.cache.len()
-    }
 
     /// Number of sessions the LRU cache can hold.
     pub fn capacity(&self) -> usize {
         self.cache.cap().get()
     }
 
-    /// Delete session files that haven't been updated in `max_age` days.
-    ///
-    /// Returns the number of files removed. Only touches disk files;
-    /// stale entries still in the LRU cache are also evicted.
-    pub fn purge_stale(&mut self, max_age_days: u64) -> usize {
-        let cutoff = Utc::now() - chrono::Duration::days(max_age_days as i64);
-        let mut removed = 0;
-
-        let Ok(dir) = std::fs::read_dir(&self.sessions_dir) else {
-            return 0;
-        };
-
-        for entry in dir.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-
-            // Read only the first line (metadata) to check updated_at
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Some(meta_line) = content.lines().next() else {
-                continue;
-            };
-            let Ok(meta) = serde_json::from_str::<SessionMeta>(meta_line) else {
-                continue;
-            };
-
-            if meta.updated_at < cutoff {
-                // Evict from LRU cache if present
-                self.cache.pop(&meta.session_key);
-                if std::fs::remove_file(&path).is_ok() {
-                    debug!(key = meta.session_key, "purged stale session");
-                    removed += 1;
-                }
-            }
-        }
-
-        removed
-    }
 
     /// Drop the cached in-memory copy of a session so the next read consults
     /// disk. Required by callers that write through alternate channels (e.g.
@@ -2193,95 +1796,7 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Scan the per-user layout for every JSONL belonging to `base_key` and
-    /// return their reconstructed `SessionKey`s. The default file maps back to
-    /// the base key (no topic suffix); other files map to `{base_key}#{topic}`.
-    ///
-    /// Used by topic-less watcher reconnects so the replay path can union
-    /// every topic-specific JSONL the actor has written under this user even
-    /// when the URL didn't carry an explicit `?topic=...` parameter.
-    pub fn list_user_session_keys(&self, base_key: &str) -> Vec<SessionKey> {
-        let encoded_base = encode_path_component(base_key);
-        let user_sessions_dir = self
-            .sessions_dir
-            .parent()
-            .unwrap_or(&self.sessions_dir)
-            .join("users")
-            .join(&encoded_base)
-            .join("sessions");
-        let mut keys = Vec::new();
-        let Ok(read_dir) = std::fs::read_dir(&user_sessions_dir) else {
-            return keys;
-        };
-        for entry in read_dir.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            let topic = Self::decode_filename(stem);
-            let session_key = if topic == "default" {
-                SessionKey(base_key.to_string())
-            } else {
-                SessionKey(format!("{base_key}#{topic}"))
-            };
-            keys.push(session_key);
-        }
-        keys
-    }
 
-    /// Ensure a session file exists in the per-user layout so that
-    /// `list_user_sessions` can discover it.  Creates an empty JSONL
-    /// (metadata-only) if the file does not already exist.
-    ///
-    /// `base_key` must match the value passed to `list_user_sessions`
-    /// (e.g. `"_main:telegram:8516089817"` or `"telegram:8516089817"`).
-    pub fn touch_user_session(&self, base_key: &str, topic: &str) {
-        let encoded_base = encode_path_component(base_key);
-        let user_sessions_dir = self
-            .sessions_dir
-            .parent()
-            .unwrap_or(&self.sessions_dir)
-            .join("users")
-            .join(&encoded_base)
-            .join("sessions");
-        let _ = std::fs::create_dir_all(&user_sessions_dir);
-
-        let effective_topic = if topic.is_empty() { "default" } else { topic };
-        let encoded_topic = encode_path_component(effective_topic);
-        let path = user_sessions_dir.join(format!("{encoded_topic}.jsonl"));
-
-        if !path.exists() {
-            let session_key_str = if topic.is_empty() {
-                base_key.to_string()
-            } else {
-                format!("{base_key}#{topic}")
-            };
-            let meta = SessionMeta {
-                schema_version: CURRENT_SESSION_SCHEMA,
-                session_key: session_key_str,
-                parent_key: None,
-                topic: if topic.is_empty() {
-                    None
-                } else {
-                    Some(topic.to_string())
-                },
-                summary: None,
-                title: None,
-                title_manual: false,
-                child_contracts: vec![],
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            };
-            if let Ok(json) = serde_json::to_string(&meta) {
-                if let Err(e) = std::fs::write(&path, format!("{json}\n")) {
-                    warn!(path = %path.display(), error = %e, "failed to write session metadata");
-                }
-            }
-        }
-    }
 }
 
 // ── SessionHandle ──────────────────────────────────────────────────────────
@@ -2371,29 +1886,6 @@ pub async fn persist_message_through_canonical_path(
     handle.add_message_with_seq_unlocked(message).await
 }
 
-/// Upsert a durable child-session contract through the canonical locked
-/// path: per-key persist lock → FRESH open (latest disk state) → mutate →
-/// rewrite, all inside one critical section.
-///
-/// Contract writes are whole-file read-modify-write cycles (`rewrite`
-/// snapshots the in-memory session and renames over the file), so two
-/// concurrent writers that each open their own handle both read the same
-/// pre-state and the second rename silently erases the first's update.
-/// This is the production-documented fanout race: two children terminating
-/// together each stamp their terminal contract into the SHARED PARENT
-/// session; the loser's contract reverts to pre-terminal and the task is
-/// stuck un-Joined forever. Holding the per-key lock across open→rewrite
-/// makes the cycle atomic per session key.
-pub async fn upsert_child_contract_through_canonical_path(
-    data_dir: &Path,
-    key: &SessionKey,
-    contract: ChildSessionContract,
-) -> Result<bool> {
-    let lock = persist_lock_for(key);
-    let _guard = lock.lock().await;
-    let mut handle = SessionHandle::open(data_dir, key);
-    handle.upsert_child_contract_unlocked(contract).await
-}
 
 impl SessionHandle {
     /// Open or create a session handle for the given key.
@@ -2508,25 +2000,6 @@ impl SessionHandle {
         user_sessions_dir.join(format!(".migrated.{encoded}"))
     }
 
-    /// Check whether a session file exists in either the per-user or legacy layout.
-    pub fn session_exists(data_dir: &Path, key: &SessionKey) -> bool {
-        let base_key = key.base_key();
-        let encoded_base = Self::encode_path_component(base_key);
-        let topic = key.topic().unwrap_or("default");
-        let encoded_topic = Self::encode_path_component(topic);
-
-        let per_user_path = data_dir
-            .join("users")
-            .join(&encoded_base)
-            .join("sessions")
-            .join(format!("{encoded_topic}.jsonl"));
-        if per_user_path.exists() {
-            return true;
-        }
-
-        let legacy_path = SessionManager::session_path_static(&data_dir.join("sessions"), key);
-        legacy_path.exists()
-    }
 
     /// Seed a child session from a parent session if the child does not already exist.
     ///
@@ -2606,10 +2079,6 @@ impl SessionHandle {
         &self.session
     }
 
-    /// Mutable access to the session.
-    pub fn session_mut(&mut self) -> &mut Session {
-        &mut self.session
-    }
 
     /// Get the most recent N messages from history.
     pub fn get_history(&self, max: usize) -> &[Message] {
@@ -2737,37 +2206,8 @@ impl SessionHandle {
         self.session.updated_at = Utc::now();
     }
 
-    /// Insert or update a durable child-session contract and persist it.
-    ///
-    /// Serialises on the per-key persist lock (see [`persist_lock_for`]).
-    /// NOTE: the lock covers mutate→rewrite only; this handle's in-memory
-    /// state was snapshotted at open time, so a handle opened BEFORE a
-    /// concurrent writer committed will still rewrite from that stale
-    /// snapshot. Callers racing other writers must use
-    /// [`upsert_child_contract_through_canonical_path`], which holds the
-    /// lock across the fresh open as well.
-    pub async fn upsert_child_contract(&mut self, contract: ChildSessionContract) -> Result<bool> {
-        let lock = persist_lock_for(&self.session.key);
-        let _guard = lock.lock().await;
-        self.upsert_child_contract_unlocked(contract).await
-    }
 
-    /// Mutate + rewrite without taking the persist lock — the caller must
-    /// already hold it (see [`upsert_child_contract_through_canonical_path`]).
-    async fn upsert_child_contract_unlocked(
-        &mut self,
-        contract: ChildSessionContract,
-    ) -> Result<bool> {
-        let existed = self.session.upsert_child_contract(contract);
-        self.session.updated_at = Utc::now();
-        self.rewrite_unlocked().await?;
-        Ok(existed)
-    }
 
-    /// Sort messages by timestamp (for speculative overflow ordering).
-    pub fn sort_by_timestamp(&mut self) {
-        self.session.sort_by_timestamp();
-    }
 
     /// Rewrite the session to disk (atomic write-then-rename).
     ///
@@ -3127,15 +2567,6 @@ impl SessionManager {
         self.rewrite(key).await
     }
 
-    /// Set a manual title for a session (rewrites metadata line). Once set,
-    /// the title persists across new messages — auto-derivation in
-    /// [`add_message_with_seq`] only fires when no manual title exists.
-    pub async fn update_title(&mut self, key: &SessionKey, title: String) -> Result<()> {
-        let session = self.get_or_create(key).await;
-        session.title = Some(title);
-        session.title_manual = true;
-        self.rewrite(key).await
-    }
 
     /// List sessions for a chat, merging per-user and legacy flat layouts.
     ///
@@ -3229,184 +2660,11 @@ impl SessionManager {
     }
 }
 
-/// Tracks which topic is active per chat, enabling multi-session switching.
-///
-/// Persisted as JSON in `data_dir/active_sessions.json`.
-pub struct ActiveSessionStore {
-    path: PathBuf,
-    /// base_key → active topic (empty string = default session)
-    active: std::collections::HashMap<String, String>,
-    /// base_key → previous topic (for /back command)
-    previous: std::collections::HashMap<String, String>,
-}
 
-impl ActiveSessionStore {
-    /// Open or create the active session store.
-    pub fn open(data_dir: &Path) -> Result<Self> {
-        let path = data_dir.join("active_sessions.json");
-        let (active, previous) = if path.exists() {
-            let data = std::fs::read_to_string(&path)?;
-            // #2013: a corrupt store must never silently become an empty one
-            // — the store is not read-only, so the next `save` would persist
-            // the empty-plus-one store OVER the file and destroy every chat's
-            // active topic and `/back` target permanently. Quarantine the
-            // bytes aside (loudly) and start empty instead; the operator can
-            // recover the mappings from the preserved file. Twin of #2005.
-            let stored: StoredActiveSessions = match serde_json::from_str(&data) {
-                Ok(stored) => stored,
-                Err(error) => {
-                    tracing::error!(
-                        path = %path.display(),
-                        %error,
-                        bytes = data.len(),
-                        "active session store is corrupt; quarantining it and starting \
-                         with no active topics. Existing topic mappings will not apply \
-                         until this is resolved.",
-                    );
-                    quarantine_active_session_store(&path);
-                    StoredActiveSessions::default()
-                }
-            };
-            (stored.active, stored.previous)
-        } else {
-            (Default::default(), Default::default())
-        };
-        Ok(Self {
-            path,
-            active,
-            previous,
-        })
-    }
 
-    /// Resolve the full SessionKey for a base key, applying the active topic.
-    pub fn resolve_session_key(&self, base_key: &str) -> SessionKey {
-        let topic = self.active.get(base_key).map(|s| s.as_str()).unwrap_or("");
-        if topic.is_empty() {
-            SessionKey(base_key.to_string())
-        } else {
-            SessionKey(format!("{base_key}#{topic}"))
-        }
-    }
 
-    /// Get the active topic for a base key (empty string = default).
-    pub fn get_active_topic(&self, base_key: &str) -> &str {
-        self.active.get(base_key).map(|s| s.as_str()).unwrap_or("")
-    }
 
-    /// Switch to a new topic. Records the previous topic for /back.
-    pub fn switch_to(&mut self, base_key: &str, topic: &str) -> Result<()> {
-        let prev = self.active.get(base_key).cloned().unwrap_or_default();
-        self.previous.insert(base_key.to_string(), prev);
-        self.active.insert(base_key.to_string(), topic.to_string());
-        self.save()
-    }
 
-    /// Switch back to the previous topic. Returns the topic switched to.
-    pub fn go_back(&mut self, base_key: &str) -> Result<Option<String>> {
-        let prev = self.previous.remove(base_key);
-        if let Some(ref topic) = prev {
-            let current = self.active.get(base_key).cloned().unwrap_or_default();
-            self.previous.insert(base_key.to_string(), current);
-            self.active.insert(base_key.to_string(), topic.clone());
-            self.save()?;
-        }
-        Ok(prev)
-    }
-
-    /// Remove tracking for a topic (e.g. when deleted).
-    /// If the deleted topic was active, switches to default.
-    pub fn remove_topic(&mut self, base_key: &str, topic: &str) -> Result<()> {
-        if self.get_active_topic(base_key) == topic {
-            self.active.insert(base_key.to_string(), String::new());
-        }
-        if self.previous.get(base_key).map(|s| s.as_str()) == Some(topic) {
-            self.previous.remove(base_key);
-        }
-        self.save()
-    }
-
-    fn save(&self) -> Result<()> {
-        let stored = StoredActiveSessions {
-            active: self.active.clone(),
-            previous: self.previous.clone(),
-        };
-        let json = serde_json::to_string_pretty(&stored)?;
-
-        // Atomic write-then-rename. #2013: the temp name must be UNIQUE —
-        // two processes sharing a data dir racing one fixed `.tmp` path would
-        // both write it and race the rename, one clobbering the other's
-        // store (the same hazard `rewrite_tmp_path` documents for session
-        // JSONL). fsync the temp file BEFORE the rename and the directory
-        // AFTER: the rename was already atomic, but not DURABLE — a hard
-        // power loss could leave a zero-length/truncated
-        // `active_sessions.json`, exactly the input the corrupt-store branch
-        // in `open` then has to quarantine (#2005).
-        let tmp = self.path.with_extension(format!(
-            "json.{}-{}.tmp",
-            std::process::id(),
-            ACTIVE_SESSIONS_TMP_SEQ.fetch_add(1, Ordering::Relaxed),
-        ));
-        if let Err(error) = write_and_sync(&tmp, &json) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(error.wrap_err("failed to write active session store temp"));
-        }
-        if let Err(error) = std::fs::rename(&tmp, &self.path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(eyre::Report::new(error).wrap_err("failed to rename active session store"));
-        }
-        if let Some(dir) = self.path.parent() {
-            fsync_dir(dir);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct StoredActiveSessions {
-    #[serde(default)]
-    active: std::collections::HashMap<String, String>,
-    #[serde(default)]
-    previous: std::collections::HashMap<String, String>,
-}
-
-/// Per-process counter for unique active-session-store temp-file names
-/// (same collision argument as `REWRITE_TMP_COUNTER` above, for the
-/// `active_sessions.json` rewrite in `ActiveSessionStore::save`).
-static ACTIVE_SESSIONS_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// Move a corrupt active-session store aside so the next save cannot
-/// overwrite it. Best-effort: if the rename fails we have still logged the
-/// corruption, and leaving the file in place is no worse than the pre-#2013
-/// behaviour.
-fn quarantine_active_session_store(path: &Path) {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or_default();
-    let quarantined = path.with_extension(format!("corrupt-{stamp}"));
-    match std::fs::rename(path, &quarantined) {
-        Ok(()) => tracing::error!(
-            quarantined = %quarantined.display(),
-            "corrupt active session store preserved here — recover topic mappings from it",
-        ),
-        Err(error) => tracing::error!(
-            path = %path.display(),
-            %error,
-            "could not quarantine the corrupt active session store",
-        ),
-    }
-}
-
-/// Write `json` to `path` and fsync the FILE before it is renamed into place.
-fn write_and_sync(path: &Path, json: &str) -> Result<()> {
-    use std::io::Write as _;
-    let mut file = std::fs::File::create(path)?;
-    file.write_all(json.as_bytes())?;
-    // `flush()` on a std File is a no-op (no userspace buffer) — `sync_all` is
-    // what actually gets the bytes to stable storage.
-    file.sync_all()?;
-    Ok(())
-}
 
 /// fsync a directory so a rename into it is durable. Best-effort: on non-Unix
 /// std cannot open a directory for syncing, so the rename there is only as

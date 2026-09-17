@@ -886,35 +886,100 @@ fn bare_session() -> SessionKey {
 }
 
 #[test]
-fn tool_started_topic_method_reads_explicit_field_then_session_suffix() {
-    let with_field = UiNotification::ToolStarted(ToolStartedEvent {
-        session_id: bare_session(),
-        topic: Some("slides".into()),
-        turn_id: TurnId::new(),
-        tool_call_id: "tc-1".into(),
-        tool_name: "shell".into(),
-        arguments: None,
-    });
-    assert_eq!(
-        with_field.topic(),
-        Some("slides"),
-        "explicit topic field wins over base_key() session_id"
-    );
+fn topic_method_reads_explicit_field_then_session_suffix_across_event_classes() {
+    // One row per topic-bearing event class (#1329 lineage): the accessor
+    // rule is shared — explicit `topic` field wins, else the session_id
+    // suffix, else None — but each class must keep exercising it.
+    let cases: Vec<(&str, Box<dyn Fn(SessionKey, Option<String>) -> UiNotification>)> = vec![
+        (
+            "ToolStarted",
+            Box::new(|session, topic| {
+                UiNotification::ToolStarted(ToolStartedEvent {
+                    session_id: session,
+                    topic,
+                    turn_id: TurnId::new(),
+                    tool_call_id: "tc".into(),
+                    tool_name: "shell".into(),
+                    arguments: None,
+                })
+            }),
+        ),
+        (
+            "ApprovalAutoResolved",
+            Box::new(|session, topic| {
+                UiNotification::ApprovalAutoResolved(ApprovalAutoResolvedEvent {
+                    session_id: session,
+                    topic,
+                    approval_id: ApprovalId::new(),
+                    turn_id: TurnId::new(),
+                    tool_name: "shell".into(),
+                    scope: approval_scopes::SESSION.into(),
+                    scope_match: "exact".into(),
+                    decision: ApprovalDecision::Approve,
+                })
+            }),
+        ),
+        (
+            "ApprovalDecided",
+            Box::new(|session, topic| {
+                UiNotification::ApprovalDecided(ApprovalDecidedEvent {
+                    session_id: session,
+                    topic,
+                    approval_id: ApprovalId::new(),
+                    turn_id: TurnId::new(),
+                    decision: ApprovalDecision::Approve,
+                    scope: None,
+                    decided_at: Utc::now(),
+                    decided_by: "user:test".into(),
+                    auto_resolved: false,
+                    policy_id: None,
+                    client_note: None,
+                })
+            }),
+        ),
+        (
+            "ApprovalCancelled",
+            Box::new(|session, topic| {
+                UiNotification::ApprovalCancelled(ApprovalCancelledEvent {
+                    session_id: session,
+                    topic,
+                    approval_id: ApprovalId::new(),
+                    turn_id: TurnId::new(),
+                    reason: approval_cancelled_reasons::TURN_INTERRUPTED.into(),
+                })
+            }),
+        ),
+        (
+            "FileAttached",
+            Box::new(|session, topic| {
+                UiNotification::FileAttached(FileAttachedEvent {
+                    session_id: session,
+                    topic,
+                    turn_id: TurnId::new(),
+                    path: "/tmp/deck.pptx".into(),
+                    tool_call_id: None,
+                    attachment_owner: None,
+                    mime: None,
+                })
+            }),
+        ),
+    ];
+    for (name, build) in &cases {
+        let with_field = build(bare_session(), Some("slides".into()));
+        assert_eq!(
+            with_field.topic(),
+            Some("slides"),
+            "{name}: explicit topic field wins over base_key() session_id"
+        );
+        let fallback = build(topic_session(), None);
+        assert_eq!(
+            fallback.topic(),
+            Some("slides"),
+            "{name}: missing explicit topic falls back to session_id suffix"
+        );
+    }
 
-    let fallback = UiNotification::ToolStarted(ToolStartedEvent {
-        session_id: topic_session(),
-        topic: None,
-        turn_id: TurnId::new(),
-        tool_call_id: "tc-2".into(),
-        tool_name: "shell".into(),
-        arguments: None,
-    });
-    assert_eq!(
-        fallback.topic(),
-        Some("slides"),
-        "missing explicit topic falls back to session_id suffix"
-    );
-
+    // The original ToolStarted test also pinned the neither case.
     let neither = UiNotification::ToolStarted(ToolStartedEvent {
         session_id: bare_session(),
         topic: None,
@@ -924,117 +989,6 @@ fn tool_started_topic_method_reads_explicit_field_then_session_suffix() {
         arguments: None,
     });
     assert_eq!(neither.topic(), None, "no topic anywhere → None");
-}
-
-#[test]
-fn approval_auto_resolved_topic_method_reads_explicit_field_then_session_suffix() {
-    let with_field = UiNotification::ApprovalAutoResolved(ApprovalAutoResolvedEvent {
-        session_id: bare_session(),
-        topic: Some("slides".into()),
-        approval_id: ApprovalId::new(),
-        turn_id: TurnId::new(),
-        tool_name: "shell".into(),
-        scope: approval_scopes::SESSION.into(),
-        scope_match: "exact".into(),
-        decision: ApprovalDecision::Approve,
-    });
-    assert_eq!(with_field.topic(), Some("slides"));
-
-    let fallback = UiNotification::ApprovalAutoResolved(ApprovalAutoResolvedEvent {
-        session_id: topic_session(),
-        topic: None,
-        approval_id: ApprovalId::new(),
-        turn_id: TurnId::new(),
-        tool_name: "shell".into(),
-        scope: approval_scopes::SESSION.into(),
-        scope_match: "exact".into(),
-        decision: ApprovalDecision::Approve,
-    });
-    assert_eq!(fallback.topic(), Some("slides"));
-}
-
-#[test]
-fn approval_decided_topic_method_reads_explicit_field_then_session_suffix() {
-    let with_field = UiNotification::ApprovalDecided(ApprovalDecidedEvent {
-        session_id: bare_session(),
-        topic: Some("slides".into()),
-        approval_id: ApprovalId::new(),
-        turn_id: TurnId::new(),
-        decision: ApprovalDecision::Approve,
-        scope: None,
-        decided_at: Utc::now(),
-        decided_by: "user:test".into(),
-        auto_resolved: false,
-        policy_id: None,
-        client_note: None,
-    });
-    assert_eq!(with_field.topic(), Some("slides"));
-
-    let fallback = UiNotification::ApprovalDecided(ApprovalDecidedEvent {
-        session_id: topic_session(),
-        topic: None,
-        approval_id: ApprovalId::new(),
-        turn_id: TurnId::new(),
-        decision: ApprovalDecision::Approve,
-        scope: None,
-        decided_at: Utc::now(),
-        decided_by: "user:test".into(),
-        auto_resolved: false,
-        policy_id: None,
-        client_note: None,
-    });
-    assert_eq!(fallback.topic(), Some("slides"));
-}
-
-#[test]
-fn approval_cancelled_topic_method_reads_explicit_field_then_session_suffix() {
-    let with_field = UiNotification::ApprovalCancelled(ApprovalCancelledEvent {
-        session_id: bare_session(),
-        topic: Some("slides".into()),
-        approval_id: ApprovalId::new(),
-        turn_id: TurnId::new(),
-        reason: approval_cancelled_reasons::TURN_INTERRUPTED.into(),
-    });
-    assert_eq!(with_field.topic(), Some("slides"));
-
-    let fallback = UiNotification::ApprovalCancelled(ApprovalCancelledEvent {
-        session_id: topic_session(),
-        topic: None,
-        approval_id: ApprovalId::new(),
-        turn_id: TurnId::new(),
-        reason: approval_cancelled_reasons::TURN_INTERRUPTED.into(),
-    });
-    assert_eq!(fallback.topic(), Some("slides"));
-}
-
-/// #1329 sibling test: FileAttached gained the same `topic` field
-/// as the 6 ApprovalDecided-class events; verify the same access
-/// rule (explicit first, suffix fallback). This was the bug the
-/// P0-A exemption patched; with explicit field, the exemption is
-/// no longer needed.
-#[test]
-fn file_attached_topic_method_reads_explicit_field_then_session_suffix() {
-    let with_field = UiNotification::FileAttached(FileAttachedEvent {
-        session_id: bare_session(),
-        topic: Some("slides".into()),
-        turn_id: TurnId::new(),
-        path: "/tmp/deck.pptx".into(),
-        tool_call_id: Some("tc-slides".into()),
-        attachment_owner: None,
-        mime: None,
-    });
-    assert_eq!(with_field.topic(), Some("slides"));
-
-    let fallback = UiNotification::FileAttached(FileAttachedEvent {
-        session_id: topic_session(),
-        topic: None,
-        turn_id: TurnId::new(),
-        path: "/tmp/deck.pptx".into(),
-        tool_call_id: None,
-        attachment_owner: None,
-        mime: None,
-    });
-    assert_eq!(fallback.topic(), Some("slides"));
 }
 
 /// `stamp_topic_from_session` MUST populate the new explicit

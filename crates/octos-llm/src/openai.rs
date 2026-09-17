@@ -300,13 +300,6 @@ impl OpenAIProvider {
         }
     }
 
-    /// Create a provider using the OPENAI_API_KEY environment variable.
-    pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("OPENAI_API_KEY")
-            .wrap_err("OPENAI_API_KEY environment variable not set")?;
-        Ok(Self::new(api_key, "gpt-4o"))
-    }
-
     /// Set a custom base URL (for Azure, local proxies, etc.).
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         let url = base_url.into();

@@ -245,6 +245,8 @@ impl RoleTemplate {
         ROLE_TEMPLATES
     }
 
+    /// Return the template tool budget in the owned shape expected by
+    /// `SpawnTool::Input.allowed_tools` and `ToolPolicy.allow`.
     /// True if `entry` is advertised as in-budget for this role.
     /// Pure-string equality — the registry stores either group
     /// identifiers (`"group:search"`) or exact tool names
@@ -257,8 +259,6 @@ impl RoleTemplate {
         self.allowed_tools.contains(&entry)
     }
 
-    /// Return the template tool budget in the owned shape expected by
-    /// `SpawnTool::Input.allowed_tools` and `ToolPolicy.allow`.
     /// Issue #971 (M14-C) wires this into the spawn aliases so a role
     /// name on the wire resolves to the same allow list the runtime
     /// gates the child agent on.

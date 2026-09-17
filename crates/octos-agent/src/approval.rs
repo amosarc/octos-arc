@@ -39,13 +39,6 @@ pub enum ApprovalTimeoutBehavior {
     Notify,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ApprovalDecision {
-    Approve,
-    Deny,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalRequestSpec {
     pub title: String,
@@ -76,14 +69,6 @@ pub struct ApprovalRequestEnvelope {
     pub authorized_approvers: Vec<String>,
     pub expires_at: DateTime<Utc>,
     pub on_timeout: ApprovalTimeoutBehavior,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApprovalResponsePayload {
-    pub request_id: String,
-    pub decision: ApprovalDecision,
-    pub source_event_id: String,
-    pub tool_args_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

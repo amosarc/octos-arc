@@ -89,14 +89,6 @@ impl GeminiProvider {
         }
     }
 
-    /// Create a provider using the GEMINI_API_KEY environment variable.
-    pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("GEMINI_API_KEY")
-            .or_else(|_| std::env::var("GOOGLE_API_KEY"))
-            .wrap_err("GEMINI_API_KEY or GOOGLE_API_KEY environment variable not set")?;
-        Ok(Self::new(api_key, "gemini-2.5-flash"))
-    }
-
     /// Set a custom base URL.
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();

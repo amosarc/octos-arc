@@ -14,7 +14,7 @@ mod store;
 pub use episode::{Episode, EpisodeOutcome, EpisodeSource};
 pub use hybrid_search::{HybridIndex, HybridScore, VectorCoverage};
 pub use memory_store::{
-    DEFAULT_MAX_INJECT_TOKENS, ExtractionItem, MemoryStore, NoteKind, NoteOrigin, StagingNote,
+    DEFAULT_MAX_INJECT_TOKENS, MemoryStore, NoteKind, NoteOrigin, StagingNote,
     UsageMap, UsageStat, estimate_tokens, extract_abstract, is_reserved_memory_name,
     is_valid_entry_id,
 };

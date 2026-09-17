@@ -125,17 +125,6 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-/// Schema version of the [`SessionScope`] shape. Bump on incompatible
-/// changes.
-///
-/// Version history:
-/// - v1: workspace + shared_zones (MultiTenant) / workspace +
-///   granted_dirs (Solo).
-/// - v2 (PR-A SKILL.md injection rethink): adds `skill_read_zones`,
-///   a read-only allowlist that lets file tools reach plugin
-///   `skill_dir` trees. Writes remain workspace-only. Additive — old
-///   callers that pass an empty list keep v1 behaviour.
-pub const SESSION_SCOPE_SCHEMA_VERSION: u32 = 2;
 
 /// Default name of the per-session workspace subdirectory inside
 /// `<root>/users/<session_id>/`. Held as a constant so the resolver
@@ -751,26 +740,6 @@ impl SessionScope {
         }
         self.skill_read_zones = dirs;
         Ok(self)
-    }
-
-    /// Return a new `SessionScope` with `dir` added to `granted_dirs`.
-    /// Solo-mode only. Calling on multi-tenant returns
-    /// [`SessionScopeError::GrantNotAllowedInMultiTenant`] per codex
-    /// round-1: silent no-op invites callers to assume the grant
-    /// applied when it didn't.
-    pub fn with_granted_dir(mut self, dir: PathBuf) -> Result<Self, SessionScopeError> {
-        if !dir.is_absolute() {
-            return Err(SessionScopeError::GrantedDirNotAbsolute(0, dir));
-        }
-        match &mut self.mode {
-            ScopeMode::Solo { granted_dirs } => {
-                if !granted_dirs.iter().any(|d| d == &dir) {
-                    granted_dirs.push(dir);
-                }
-                Ok(self)
-            }
-            ScopeMode::MultiTenant { .. } => Err(SessionScopeError::GrantNotAllowedInMultiTenant),
-        }
     }
 
     /// Classify `path` against this scope using pure-lexical rules.

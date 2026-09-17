@@ -270,20 +270,6 @@ pub struct SessionSummary {
 pub const STALE_DECISION_PREFIX: &str = "[STALE]";
 
 impl SessionSummary {
-    /// Construct an empty summary pinned to the current schema version.
-    pub fn empty(goal: impl Into<String>) -> Self {
-        Self {
-            schema_version: SESSION_SUMMARY_SCHEMA_VERSION,
-            goal: goal.into(),
-            constraints: Vec::new(),
-            progress_done: Vec::new(),
-            progress_in_progress: Vec::new(),
-            decisions: Vec::new(),
-            files: Vec::new(),
-            next_steps: Vec::new(),
-        }
-    }
-
     /// Validate the schema version against the running harness.
     ///
     /// Returns `Ok(())` when the payload is at or below the current

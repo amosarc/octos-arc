@@ -134,14 +134,6 @@ pub fn decode_file_handle(handle: &str) -> Option<FileHandleScope> {
     }
 }
 
-pub fn resolve_scoped_file_handle(base_dir: &Path, handle: &str) -> Option<PathBuf> {
-    match decode_file_handle(handle)? {
-        FileHandleScope::ProfileRelative(relative) => canonicalize_under(base_dir, &relative),
-        FileHandleScope::TempUpload(relative) => canonicalize_under(&temp_upload_root(), &relative),
-        FileHandleScope::WorkspaceRelative(_) => None,
-    }
-}
-
 pub fn resolve_workspace_file_handle(workspace_root: &Path, handle: &str) -> Option<PathBuf> {
     let FileHandleScope::WorkspaceRelative(relative) = decode_file_handle(handle)? else {
         return None;

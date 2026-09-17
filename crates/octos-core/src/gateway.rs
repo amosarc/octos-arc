@@ -72,12 +72,6 @@ impl InboundMessage {
         SessionKey::new(&self.channel, &self.chat_id)
     }
 
-    /// True when this message came from outside the runtime (channel user
-    /// traffic). Content-triggered automation must check this before acting
-    /// on message text (#1455).
-    pub fn is_external_user(&self) -> bool {
-        self.origin == MessageOrigin::ExternalUser
-    }
 }
 
 /// Metadata key carrying the sender identity on outbound messages
@@ -165,12 +159,11 @@ mod tests {
         }"#;
         let msg: InboundMessage = serde_json::from_str(json).unwrap();
         assert_eq!(msg.origin, MessageOrigin::ExternalUser);
-        assert!(msg.is_external_user());
         let synthetic = InboundMessage {
             origin: MessageOrigin::Synthetic,
             ..msg
         };
-        assert!(!synthetic.is_external_user());
+        assert_eq!(synthetic.origin, MessageOrigin::Synthetic);
         let roundtrip: InboundMessage =
             serde_json::from_str(&serde_json::to_string(&synthetic).unwrap()).unwrap();
         assert_eq!(roundtrip.origin, MessageOrigin::Synthetic);

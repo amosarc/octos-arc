@@ -122,11 +122,6 @@ impl Turn {
     }
 }
 
-/// Convert a sequence of turns back to plain messages for LLM calls.
-pub fn turns_to_messages(turns: &[Turn]) -> Vec<Message> {
-    turns.iter().map(|t| t.message.clone()).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,18 +156,6 @@ mod tests {
     fn should_set_iteration() {
         let turn = Turn::user_input("Hi").at_iteration(5);
         assert_eq!(turn.iteration, 5);
-    }
-
-    #[test]
-    fn should_convert_turns_to_messages() {
-        let turns = vec![
-            Turn::user_input("Hello"),
-            Turn::tool_result("shell", "ok", "c1"),
-        ];
-        let messages = turns_to_messages(&turns);
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, MessageRole::User);
-        assert_eq!(messages[1].role, MessageRole::Tool);
     }
 
     #[test]

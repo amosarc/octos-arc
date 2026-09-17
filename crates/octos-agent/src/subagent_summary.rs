@@ -113,11 +113,6 @@ impl SubAgentSummaryRegistry {
         guard.len()
     }
 
-    /// True when the registry holds zero watchers.
-    pub fn is_empty(&self) -> bool {
-        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.is_empty()
-    }
 }
 
 /// Source of the activity lines fed into the summary LLM.

@@ -2038,7 +2038,6 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "rpassword",
- "rustix",
  "rustyline",
  "serde",
  "serde_json",

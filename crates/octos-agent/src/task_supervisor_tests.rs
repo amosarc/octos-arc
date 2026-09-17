@@ -469,16 +469,8 @@ fn mark_completed_after_cancel_does_not_overwrite_cancelled_state() {
 }
 
 #[test]
-fn relaunch_failed_task_creates_successor_and_fires_callback() {
-    use std::sync::Mutex;
+fn relaunch_failed_task_creates_lineage_stamped_successor() {
     let supervisor = TaskSupervisor::new();
-    let captured: Arc<Mutex<Vec<RelaunchRequest>>> = Arc::new(Mutex::new(Vec::new()));
-    {
-        let captured = captured.clone();
-        supervisor.set_on_relaunch(move |req| {
-            captured.lock().unwrap().push(req.clone());
-        });
-    }
 
     let task_id = supervisor.register_with_input("bg_research", "call-relaunch-1", Some("session-D"), None);
     supervisor.mark_running(&task_id);
@@ -498,66 +490,11 @@ fn relaunch_failed_task_creates_successor_and_fires_callback() {
     assert_eq!(new_task.tool_name, "bg_research");
     assert_eq!(new_task.tool_call_id, "call-relaunch-1");
     assert_eq!(new_task.session_key.as_deref(), Some("session-D"));
-
-    let log = captured.lock().unwrap();
-    assert_eq!(log.len(), 1, "relaunch callback fired exactly once");
-    assert_eq!(log[0].original_task_id, task_id);
-    assert_eq!(log[0].new_task_id, new_id);
-    assert_eq!(log[0].opts.from_node.as_deref(), Some("design"));
+    // Lineage edge is stamped in runtime_detail for callers to surface.
+    let detail = new_task.runtime_detail.as_deref().unwrap_or_default();
+    assert!(detail.contains(&format!("\"relaunched_from\":\"{task_id}\"")), "{detail}");
 }
 
-/// #2056 — the restore observer fires ONCE per restore, with the table in its
-/// FINAL post-sweep state, and never for a re-enable that restores nothing.
-/// Consumers that mirror task state elsewhere (the octos-cli goal ledger) use
-/// it to notice terminal transitions the previous process never delivered, so
-/// a snapshot taken before the orphan sweep would hand them a row that is
-/// about to change and a repeat firing would re-drive work already done.
-#[test]
-fn should_fire_on_restore_once_with_the_swept_table_when_persistence_is_enabled() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let ledger_path = dir.path().join("tasks.jsonl");
-
-    let writer = TaskSupervisor::new();
-    writer.enable_persistence(&ledger_path).unwrap();
-    let orphan = writer.register_with_input("search", "call-orphan", Some("api:session"), None);
-    writer.mark_running(&orphan);
-    let finished = writer.register_with_input("fm_tts", "call-done", Some("api:session"), None);
-    writer.mark_completed(&finished, vec![]);
-    drop(writer);
-
-    type RestoredRows = Vec<(String, TaskStatus)>;
-    let observed: Arc<Mutex<Vec<RestoredRows>>> = Arc::new(Mutex::new(Vec::new()));
-    let restored = TaskSupervisor::new();
-    let sink = Arc::clone(&observed);
-    restored.set_on_restore(move |tasks| {
-        let mut rows: RestoredRows = tasks
-            .iter()
-            .map(|task| (task.id.clone(), task.status.clone()))
-            .collect();
-        rows.sort_by(|left, right| left.0.cmp(&right.0));
-        sink.lock().unwrap().push(rows);
-    });
-    restored.enable_persistence(&ledger_path).unwrap();
-
-    let calls = observed.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1, "exactly one firing per restore");
-    let rows: std::collections::HashMap<String, TaskStatus> = calls[0].iter().cloned().collect();
-    assert_eq!(
-        rows.get(&orphan),
-        Some(&TaskStatus::Failed),
-        "the observer sees the table AFTER the orphan sweep, not before it",
-    );
-    assert_eq!(rows.get(&finished), Some(&TaskStatus::Completed));
-
-    // Re-enabling the SAME path restores nothing (the idempotence guard) and
-    // must not re-fire.
-    restored.enable_persistence(&ledger_path).unwrap();
-    assert_eq!(
-        observed.lock().unwrap().len(),
-        1,
-        "a no-op re-enable must not re-fire the restore observer",
-    );
-}
 
 #[test]
 fn enable_persistence_reaps_orphan_running_tasks_at_startup() {

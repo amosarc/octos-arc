@@ -891,11 +891,6 @@ pub fn resolve_config_file_path(
 }
 
 impl Config {
-    /// Path to the runtime config file under the resolved data dir.
-    pub fn data_dir_config_path(data_dir: &Path) -> PathBuf {
-        data_dir.join("config.json")
-    }
-
     /// Load config from the current project plus the canonical config context.
     ///
     /// This is the preferred entrypoint: it threads the single

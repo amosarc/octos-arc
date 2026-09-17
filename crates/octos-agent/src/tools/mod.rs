@@ -761,14 +761,6 @@ pub use registry::ToolRegistry;
 pub mod policy;
 pub use policy::{PolicyDecision, ToolPolicy};
 
-// Shared dispatch-policy gate (#714 / #713) re-exported from the
-// crate root so [`SpawnTool::with_dispatch_policy`] callers can pull
-// the type alongside the other `tools::*` re-exports.
-pub use crate::dispatch_policy::{
-    DispatchBackendMetadata, DispatchPolicy, DispatchTarget, GateDenial, enforce_dispatch_gates,
-    enforce_dispatch_gates_for_backend,
-};
-
 // Robot safety-tier groups consulted by ToolPolicy evaluation.
 
 // Shared SSRF protection

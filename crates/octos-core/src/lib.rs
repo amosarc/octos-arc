@@ -8,7 +8,6 @@
 
 pub mod app_ui_codec;
 pub mod env_hygiene;
-mod error;
 pub mod gateway;
 pub mod git_worktree;
 pub mod secret_redaction;
@@ -22,12 +21,11 @@ pub use env_hygiene::{
     BLOCKED_ENV_VARS, is_registered_secret_env_name, is_secret_env_name, register_secret_env_names,
     sanitize_git_command_env,
 };
-pub use error::{Error, ErrorKind, Result};
 pub use gateway::{InboundMessage, MessageOrigin, OutboundMessage};
 pub use git_worktree::clear_worktree_admin_entry;
 pub use session_scope::{
     DEFAULT_MULTI_TENANT_SHARED_ZONE_NAMES, MULTI_TENANT_USERS_DIR_NAME,
-    MULTI_TENANT_WORKSPACE_DIR_NAME, PathClassification, SESSION_SCOPE_SCHEMA_VERSION, ScopeMode,
+    MULTI_TENANT_WORKSPACE_DIR_NAME, PathClassification, ScopeMode,
     SessionScope, SessionScopeError, canonical_root_lossy, canonicalize_lossy,
     canonicalize_skill_read_zones, is_safe_session_id,
 };

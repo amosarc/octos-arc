@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use eyre::{Result, WrapErr, bail};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, FallbackModel, GatewayConfig};
 
@@ -226,75 +226,6 @@ impl ProfileSkillsConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub enum PatchField<T> {
-    #[default]
-    Absent,
-    Clear,
-    Value(T),
-}
-
-impl<T> PatchField<T> {
-    pub fn into_value(self) -> Option<T> {
-        match self {
-            Self::Value(value) => Some(value),
-            Self::Absent | Self::Clear => None,
-        }
-    }
-}
-
-impl<'de, T> Deserialize<'de> for PatchField<T>
-where
-    T: Deserialize<'de>,
-{
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Ok(match Option::<T>::deserialize(deserializer)? {
-            Some(value) => Self::Value(value),
-            None => Self::Clear,
-        })
-    }
-}
-
-/// Partial profile config update from the admin/self-service API.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProfileConfigPatch {
-    #[serde(default)]
-    pub llm: PatchField<LlmProfileConfig>,
-    #[serde(default)]
-    pub gateway: Option<GatewaySettingsPatch>,
-    #[serde(default)]
-    pub env_vars: Option<HashMap<String, String>>,
-    #[serde(default)]
-    pub hooks: Option<Vec<octos_agent::HookConfig>>,
-    #[serde(default)]
-    pub sandbox: Option<octos_agent::SandboxConfig>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GatewaySettingsPatch {
-    #[serde(default)]
-    pub max_history: PatchField<usize>,
-    #[serde(default)]
-    pub max_iterations: PatchField<u32>,
-    #[serde(default)]
-    pub system_prompt: PatchField<String>,
-    #[serde(default)]
-    pub max_concurrent_sessions: PatchField<usize>,
-    #[serde(default)]
-    pub browser_timeout_secs: PatchField<u64>,
-    #[serde(default)]
-    pub max_output_tokens: PatchField<u32>,
-    #[serde(default)]
-    pub watchdog_enabled: PatchField<bool>,
-    #[serde(default)]
-    pub alerts_enabled: PatchField<bool>,
-}
-
 /// Structured LLM contract for a profile.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -399,27 +330,6 @@ impl ProfileConfig {
             .and_then(|selection| selection.model_id.as_deref())
     }
 
-    pub fn apply_patch(&mut self, patch: ProfileConfigPatch) {
-        match patch.llm {
-            PatchField::Absent => {}
-            PatchField::Clear => self.llm = None,
-            PatchField::Value(llm) => self.llm = Some(llm),
-        }
-        if let Some(gateway) = patch.gateway {
-            gateway.apply_to(&mut self.gateway);
-        }
-        if let Some(env_vars) = patch.env_vars {
-            self.env_vars = env_vars;
-        }
-        if let Some(hooks) = patch.hooks {
-            self.hooks = hooks;
-        }
-        if let Some(sandbox) = patch.sandbox {
-            self.sandbox = sandbox;
-        }
-        self.normalize_llm_contract();
-    }
-
     pub fn has_llm_selection(&self) -> bool {
         let mut normalized = self.clone();
         normalized.normalize_llm_contract();
@@ -447,61 +357,6 @@ impl ProfileConfig {
         } else {
             Some(llm)
         };
-    }
-}
-
-impl GatewaySettingsPatch {
-    fn apply_to(self, gateway: &mut GatewaySettings) {
-        match self.max_history {
-            PatchField::Absent => {}
-            PatchField::Clear => gateway.max_history = None,
-            PatchField::Value(max_history) => gateway.max_history = Some(max_history),
-        }
-        match self.max_iterations {
-            PatchField::Absent => {}
-            PatchField::Clear => gateway.max_iterations = None,
-            PatchField::Value(max_iterations) => gateway.max_iterations = Some(max_iterations),
-        }
-        match self.system_prompt {
-            PatchField::Absent => {}
-            PatchField::Clear => gateway.system_prompt = None,
-            PatchField::Value(system_prompt) => gateway.system_prompt = Some(system_prompt),
-        }
-        match self.max_concurrent_sessions {
-            PatchField::Absent => {}
-            PatchField::Clear => gateway.max_concurrent_sessions = None,
-            PatchField::Value(max_concurrent_sessions) => {
-                gateway.max_concurrent_sessions = Some(max_concurrent_sessions);
-            }
-        }
-        match self.browser_timeout_secs {
-            PatchField::Absent => {}
-            PatchField::Clear => gateway.browser_timeout_secs = None,
-            PatchField::Value(browser_timeout_secs) => {
-                gateway.browser_timeout_secs = Some(browser_timeout_secs);
-            }
-        }
-        match self.max_output_tokens {
-            PatchField::Absent => {}
-            PatchField::Clear => gateway.max_output_tokens = None,
-            PatchField::Value(max_output_tokens) => {
-                gateway.max_output_tokens = Some(max_output_tokens);
-            }
-        }
-        match self.watchdog_enabled {
-            PatchField::Absent => {}
-            PatchField::Clear => gateway.watchdog_enabled = None,
-            PatchField::Value(watchdog_enabled) => {
-                gateway.watchdog_enabled = Some(watchdog_enabled);
-            }
-        }
-        match self.alerts_enabled {
-            PatchField::Absent => {}
-            PatchField::Clear => gateway.alerts_enabled = None,
-            PatchField::Value(alerts_enabled) => {
-                gateway.alerts_enabled = Some(alerts_enabled);
-            }
-        }
     }
 }
 
@@ -1281,44 +1136,11 @@ fn validate_public_subdomain(slug: &str) -> Result<()> {
     Ok(())
 }
 
-/// Return a copy of the profile with secret values in `env_vars` masked.
-/// Shows the first 4 and last 3 characters for keys longer than 12 chars,
-/// otherwise replaces the entire value with `***`.
-/// Keychain-backed values show as a special indicator.
-pub fn mask_secrets(profile: &UserProfile) -> UserProfile {
-    let mut masked = profile.clone();
-    for value in masked.config.env_vars.values_mut() {
-        // Any keychain marker (bare or profile-scoped) shows the indicator,
-        // never a mangled mask of the marker string itself.
-        if crate::auth::keychain::is_marker(value) {
-            *value = KEYCHAIN_DISPLAY.to_string();
-        } else {
-            *value = mask_value(value);
-        }
-    }
-    masked.config.normalize_llm_contract();
-    masked
-}
-
 /// Display string for keychain-backed values in API responses.
 const KEYCHAIN_DISPLAY: &str = "\u{1f511} (keychain)";
 
 pub(crate) fn is_display_secret_value(value: &str) -> bool {
     value.contains("***") || value.contains(KEYCHAIN_DISPLAY)
-}
-
-fn mask_value(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let len = chars.len();
-    if len > 12 {
-        let prefix: String = chars[..4].iter().collect();
-        let suffix: String = chars[len - 3..].iter().collect();
-        format!("{prefix}***{suffix}")
-    } else if len > 0 {
-        "***".into()
-    } else {
-        String::new()
-    }
 }
 
 /// Shared slug shape check for profile IDs and public subdomains:
@@ -1478,91 +1300,9 @@ pub(crate) fn config_from_profile(profile: &UserProfile) -> Config {
     }
 }
 
-/// Classification of changes between two profile versions.
-#[derive(Debug)]
-pub enum ProfileChange {
-    /// No meaningful change detected.
-    Unchanged,
-    /// Only hot-reloadable fields changed (gateway's own watcher handles these).
-    HotReloadable,
-    /// Fields changed that require a gateway restart.
-    RestartRequired(Vec<String>),
-}
-
-/// Compare two profiles and classify the nature of changes.
-///
-/// Restart-required: llm, review, search, apps, channels,
-///   env_vars, email, hooks, sandbox, routing, plugins.
-/// Hot-reloadable: system_prompt, max_history, max_iterations,
-///   max_concurrent_sessions, browser_timeout_secs.
-pub fn diff_profiles(old: &UserProfile, new: &UserProfile) -> ProfileChange {
-    let mut restart_fields = Vec::new();
-    let oc = &old.config;
-    let nc = &new.config;
-
-    // Restart-required: parent_id change
-    if old.parent_id != new.parent_id {
-        restart_fields.push("parent_id".into());
-    }
-
-    if oc.llm != nc.llm {
-        restart_fields.push("llm".into());
-    }
-    if oc.env_vars != nc.env_vars {
-        restart_fields.push("env_vars".into());
-    }
-    if oc.hooks != nc.hooks {
-        restart_fields.push("hooks".into());
-    }
-    if oc.sandbox != nc.sandbox {
-        restart_fields.push("sandbox".into());
-    }
-
-    if !restart_fields.is_empty() {
-        return ProfileChange::RestartRequired(restart_fields);
-    }
-
-    // Hot-reloadable fields
-    if oc.gateway != nc.gateway {
-        return ProfileChange::HotReloadable;
-    }
-
-    ProfileChange::Unchanged
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn llm_selection(
-        family_id: &str,
-        model_id: &str,
-        api_key_env: Option<&str>,
-        base_url: Option<&str>,
-    ) -> LlmModelSelectionConfig {
-        LlmModelSelectionConfig {
-            family_id: Some(family_id.into()),
-            model_id: Some(model_id.into()),
-            route: Some(LlmRouteConfig {
-                route_id: None,
-                label: None,
-                base_url: base_url.map(str::to_string),
-                api_key_env: api_key_env.map(str::to_string),
-                api_type: None,
-            }),
-            ..Default::default()
-        }
-    }
-
-    fn llm_profile(
-        primary: LlmModelSelectionConfig,
-        fallbacks: Vec<LlmModelSelectionConfig>,
-    ) -> LlmProfileConfig {
-        LlmProfileConfig {
-            primary: Some(primary),
-            fallbacks,
-        }
-    }
 
     #[test]
     fn test_validate_profile_id() {
@@ -1765,82 +1505,6 @@ mod tests {
             let meta = std::fs::metadata(store.profile_path("perms-test")).unwrap();
             assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         }
-    }
-
-    #[test]
-    fn test_diff_profiles_model_change_is_hot() {
-        let base = UserProfile {
-            id: "diff-test".into(),
-            name: "Diff".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                llm: Some(llm_profile(
-                    llm_selection("openai", "gpt-4o", None, None),
-                    vec![],
-                )),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        let mut changed = base.clone();
-        changed.config.llm = Some(llm_profile(
-            llm_selection("openai", "gpt-4o-mini", None, None),
-            vec![],
-        ));
-
-        assert!(matches!(
-            diff_profiles(&base, &changed),
-            ProfileChange::RestartRequired(fields) if fields == vec!["llm"]
-        ));
-    }
-
-    #[test]
-    fn test_profile_config_patch_rejects_unknown_root_field() {
-        let err = serde_json::from_value::<ProfileConfigPatch>(serde_json::json!({
-            "gateway": { "max_history": 100 },
-            "bogus": true
-        }))
-        .expect_err("unknown root field should be rejected");
-
-        assert!(err.to_string().contains("unknown field `bogus`"));
-    }
-
-    #[test]
-    fn test_mask_secrets_keychain_marker() {
-        let profile = UserProfile {
-            id: "kc".into(),
-            name: "KC".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                env_vars: [
-                    ("KC_KEY".into(), "keychain:".into()),
-                    ("PLAIN_KEY".into(), "sk-1234567890abcdef".into()),
-                    ("SHORT".into(), "abc".into()),
-                    ("EMPTY".into(), String::new()),
-                ]
-                .into(),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        let masked = mask_secrets(&profile);
-        assert_eq!(
-            masked.config.env_vars["KC_KEY"], "\u{1f511} (keychain)",
-            "keychain marker should display as key emoji"
-        );
-        assert_eq!(masked.config.env_vars["PLAIN_KEY"], "sk-1***def");
-        assert_eq!(masked.config.env_vars["SHORT"], "***");
-        assert_eq!(masked.config.env_vars["EMPTY"], "");
     }
 
     fn inheritance_profile(id: &str) -> UserProfile {

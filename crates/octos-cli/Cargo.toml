@@ -52,11 +52,6 @@ metrics = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 rpassword = { workspace = true }
-# `rustix::process::test_kill_process` — the kill(pid, 0) liveness probe in
-# `src/build_cache/pool.rs` (review #3 D1). Unlike the `kill` binary, the
-# syscall returns a distinguishable errno (ESRCH vs EPERM), and unlike
-# `libc::kill` it is safe under the workspace-wide deny(unsafe_code).
-rustix = { version = "1.1", features = ["process"] }
 
 [features]
 # chat, ACP and serve use one OUP dispatcher. Minimal library builds can opt
@@ -69,8 +64,4 @@ ast = ["octos-agent/ast"]
 workspace = true
 
 [dev-dependencies]
-# Wave-4 B3.4 — enable `test-utils` for octos-llm so the gateway's
-# failover-surfacing tests can call `publish_failover_for_subscribers`.
-# Production builds don't see this; only `cargo test -p octos-cli`.
-octos-llm = { workspace = true, features = ["test-utils"] }
 

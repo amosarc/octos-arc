@@ -50,11 +50,6 @@ impl ClientMessageId {
         }
     }
 
-    /// Mint a fresh ID (used by tests and synthetic call paths).
-    pub fn generate() -> Self {
-        Self(Uuid::now_v7().to_string())
-    }
-
     /// Borrow the inner string.
     pub fn as_str(&self) -> &str {
         &self.0

@@ -410,14 +410,6 @@ impl BackgroundTask {
 /// Callback invoked when a task's status changes.
 type OnChangeCallback = Arc<dyn Fn(&BackgroundTask) + Send + Sync>;
 
-/// #2055 — callback invoked once per SUCCESSFUL registration, with the
-/// freshly inserted task snapshot. The registration-side twin of
-/// [`OnTerminalCallback`]: octos-agent cannot see octos-fleet, so the
-/// goal-ledger task-row creation lives in octos-cli and is wired through
-/// this observer next to `set_on_terminal`. `Arc` (not `Box`) so
-/// `notify_register` can clone it out of its mutex and invoke it with no
-/// supervisor locks held, exactly like `notify_change`.
-type OnRegisterCallback = Arc<dyn Fn(&BackgroundTask) + Send + Sync>;
 
 /// #2056 — callback invoked ONCE at the end of
 /// [`TaskSupervisor::enable_persistence`], with the rebuilt task table as it
@@ -529,47 +521,8 @@ pub enum TerminalOutcome {
     Failed(SpawnOnlyFailureSignal),
 }
 
-/// Gap-1 unification: a single terminal-transition event fired from every
-/// terminal path (`mark_completed`, `mark_failed`, cascade-fail,
-/// orphan-sweep). Carries the union of today's three divergent payloads so
-/// ONE consumer can route success AND failure through the master
-/// continuation queue with a single profile-resolving call path.
-///
-/// `synth_ack_emitted` lifts the load-bearing failure gate from delivery
-/// (today's `notify_failure` two-phase stash) to PROMPT SELECTION: the
-/// consumer suppresses the recovery body for a failure whose synth-ack was
-/// never emitted (sibling-error / pre-flight short-circuit) rather than the
-/// supervisor deciding whether the event is delivered at all. The boolean
-/// is captured at fire-time from
-/// [`TaskSupervisor::was_synth_ack_emitted`]; for the rare fail-before-ack
-/// race the legacy two-phase path (kept live during the strangler
-/// migration) re-emits the deferred signal on ack and the shared dedupe key
-/// collapses the two deliveries to one continuation.
-#[derive(Debug, Clone)]
-pub struct TerminalEvent {
-    /// Snapshot of the task at the moment it went terminal.
-    pub task: BackgroundTask,
-    /// Whether the spawn_only synth-ack ("Background work started …") was
-    /// emitted to the LLM for this task's `tool_call_id`. Only meaningful
-    /// for [`TerminalOutcome::Failed`]; `false` for completions.
-    pub synth_ack_emitted: bool,
-    /// Success vs failure, carrying the failure recovery payload.
-    pub outcome: TerminalOutcome,
-}
 
-impl TerminalEvent {
-    /// The failure signal payload, when this is a failure event.
-    pub fn failure_signal(&self) -> Option<&SpawnOnlyFailureSignal> {
-        match &self.outcome {
-            TerminalOutcome::Failed(signal) => Some(signal),
-            TerminalOutcome::Completed => None,
-        }
-    }
-}
 
-/// Callback invoked on EVERY terminal background-task transition. The
-/// single sink the Gap-1 unification routes all terminal re-entry through.
-type OnTerminalCallback = Box<dyn Fn(&TerminalEvent) + Send + Sync>;
 
 /// Options for `TaskSupervisor::relaunch`. Mirrors the
 /// `POST /api/tasks/{id}/restart-from-node` request body.
@@ -582,28 +535,6 @@ pub struct RelaunchOpts {
     pub from_node: Option<String>,
 }
 
-/// Payload emitted to the relaunch callback when a caller invokes
-/// `TaskSupervisor::relaunch`. The callback owns turning this into a
-/// concrete tokio task that re-executes the work; the supervisor only
-/// stores a forwarding pointer (`relaunched_from`) on the original task.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RelaunchRequest {
-    /// Identifier of the task being relaunched. Always `task.id`.
-    pub original_task_id: String,
-    /// Identifier the supervisor pre-allocated for the relaunched task.
-    /// Already registered on the supervisor in the `Spawned` state so the
-    /// callback can `mark_running` immediately.
-    pub new_task_id: String,
-    pub tool_name: String,
-    pub tool_call_id: String,
-    pub parent_session_key: Option<String>,
-    pub session_key: Option<String>,
-    pub tool_input: Value,
-    pub opts: RelaunchOpts,
-}
-
-/// Callback invoked when a caller asks the supervisor to relaunch a task.
-type OnRelaunchCallback = Box<dyn Fn(&RelaunchRequest) + Send + Sync>;
 
 /// Error variants for [`TaskSupervisor::cancel`]. Mapped to HTTP status
 /// codes by the API layer:
@@ -955,9 +886,6 @@ impl std::fmt::Debug for TaskSupervisor {
             .field("tasks", &self.tasks)
             .field("on_change", &"<callback>")
             .field("on_failure", &"<callback>")
-            .field("on_terminal", &"<callback>")
-            .field("on_register", &"<callback>")
-            .field("on_relaunch", &"<callback>")
             .field("progress_reporter", &progress_reporter_attached)
             .field(
                 "persistence_path",
@@ -1009,11 +937,9 @@ pub struct TaskSupervisor {
     /// every terminal path alongside the legacy `on_change` / `on_failure`
     /// callbacks (strangler — both live during migration; shared dedupe
     /// keys collapse double-delivery to one continuation).
-    on_terminal: Arc<Mutex<Option<OnTerminalCallback>>>,
     /// #2055 — registration observer, fired once from `register_full`'s
     /// single success path (covers every `register*` entry point). The
     /// octos-cli runtime wires the goal-ledger task-row creation here.
-    on_register: Arc<Mutex<Option<OnRegisterCallback>>>,
     /// #2056 — restore observer plus its missed-restore state, under ONE
     /// mutex. The octos-cli runtime wires the goal-ledger reconciliation sweep
     /// here, next to the registration observer above. See
@@ -1026,7 +952,6 @@ pub struct TaskSupervisor {
     /// see each other's hook.
     #[cfg(test)]
     restore_notify_hook: Arc<Mutex<Option<RestoreNotifyHook>>>,
-    on_relaunch: Arc<Mutex<Option<OnRelaunchCallback>>>,
     persistence_path: Arc<Mutex<Option<PathBuf>>>,
     /// Optional reporter that receives a [`ProgressEvent::ToolProgress`]
     /// for every supervised state transition. Wired by the agent's
@@ -1174,15 +1099,6 @@ struct AckAndPending {
     emitted_task_ids: HashSet<String>,
     /// FIFO insertion order for `emitted_task_ids`.
     emitted_insertion_order: VecDeque<String>,
-    /// Gap-1 unification: per-task idempotency guard for the unified
-    /// `on_terminal` callback. Keyed by `task_id` (unique) so each task
-    /// fires its terminal event at most once even across the live →
-    /// cascade-fail → orphan-sweep re-mark paths. Bounded by
-    /// [`MAX_FAILURE_SIGNAL_EMITTED_IDS`] with FIFO eviction (same class
-    /// as `emitted_task_ids`).
-    terminal_notified_task_ids: HashSet<String>,
-    /// FIFO insertion order for `terminal_notified_task_ids`.
-    terminal_notified_insertion_order: VecDeque<String>,
 }
 
 impl AckAndPending {
@@ -1308,32 +1224,6 @@ impl AckAndPending {
         true
     }
 
-    /// Gap-1 unification: mark `task_id` as having fired its unified
-    /// terminal event. Returns `true` on the first call (caller should
-    /// invoke the callback), `false` on subsequent calls (caller must
-    /// suppress). Bounded by [`MAX_FAILURE_SIGNAL_EMITTED_IDS`] with FIFO
-    /// eviction — same idempotency class as [`Self::mark_emitted`].
-    fn mark_terminal_notified(&mut self, task_id: &str) -> bool {
-        if !self.terminal_notified_task_ids.insert(task_id.to_string()) {
-            return false;
-        }
-        self.terminal_notified_insertion_order
-            .push_back(task_id.to_string());
-        while self.terminal_notified_task_ids.len() > MAX_FAILURE_SIGNAL_EMITTED_IDS {
-            if let Some(stale) = self.terminal_notified_insertion_order.pop_front() {
-                if self.terminal_notified_task_ids.remove(&stale) {
-                    tracing::warn!(
-                        evicted_task_id = %stale,
-                        cap = MAX_FAILURE_SIGNAL_EMITTED_IDS,
-                        "evicting oldest terminal-notified id: cap exceeded",
-                    );
-                }
-            } else {
-                break;
-            }
-        }
-        true
-    }
 }
 
 /// Pending failure entry — see the field-level doc on
@@ -1364,12 +1254,9 @@ impl TaskSupervisor {
             on_change: Arc::new(Mutex::new(None)),
             on_change_listeners: Arc::new(Mutex::new(HashMap::new())),
             on_failure: Arc::new(Mutex::new(None)),
-            on_terminal: Arc::new(Mutex::new(None)),
-            on_register: Arc::new(Mutex::new(None)),
             on_restore: Arc::new(Mutex::new(RestoreObserverSlot::default())),
             #[cfg(test)]
             restore_notify_hook: Arc::new(Mutex::new(None)),
-            on_relaunch: Arc::new(Mutex::new(None)),
             persistence_path: Arc::new(Mutex::new(None)),
             progress_reporter: Arc::new(Mutex::new(None)),
             cancel_tokens: Arc::new(CancelTokenStore::default()),
@@ -1430,21 +1317,6 @@ impl TaskSupervisor {
         }
     }
 
-    /// True iff the synth-ack was emitted for `tool_call_id` via
-    /// [`Self::mark_synth_ack_emitted`]. Used by `notify_failure` to gate
-    /// `SpawnOnlyFailureSignal` emission so post-spawn failures only
-    /// trigger a recovery turn when the LLM was previously told the
-    /// background task started successfully.
-    pub fn was_synth_ack_emitted(&self, tool_call_id: &str) -> bool {
-        if tool_call_id.is_empty() {
-            return false;
-        }
-        let guard = self
-            .ack_and_pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        guard.synth_ack_emitted_tool_call_ids.contains(tool_call_id)
-    }
 
     /// Enable append-only persistence for task snapshots and restore existing state.
     ///
@@ -1703,57 +1575,8 @@ impl TaskSupervisor {
         *guard = Some(Box::new(cb));
     }
 
-    /// Gap-1 unification: set the single terminal-transition callback. Fired
-    /// (once per task, idempotently) from `mark_completed` / `mark_failed` /
-    /// cascade-fail / orphan-sweep with a [`TerminalEvent`] union payload.
-    ///
-    /// This is the unified sink the consumer routes BOTH success
-    /// (`ChildCompleted`) AND failure (recovery) re-entry through, with one
-    /// profile-resolving call path. It fires ALONGSIDE the legacy
-    /// `on_change` / `on_failure` callbacks during the strangler migration;
-    /// shared dedupe keys collapse the double delivery to one continuation.
-    ///
-    /// Like `on_failure`, the terminal callback fires at most once per task:
-    /// re-marking an already-terminal task (live + cascade, idempotent
-    /// re-marks) is a no-op for this callback.
-    pub fn set_on_terminal(&self, cb: impl Fn(&TerminalEvent) + Send + Sync + 'static) {
-        let mut guard = self.on_terminal.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = Some(Box::new(cb));
-    }
 
-    /// #2055 — set the registration observer, fired once per SUCCESSFUL
-    /// registration with the freshly inserted task snapshot. Fired from
-    /// `register_full`'s single success return, AFTER the task is inserted
-    /// and its snapshot persisted, so ONE call site covers every
-    /// registration kind (background/spawn_only, sub-agents, MCP sessions,
-    /// peers). Refused registrations (terminal parent, fan-out cap) never
-    /// fire it. The latest observer wins — runtimes re-wire it per turn /
-    /// per actor next to [`Self::set_on_terminal`].
-    pub fn set_on_register(&self, cb: impl Fn(&BackgroundTask) + Send + Sync + 'static) {
-        let mut guard = self.on_register.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = Some(Arc::new(cb));
-    }
 
-    /// #2056 — set the restore observer, fired ONCE at the end of
-    /// [`Self::enable_persistence`] with the rebuilt task table (see
-    /// [`OnRestoreCallback`]). Wired next to [`Self::set_on_register`] by the
-    /// runtime modes and inherited by child / nested supervisors, so the
-    /// consumer that mirrors task state into the goal ledger gets a chance to
-    /// reconcile deliveries the previous process never made. The latest
-    /// observer wins.
-    /// Round 2 (#2056) — if a restore already happened on this supervisor
-    /// while no observer was wired, the observer is invoked IMMEDIATELY with
-    /// the current table. Without that, a site that enables persistence before
-    /// the observers are installed loses the sweep permanently: the later
-    /// wiring re-enables the SAME path and returns at
-    /// [`Self::enable_persistence`]'s idempotence guard, so no further restore
-    /// is ever notified. Round 3 — the install and the taking of that pending
-    /// mark are ONE critical section (see [`RestoreObserverSlot`]); the
-    /// round-2 shape, which installed and then compare-exchanged a separate
-    /// flag, could lose the wakeup entirely.
-    pub fn set_on_restore(&self, cb: impl Fn(&[BackgroundTask]) + Send + Sync + 'static) {
-        self.install_on_restore(Arc::new(cb));
-    }
 
     /// #2055 review round 2 — copy the REGISTRATION observers from `parent`
     /// onto this (freshly created) supervisor: the `on_register` callback
@@ -1771,15 +1594,6 @@ impl TaskSupervisor {
     /// are kept. Both copies are `Arc` clones — cheap, and later re-wiring
     /// on either side does not affect the other.
     pub fn inherit_registration_observers(&self, parent: &TaskSupervisor) {
-        let parent_register = parent
-            .on_register
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if let Some(callback) = parent_register {
-            let mut guard = self.on_register.lock().unwrap_or_else(|e| e.into_inner());
-            *guard = Some(callback);
-        }
         // #2056 — the restore observer travels with the registration
         // observer: a child supervisor that enables persistence over its own
         // ledger must reconcile its own rows too. Round 3 — through
@@ -1833,15 +1647,6 @@ impl TaskSupervisor {
         *guard = Some(reporter);
     }
 
-    /// Wire a callback that fires when [`Self::relaunch`] is invoked. The
-    /// callback is responsible for spawning the actual replacement task —
-    /// the supervisor only pre-allocates a fresh task id and fires the
-    /// signal so the owning runtime (session actor / pipeline executor)
-    /// can rebuild context.
-    pub fn set_on_relaunch(&self, cb: impl Fn(&RelaunchRequest) + Send + Sync + 'static) {
-        let mut guard = self.on_relaunch.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = Some(Box::new(cb));
-    }
 
     /// Acquire (or create) the cancel token for `task_id`. Workers should
     /// call this once at the top of their critical section and then poll
@@ -1944,21 +1749,6 @@ impl TaskSupervisor {
         .to_string();
         self.mark_runtime_state(&new_task_id, TaskRuntimeState::Spawned, Some(detail));
 
-        let request = RelaunchRequest {
-            original_task_id: task_id.to_string(),
-            new_task_id: new_task_id.clone(),
-            tool_name: original.tool_name.clone(),
-            tool_call_id: original.tool_call_id.clone(),
-            parent_session_key: original.parent_session_key.clone(),
-            session_key: original.session_key.clone(),
-            tool_input: original.tool_input.clone().unwrap_or(Value::Null),
-            opts,
-        };
-
-        let guard = self.on_relaunch.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref cb) = *guard {
-            cb(&request);
-        }
         Ok(new_task_id)
     }
 
@@ -2403,7 +2193,6 @@ impl TaskSupervisor {
         // #2055 — the single success path every `register*` entry point
         // funnels through: fire the registration observer AFTER the insert
         // and snapshot persist, with no locks held (see `notify_register`).
-        self.notify_register(&id);
         Ok(id)
     }
 
@@ -2683,12 +2472,6 @@ impl TaskSupervisor {
         if let Some(ref task) = snapshot {
             self.persist_snapshot(task);
             self.notify_change(task);
-            // Gap-1 unification: fire the single terminal sink for the
-            // success path (→ ChildCompleted re-entry). Runs alongside the
-            // legacy `on_change` → `upsert_background_task_agent` path during
-            // the strangler migration; shared dedupe keys collapse the two
-            // `ChildCompleted` enqueues to one continuation.
-            self.notify_terminal(task);
             self.emit_progress_for_state(task);
             // Codex round-4 BLOCKER (PR #1324 follow-up): drain any
             // pending failure stash for this task's unique task_id.
@@ -2861,16 +2644,6 @@ impl TaskSupervisor {
             if !was_already_failed {
                 self.emit_progress_for_state(task);
                 self.notify_failure(task);
-                // Gap-1 unification: fire the single terminal sink for the
-                // failure path (→ recovery re-entry). Runs alongside the
-                // legacy `notify_failure` → `on_failure` path during the
-                // strangler migration. The consumer resolves the runtime
-                // profile here (killing `_main` stranding for failures) and
-                // shares the failure dedupe key with the legacy
-                // gateway/WS deliveries, so double-delivery collapses to one
-                // continuation. Synth-ack gating moves to prompt selection
-                // inside the consumer (carried on the `TerminalEvent`).
-                self.notify_terminal(task);
             }
         }
     }
@@ -3397,106 +3170,7 @@ impl TaskSupervisor {
         }
     }
 
-    /// #2055 — fire the registration observer (if set) with a snapshot of
-    /// the just-registered task. Mirrors `notify_change`'s locking
-    /// discipline exactly: the callback is cloned out of its own mutex and
-    /// invoked with NO supervisor locks held — it is user code that may
-    /// take other locks (the octos-cli closure opens the goal ledger and
-    /// re-enters orchestrator state) and may re-enter the supervisor.
-    ///
-    /// Cheap early-out mirroring `notify_terminal`: an unwired supervisor
-    /// returns before the map lookup and before cloning the task snapshot,
-    /// so registration-hot unwired builds pay one mutex probe and nothing
-    /// else.
-    fn notify_register(&self, task_id: &str) {
-        let callback = {
-            let guard = self.on_register.lock().unwrap_or_else(|e| e.into_inner());
-            match guard.as_ref() {
-                Some(callback) => Arc::clone(callback),
-                None => return,
-            }
-        };
-        // Snapshot under the `tasks` mutex, invoke after releasing it. The
-        // lookup is by id rather than a pre-insert clone so the observer
-        // sees the task exactly as the map holds it post-insert.
-        let snapshot = {
-            let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-            match tasks.get(task_id) {
-                Some(task) => task.clone(),
-                None => return,
-            }
-        };
-        callback(&snapshot);
-    }
 
-    /// Gap-1 unification: fire the unified `on_terminal` callback (if set)
-    /// exactly once per task for a terminal transition. Builds the
-    /// [`TerminalEvent`] union payload — for failures it captures the
-    /// failure signal AND the synth-ack boolean (lifted from delivery-gate
-    /// to prompt-selection) so the consumer decides recovery-prompt vs
-    /// suppression. The per-task idempotency guard collapses live +
-    /// cascade-fail + orphan-sweep re-marks to one event.
-    ///
-    /// The callback is invoked AFTER releasing the `ack_and_pending` mutex
-    /// — it is user code that may take other locks (notably the orchestrator
-    /// state mutex).
-    fn notify_terminal(&self, task: &BackgroundTask) {
-        // Cheap early-out: nothing to do without a wired callback.
-        {
-            let guard = self.on_terminal.lock().unwrap_or_else(|e| e.into_inner());
-            if guard.is_none() {
-                return;
-            }
-        }
-        let outcome = match task.status {
-            TaskStatus::Completed => TerminalOutcome::Completed,
-            TaskStatus::Failed | TaskStatus::Cancelled => {
-                TerminalOutcome::Failed(SpawnOnlyFailureSignal {
-                    task_id: task.id.clone(),
-                    tool_name: task.tool_name.clone(),
-                    tool_input: task.tool_input.clone().unwrap_or(Value::Null),
-                    error_message: task.error.clone().unwrap_or_default(),
-                    suggested_alternatives: parse_alternatives(task.error.as_deref().unwrap_or("")),
-                    parent_session_key: task
-                        .parent_session_key
-                        .clone()
-                        .or_else(|| task.session_key.clone()),
-                    originating_client_message_id: task.originating_client_message_id.clone(),
-                })
-            }
-            // Non-terminal status — defensive; callers only invoke this on
-            // terminal transitions. #27c: `Parked` is non-terminal (it
-            // awaits client re-attach) and must NOT fire the terminal
-            // callback — that is the whole point of parking an orphan
-            // instead of failing it.
-            TaskStatus::Spawned | TaskStatus::Running | TaskStatus::Parked => return,
-        };
-        // Idempotency under the shared mutex so the live → cascade → orphan
-        // re-mark paths cannot double-fire.
-        {
-            let mut guard = self
-                .ack_and_pending
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if !guard.mark_terminal_notified(&task.id) {
-                return;
-            }
-        }
-        // Synth-ack is only consulted for prompt selection on failures.
-        let synth_ack_emitted = match &outcome {
-            TerminalOutcome::Failed(_) => self.was_synth_ack_emitted(&task.tool_call_id),
-            TerminalOutcome::Completed => false,
-        };
-        let event = TerminalEvent {
-            task: task.clone(),
-            synth_ack_emitted,
-            outcome,
-        };
-        let guard = self.on_terminal.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref cb) = *guard {
-            cb(&event);
-        }
-    }
 
     /// Return all non-completed (active) tasks.
     pub fn get_active_tasks(&self) -> Vec<BackgroundTask> {
@@ -3742,61 +3416,9 @@ impl Drop for TaskTerminalGuard {
     }
 }
 
-/// Whether `task_id` currently holds a liveness claim in this process — either
-/// a detached worker's [`TaskTerminalGuard`] or a [`TaskLivenessLease`].
-///
-/// This is what the orphan sweep consults, so it is also the honest way for a
-/// caller outside this crate to assert that it has (or has released) liveness
-/// for work it owns.
-pub fn task_is_live(task_id: &str) -> bool {
-    is_task_live(task_id)
-}
 
-/// A liveness lease for work that is genuinely in flight but is NOT driven by
-/// a detached `tokio` worker in this process — a peer session the CLIENT
-/// boots and drives being the motivating case (#2035).
-///
-/// The orphan sweep in [`TaskSupervisor::enable_persistence`] reaps every
-/// non-terminal row that is absent from the process-global live-set, on the
-/// premise that "non-terminal ⇒ no live worker". [`TaskTerminalGuard`] is what
-/// makes that premise true for detached workers, but it is the wrong tool
-/// here: it holds an `Arc<TaskSupervisor>` (which would pin a per-turn
-/// supervisor for the whole life of the peer and defeat the `Weak`-based
-/// pruning in `SessionTaskQueryStore`), and its `Drop` fires a terminal
-/// transition — whereas a peer is retired by `peer_close`, not by a worker
-/// future ending.
-///
-/// So this type carries the liveness half alone: mark on construction, clear
-/// on `Drop`, no supervisor reference and no terminal side effect. Hold it for
-/// exactly as long as the client-driven work is live.
-///
-/// It does not weaken the sweep. Membership is process-global and starts EMPTY
-/// in a new process, so a row left behind by a genuine cross-process restart
-/// has no lease and is still correctly reaped.
-pub struct TaskLivenessLease {
-    task_id: String,
-}
 
-impl TaskLivenessLease {
-    /// Mark `task_id` live until the returned lease is dropped. Idempotent —
-    /// re-leasing an already-live id is a no-op insert.
-    pub fn new(task_id: impl Into<String>) -> Self {
-        let task_id = task_id.into();
-        mark_task_live(&task_id);
-        Self { task_id }
-    }
 
-    /// The task this lease keeps live.
-    pub fn task_id(&self) -> &str {
-        &self.task_id
-    }
-}
-
-impl Drop for TaskLivenessLease {
-    fn drop(&mut self) {
-        clear_task_live(&self.task_id);
-    }
-}
 
 #[cfg(test)]
 #[path = "task_supervisor_tests.rs"]

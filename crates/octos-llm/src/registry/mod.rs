@@ -186,11 +186,6 @@ pub fn lookup(name: &str) -> Option<&'static ProviderEntry> {
         .find(|e| e.name == lower || e.aliases.iter().any(|a| a.eq_ignore_ascii_case(&lower)))
 }
 
-/// All registered provider entries.
-pub fn all_entries() -> &'static [ProviderEntry] {
-    ALL
-}
-
 /// Whether `family` constructs a provider without an API key. Connection-test
 /// surfaces must not dead-end on "no API key" for such families.
 pub fn is_keyless(family: &str) -> bool {

@@ -14,7 +14,6 @@ pub mod approval;
 pub mod behaviour;
 pub mod compaction;
 pub mod context_log;
-pub mod dispatch_policy;
 pub mod file_state_cache;
 pub mod format;
 pub mod harness_errors;
@@ -76,13 +75,9 @@ pub use agent::{
     normalize_tool_call_id,
 };
 pub use approval::{
-    ApprovalDecision, ApprovalRequestEnvelope, ApprovalRequestSpec, ApprovalResponsePayload,
+    ApprovalRequestEnvelope, ApprovalRequestSpec,
     ApprovalRiskLevel, ApprovalRule, ApprovalTimeoutBehavior,
     HumanApprovalRules, PendingApprovalDraft,
-};
-pub use dispatch_policy::{
-    DispatchBackendMetadata, DispatchPolicy, DispatchTarget, GateDenial, enforce_dispatch_gates,
-    enforce_dispatch_gates_for_backend,
 };
 pub use file_state_cache::{FILE_UNCHANGED_STUB_PREFIX,
     FileStateCache, FileStateCacheBuilder, format_file_unchanged_stub,
@@ -133,10 +128,10 @@ pub use subagent_summary::{
 };
 pub use summarizer::{ExtractiveSummarizer, Summarizer};
 pub use task_supervisor::{
-    BackgroundTask, RegisterTaskError, RelaunchOpts, RelaunchRequest, SpawnOnlyFailureSignal,
-    TaskCancelError, TaskCancelToken, TaskLifecycleState, TaskLivenessLease, TaskRelaunchError,
-    TaskRuntimeState, TaskStatus, TaskSupervisor, TaskTerminalGuard, TerminalEvent,
-    TerminalOutcome, parse_alternatives, task_is_live,
+    BackgroundTask, RegisterTaskError, RelaunchOpts, SpawnOnlyFailureSignal,
+    TaskCancelError, TaskCancelToken, TaskLifecycleState, TaskRelaunchError,
+    TaskRuntimeState, TaskStatus, TaskSupervisor, TaskTerminalGuard,
+    TerminalOutcome, parse_alternatives,
 };
 pub use tools::{
     AskUserQuestionTool, BackgroundResultKind, BackgroundResultPayload, CheckBackgroundTasksTool,
@@ -151,7 +146,7 @@ pub use tools::{
     WriteFileTool, build_backend_from_config, build_dispatch_event_payload, dispatch_with_metrics,
     record_dispatch,
 };
-pub use turn::{Turn, TurnKind, turns_to_messages};
+pub use turn::{Turn, TurnKind};
 pub use workspace_policy::{
     CompactionPolicy, CompactionSummarizerKind, WORKSPACE_POLICY_FILE, WorkspaceArtifactsPolicy,
     WorkspacePolicy, WorkspacePolicyKind, WorkspaceSpawnTaskPolicy,

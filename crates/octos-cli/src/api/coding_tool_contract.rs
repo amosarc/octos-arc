@@ -52,18 +52,6 @@ pub(crate) const CODING_DYNAMIC_TOOL_SEARCH_CAPABILITY_V1: &str = "coding.dynami
 pub(crate) const CODING_BASH_CAPABILITY_V1: &str = "coding.bash.v1";
 pub(crate) const CODING_DELEGATE_CAPABILITY_V1: &str = "coding.delegate.v1";
 
-// UPCR-2026-020 §8 typed error kinds. Used in structured RpcError `data.kind`
-// fields when the corresponding failure mode is hit. Declared centrally so
-// callers and tests agree on the wire strings; not all are emitted yet, see
-// #970 for the wiring work.
-#[allow(dead_code)]
-pub(crate) const ERROR_KIND_TOOL_CONTRACT_UNAVAILABLE: &str = "tool_contract_unavailable";
-#[allow(dead_code)]
-pub(crate) const ERROR_KIND_CODING_TOOL_DENIED: &str = "coding_tool_denied";
-#[allow(dead_code)]
-pub(crate) const ERROR_KIND_CODING_TOOL_MISSING: &str = "coding_tool_missing";
-#[allow(dead_code)]
-pub(crate) const ERROR_KIND_EXEC_SESSION_UNKNOWN: &str = "exec_session_unknown";
 
 pub(crate) const CODING_P0_REQUIRED_TOOL_NAMES: &[&str] = &[
     "apply_patch",
@@ -847,15 +835,6 @@ mod tests {
         // #1172 — Codex naming-parity capability flags.
         assert_eq!(CODING_BASH_CAPABILITY_V1, "coding.bash.v1");
         assert_eq!(CODING_DELEGATE_CAPABILITY_V1, "coding.delegate.v1");
-
-        // Typed error kinds (UPCR §8).
-        assert_eq!(
-            ERROR_KIND_TOOL_CONTRACT_UNAVAILABLE,
-            "tool_contract_unavailable"
-        );
-        assert_eq!(ERROR_KIND_CODING_TOOL_DENIED, "coding_tool_denied");
-        assert_eq!(ERROR_KIND_CODING_TOOL_MISSING, "coding_tool_missing");
-        assert_eq!(ERROR_KIND_EXEC_SESSION_UNKNOWN, "exec_session_unknown");
     }
 
     fn required_tool<'a>(contract: &'a Value, name: &str) -> &'a Value {

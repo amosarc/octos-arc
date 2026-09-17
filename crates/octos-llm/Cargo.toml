@@ -12,7 +12,6 @@ default = []
 # for downstream crates' integration tests. Production builds must NOT enable
 # this — synthetic failover broadcasts would otherwise be visible on the
 # stable public API.
-test-utils = []
 
 [dependencies]
 octos-core = { workspace = true }

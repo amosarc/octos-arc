@@ -198,26 +198,6 @@ impl EpisodeStore {
         Self::open_inner(data_dir.as_ref(), false, dimension).await
     }
 
-    /// Open or create an episode store at the given path, falling
-    /// back to a degraded in-memory store when the redb file lock is
-    /// already held by another process.
-    ///
-    /// This is the right entry point for the `octos gateway`
-    /// subprocess: `octos serve` always wins the lock in production
-    /// (process_manager spawns gateway after `ProfileRuntime` has
-    /// already bootstrapped every profile), so gateway always gets a
-    /// degraded handle when serve is the parent daemon. Writes on a
-    /// degraded handle silently no-op; reads return empty. See the
-    /// type-level docs on [`EpisodeStore`].
-    ///
-    /// **Other failure modes still bubble up.** Only the typed
-    /// `redb::DatabaseError::DatabaseAlreadyOpen` triggers the
-    /// degraded fallback; corruption / I/O / permission errors are
-    /// returned as `Err`.
-    pub async fn open_or_degraded(data_dir: impl AsRef<Path>) -> Result<Self> {
-        Self::open_inner(data_dir.as_ref(), true, DEFAULT_DIMENSION).await
-    }
-
     /// [`Self::open_or_degraded`] with an explicit vector-index width.
     /// See [`Self::open_with_dimension`] for why this must track the embedder.
     pub async fn open_or_degraded_with_dimension(
@@ -652,63 +632,6 @@ impl EpisodeStore {
         }
     }
 
-    /// Episodes that carry no usable vector, as `(episode_id, summary)` ready
-    /// to re-embed.
-    ///
-    /// "Usable" means a persisted embedding whose width matches this store's
-    /// index. An episode qualifies when its vector is ABSENT (saved while no
-    /// embedder was configured, or the embed call failed) or MISMATCHED (the
-    /// embedding model changed — stored vectors cannot be converted to a
-    /// different width, only regenerated).
-    ///
-    /// This is the input to `octos memory reindex`. It reads persisted state
-    /// rather than the in-memory index, so it stays correct regardless of what
-    /// the index dropped at rebuild, and the summary it returns is the exact
-    /// text the save path embeds.
-    ///
-    /// A degraded (lock-contended) handle has no database and returns empty.
-    pub async fn episodes_needing_vectors(&self) -> Result<Vec<(String, String)>> {
-        let Some(db) = self.db.clone() else {
-            return Ok(Vec::new());
-        };
-        let expected = self
-            .index
-            .read()
-            .map(|idx| idx.vector_coverage().dimension)
-            .unwrap_or(DEFAULT_DIMENSION);
-
-        tokio::task::spawn_blocking(move || {
-            let read_txn = db.begin_read()?;
-            let episodes_table = read_txn.open_table(EPISODES_TABLE)?;
-            let embeddings_table = read_txn.open_table(EMBEDDINGS_TABLE)?;
-            let mut out = Vec::new();
-
-            for entry in episodes_table.iter()? {
-                let (key, value) = entry?;
-                let ep_id = key.value().to_string();
-                let Ok(episode) = serde_json::from_str::<Episode>(value.value()) else {
-                    continue;
-                };
-                // An episode with no summary has nothing to embed; skip it
-                // rather than sending empty text to a provider.
-                if episode.summary.trim().is_empty() {
-                    continue;
-                }
-                let width = embeddings_table
-                    .get(ep_id.as_str())
-                    .ok()
-                    .flatten()
-                    .and_then(|v| bincode::deserialize::<Vec<f32>>(v.value()).ok())
-                    .map(|v| v.len());
-                if width != Some(expected) {
-                    out.push((ep_id, episode.summary));
-                }
-            }
-            Ok::<_, eyre::Report>(out)
-        })
-        .await?
-    }
-
     pub async fn store_embedding(&self, episode_id: &str, embedding: Vec<f32>) -> Result<()> {
         // Degraded fallback: skip the disk write, update the in-memory
         // embedding entry only, return success.
@@ -744,139 +667,6 @@ impl EpisodeStore {
         }
 
         Ok(())
-    }
-
-    /// Delete an episode by its ID. Removes from all DB tables and the in-memory index.
-    ///
-    /// Returns `true` if the episode existed and was deleted.
-    ///
-    /// In degraded mode the disk delete is skipped; this attempts to
-    /// remove the entry from the in-memory index only and returns
-    /// `false` (there is nothing the degraded handle can authoritatively
-    /// claim was persisted).
-    pub async fn delete_by_id(&self, episode_id: &str) -> Result<bool> {
-        // Degraded fallback: no DB to delete from; clear the in-memory
-        // entry (if any) and report `false`.
-        let Some(db) = self.db.clone() else {
-            match self.index.write() {
-                Ok(mut idx) => {
-                    let _ = idx.remove(episode_id);
-                }
-                Err(e) => warn!("index write lock poisoned, skipping removal: {e}"),
-            }
-            return Ok(false);
-        };
-        let ep_id = episode_id.to_string();
-
-        let found = tokio::task::spawn_blocking(move || {
-            let write_txn = db.begin_write()?;
-            let existed = {
-                // Remove from episodes table
-                let mut episodes = write_txn.open_table(EPISODES_TABLE)?;
-                let old = episodes.remove(ep_id.as_str())?;
-
-                if let Some(old_json) = &old {
-                    // Parse to get the cwd so we can update the cwd index
-                    if let Ok(episode) = serde_json::from_str::<Episode>(old_json.value()) {
-                        let cwd = episode.working_dir.to_string_lossy().to_string();
-                        let mut cwd_index = write_txn.open_table(CWD_INDEX_TABLE)?;
-                        // Read and drop the immutable borrow before mutating.
-                        // Salvage on corrupt JSON (parity with `store`):
-                        // defaulting to an empty list here would remove the
-                        // whole cwd entry and orphan every other episode
-                        // indexed under it.
-                        let existing: Option<Vec<String>> = cwd_index
-                            .get(cwd.as_str())?
-                            .map(|ids_json| parse_episode_ids_with_salvage(ids_json.value()));
-                        if let Some(mut ids) = existing {
-                            ids.retain(|id| id != &ep_id);
-                            if ids.is_empty() {
-                                cwd_index.remove(cwd.as_str())?;
-                            } else {
-                                let new_json = serde_json::to_string(&ids)?;
-                                cwd_index.insert(cwd.as_str(), new_json.as_str())?;
-                            }
-                        }
-                    }
-                }
-
-                // Remove embedding
-                let mut embeddings = write_txn.open_table(EMBEDDINGS_TABLE)?;
-                embeddings.remove(ep_id.as_str())?;
-
-                old.is_some()
-            };
-            write_txn.commit()?;
-            Ok::<_, eyre::Report>(existed)
-        })
-        .await??;
-
-        // Remove from in-memory hybrid index
-        if found {
-            match self.index.write() {
-                Ok(mut idx) => {
-                    idx.remove(episode_id);
-                }
-                Err(e) => warn!("index write lock poisoned, skipping removal: {e}"),
-            }
-        }
-
-        Ok(found)
-    }
-
-    /// Delete multiple episodes by their IDs.
-    ///
-    /// Returns the number of episodes that were actually deleted.
-    pub async fn delete_many(&self, episode_ids: &[String]) -> Result<usize> {
-        let mut deleted = 0;
-        for id in episode_ids {
-            if self.delete_by_id(id).await? {
-                deleted += 1;
-            }
-        }
-        Ok(deleted)
-    }
-
-    /// Hybrid search across all episodes (not cwd-scoped).
-    ///
-    /// Backward-compatible wrapper around [`Self::find_relevant_hybrid_scored`]
-    /// that drops the similarity score. Callers that need to gate episode
-    /// injection on a minimum similarity (e.g. the agent loop's "Relevant
-    /// Past Experiences" system message) should call the `_scored` variant
-    /// directly so cross-session contamination is filtered out (NEW-06).
-    pub async fn find_relevant_hybrid(
-        &self,
-        query: &str,
-        query_embedding: Option<Vec<f32>>,
-        limit: usize,
-    ) -> Result<Vec<Episode>> {
-        let scored = self
-            .find_relevant_hybrid_scored(query, query_embedding, limit)
-            .await?;
-        Ok(scored.into_iter().map(|(ep, _)| ep).collect())
-    }
-
-    /// Hybrid search across all episodes (not cwd-scoped), returning each
-    /// episode alongside a per-modality [`HybridScore`] breakdown.
-    ///
-    /// Results are sorted by descending `HybridScore::combined` (the
-    /// same weighted-sum ranking as
-    /// [`Self::find_relevant_hybrid`]). The breakdown lets callers
-    /// apply a modality-aware minimum-similarity gate so a strong
-    /// single-modality match (e.g. a keyword-perfect older episode
-    /// without a stored embedding) isn't dropped just because the
-    /// configured `bm25_weight` / `vector_weight` would down-weight the
-    /// combined score below the gate. Without this, the agent loop's
-    /// "Relevant Past Experiences" gate (NEW-06 fix) would strand
-    /// legitimately relevant keyword-only matches.
-    pub async fn find_relevant_hybrid_scored(
-        &self,
-        query: &str,
-        query_embedding: Option<Vec<f32>>,
-        limit: usize,
-    ) -> Result<Vec<(Episode, HybridScore)>> {
-        self.find_relevant_hybrid_scored_filtered(query, query_embedding, limit, None, false)
-            .await
     }
 
     /// Like [`Self::find_relevant_hybrid_scored`] but applies an
@@ -1033,7 +823,7 @@ mod tests {
         // Query text deliberately shares NO tokens with the summary, so any
         // non-zero score has to come from the vector lane.
         let scored = store
-            .find_relevant_hybrid_scored("zzzz", Some(embedding), 10)
+            .find_relevant_hybrid_scored_filtered("zzzz", Some(embedding), 10, None, false)
             .await
             .unwrap();
 
@@ -1132,22 +922,6 @@ mod tests {
             "the re-embedded episode rejoins the vector index"
         );
         assert!((c.ratio() - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn parse_episode_ids_salvages_corrupt_json() {
-        // Valid JSON parses normally.
-        assert_eq!(
-            parse_episode_ids_with_salvage(r#"["ep-1","ep-2"]"#),
-            vec!["ep-1".to_string(), "ep-2".to_string()]
-        );
-        // Corrupt JSON (truncated array) salvages the quoted IDs instead of
-        // silently dropping the list — the pre-fix `delete_by_id` behavior
-        // would have emptied the cwd index and orphaned ep-1/ep-2.
-        assert_eq!(
-            parse_episode_ids_with_salvage(r#"["ep-1","ep-2""#),
-            vec!["ep-1".to_string(), "ep-2".to_string()]
-        );
     }
 
     #[tokio::test]
@@ -1269,87 +1043,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_relevant_hybrid_scored_returns_similarity_scores() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EpisodeStore::open(dir.path()).await.unwrap();
-
-        store
-            .store(make_episode("rust ownership borrow checker", "/proj"))
-            .await
-            .unwrap();
-        store
-            .store(make_episode("python web flask framework", "/proj"))
-            .await
-            .unwrap();
-
-        let scored = store
-            .find_relevant_hybrid_scored("rust ownership", None, 10)
-            .await
-            .unwrap();
-
-        // At least one match returned with a populated HybridScore.
-        assert!(!scored.is_empty(), "expected at least one match");
-        let (top_ep, top_score) = &scored[0];
-        assert!(
-            top_ep.summary.contains("rust"),
-            "top match should be the rust episode, got: {}",
-            top_ep.summary
-        );
-        // BM25-only path (no query embedding): combined == bm25 score.
-        assert!(
-            top_score.combined > 0.0 && top_score.combined <= 1.0,
-            "top combined score should be in (0, 1], got {}",
-            top_score.combined
-        );
-        assert!(
-            top_score.bm25 > 0.0,
-            "BM25 score should be > 0 for the rust match (got {})",
-            top_score.bm25
-        );
-        assert_eq!(
-            top_score.vector, 0.0,
-            "no embedding stored, vector score should be 0"
-        );
-
-        // Backward-compat: find_relevant_hybrid returns the same episodes
-        // (without scores) in the same order.
-        let plain = store
-            .find_relevant_hybrid("rust ownership", None, 10)
-            .await
-            .unwrap();
-        assert_eq!(plain.len(), scored.len());
-        assert_eq!(plain[0].id, scored[0].0.id);
-    }
-
-    #[tokio::test]
-    async fn should_delete_episode_when_id_exists() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EpisodeStore::open(dir.path()).await.unwrap();
-
-        let ep = make_episode("Delete me", "/proj");
-        let ep_id = ep.id.clone();
-        store.store(ep).await.unwrap();
-
-        // Verify it exists
-        let results = store
-            .find_relevant(Path::new("/proj"), "delete", 10)
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 1);
-
-        // Delete it
-        let deleted = store.delete_by_id(&ep_id).await.unwrap();
-        assert!(deleted);
-
-        // Verify it's gone
-        let results = store
-            .find_relevant(Path::new("/proj"), "delete", 10)
-            .await
-            .unwrap();
-        assert!(results.is_empty());
-    }
-
-    #[tokio::test]
     async fn test_reopen_persists_data() {
         let dir = tempfile::tempdir().unwrap();
         {
@@ -1367,76 +1060,4 @@ mod tests {
         assert_eq!(results[0].summary, "persistent data");
     }
 
-    /// RED-first repro for the production crashloop tracked in #899
-    /// (PR #888 / M11-F gateway consolidation).
-    ///
-    /// `octos serve` and `octos gateway` run as separate processes;
-    /// both call `EpisodeStore::open*` against the same per-profile
-    /// data dir. The second open used to crash with
-    /// `redb::DatabaseError::DatabaseAlreadyOpen` because redb is a
-    /// single-writer-single-process embedded database. This test
-    /// pins the new contract: `open_or_degraded` returns a degraded
-    /// in-memory fallback handle instead of an error.
-    #[tokio::test]
-    async fn should_return_degraded_store_when_redb_already_held_by_another_handle() {
-        let dir = tempfile::tempdir().unwrap();
-        // Owner: behaves like `octos serve` holding the lock. Strict
-        // `open` is used so misconfigurations would still surface.
-        let owner = EpisodeStore::open(dir.path()).await.unwrap();
-        assert!(
-            !owner.is_degraded(),
-            "first opener should hold the canonical DB",
-        );
-
-        // Second opener: behaves like an `octos gateway` subprocess.
-        // It opts into the degraded fallback via `open_or_degraded`.
-        // Before the fix this returned `Err(... DatabaseAlreadyOpen ...)`;
-        // now it must succeed with a degraded fallback.
-        let degraded = EpisodeStore::open_or_degraded(dir.path()).await.unwrap();
-        assert!(
-            degraded.is_degraded(),
-            "open_or_degraded must return a degraded in-memory fallback",
-        );
-
-        // The degraded handle accepts writes (silent no-op on disk)
-        // and reports them as successful — gateway sub-agents that
-        // record completion episodes don't crash.
-        let ep = make_episode("recorded on degraded handle", "/proj");
-        let ep_id = ep.id.clone();
-        degraded
-            .store(ep)
-            .await
-            .expect("store on degraded handle must succeed");
-        degraded
-            .store_embedding(&ep_id, vec![0.0_f32; 1536])
-            .await
-            .expect("store_embedding on degraded handle must succeed");
-
-        // The owner still sees zero episodes — degraded writes are
-        // not persisted to disk, so the owner's view is unchanged.
-        let owner_view = owner
-            .find_relevant(Path::new("/proj"), "recorded", 10)
-            .await
-            .unwrap();
-        assert!(
-            owner_view.is_empty(),
-            "degraded writes must not surface to the owner; got {owner_view:?}",
-        );
-
-        // The degraded handle's own reads also return empty: the
-        // hybrid index can match the summary for ranking, but
-        // `find_relevant` / `find_relevant_hybrid` fetch full episode
-        // bodies from disk, and the degraded handle has no disk
-        // backing. This is the "writes accepted, reads empty"
-        // contract — anything stricter would be incorrect because
-        // the canonical store is owned elsewhere.
-        let degraded_view = degraded
-            .find_relevant(Path::new("/proj"), "recorded", 10)
-            .await
-            .unwrap();
-        assert!(
-            degraded_view.is_empty(),
-            "degraded reads must return empty; got {degraded_view:?}",
-        );
-    }
 }

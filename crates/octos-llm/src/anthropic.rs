@@ -101,13 +101,6 @@ impl AnthropicProvider {
         }
     }
 
-    /// Create a provider using the ANTHROPIC_API_KEY environment variable.
-    pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .wrap_err("ANTHROPIC_API_KEY environment variable not set")?;
-        Ok(Self::new(api_key, "claude-sonnet-4-20250514"))
-    }
-
     /// Set a custom base URL (for compatible endpoints).
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();

@@ -251,16 +251,6 @@ impl AgentDefinitions {
         Self::default()
     }
 
-    /// Whether the registry has zero manifests.
-    pub fn is_empty(&self) -> bool {
-        self.by_id.is_empty()
-    }
-
-    /// Number of registered manifests.
-    pub fn len(&self) -> usize {
-        self.by_id.len()
-    }
-
     /// Look up a manifest by id.
     pub fn get(&self, id: &str) -> Option<&AgentDefinition> {
         self.by_id.get(id)
@@ -274,6 +264,11 @@ impl AgentDefinitions {
         def: AgentDefinition,
     ) -> Option<AgentDefinition> {
         self.by_id.insert(id.into(), def)
+    }
+
+    /// Whether the registry has zero manifests.
+    pub fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
     }
 
     /// Iterate manifest ids.
