@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import plan_envelope as pe  # noqa: E402
+import scaffold as sc  # noqa: E402
 
 
 def node(nid: str) -> dict:
@@ -118,10 +119,12 @@ class ValidationProbeTests(unittest.TestCase):
 class HostStackRulesTests(unittest.TestCase):
     def test_contains_stack_facts_and_generic_validation(self):
         r = pe.HOST_STACK_RULES
-        for needle in ["scrypt", "ARC_EXTRA_PORTS", "npmmirror",
+        for needle in ["scrypt", "ARC_EXTRA_PORTS", "never run npm install",
+                       "schema.json", "/api/auth/register",
                        "SERVER-SIDE VALIDATION", "min, min+1, max, max+1",
                        "a 5xx on any input is a bug"]:
             self.assertIn(needle, r)
+        self.assertLessEqual(len(r), 6000)  # wire 上限(planctl mod.rs:99)
         # 通用内核文案撤销后不得回流:无普适 UI 行为条
         self.assertNotIn("RE-RENDER", r)
         self.assertNotIn("bilingual", r)
@@ -298,44 +301,63 @@ class StageSpecsTests(unittest.TestCase):
 
 
 class HostScaffoldTests(unittest.TestCase):
-    def test_writes_five_plus_npmrc_and_is_idempotent(self):
+    def test_writes_full_template_and_is_idempotent(self):
         with TemporaryDirectory() as td:
             out = Path(td)
-            written = pe.host_scaffold(out)
+            written = sc.scaffold(out)
             for rel in [
                 "backend/package.json",
-                "backend/vitest.config.js",
+                "backend/src/app.js",
+                "backend/src/index.js",
+                "backend/src/lib/util.js",
+                "backend/src/lib/validate.js",
+                "backend/src/lib/auth.js",
+                "backend/src/database/store.js",
+                "backend/src/database/engine.js",
+                "backend/src/database/schema.js",
+                "backend/src/routes/index.js",
+                "backend/data/db.json",
                 "frontend/package.json",
                 "frontend/index.html",
                 "frontend/src/main.jsx",
                 ".npmrc",
+                "backend/.npmrc",
+                "frontend/.npmrc",
             ]:
                 self.assertTrue((out / rel).exists(), rel)
                 self.assertIn(rel, written)
             pkg = json.loads((out / "backend" / "package.json").read_text())
             self.assertEqual(pkg["dependencies"], {"express": "^4.19.2"})
-            self.assertIn("vitest run", pkg["scripts"]["test"])
+            self.assertNotIn("vitest", json.dumps(pkg))
             fpkg = json.loads((out / "frontend" / "package.json").read_text())
             self.assertEqual(fpkg["scripts"]["build"], "vite build")
-            self.assertIn("npmmirror", (out / ".npmrc").read_text())
+            self.assertIn("npmmirror", (out / "backend" / ".npmrc").read_text())
 
             # idempotent: second call writes nothing
-            self.assertEqual(pe.host_scaffold(out), [])
+            self.assertEqual(sc.scaffold(out), [])
             # existing files are NOT overwritten
             (out / ".npmrc").write_text("custom\n")
-            pe.host_scaffold(out)
+            sc.scaffold(out)
             self.assertEqual((out / ".npmrc").read_text(), "custom\n")
 
-    def test_business_files_never_touched(self):
+    def test_business_files_stay_with_the_model(self):
         with TemporaryDirectory() as td:
             out = Path(td)
-            pe.host_scaffold(out)
-            for forbidden in [
-                "backend/data/db.json",
-                "backend/src/app.js",
-                "backend/src/server.js",
-            ]:
-                self.assertFalse((out / forbidden).exists(), forbidden)
+            sc.scaffold(out)
+            # 模型独占:数据声明、种子记录、业务端点。
+            self.assertFalse((out / "backend/data/schema.json").exists())
+            db = json.loads(
+                (out / "backend/data/db.json").read_text())
+            self.assertEqual(db, {"collections": {}})
+            stub = (out / "backend/src/routes/index.js").read_text()
+            self.assertIn("module.exports = () => {};", stub)
+
+    def test_template_js_has_no_blank_lines(self):
+        # 无空行律只约束 backend JS(会被模型经 repomap 反复消费);
+        # frontend.jsx 本就含空行。
+        for rel, (content, _role) in sc.SCAFFOLD_FILES.items():
+            if rel.startswith("backend/") and rel.endswith(".js"):
+                self.assertNotIn("\n\n", content, rel)
 
 
 class ProbeRoutesTests(unittest.TestCase):

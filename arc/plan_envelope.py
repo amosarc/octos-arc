@@ -1,8 +1,9 @@
 """ARC host plan envelope builder (纯标准库).
 
 构建发往内核 `[arc-plan]` marker 的计划 envelope:需求树 → steps、spec→节点
-映射(含碰撞组分配)、端口契约、host_signals 透传;以及宿主尽算的两件基础设施:
-stage_specs(specs 只读暂存)与 host_scaffold(幂等五件套)。
+映射(含碰撞组分配)、端口契约、host_signals 透传;以及宿主尽算的 specs
+只读暂存(stage_specs)。宿主模板落盘已迁至 scaffold 包(HOST_STACK_RULES
+文字契约保留在此)。
 
 设计律(与内核 planctl 对齐):
 - 宿主尽算:凡宿主能算的不交模型;
@@ -28,16 +29,34 @@ WIPE_GLOBS = ("*.spec.ts", "support")
 HOST_STACK_RULES = """\
 HOST CONTRACT (graded Playwright specs are ground truth — where the \
 requirement text disagrees, the spec wins):
-STACK: React(Vite) frontend + Express backend. backend/src/app.js exports \
-the app; backend/src/server.js listens on process.env.PORT plus every \
-port in ARC_EXTRA_PORTS. Serve frontend/dist; JSON APIs under /api/. \
-Persistence: backend/data/db.json (load at startup, rewrite per mutation, \
-seed the requirement's records when empty). Hash passwords with Node \
-crypto scrypt. Dependencies: backend express; frontend \
-react/react-dom/vite; vitest as a backend devDependency (test marker). No \
-TypeScript in app code; no native-binding packages; installs use the \
-China mirror (npmmirror, already in .npmrc). The staged specs \
-.arc/acceptance/ are READ-ONLY (never edit/copy/delete).
+STACK: React(Vite) frontend + Express backend, PREBUILT BY THE HOST — the \
+backend is already a complete running app. Host-owned files (never \
+rewrite): src/app.js + src/index.js (bootstrap; listens on PORT plus \
+every port in ARC_EXTRA_PORTS; serves frontend/dist), src/lib/util.js \
+(responses/cookies/ids), src/lib/validate.js (schema-driven validators, \
+CN/EN error text), src/database/store.js (atomic JSON store: coll/one/\
+all/dup/insert/remove/save + scrypt hash/verify), src/database/engine.js \
+(schema-driven CRUD factory), src/lib/auth.js (register/login/logout/me \
++ sessions). Dependencies are PREINSTALLED — never run npm install, \
+never add npm packages.
+SCHEMA-DRIVEN BACKEND: to add data, write backend/data/schema.json = \
+{"entities":[{"name":"users","auth":true,"label":"用户名","fields":[...]}]}; \
+field keys: name, label (used in error messages), type \
+(string|number|boolean|password), required, unique, min, max, pattern \
+(JS regex), enum, match (mirror field, e.g. confirmPassword), format \
+(email|username|password), message (custom error). The host compiles it \
+to src/database/schema.js and mounts CRUD at /api/<entity> \
+automatically; entities with auth:true additionally get \
+/api/auth/register (validates ALL entity fields, scrypt-hashes the \
+secret, creates a session = auto-login), /api/auth/login (accepts any \
+unique field as identifier: username or email, trimmed, email \
+case-insensitive, uniform failure message that never reveals account \
+existence), /api/auth/logout, /api/me (session restore; sessions \
+survive server restart). Endpoints that are NOT plain CRUD (search / \
+booking flows) go in src/routes/index.js using store + lib helpers. \
+Seed concrete demo records verbatim from the requirement into \
+backend/data/db.json ({"collections":{"<entity>":[...]}}) — the store \
+persists atomically on every mutation.
 SERVER-SIDE VALIDATION (generic discipline, every task): the backend \
 re-validates ALL input and never trusts the client. Enforce the \
 contract's required/length/format/uniqueness rules EXACTLY, boundaries \
@@ -265,95 +284,6 @@ def stage_specs(tests_dir: Path, output_dir: Path) -> Path:
         if support.is_dir():
             shutil.copytree(support, stage / "support")
     return stage
-
-
-# ── host_scaffold:幂等五件套(E 翻转)─────────────────────────────────
-
-BACKEND_PACKAGE_JSON = {
-    "name": "backend",
-    "version": "1.0.0",
-    "private": True,
-    "main": "src/server.js",
-    "scripts": {
-        "start": "node src/server.js",
-        "test": "vitest run --config vitest.config.js",
-    },
-    "dependencies": {"express": "^4.19.2"},
-    "devDependencies": {"vitest": "^1.6.0"},
-}
-
-BACKEND_VITEST_CONFIG = """\
-import { defineConfig } from 'vitest/config';
-
-export default defineConfig({
-  test: {
-    include: ['test/**/*.test.js'],
-    environment: 'node',
-  },
-});
-"""
-
-FRONTEND_PACKAGE_JSON = {
-    "name": "frontend",
-    "version": "1.0.0",
-    "private": True,
-    "scripts": {"build": "vite build"},
-    "dependencies": {"react": "^18.3.1", "react-dom": "^18.3.1"},
-    "devDependencies": {"@vitejs/plugin-react": "^4.3.1", "vite": "^5.2.0"},
-}
-
-FRONTEND_INDEX_HTML = """\
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>App</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
-</html>
-"""
-
-FRONTEND_MAIN_JSX = """\
-import React from 'react';
-import { createRoot } from 'react-dom/client';
-
-function App() {
-  return <div>App scaffold</div>;
-}
-
-createRoot(document.getElementById('root')).render(<App />);
-"""
-
-NPMRC = "registry=https://registry.npmmirror.com\n"
-
-
-def host_scaffold(output_dir: Path) -> list[str]:
-    """Idempotently lay down the five fixed infrastructure files.
-
-    Never touches db.json / app.js / server.js (business semantics stay
-    with the model). Returns the list of paths written THIS call.
-    """
-    written: list[str] = []
-
-    def write(rel: str, content: str) -> None:
-        target = output_dir / rel
-        if target.exists():
-            return
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        written.append(rel)
-
-    write("backend/package.json", json.dumps(BACKEND_PACKAGE_JSON, indent=2) + "\n")
-    write("backend/vitest.config.js", BACKEND_VITEST_CONFIG)
-    write("frontend/package.json", json.dumps(FRONTEND_PACKAGE_JSON, indent=2) + "\n")
-    write("frontend/index.html", FRONTEND_INDEX_HTML)
-    write("frontend/src/main.jsx", FRONTEND_MAIN_JSX)
-    write(".npmrc", NPMRC)
-    return written
 
 
 # ── probe_routes:从 staged specs 提取探测清单(A 翻转)───────────────

@@ -61,6 +61,49 @@ sh arc/pack.sh                               # 得到 octos-arc-bundle.zip
 跑 staged Playwright,缺省关)、`OCTOS_ARC_WINDOW_TOKENS` /
 `OCTOS_ARC_PLAN_FULL_RATIO=0.50` / `OCTOS_ARC_PLAN_SKELETON_RATIO=0.62`(压力降级)。
 
+## 宿主模板 + schema 信号驱动 codegen(2026-09-17 起;2026-09-18 迁入 scaffold/ 包)
+
+脚手架封装在 `scaffold/` 包(参考 agent-arc-based 的组织:清单单源 + 小公开面),
+调用方只 `import scaffold`,不再触碰具体文件路径:
+
+- `scaffold/manifest.py` — **单一事实源**:17 件模板清单(rel → 内容+角色
+  host/placeholder/seed/model)、就绪/完整判定键、schema 编译路径、cookie 名、
+  npm 源、HOST_STACK_RULES 必须点名的路径清单(RULES_MUST_NAME)。
+- `scaffold/backend.py` / `scaffold/frontend.py` — 模板内容常量(纯标准库)。
+- `scaffold/codegen.py` — schema.json → schema.js 编译 + Watcher。
+- `scaffold/__init__.py` — 公开面:`scaffold()`(幂等落盘)/
+  `template_ready()` / `template_complete()` / `prewarm_deps()` /
+  `compile_schema` / `Watcher` / `schema_path`。
+- `scaffold_test.py` — 单测 + 冒烟 + **防漂移一致性测试**(文字契约点名、
+  cookie 单源、清单↔模板咬合)。
+
+请求任何模型之前,宿主完成:完整模板落盘(`scaffold.scaffold`:HTTP/cookie/
+存储/校验/auth/CRUD 通用层,backend 零依赖即可启动)→ `npm install`
+预装(npmmirror,`OCTOS_ARC_PREWARM=0` 关)。skeleton LLM 轮整个删除,第一轮就是
+REQ-1 节点轮,首轮 prompt 追加 `SCHEMA_DIRECTIVE`(首动作写
+`backend/data/schema.json`)。schema.json 落盘即信号:`scaffold.Watcher`
+轮中 2s 轮询、稳定 3s 即编译为 `src/database/schema.js`(轮末兜底 sync),
+engine/auth 在下次 boot 时挂出 `/api/<entity>` CRUD 与 `/api/auth/*`;
+tree-sitter repomap 每个 marker turn 全量重扫,宿主直写文件自动进图,
+并列入 `scaffolded_by_host`(do NOT rewrite 清单)。开关:
+`OCTOS_ARC_HOST_CODEGEN=0` 关 codegen,`OCTOS_ARC_HOST_SCAFFOLD=0` 回退
+模型自建骨架(保留 skeleton 重试老路径),`OCTOS_ARC_HOST_GRADE=0` 关
+Tier-2(缺省开:final 阶段宿主跑 staged Playwright——复用 local-grader 的
+@playwright/test 安装,node_modules 软链进临时 run 目录;E2E_BASE_URL 指向
+smoke 端口并双听 spec 基端口;全绿跳过 final LLM 轮,红则把失败清单喂给
+final 轮;环境跑不了自动降级为模型自查)。教训:JSON reporter 的结果状态
+是 `passed`,`expected` 是 outcome 字段,分类要两者都认。
+
+### token 基线与实测口径
+
+`measure_tokens.py`(只读)统计 `.octos/context-logs/*/llm.jsonl`:
+`python3 arc/measure_tokens.py arc/arc-output/<run>...`。基线(agnes-3.0-flash,
+planctl 栈):ticket r4=184 calls/10.04M in+cache/49.5K out/22.1min(评分 10/10);
+ticket r1/r2=138/165 calls,7.90M/8.90M;r3=292/17.68M(失控上界);
+smoke r2=80/2.53M(1/1)。input(含 cache)占 99.5%,主杠杆是调用次数。
+判据:ticket ×3 全绿且均值 calls ≤165、in+cache ≤8.9M;工具分布中
+shell 安装/构建类调用应显著下降。
+
 ### Linux x86_64 发布(内核改动后必做)
 
 ```sh

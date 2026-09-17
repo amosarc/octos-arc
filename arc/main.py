@@ -38,6 +38,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from arcbench_agent_runtime import AgentRuntime  # noqa: E402
 import plan_envelope  # noqa: E402
+import scaffold  # noqa: E402  (宿主脚手架包:模板/清单/schema 编译唯一公开面)
 
 
 def log(msg: str) -> None:
@@ -361,7 +362,8 @@ def _probe_routes_on(smoke_port: int, probes: list, extra_ports: list,
 
 
 def _run_staged_playwright(output_dir: Path, smoke_port: int,
-                           tests_dir: Path | None) -> tuple[int, int] | None:
+                           tests_dir: Path | None,
+                           extra_ports: list | None = None) -> tuple | None:
     """Tier-2 (OCTOS_ARC_HOST_GRADE=1, default off): run the staged
     Playwright suite against the smoke port. Returns (passed, failed), or
     None when the environment cannot run it (no npx/browsers) — callers
@@ -380,9 +382,30 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
            "  use: { baseURL: process.env.E2E_BASE_URL || "
            f"'http://127.0.0.1:{smoke_port}' }} }});\n")
     (run_dir / "playwright.config.ts").write_text(cfg, encoding="utf-8")
-    # Boot the app on the smoke port for the duration of the run.
+    # Prefer the bundled local-grader install (version-matched browsers are
+    # already cached); npx --yes pulls latest, which may need a browser
+    # build the sandbox cannot download.
+    lg_cli = (Path(__file__).resolve().parent / "local-grader"
+              / "node_modules" / "@playwright" / "test" / "cli.js")
+    if lg_cli.is_file():
+        cmd = [shutil.which("node") or "node", str(lg_cli),
+               "test", "--reporter=json"]
+        # The config imports '@playwright/test' — resolution walks up from
+        # run_dir, so link the local-grader tree in.
+        try:
+            (run_dir / "node_modules").symlink_to(lg_cli.parents[2],
+                                                  target_is_directory=True)
+        except OSError:
+            pass
+    else:
+        cmd = ["npx", "--yes", "@playwright/test", "test", "--reporter=json"]
+    # Boot the app on the smoke port for the duration of the run; specs
+    # derive their origin from E2E_BASE_URL (default hardcodes 3301) —
+    # set it explicitly, and dual-listen spec base ports as a fallback.
     backend = output_dir / "backend"
-    env = plan_envelope.rehearsal_boot_env(os.environ, smoke_port, [])
+    env = plan_envelope.rehearsal_boot_env(os.environ, smoke_port,
+                                           extra_ports or [])
+    env["E2E_BASE_URL"] = f"http://127.0.0.1:{smoke_port}"
     proc = None
     try:
         with open(grader / "boot.log", "w") as fh:
@@ -402,33 +425,43 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
             else:
                 return None
             r = subprocess.run(
-                ["npx", "--yes", "@playwright/test", "test",
-                 "--reporter=json"], cwd=run_dir, capture_output=True,
+                cmd, cwd=run_dir, capture_output=True,
                 text=True, timeout=900, errors="replace")
         # The JSON reporter prints the suite result on stdout.
         try:
             payload = json.loads(r.stdout[r.stdout.find("{"):])
             suites = payload.get("suites") or []
             passed = failed = 0
+            bad: list[str] = []
 
             def walk(suite: dict) -> None:
                 nonlocal passed, failed
                 for spec in suite.get("specs") or []:
                     for t in spec.get("tests") or []:
-                        ok = all(
-                            (res.get("status") in ("expected", "skipped"))
-                            for res in t.get("results") or [])
-                        if ok and any(res.get("status") == "expected"
-                                      for res in t.get("results") or []):
+                        results = t.get("results") or []
+                        # outcome ∈ expected/unexpected/flaky/skipped;
+                        # result.status ∈ passed/failed/timedOut/skipped —
+                        # handle both vocabularies (reporter-dependent).
+                        ok = (t.get("outcome") == "expected"
+                              or (results and all(
+                                  r.get("status") in ("passed", "skipped")
+                                  for r in results)
+                                  and any(r.get("status") == "passed"
+                                          for r in results)))
+                        if ok:
                             passed += 1
                         else:
                             failed += 1
+                            if len(bad) < 8:
+                                bad.append(str(t.get("title")
+                                               or spec.get("title")
+                                               or "untitled")[:120])
                 for sub in suite.get("suites") or []:
                     walk(sub)
 
             for suite in suites:
                 walk(suite)
-            return passed, failed
+            return passed, failed, " | ".join(bad)
         except (json.JSONDecodeError, ValueError):
             return None
     except (OSError, subprocess.SubprocessError):
@@ -1137,17 +1170,14 @@ write code first.\
 # shrinks to direction only. The legacy constants below stay for
 # non-plan-capable kernels (OCTOS_ASSUME_ARC_PLAN=0 baselines).
 HOST_SKELETON_PROMPT = """\
-Create the application skeleton for this task. The fixed infrastructure \
-files already exist (backend/package.json + vitest.config.js, frontend/ \
-package.json + index.html + src/main.jsx, .npmrc) — do NOT rewrite them. \
-Create ONLY the logic files: backend/src/app.js exporting the Express app \
-with every /api/ route mounted, backend/src/server.js as the bootstrap \
-that listens on process.env.PORT and also on every port in \
-process.env.ARC_EXTRA_PORTS when set, and backend/data/db.json seeded \
-with the requirement's concrete demo records (scrypt password hashing; \
-JSON-file persistence). JavaScript/JSX only; the full contract and the \
-staged acceptance specs are in your system prompt — follow them \
-exactly. Do not commit; the harness handles git.\
+Create the application skeleton for this task. Fixed infrastructure \
+already exists (backend: package.json/.npmrc + src/{app.js,index.js,lib/*,\
+database/*,routes/*}, frontend: package.json + index.html + src/main.jsx) \
+— do NOT rewrite them. Create ONLY what is missing: backend/data/\
+schema.json per the HOST CONTRACT (the host compiles it and mounts CRUD + \
+auth), backend/data/db.json seed records, and the frontend pages. \
+JavaScript/JSX only; dependencies are preinstalled — never run npm \
+install. Do not commit; the harness handles git.\
 PORT DISCIPLINE: run any dev/test server ONLY on port {smoke}; NEVER \
 bind port {port} (the grader watches it — binding it kills the whole \
 run). Stop every server you started when done.\
@@ -1165,6 +1195,22 @@ PORT DISCIPLINE: run any dev/test server ONLY on port {smoke}; NEVER \
 bind port {port}. Stop every server you started when done.\
 
 {node_spec}"""
+
+# plan §4: schema-first directive for the first node turn (host template
+# present). The model declares data; the host compiles schema.json →
+# database/schema.js and the engine/auth mount CRUD + auth automatically.
+# 路径经 manifest 注入(%-style:文本含字面量 JSON 花括号,且无 % 字符)。
+SCHEMA_DIRECTIVE = """
+FIRST ACTION: write %(schema_json)s declaring this task's data — \
+{"entities":[{"name":"users","auth":true,"fields":[...]}]} with field keys \
+name/label/type(string|number|boolean|password)/required/unique/min/max/\
+pattern/enum/match/format(email|username|password)/message, per the HOST \
+CONTRACT. CRUD at /api/<entity> and auth (register/login/logout/me) then \
+exist automatically — build the UI on them; write ONLY task-specific \
+endpoints (search/booking flows) in src/routes/index.js. Seed concrete \
+demo records into backend/data/db.json. Dependencies are preinstalled — \
+never run npm install.\
+""" % {"schema_json": scaffold.SCHEMA_JSON_REL}
 
 HOST_FINAL_CHECK_PROMPT = """\
 The host already built the app, booted it, and probed the /api/ routes \
@@ -1185,8 +1231,10 @@ header after register/login (re-rendered immediately, not only after \
 reload), session across reload, exactly one visible error element per \
 failure, strict-mode unique echoes, verbatim option labels. Report one \
 line of evidence per chain; an empty "all good" without evidence is a \
-failed check. Fix what is broken; do not rebuild what works. Do not \
-commit.\
+failed check. BUDGET: one walk per chain — verify each chain once, fix \
+only what is red, then end the turn; never re-run whole suites and \
+never re-verify chains that already passed. Fix what is broken; do not \
+rebuild what works. Do not commit.\
 """
 
 ACCEPTANCE_STAGED_NOTE = """\
@@ -1264,10 +1312,11 @@ tables/queries, and the frontend UI to exercise it:
 
 Rules:
 - Extend the existing app; do not rewrite or break already-working features.
-- Do not add npm dependencies; stay on built-in Node modules. If one is \
-truly unavoidable, install it only via \
-`npm install --registry=https://registry.npmmirror.com <pkg>` and keep a \
-`.npmrc` with that registry in the folder.
+- Dependencies are preinstalled (backend express included); do not add \
+new npm dependencies and never run npm install. The backend generic \
+layer (auth/validate/store/engine, see HOST CONTRACT) is host-owned — \
+extend via src/routes/index.js, backend/data/schema.json, and the \
+frontend.
 - Keep the architecture intact: `npm run build` in frontend/ and \
 `npm run start` in backend/ MUST keep working.
 
@@ -1602,11 +1651,17 @@ def main() -> int:
                 {p for p in spec_base_ports(tests_dir)
                  if p not in (args.web_port, smoke_port)})
             if os.environ.get("OCTOS_ARC_HOST_SCAFFOLD", "1") != "0":
-                scaffolded = plan_envelope.host_scaffold(output_dir)
+                scaffolded = scaffold.scaffold(output_dir)
                 log(f"[plan] host scaffold wrote {len(scaffolded)} file(s): "
                     f"{scaffolded}")
             else:
                 log("[plan] OCTOS_ARC_HOST_SCAFFOLD=0; scaffolding left to the model")
+        # 模板已就位时依赖由宿主预装(模型零安装);codegen 门控紧随其后。
+        template_ready = scaffold.template_ready(output_dir)
+        codegen_on = (os.environ.get("OCTOS_ARC_HOST_CODEGEN", "1") != "0"
+                      and bool(scaffolded) and template_ready)
+        if template_ready and os.environ.get("OCTOS_ARC_PREWARM", "1") != "0":
+            scaffold.prewarm_deps(output_dir, log)
 
         def time_up() -> bool:
             return time.time() - t_run_start > budget
@@ -1643,7 +1698,8 @@ def main() -> int:
             str(n.get("id")): "pending" for n in atomic_nodes}
         if plan_on:
             driver.set_envelope(
-                phase="skeleton", task=plan_task, atomic_nodes=atomic_nodes,
+                phase="node" if template_ready else "skeleton",
+                task=plan_task, atomic_nodes=atomic_nodes,
                 statuses=plan_statuses, focus=None, ports=plan_ports,
                 spec_map=spec_map,
                 host_signals={"rehearsal": None,
@@ -1652,13 +1708,24 @@ def main() -> int:
 
         try:
             # Step 0: orient in the starter project + shared foundations.
-            # Retry the skeleton turn: the platform LLM proxy 500s in bursts,
-            # and without a skeleton there is no app at all.
-            log(f"[flow] skeleton/foundations turn starting "
-                f"({len(atomic_nodes)} atomic nodes queued)")
-            skeleton_ok = False
-            skeleton_text = ""
-            for sk_attempt in range(1, 5):
+            # With the host template in place the app already boots — the
+            # skeleton LLM turn (and its nudge/syntax-gate retry machinery)
+            # is skipped entirely; the first model turn is node 1. The
+            # legacy loop below only runs when scaffolding is disabled
+            # (OCTOS_ARC_HOST_SCAFFOLD=0) or the template is incomplete.
+            template_complete = scaffold.template_complete(output_dir)
+            if template_complete:
+                log("[flow] host template complete; skeleton turn skipped "
+                    f"({len(atomic_nodes)} atomic nodes queued)")
+                skeleton_ok = True
+            else:
+                log(f"[flow] skeleton/foundations turn starting "
+                    f"({len(atomic_nodes)} atomic nodes queued)")
+                skeleton_ok = False
+                skeleton_text = ""
+            # Template present → zero skeleton attempts (loop is empty);
+            # legacy/no-scaffold path keeps the 4-attempt retry machinery.
+            for sk_attempt in range(1, 1 if template_complete else 5):
                 if time_up():
                     log("[flow] time budget exhausted before skeleton retry")
                     break
@@ -1739,9 +1806,16 @@ def main() -> int:
                 time.sleep(45)
             if not skeleton_ok:
                 raise RuntimeError(f"skeleton scaffolding failed: {skeleton_text}")
-            runtime.git.commit("chore: scaffold web application skeleton")
+            runtime.git.commit("chore: host template + app skeleton")
 
-            # Per-node implementation.
+            # Per-node implementation. The schema watcher compiles
+            # backend/data/schema.json MID-TURN (stable 3s) so the model can
+            # exercise host-generated endpoints in the same turn it declares
+            # the schema; sync() at turn end is the guaranteed fallback.
+            codegen = (scaffold.Watcher(output_dir, log=log)
+                       if codegen_on else None)
+            if codegen:
+                codegen.start()
             failed: list[str] = []
             for idx, node in enumerate(atomic_nodes, 1):
                 node_id = str(node.get("id"))
@@ -1759,12 +1833,14 @@ def main() -> int:
                 t0 = time.time()
                 if plan_on:
                     plan_statuses[node_id] = "active"
+                    hs0 = dict(driver.envelope.get("host_signals") or {}) \
+                        if driver.envelope else {}
+                    hs0["scaffolded_by_host"] = scaffolded
                     driver.set_envelope(
                         phase="node", task=plan_task,
                         atomic_nodes=atomic_nodes, statuses=plan_statuses,
                         focus=node_id, ports=plan_ports, spec_map=spec_map,
-                        host_signals=driver.envelope.get("host_signals")
-                        if driver.envelope else None)
+                        host_signals=hs0 or None)
                     node_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
                         node_id=node_id, node_spec=describe_node(node),
                         port=args.web_port, smoke=smoke_port)
@@ -1772,103 +1848,127 @@ def main() -> int:
                     node_prompt = NODE_PROMPT_TEMPLATE.format(
                         port=args.web_port, smoke=smoke_port,
                         node_spec=describe_node(node)) + tests_prompt_slim
+                if codegen_on and not scaffold.schema_path(output_dir).exists():
+                    node_prompt += SCHEMA_DIRECTIVE
                 ok, text = driver.run(node_prompt, node_timeout)
                 log(f"[flow] node {node_id} {'ok' if ok else 'FAILED'} "
                     f"in {time.time()-t0:.0f}s: {text[-300:]!r}")
-                if ok:
-                    if not project_files_changed(output_dir, t0):
-                        # Lazy turn: protocol ok, zero disk progress.
-                        log(f"[gate] {node_id}: turn ok but no project "
-                            "file changed; nudging to implement")
-                        nudged = False
-                        for ng in range(1, 3):
-                            if time_up():
-                                break
-                            ng_t0 = time.time()
-                            driver.run(NODE_NUDGE_PROMPT, 600)
-                            if project_files_changed(output_dir, ng_t0):
-                                nudged = True
-                                log(f"[gate] {node_id}: nudge {ng} produced "
-                                    "file changes")
-                                break
-                        if not nudged and not project_files_changed(output_dir, t0):
-                            events.mark_implementation_failed(
-                                node_id, "turn made no file changes")
-                            failed.append(node_id)
-                            continue
-                    syn = js_syntax_errors(output_dir)
-                    if syn:
-                        log(f"[gate] {node_id}: {len(syn)} JS syntax "
-                            f"error(s): {syn[:3]}")
-                        for rg_attempt in range(1, 3):
-                            if time_up():
-                                break
-                            driver.run(syntax_repair_prompt(syn), 600)
-                            syn = js_syntax_errors(output_dir)
-                            if not syn:
-                                log(f"[gate] {node_id} syntax repaired "
-                                    f"(repair turn {rg_attempt})")
-                                break
-                    if syn:
+                if not ok:
+                    # Hard-wall/orphan cuts can leave a node 90% done on disk
+                    # (tok-ticket-3: REQ-1 died at the 3600s wall and was
+                    # failed un-gated while register was nearly complete).
+                    # Gate + rehearse whatever landed instead of failing
+                    # fast; repair turns run in a fresh session.
+                    log(f"[flow] node {node_id} failed; gating + rehearsing "
+                        "what landed on disk")
+                    events.mark_implementation_failed(
+                        node_id, "turn ended failed: " + text[-200:])
+                    failed.append(node_id)
+                if ok and not project_files_changed(output_dir, t0):
+                    # Lazy turn: protocol ok, zero disk progress.
+                    log(f"[gate] {node_id}: turn ok but no project "
+                        "file changed; nudging to implement")
+                    nudged = False
+                    for ng in range(1, 3):
+                        if time_up():
+                            break
+                        ng_t0 = time.time()
+                        driver.run(NODE_NUDGE_PROMPT, 600)
+                        if project_files_changed(output_dir, ng_t0):
+                            nudged = True
+                            log(f"[gate] {node_id}: nudge {ng} produced "
+                                "file changes")
+                            break
+                    if not nudged and not project_files_changed(output_dir, t0):
                         events.mark_implementation_failed(
-                            node_id, "JS syntax errors: " + "; ".join(syn[:2]))
+                            node_id, "turn made no file changes")
                         failed.append(node_id)
                         continue
-                    events.mark_implementation_done(node_id, text[-500:] or None)
-                    runtime.git.commit(f"{node_id} (implement): {node.get('name', '')}")
-                    if plan_on and not time_up():
-                        # A-flip: the HOST verifies the node (build + boot +
-                        # route probes + extra ports) instead of asking the
-                        # model to smoke-test itself. Red → ≤2 repair turns
-                        # on the digest; still red → the node stays blocked
-                        # in the plan (events above stay as recorded).
-                        r_err, r_report = rehearse_node(
-                            output_dir, smoke_port, probe_list,
-                            spec_ports_extra)
-                        report_vrows = r_report.get("validation_probes") or []
-                        log(f"[plan] node {node_id} rehearsal "
-                            f"{'GREEN' if r_err is None else 'RED'}: "
-                            f"{(r_err or 'ok').splitlines()[0][:200]}")
-                        if r_err is not None:
-                            for fix_attempt in (1, 2):
-                                if time_up():
-                                    break
-                                driver.run(REHEARSAL_REPAIR_PROMPT.format(
-                                    error=r_err[-1200:],
-                                    port=args.web_port, smoke=smoke_port),
-                                    node_timeout)
-                                r_err, r_report = rehearse_node(
-                                    output_dir, smoke_port, probe_list,
-                                    spec_ports_extra)
-                                report_vrows = r_report.get("validation_probes") or []
-                                log(f"[plan] node {node_id} repair "
-                                    f"{fix_attempt}: "
-                                    f"{'GREEN' if r_err is None else 'RED'}")
-                                if r_err is None:
-                                    break
-                        plan_statuses[node_id] = (
-                            "done" if r_err is None else "blocked")
-                        # validation_probes lives on HostSignals (next to
-                        # rehearsal), not inside RehearsalReport.
-                        r_report.pop("validation_probes", None)
-                        vrows = report_vrows
-                        if driver.envelope is not None:
-                            hs = dict(driver.envelope.get("host_signals") or {})
-                            hs["rehearsal"] = r_report
-                            hs["validation_probes"] = vrows
-                        else:
-                            hs = {"rehearsal": r_report,
-                                  "validation_probes": vrows}
-                        driver.set_envelope(
-                            phase="node", task=plan_task,
-                            atomic_nodes=atomic_nodes,
-                            statuses=plan_statuses, focus=node_id,
-                            ports=plan_ports, spec_map=spec_map,
-                            host_signals=hs)
-                else:
-                    events.mark_implementation_failed(node_id, text[-500:])
+                syn = js_syntax_errors(output_dir)
+                if syn:
+                    log(f"[gate] {node_id}: {len(syn)} JS syntax "
+                        f"error(s): {syn[:3]}")
+                    for rg_attempt in range(1, 3):
+                        if time_up():
+                            break
+                        driver.run(syntax_repair_prompt(syn), 600)
+                        syn = js_syntax_errors(output_dir)
+                        if not syn:
+                            log(f"[gate] {node_id} syntax repaired "
+                                f"(repair turn {rg_attempt})")
+                            break
+                if syn:
+                    events.mark_implementation_failed(
+                        node_id, "JS syntax errors: " + "; ".join(syn[:2]))
                     failed.append(node_id)
+                    continue
+                events.mark_implementation_done(node_id, text[-500:] or None)
+                runtime.git.commit(f"{node_id} (implement): {node.get('name', '')}")
+                if codegen:
+                    written = codegen.sync()
+                    if written:
+                        scaffolded = sorted(set(scaffolded) | set(written))
+                        log(f"[codegen] host compiled {written}")
+                if plan_on and not time_up():
+                    # A-flip: the HOST verifies the node (build + boot +
+                    # route probes + extra ports) instead of asking the
+                    # model to smoke-test itself. Red → ≤2 repair turns
+                    # on the digest; still red → the node stays blocked
+                    # in the plan (events above stay as recorded).
+                    r_err, r_report = rehearse_node(
+                        output_dir, smoke_port, probe_list,
+                        spec_ports_extra)
+                    report_vrows = r_report.get("validation_probes") or []
+                    log(f"[plan] node {node_id} rehearsal "
+                        f"{'GREEN' if r_err is None else 'RED'}: "
+                        f"{(r_err or 'ok').splitlines()[0][:200]}")
+                    if r_err is not None:
+                        for fix_attempt in (1, 2):
+                            if time_up():
+                                break
+                            driver.run(REHEARSAL_REPAIR_PROMPT.format(
+                                error=r_err[-1200:],
+                                port=args.web_port, smoke=smoke_port),
+                                node_timeout)
+                            r_err, r_report = rehearse_node(
+                                output_dir, smoke_port, probe_list,
+                                spec_ports_extra)
+                            report_vrows = r_report.get("validation_probes") or []
+                            log(f"[plan] node {node_id} repair "
+                                f"{fix_attempt}: "
+                                f"{'GREEN' if r_err is None else 'RED'}")
+                            if r_err is None:
+                                break
+                    plan_statuses[node_id] = (
+                        "done" if r_err is None else "blocked")
+                    if r_err is None and node_id in failed:
+                        # Wall-cut turn whose code actually rehearsal-greened.
+                        failed.remove(node_id)
+                        events.mark_implementation_done(
+                            node_id, "recovered via host rehearsal")
+                    # validation_probes lives on HostSignals (next to
+                    # rehearsal), not inside RehearsalReport.
+                    r_report.pop("validation_probes", None)
+                    vrows = report_vrows
+                    if driver.envelope is not None:
+                        hs = dict(driver.envelope.get("host_signals") or {})
+                        hs["rehearsal"] = r_report
+                        hs["validation_probes"] = vrows
+                    else:
+                        hs = {"rehearsal": r_report,
+                              "validation_probes": vrows}
+                    hs["scaffolded_by_host"] = scaffolded
+                    driver.set_envelope(
+                        phase="node", task=plan_task,
+                        atomic_nodes=atomic_nodes,
+                        statuses=plan_statuses, focus=node_id,
+                        ports=plan_ports, spec_map=spec_map,
+                        host_signals=hs)
 
+            if codegen:
+                codegen.stop()
+                if codegen.sync():
+                    log("[codegen] final compile done")
             # Final verification pass; octos leaves the port free.
             ok, text = False, "skipped: time budget"
             if time_up():
@@ -1886,13 +1986,17 @@ def main() -> int:
                 f_report.pop("validation_probes", None)
                 hs = {"rehearsal": f_report}
                 tier2_run = None
-                if f_err is None and os.environ.get("OCTOS_ARC_HOST_GRADE") == "1":
+                if f_err is None and os.environ.get("OCTOS_ARC_HOST_GRADE",
+                                                    "1") != "0":
                     tier2_run = _run_staged_playwright(
-                        output_dir, smoke_port, tests_dir)
+                        output_dir, smoke_port, tests_dir, spec_ports_extra)
                     hs["spec_run"] = (
                         {"passed": tier2_run[0], "failed": tier2_run[1],
-                         "digest": ""} if tier2_run else None)
-                    log(f"[plan] Tier-2 staged playwright: {tier2_run}")
+                         "digest": tier2_run[2]} if tier2_run else None)
+                    log(f"[plan] Tier-2 staged playwright: "
+                        f"{tier2_run[0]}p/{tier2_run[1]}f"
+                        if tier2_run else "[plan] Tier-2 unavailable; "
+                                         "degrading to model final check")
                 driver.set_envelope(
                     phase="final", task=plan_task, atomic_nodes=atomic_nodes,
                     statuses=plan_statuses, focus=None, ports=plan_ports,
@@ -1908,6 +2012,23 @@ def main() -> int:
                     final_prompt = (
                         HOST_FINAL_CHECK_PROMPT if probe_list
                         else HOST_FINAL_CHECK_UI_PROMPT)
+                    if tier2_run and tier2_run[1] > 0:
+                        # Tier-2 ran and is RED: the failing titles are ground
+                        # truth — hand them to the model instead of letting it
+                        # re-discover failures by hand-walking.
+                        final_prompt += (
+                            f"\nHOST SPEC RUN (ground truth, Playwright vs "
+                            f"this app on port {smoke_port}): "
+                            f"{tier2_run[0]} passed, {tier2_run[1]} FAILED. "
+                            f"Failing tests: {tier2_run[2]}. Reproduce with "
+                            f"the staged specs under .arc/acceptance/, fix "
+                            f"each failure, do not touch passing flows.")
+                    elif tier2_run is not None and not probe_list:
+                        final_prompt += (
+                            f"\nHOST SPEC RUN (ground truth): all "
+                            f"{tier2_run[0]} staged specs PASS on port "
+                            f"{smoke_port}. Do not re-run suites; spot-check "
+                            "one chain if you must, then end the turn.")
                     log("[flow] final verification turn starting (slim, "
                         f"{len(probe_list)} route probe(s))")
                     t0 = time.time()
