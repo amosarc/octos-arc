@@ -1,18 +1,17 @@
 //! task-turn-interrupt-steer-correlation-logs: session/turn-correlated
-//! lifecycle logging for `turn/interrupt` and `turn/steer`.
+//! lifecycle logging for `turn/interrupt`.
 //!
 //! The 2026-08-17 incident had to be reconstructed from the ledger because
 //! the server log carried no INFO record of the interrupt and the agent-side
-//! lines (`calling LLM`, `executing tool batch`, `draining mid-turn steer
-//! input`) named neither session nor turn. Everything here logs ids, counts
-//! and states only — never user text.
+//! lines (`calling LLM`, `executing tool batch`) named neither session nor
+//! turn. Everything here logs ids, counts and states only — never user text.
 
 use octos_core::SessionKey;
 use octos_core::ui_protocol::TurnId;
 use tracing::{Span, info, info_span};
 
 /// The span the spawned agent future runs under, so every log line it emits
-/// (LLM calls, tool batches, steer drains, EndTurn rounds) carries
+/// (LLM calls, tool batches, EndTurn rounds) carries
 /// `session` and `turn` without each call site naming them.
 pub(crate) fn turn_span(session_id: &SessionKey, turn_id: &TurnId) -> Span {
     info_span!("turn", session = %session_id.0, turn = %turn_id.0)
@@ -116,15 +115,15 @@ mod tests {
     #[test]
     fn correlation_logs_never_contain_user_text() {
         let (session, turn) = ids();
-        let steer_text = "SECRET-MARKER-please-rm-rf-nothing";
+        let pending_text = "SECRET-MARKER-please-rm-rf-nothing";
         let logs = capture(|| {
             // The text lives with the caller; none of the log fns take it.
-            let _pending = [steer_text.to_string()];
+            let _pending = [pending_text.to_string()];
             log_interrupt_received(&session, &turn);
             log_interrupt_outcome(&session, &turn, "captured");
             log_interrupt_ack(&session, &turn, "interrupted");
         });
-        assert!(!logs.contains(steer_text), "{logs}");
+        assert!(!logs.contains(pending_text), "{logs}");
         assert!(!logs.contains("SECRET-MARKER"));
     }
 

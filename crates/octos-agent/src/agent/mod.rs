@@ -20,7 +20,6 @@ mod prompt_cache;
 pub mod prompt_segments;
 mod streaming;
 mod turn_state;
-pub mod verifier;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -38,7 +37,6 @@ use crate::progress::{ProgressReporter, SilentReporter};
 use crate::prompt_context::PromptContextManager;
 use crate::session::{SessionLimits, SessionUsage};
 use crate::tools::ToolRegistry;
-use verifier::AgentVerifierConfig;
 
 pub use message_repair::normalize_tool_call_id;
 pub use turn_state::PartialTurnUsage;
@@ -497,41 +495,21 @@ pub struct Agent {
     /// pipeline workers, plugins, and shell to derive their CWD and
     /// path validation from this scope.
     pub(super) session_scope: Option<Arc<SessionScope>>,
-    /// Build-cache pool slot held by this peer's CURRENT turn (outer-loop
-    /// #4, docs/build-cache-pool.md §4). The slot lifecycle is ONE TURN, not
-    /// the peer session: the serve boot adopts/acquires it and the turn
-    /// terminal releases it. Threaded into `ToolContext.build_cache_slot`
-    /// for per-tool-call `CARGO_TARGET_DIR` injection (§7.4) — the serve
-    /// path shares one process across peers and the master, so this MUST
-    /// ride the tool context, never the process environment.
-    pub(super) build_cache_slot: Option<std::path::PathBuf>,
-    pub(super) build_cache_usage: Option<crate::tools::BuildCacheUsage>,
-    /// Optional inference-time verifier plus structured TurnLedger. Absent
-    /// by default so legacy agent loops do not spend verifier calls or write
-    /// verifier sidecars unless a caller opts in explicitly.
-    pub(super) verifier_config: Option<AgentVerifierConfig>,
     /// Git-backed workspace snapshot store (#1768, opt-in). When present,
     /// `execute_tools` records a snapshot of the workspace before any
     /// batch containing a mutating tool so the user can restore
     /// pre-mutation state later. `None` (the default) disables the
     /// feature entirely — no git subprocess is ever spawned.
     pub(super) snapshot_manager: Option<Arc<crate::snapshot::SnapshotManager>>,
-    /// Per-turn pending-input buffer for mid-turn prompt injection
-    /// ("steer") — codex `TurnState.pending_input` parity. The host pushes
-    /// while the turn runs; the conversation loop drains FIFO at the top of
-    /// each iteration (before the next LLM call) and appends each entry as
-    /// a plain `role: user` message with no wrapper text. A steer that
-    /// lands after the model's final answer forces one more round
-    /// (`needs_follow_up = model_wants_more || buffer_nonempty`). `None`
-    /// (the default) keeps the loop byte-identical to pre-steer behaviour.
-    pub(super) steer_buffer: Option<crate::steering::SharedSteerBuffer>,
-    /// Host callback observing each drained steer batch, called inline at
-    /// the drain point before the next LLM call. Observation only: the
-    /// drained rows always stay in the chronological turn output log and are
-    /// persisted by the end-of-turn pass in model-visible order, so a host
-    /// must not persist them itself (doing so at drain time gave the steer a
-    /// lower durable sequence than the turn's own rows).
-    pub(super) steer_drained_callback: Option<crate::steering::SteerDrainedCallback>,
+    /// ARC host planning-signal state (planctl). `None` unless the turn
+    /// carried the `[arc-plan]` marker (kernel scan) or disk rehydration
+    /// found a stored envelope. Agents rebuild per turn in ARC stdio
+    /// sessions, so the segment is re-installed every turn from the wire
+    /// or from `.arc/host-plan/state.v1.json` — memory alone is never
+    /// sufficient.
+    pub(super) arc_plan: RwLock<Option<crate::planctl::PlanState>>,
+    /// `<arc-workspace>` tail blocks appended this turn (cap 8).
+    arc_plan_tail_count: std::sync::atomic::AtomicU8,
 }
 
 impl Agent {
@@ -585,12 +563,9 @@ impl Agent {
             sandbox_config: None,
             prompt_context_manager: None,
             session_scope: None,
-            build_cache_slot: None,
-            build_cache_usage: None,
-            verifier_config: None,
             snapshot_manager: None,
-            steer_buffer: None,
-            steer_drained_callback: None,
+            arc_plan: RwLock::new(None),
+            arc_plan_tail_count: std::sync::atomic::AtomicU8::new(0),
         }
     }
 
@@ -643,12 +618,9 @@ impl Agent {
             sandbox_config: None,
             prompt_context_manager: None,
             session_scope: None,
-            build_cache_slot: None,
-            build_cache_usage: None,
-            verifier_config: None,
             snapshot_manager: None,
-            steer_buffer: None,
-            steer_drained_callback: None,
+            arc_plan: RwLock::new(None),
+            arc_plan_tail_count: std::sync::atomic::AtomicU8::new(0),
         }
     }
 
@@ -757,31 +729,6 @@ impl Agent {
     /// Cancellation handle for embedders using the canonical session agent.
     pub fn shutdown_signal(&self) -> Arc<AtomicBool> {
         self.shutdown.clone()
-    }
-
-    /// Attach the per-turn pending-input buffer for mid-turn prompt
-    /// injection ("steer"). The host keeps a clone and pushes inputs while
-    /// the turn runs; the conversation loop drains FIFO at the top of each
-    /// iteration, before the next LLM call, appending each entry as a plain
-    /// `role: user` message (codex `TurnState.pending_input` parity —
-    /// codex-rs `core/src/session/turn.rs:225-233`). Absent = pre-steer
-    /// behaviour, byte-identical.
-    pub fn with_steer_buffer(mut self, buffer: crate::steering::SharedSteerBuffer) -> Self {
-        self.steer_buffer = Some(buffer);
-        self
-    }
-
-    /// Register the host callback observing each drained steer batch.
-    /// Called inline from the drain point (after the drained texts joined
-    /// the prompt, before the next LLM call). This is an observation hook;
-    /// drained rows remain in `ConversationResponse.messages` and are
-    /// persisted by the normal end-of-turn path in model-visible order.
-    pub fn with_steer_drained_callback(
-        mut self,
-        callback: crate::steering::SteerDrainedCallback,
-    ) -> Self {
-        self.steer_drained_callback = Some(callback);
-        self
     }
 
     /// Enable M8.4's [`FileStateCache`] for file tools.
@@ -904,28 +851,6 @@ impl Agent {
     /// Access the configured session scope, if any.
     pub fn session_scope(&self) -> Option<&Arc<SessionScope>> {
         self.session_scope.as_ref()
-    }
-
-    /// Builder: set the build-cache pool slot this peer's current turn holds
-    /// (outer-loop #4, docs/build-cache-pool.md §4/§7.4). Called by the peer
-    /// turn boot — serve adopts the staging slot on the first turn and
-    /// acquires fresh on later ones. The solo chat path does not allocate pool slots.
-    /// Threaded into `ToolContext.build_cache_slot` so the shell tool can
-    /// inject `CARGO_TARGET_DIR` per tool call (never a process env var).
-    pub fn with_build_cache_slot(mut self, slot: std::path::PathBuf) -> Self {
-        self.build_cache_slot = Some(slot);
-        self
-    }
-
-    /// Share the registry claim's child lifetime tracker with tool execution.
-    pub fn with_build_cache_usage(mut self, usage: crate::tools::BuildCacheUsage) -> Self {
-        self.build_cache_usage = Some(usage);
-        self
-    }
-
-    /// The build-cache slot held by this peer's current turn, if any.
-    pub fn build_cache_slot(&self) -> Option<&std::path::Path> {
-        self.build_cache_slot.as_deref()
     }
 
     /// Guard C (issue #607): record this agent's spawn nesting depth so
@@ -1142,6 +1067,195 @@ impl Agent {
             .set_named(name, content);
     }
 
+    // ── ARC host plan (planctl) ─────────────────────────────────────
+    //
+    // Lifecycle: a `[arc-plan]` marker turn calls `arc_plan_apply` (full
+    // scan + segment install + disk store); marker-less turns rehydrate
+    // from disk; mutating tool batches may earn an `<arc-workspace>` tail
+    // block; every LLM call re-classifies pressure and may shrink the
+    // segment between the sentinels in `messages[0]`.
+
+    /// Snapshot of the installed plan state, when present.
+    pub(super) fn arc_plan_state(&self) -> Option<crate::planctl::PlanState> {
+        self.arc_plan
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Install the plan: three-layer scan → build state → disk store →
+    /// `set_prompt_segment(SEGMENT_NAME, render(Full))`. Compose excludes
+    /// the segment from the stable snapshot and appends the sentinel-
+    /// wrapped body LAST (cache law: stable rules forward, volatile tail).
+    pub fn arc_plan_apply(&self, envelope: crate::planctl::Envelope, workspace: &std::path::Path) {
+        let prev_seq = self
+            .arc_plan_state()
+            .map(|s| s.tail_seq)
+            .or_else(|| crate::planctl::state::load(workspace).map(|(_, seq)| seq))
+            .unwrap_or(0);
+        let state = crate::planctl::build_plan_state(envelope, workspace, prev_seq);
+        if let Err(e) = crate::planctl::state::store(workspace, &state.envelope, state.tail_seq) {
+            tracing::warn!(error = %e, "planctl: failed to persist plan state");
+        }
+        self.install_plan_segment(state);
+    }
+
+    /// Marker-less turn: read the stored envelope from disk and rescan the
+    /// workspace repo map (agents rebuild per turn, so memory alone is not
+    /// enough). No-op when a plan is already installed or no state file
+    /// exists.
+    pub fn arc_plan_rehydrate_if_present(&self, workspace: &std::path::Path) {
+        if self.arc_plan_state().is_some() {
+            return;
+        }
+        let Some((envelope, tail_seq)) = crate::planctl::state::load(workspace) else {
+            return;
+        };
+        let state = crate::planctl::build_plan_state(envelope, workspace, tail_seq);
+        self.install_plan_segment(state);
+        tracing::debug!("planctl: rehydrated plan state from disk");
+    }
+
+    fn install_plan_segment(&self, state: crate::planctl::PlanState) {
+        // ONLY the stable CONTRACT rides the system row (byte-stable
+        // across turns); the volatile turn-tail is composed per turn into
+        // the user message (see arc_plan_turn_tail).
+        let body = crate::planctl::render::render_stable_segment(&state);
+        self.arc_plan
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(state);
+        self.set_prompt_segment(crate::planctl::SEGMENT_NAME, body);
+    }
+
+    /// Stable system-row segment body (sentinels included), if installed.
+    /// Public for integration tests (planctl_turn_e2e).
+    pub fn arc_plan_segment_body(&self) -> Option<String> {
+        let state = self.arc_plan_state()?;
+        Some(crate::planctl::render::render_stable_segment(&state))
+    }
+
+    /// Volatile turn-tail (`<arc-plan-turn>` block) for THIS turn:
+    /// pressure-classify against history + the incoming prompt, render
+    /// the tail once, and let the caller prepend it to the user message.
+    /// The system row is never touched mid-turn (cache law: the stable
+    /// CONTRACT segment keeps the whole conversation prefix cacheable).
+    pub fn arc_plan_turn_tail(&self, history: &[Message], incoming: &str) -> String {
+        let Some(state) = self.arc_plan_state() else {
+            return String::new();
+        };
+        let stable = crate::planctl::render::render_stable_segment(&state);
+        let mut used = octos_llm::context::estimate_tokens(&stable);
+        for m in history {
+            used += octos_llm::context::estimate_message_tokens(m);
+        }
+        used += octos_llm::context::estimate_tokens(incoming);
+        let mode = crate::planctl::PressureMode::classify(
+            used,
+            self.arc_plan_effective_window(),
+            crate::planctl::full_ratio(),
+            crate::planctl::skeleton_ratio(),
+        );
+        crate::planctl::render::render_turn_tail(&state, mode)
+    }
+
+    /// Effective context window for pressure classification: env override
+    /// first (ARC bench forces degraded windows), then the provider's.
+    pub(crate) fn arc_plan_effective_window(&self) -> u32 {
+        std::env::var("OCTOS_ARC_WINDOW_TOKENS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| self.llm.context_window())
+    }
+
+    /// Mutating tool batch succeeded on `changed_files`: L1 rg drift check
+    /// (full workspace, millisecond-scale at ARC sizes), escalate to L2 ts
+    /// change localization only on the changed files, and return the
+    /// `<arc-workspace>` tail-block text when the drift set moved. When
+    /// `emit` is false (per-turn block cap reached) the state still
+    /// updates, but no block is produced.
+    pub(crate) fn arc_plan_on_mutating_batch(
+        &self,
+        changed_files: &[std::path::PathBuf],
+        emit: bool,
+    ) -> Option<String> {
+        let Some(workspace) = self.tools.workspace_root().map(PathBuf::from) else {
+            return None;
+        };
+        let mut guard = self.arc_plan.write().unwrap_or_else(|e| e.into_inner());
+        let state = guard.as_mut()?;
+
+        // L2: localize changed definitions against the cached tags.
+        let mut notes: Vec<crate::planctl::render::ChangeNote> = Vec::new();
+        for path in changed_files {
+            let Ok(rel) = path.strip_prefix(&workspace) else {
+                continue;
+            };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            let Ok(new_source) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let mtime = std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let old_tags = state
+                .index
+                .tags_by_file
+                .get(&rel)
+                .map(|(_, tags)| tags.clone())
+                .unwrap_or_default();
+            notes.extend(crate::planctl::scan::change_localize(
+                &rel,
+                &old_tags,
+                &new_source,
+            ));
+            if let Some(new_tags) = crate::planctl::repomap::extract_file_tags(&new_source, &rel) {
+                state.index.tags_by_file.insert(rel, (mtime, new_tags));
+            }
+        }
+
+        // L1: full-workspace drift re-check.
+        let files = crate::planctl::scan::walk_workspace(&workspace);
+        let hits = crate::planctl::scan::harvest_literals(&files);
+        let required = crate::planctl::required_signals(&state.inventory);
+        let mut drift = crate::planctl::scan::drift(&required, &hits);
+        crate::planctl::scan::reconcile_drift(&state.last_missing, &mut drift);
+
+        let prev_fingerprint = crate::planctl::DriftReport {
+            missing: state.last_missing.clone(),
+            newly_satisfied: Vec::new(),
+        }
+        .fingerprint();
+        let moved = drift.fingerprint() != prev_fingerprint || !notes.is_empty();
+        state.last_missing = drift.missing.clone();
+        if !moved {
+            return None;
+        }
+        state.tail_seq += 1;
+        if !emit {
+            return None;
+        }
+        crate::planctl::render::render_tail_block(state.tail_seq, &drift, &notes)
+    }
+
+    /// Reset the per-turn tail-block budget (≤8 `<arc-workspace>` blocks
+    /// per turn; past the cap the state still updates, silently).
+    pub fn reset_arc_plan_tail_budget(&self) {
+        self.arc_plan_tail_count
+            .store(0, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn arc_plan_tail_budget_available(&self) -> bool {
+        self.arc_plan_tail_count
+            .load(std::sync::atomic::Ordering::Acquire)
+            < 8
+    }
+
+    pub(crate) fn arc_plan_tail_budget_consume(&self) {
+        self.arc_plan_tail_count
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
     /// Register a provider that refreshes a named segment between turns.
     pub fn add_prompt_segment_provider(&self, provider: Arc<dyn PromptSegmentProvider>) {
         self.segment_providers
@@ -1285,6 +1399,15 @@ impl Agent {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .render()
+    }
+
+    /// Snapshot with named segments listed in `excluded` dropped
+    /// (planctl: the volatile plan segment rides at the tail instead).
+    pub(super) fn system_prompt_snapshot_excluding(&self, names: &[&str]) -> String {
+        self.system_prompt
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .render_excluding_named(names)
     }
 
     /// Render the System prompt with one named segment replaced in the

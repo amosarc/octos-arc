@@ -20,7 +20,6 @@ use super::loop_compaction::{prepare_conversation_messages, prepare_task_message
 use super::loop_state::{LoopDecision, LoopRetryState, SHELL_SPIRAL_VARIANT};
 use super::message_repair::sanitize_tool_call_id;
 use super::turn_state::{LoopRetryReason, LoopTurnState, attach_partial_usage};
-use super::verifier::{TurnLedger, ledger_entry_from_tool_result};
 use super::{Agent, AssistantSegmentProvenance, ConversationResponse, TASK_REPORTER, TokenTracker};
 use crate::harness_errors::HarnessError;
 use crate::harness_events::write_event_to_sink;
@@ -680,71 +679,6 @@ impl Agent {
         Ok(warning)
     }
 
-    /// Drain the per-turn steer buffer (mid-turn injected user inputs) into
-    /// the live conversation.
-    ///
-    /// Codex parity: `run_turn` drains `TurnState.pending_input` at the TOP
-    /// of each loop iteration, before building the next model request
-    /// (codex-rs `core/src/session/turn.rs:225-233`), and records each item
-    /// as a plain `role: user` message with NO wrapper text
-    /// (`record_user_prompt_and_emit_turn_item`). FIFO order is the
-    /// buffer's append order (`split_off(0)` semantics).
-    ///
-    /// Persistence ownership: drained steer rows ALWAYS ride the
-    /// chronological `turn_output_log`, so the end-of-turn persist pass
-    /// writes them at their model-visible position (after every row the
-    /// model had already seen). The optional drained-callback is a live
-    /// observation hook for the host; it never owns persistence — a host
-    /// that persisted at drain time gave the steer a lower durable sequence
-    /// than the turn's own rows and corrupted the chronology of any context
-    /// ledger rebuilt from session history.
-    ///
-    /// No-op without a configured buffer — pre-steer loops are
-    /// byte-identical.
-    async fn drain_pending_steer_input(
-        &self,
-        messages: &mut Vec<Message>,
-        turn_output_log: &mut TurnOutputLog,
-    ) {
-        let Some(buffer) = self.steer_buffer.as_ref() else {
-            return;
-        };
-        let drained = buffer.drain();
-        if drained.is_empty() {
-            return;
-        }
-        tracing::info!(
-            count = drained.len(),
-            "draining mid-turn steer input into the conversation before the next LLM call"
-        );
-        for text in &drained {
-            let message = Message::user(text.clone());
-            messages.push(message.clone());
-            // The steer is appended to the durable turn log at its
-            // chronological position — after every row the model has already
-            // seen — so session history persists in model-visible order and a
-            // rebuild of the context ledger from that history reproduces the
-            // same chronology (answer, then the injected steer). A host that
-            // persisted the steer at drain time instead put it BEFORE the
-            // turn's prompt/answer rows in the durable sequence, which
-            // silently reordered the prompt after any snapshot rebuild.
-            turn_output_log.push(message);
-        }
-        if let Some(callback) = self.steer_drained_callback.as_ref() {
-            callback(drained).await;
-        }
-    }
-
-    /// Whether a mid-turn steer input is pending (codex `has_pending_input`,
-    /// `turn.rs:304-318`). Read in the EndTurn arm so
-    /// `needs_follow_up = model_wants_more || buffer_nonempty` — a steer
-    /// landing after the model's final answer forces one more round.
-    fn steer_input_pending(&self) -> bool {
-        self.steer_buffer
-            .as_ref()
-            .is_some_and(|buffer| !buffer.is_empty())
-    }
-
     /// Process a single message in conversation mode (chat/gateway).
     /// Takes the user's message, conversation history, and optional media paths.
     pub async fn process_message(
@@ -819,6 +753,56 @@ impl Agent {
         attachments: TurnAttachmentContext,
         tracker: Option<&TokenTracker>,
     ) -> Result<ConversationResponse> {
+        // planctl turn marker (`[arc-plan]`): scanned FIRST. A valid
+        // envelope applies the host plan (scan → segment install → disk
+        // store) and the stripped text CONTINUES through the testgen scan
+        // below — both markers can coexist on one turn. A rejected payload
+        // keeps the stripped text plus a short constant notice; a
+        // marker-less turn rehydrates any stored plan from disk (per-turn
+        // agents start cold).
+        let plan_scan = crate::planctl::wire::scan_turn_input(user_content);
+        let plan_message;
+        let user_content: &str = match &plan_scan.envelope {
+            Some(Ok(envelope)) => {
+                if let Some(workspace) = self.tools.workspace_root() {
+                    self.arc_plan_apply(envelope.clone(), workspace);
+                }
+                // Volatile turn-tail rides the USER row (cache law ADR):
+                // the system row keeps only the byte-stable CONTRACT, so
+                // per-turn seq/focus/report changes never invalidate the
+                // conversation prefix cache.
+                plan_message = format!(
+                    "{}\n\n{}",
+                    self.arc_plan_turn_tail(history, &plan_scan.text),
+                    plan_scan.text
+                );
+                plan_message.as_str()
+            }
+            Some(Err(reason)) => {
+                tracing::warn!(reason, "planctl: marked turn payload rejected");
+                plan_message = format!(
+                    "{}\n\n{}",
+                    self.arc_plan_turn_tail(history, ""),
+                    crate::planctl::wire::compose_turn_message(&plan_scan)
+                );
+                plan_message.as_str()
+            }
+            None => {
+                if let Some(workspace) = self.tools.workspace_root() {
+                    self.arc_plan_rehydrate_if_present(workspace);
+                }
+                if self.arc_plan_state().is_some() {
+                    plan_message = format!(
+                        "{}\n\n{user_content}",
+                        self.arc_plan_turn_tail(history, user_content)
+                    );
+                    plan_message.as_str()
+                } else {
+                    user_content
+                }
+            }
+        };
+
         // testgen turn marker (`[task-kind:test]`): strip the harness marker
         // and append the bounded host notice (TestWriter role prompt +
         // scaffold→fill→verify loop contract). This is the in-session
@@ -848,6 +832,7 @@ impl Agent {
                 // Reset per-run flags
                 self.tools.reset_spawn_only_invoked();
                 self.reset_loop_detected_recently();
+                self.reset_arc_plan_tail_budget();
 
                 // Refresh provider-backed prompt segments (e.g. the memory
                 // block when MEMORY.md changed on disk) before composing.
@@ -1004,7 +989,6 @@ impl Agent {
                 // arguments is still the same terminal operation and must
                 // not execute again.
                 let mut terminal_tools_for_turn = HashSet::new();
-                let mut turn_ledger = self.new_turn_ledger();
                 // #1691 (codex gap G6): fire the in-band budget reminder once,
                 // when the run first crosses ~80% of its iteration cap.
                 let mut budget_reminder_sent = false;
@@ -1115,15 +1099,6 @@ impl Agent {
                 // loop — an unlabeled `continue` there fell through to
                 // `handle_tool_use` and executed the spiraling tools anyway.
                 'agent_loop: loop {
-                    // Codex-parity steer drain (turn.rs:225-233): fold any
-                    // mid-turn injected user inputs into the conversation at
-                    // the TOP of each iteration, BEFORE the next LLM call,
-                    // in FIFO order. Steering never interrupts an in-flight
-                    // round — inputs buffered while the model streams are
-                    // picked up here, after the previous round's tool
-                    // results are recorded.
-                    self.drain_pending_steer_input(&mut messages, &mut turn_output_log)
-                        .await;
                     // The previous checkpoint summary is transient working
                     // memory, not durable conversation history. Remove it
                     // before prompt repair/compaction and re-inject only the
@@ -1608,43 +1583,6 @@ impl Agent {
                     match response.stop_reason {
                         StopReason::EndTurn | StopReason::StopSequence => {
                             let content = response.content.clone().unwrap_or_default();
-                            if !self
-                                .verifier_allows_termination(
-                                    &mut messages,
-                                    turn_ledger.as_mut(),
-                                    &content,
-                                    iteration,
-                                    &mut turn,
-                                    tracker,
-                                )
-                                .await?
-                            {
-                                continue;
-                            }
-                            // Codex-parity follow-up gate (turn.rs:304-318):
-                            // `needs_follow_up = model_needs_follow_up ||
-                            // has_pending_input`. The model produced its
-                            // final answer, but a steer landed during this
-                            // round — record that answer as a normal
-                            // assistant row (so the model sees its own
-                            // reply next round and the row persists), then
-                            // loop again; the top-of-loop drain folds the
-                            // steer in as a plain user message and the
-                            // steer gets a response inside the SAME turn.
-                            if self.steer_input_pending() {
-                                if !content.trim().is_empty() {
-                                    let mut assistant_row = Message::assistant(content.clone());
-                                    assistant_row.reasoning_content =
-                                        response.reasoning_content.clone();
-                                    messages.push(assistant_row.clone());
-                                    turn_output_log.push(assistant_row);
-                                }
-                                tracing::info!(
-                                    "steer input pending at EndTurn — running another round \
-                                     instead of terminating the turn"
-                                );
-                                continue 'agent_loop;
-                            }
                             self.emit_cost_update(&turn, &response, attributed_cost);
                             return Ok(ConversationResponse {
                                 content,
@@ -1701,21 +1639,7 @@ impl Agent {
                                 // still consulted first — extracting real
                                 // shell output from a retry spiral is a
                                 // strictly better outcome than a doom abort.
-                                //
-                                // Verifier-configured agents are exempt: the
-                                // verifier lane classifies each repeated
-                                // failure into the turn ledger and injects a
-                                // `verdict: Repeating` note the planner acts
-                                // on at exactly this streak length — a
-                                // strictly richer recovery than an abort
-                                // (see `verifier_repeating_note_changes_
-                                // next_planner_action`). The cycle detector
-                                // below still terminates true thrash there.
-                                let doom_streak = if self.verifier_config.is_some() {
-                                    None
-                                } else {
-                                    loop_detector.record_doom(&tc.name, &tc.arguments)
-                                };
+                                let doom_streak = loop_detector.record_doom(&tc.name, &tc.arguments);
                                 let cycle_warning = if doom_streak.is_some() {
                                     None
                                 } else {
@@ -1956,7 +1880,6 @@ impl Agent {
                                     Some(&mut iter_tool_success),
                                     Some(&mut turn_output_log),
                                     &mut loop_detector,
-                                    turn_ledger.as_mut(),
                                     Some(&mut terminal_tools_for_turn),
                                     Some(&mut iter_pending_approval),
                                 )
@@ -2036,27 +1959,6 @@ impl Agent {
                                     synthesized_from_spawn_only: false,
                                     pending_approval: Some(draft),
                                 });
-                            }
-
-                            if let Err(e) = self
-                                .maybe_run_verifier_after_tool_batch(
-                                    &mut messages,
-                                    turn_ledger.as_mut(),
-                                    iteration,
-                                    &mut turn,
-                                    tracker,
-                                )
-                                .await
-                            {
-                                match self.handle_loop_error_with_dispatch(
-                                    &e,
-                                    &mut retry_state,
-                                    iteration,
-                                    &mut messages,
-                                ) {
-                                    LoopErrorAction::Retry => continue,
-                                    LoopErrorAction::Bail => return Err(attach_partial_usage(e, turn.total_usage().clone())),
-                                }
                             }
 
                             let spiral_iteration = turn.iteration();
@@ -2199,23 +2101,6 @@ impl Agent {
                                         "tool invocation errored in spawn_only turn — suppressing synthesized 'Background work started' ack and letting the LLM react to the error"
                                     );
                                 } else {
-                                    let should_gate_spawn_ack = turn_ledger
-                                        .as_ref()
-                                        .is_some_and(TurnLedger::ready_gate_active);
-                                    if should_gate_spawn_ack
-                                        && !self
-                                            .verifier_allows_termination(
-                                                &mut messages,
-                                                turn_ledger.as_mut(),
-                                                "Background work started.",
-                                                iteration,
-                                                &mut turn,
-                                                tracker,
-                                            )
-                                            .await?
-                                    {
-                                        continue;
-                                    }
                                     self.emit_cost_update(&turn, &response, attributed_cost);
                                     // Post-spawn failure feedback loop
                                     // (feat/spawn-only-failure-feedback-loop):
@@ -2473,7 +2358,6 @@ impl Agent {
             // can run the no-progress soft check on tool results here too.
             // Matches the conversation-loop's window of 12.
             let mut loop_detector = LoopDetector::new(12);
-            let mut turn_ledger = self.new_turn_ledger();
             let config = self.chat_config();
 
             loop {
@@ -2615,20 +2499,6 @@ impl Agent {
                     StopReason::EndTurn | StopReason::StopSequence => {
                         let final_response =
                             response_with_max_token_fragments(&response, &max_token_fragments);
-                        let proposed = final_response.content.clone().unwrap_or_default();
-                        if !self
-                            .verifier_allows_termination(
-                                &mut messages,
-                                turn_ledger.as_mut(),
-                                &proposed,
-                                iteration,
-                                &mut turn,
-                                None,
-                            )
-                            .await?
-                        {
-                            continue;
-                        }
                         if self.config.save_episodes {
                             let summary = final_response.content.clone().unwrap_or_default();
                             let summary_truncated =
@@ -2721,31 +2591,10 @@ impl Agent {
                                 None,
                                 None,
                                 &mut loop_detector,
-                                turn_ledger.as_mut(),
                                 None,
                                 // Background task loop: no resume host —
                                 // rule-matched tools are denied, not
                                 // suspended (see handle_tool_use doc).
-                                None,
-                            )
-                            .await
-                        {
-                            match self.handle_loop_error_with_dispatch(
-                                &e,
-                                &mut retry_state,
-                                iteration,
-                                &mut messages,
-                            ) {
-                                LoopErrorAction::Retry => continue,
-                                LoopErrorAction::Bail => return Err(attach_partial_usage(e, turn.total_usage().clone())),
-                            }
-                        }
-                        if let Err(e) = self
-                            .maybe_run_verifier_after_tool_batch(
-                                &mut messages,
-                                turn_ledger.as_mut(),
-                                iteration,
-                                &mut turn,
                                 None,
                             )
                             .await
@@ -2911,7 +2760,6 @@ impl Agent {
         // appended to the matching Tool message's content and the
         // conversation continues.
         loop_detector: &mut LoopDetector,
-        turn_ledger: Option<&mut TurnLedger>,
         // A failed tool can set structured_metadata.do_not_retry_same_turn.
         // The conversation loop stores the tool name here and rejects any
         // later call before execution, even when the model changes arguments.
@@ -3148,7 +2996,7 @@ impl Agent {
         if let Some(sink) = tool_structured_metadata {
             sink.extend(tool_metadata);
         }
-        let tool_success_for_ledger = tool_success.clone();
+        let tool_success_for_loop_checks = tool_success.clone();
         if let Some(sink) = tool_success_by_id {
             sink.extend(tool_success);
         }
@@ -3175,12 +3023,10 @@ impl Agent {
                 .iter()
                 .map(|tc| (tc.id.as_str(), (tc.name.as_str(), &tc.arguments)))
                 .collect();
-            let success_by_id: HashMap<&str, bool> = tool_success_for_ledger
+            let success_by_id: HashMap<&str, bool> = tool_success_for_loop_checks
                 .iter()
                 .map(|(id, success)| (id.as_str(), *success))
                 .collect();
-            let stated_intent = response.content.as_deref();
-            let mut turn_ledger = turn_ledger;
             for message in merged.iter_mut() {
                 if message.role != MessageRole::Tool {
                     continue;
@@ -3192,31 +3038,15 @@ impl Agent {
                     continue;
                 };
                 let result_before_hint = message.content.clone();
-                let repeating = if let Some(hint) =
-                    loop_detector.record_result(name, args, &result_before_hint)
-                {
+                if let Some(hint) = loop_detector.record_result(name, args, &result_before_hint) {
                     message.content.push_str(&hint);
-                    true
-                } else {
-                    false
-                };
+                }
                 if let Some(hint) = loop_detector.record_file_mutation(
                     name,
                     args,
                     success_by_id.get(id).copied().unwrap_or(false),
                 ) {
                     message.content.push_str(&hint);
-                }
-                if let Some(ledger) = turn_ledger.as_deref_mut() {
-                    ledger.push_entry(ledger_entry_from_tool_result(
-                        turn.iteration(),
-                        stated_intent,
-                        name,
-                        args,
-                        success_by_id.get(id).copied(),
-                        &result_before_hint,
-                        repeating,
-                    ));
                 }
             }
         }
@@ -3229,6 +3059,34 @@ impl Agent {
         for message in &merged {
             if message.role == MessageRole::Tool && is_productive_tool_message(&message.content) {
                 retry_state.record_productive_tool_call();
+            }
+        }
+
+        // planctl: a successful MUTATING batch may earn an
+        // `<arc-workspace>` tail block (drift movement + change
+        // localization), appended to the batch's LAST Tool message — the
+        // same append-only channel the loop-detector hints use. The
+        // system row is never touched mid-turn (cache law). Capped at 8
+        // blocks per turn; past the cap the plan state still updates,
+        // silently.
+        let plan_mutating_success = tool_success_for_loop_checks.iter().any(|(id, ok)| {
+            *ok && response
+                .tool_calls
+                .iter()
+                .any(|tc| tc.id == *id && crate::snapshot::is_mutating_tool(tc.name.as_str()))
+        });
+        if plan_mutating_success && !tool_files.is_empty() {
+            let emit = self.arc_plan_tail_budget_available();
+            if let Some(block) = self.arc_plan_on_mutating_batch(&tool_files, emit) {
+                self.arc_plan_tail_budget_consume();
+                if let Some(last_tool) = merged
+                    .iter_mut()
+                    .rev()
+                    .find(|m| m.role == MessageRole::Tool)
+                {
+                    last_tool.content.push('\n');
+                    last_tool.content.push_str(&block);
+                }
             }
         }
 

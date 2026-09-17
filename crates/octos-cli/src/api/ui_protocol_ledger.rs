@@ -58,11 +58,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use octos_agent::{ProgressEvent, ProgressReporter};
 use octos_core::SessionKey;
 use octos_core::ui_protocol::{
     Envelope, EnvelopeNotification, EnvelopeV2, EnvelopeV2Notification, Payload, PayloadV2,
-    RpcError, RpcNotification, SessionOpened, TaskRuntimeState, TurnCompletedEvent, TurnErrorEvent,
-    UiCursor, UiNotification, UiProgressEvent, methods,
+    RpcError, RpcNotification, SessionOpened, TaskRuntimeState, ToolProgressEvent, TurnCompletedEvent,
+    TurnErrorEvent, TurnId, UiCursor, UiNotification, UiProgressEvent, methods,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -3635,7 +3636,6 @@ fn notification_session_id(notification: &UiNotification) -> &SessionKey {
         UiNotification::Warning(event) => &event.session_id,
         UiNotification::TurnCompleted(event) => &event.session_id,
         UiNotification::TurnError(event) => &event.session_id,
-        UiNotification::TurnSteerDropped(event) => &event.session_id,
         UiNotification::ReplayLossy(event) => &event.session_id,
         UiNotification::TurnSpawnComplete(event) => &event.session_id,
         UiNotification::FileAttached(event) => &event.session_id,
@@ -3863,6 +3863,74 @@ fn list_log_files(session_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
         }
     }
     Ok(out)
+}
+
+// ---------- Tool-progress ledger reporter (ex-α-2 bridge, relocated) ----------
+
+/// Decorator that delegates every event to its `inner` reporter AND mirrors
+/// `ProgressEvent::ToolProgress` onto the ledger as a `tool/progress.v1`
+/// notification so connected subscribers observe the same event.
+///
+/// (Historically the α-2 "bridge" between the SSE channel reporter and the
+/// M9 ledger; the SSE leg is long gone — the ledger append is the only
+/// delivery path — so the struct now lives beside the ledger it wraps.
+/// Wired into the `turn/start` reporter stack by `ui_protocol_transport`.)
+///
+/// Construction is cheap — `Arc<UiProtocolLedger>` is already
+/// process-singleton (see `ui_protocol_transport::event_ledger`), so wrapping
+/// costs one pointer copy per turn.
+pub(super) struct LedgerToolProgressReporter {
+    inner: Arc<dyn ProgressReporter>,
+    ledger: Arc<UiProtocolLedger>,
+    session_id: SessionKey,
+    turn_id: TurnId,
+}
+
+impl LedgerToolProgressReporter {
+    /// Wrap `inner` so each emitted event is also mirrored onto `ledger`
+    /// when applicable. `session_id` is the turn's `SessionKey`;
+    /// `turn_id` is the per-request synthetic `TurnId` that lets
+    /// subscribers correlate this turn's tool calls with their pane state.
+    pub(super) fn new(
+        inner: Arc<dyn ProgressReporter>,
+        ledger: Arc<UiProtocolLedger>,
+        session_id: SessionKey,
+        turn_id: TurnId,
+    ) -> Self {
+        Self {
+            inner,
+            ledger,
+            session_id,
+            turn_id,
+        }
+    }
+}
+
+impl ProgressReporter for LedgerToolProgressReporter {
+    fn report(&self, event: ProgressEvent) {
+        // Mirror to the ledger BEFORE delegating to the inner reporter.
+        // Order matters: if the inner reporter is slow, we still want
+        // subscribers to see the progress promptly.
+        if let ProgressEvent::ToolProgress {
+            tool_id, message, ..
+        } = &event
+        {
+            let notification = UiNotification::ToolProgress(ToolProgressEvent {
+                session_id: self.session_id.clone(),
+                topic: self.session_id.topic().map(ToOwned::to_owned),
+                turn_id: self.turn_id.clone(),
+                tool_call_id: tool_id.clone(),
+                message: Some(message.clone()),
+                progress_pct: None,
+            });
+            // `append_notification` performs an in-process broadcast and
+            // (when `data_dir` is configured) a write-ahead disk record.
+            // Both paths are infallible from the caller's POV — disk
+            // errors are logged but do not panic.
+            let _ = self.ledger.append_notification(notification);
+        }
+        self.inner.report(event);
+    }
 }
 
 // ---------- Tests ----------
@@ -4641,5 +4709,210 @@ mod tests {
             panic!("expected the tool_started row, got {:?}", replay[0].event);
         };
         assert_redacted_arguments(replayed.arguments.as_ref().expect("arguments kept"));
+    }
+}
+
+/// Contract tests for [`LedgerToolProgressReporter`] (relocated from the
+/// retired `ui_protocol_alpha2_bridge.rs`).
+#[cfg(test)]
+mod alpha2_reporter_tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    /// Test double that captures every event the inner reporter receives.
+    #[derive(Default)]
+    struct CapturingReporter {
+        events: StdMutex<Vec<ProgressEvent>>,
+    }
+
+    impl ProgressReporter for CapturingReporter {
+        fn report(&self, event: ProgressEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    fn fixture(session_id: &str) -> (Arc<CapturingReporter>, LedgerToolProgressReporter) {
+        let inner = Arc::new(CapturingReporter::default());
+        let ledger = Arc::new(UiProtocolLedger::new(64));
+        let reporter = LedgerToolProgressReporter::new(
+            inner.clone() as Arc<dyn ProgressReporter>,
+            ledger.clone(),
+            SessionKey::new("api", session_id),
+            TurnId::new(),
+        );
+        (inner, reporter)
+    }
+
+    #[test]
+    fn should_mirror_tool_progress_to_ledger_when_event_is_tool_progress() {
+        let inner = Arc::new(CapturingReporter::default());
+        let ledger = Arc::new(UiProtocolLedger::new(64));
+        let session_id = SessionKey::new("api", "alpha2-fixture");
+        let turn_id = TurnId::new();
+
+        let mut subscriber = ledger.subscribe(&session_id);
+
+        let reporter = LedgerToolProgressReporter::new(
+            inner.clone() as Arc<dyn ProgressReporter>,
+            ledger.clone(),
+            session_id.clone(),
+            turn_id.clone(),
+        );
+
+        reporter.report(ProgressEvent::ToolProgress {
+            name: "search".into(),
+            tool_id: "call_42".into(),
+            message: "phase 2/4".into(),
+        });
+
+        // Inner reporter still saw the event.
+        let captured = inner.events.lock().unwrap();
+        assert_eq!(captured.len(), 1, "inner reporter must receive the event");
+        match &captured[0] {
+            ProgressEvent::ToolProgress {
+                name,
+                tool_id,
+                message,
+            } => {
+                assert_eq!(name, "search");
+                assert_eq!(tool_id, "call_42");
+                assert_eq!(message, "phase 2/4");
+            }
+            other => panic!("expected ToolProgress, got {other:?}"),
+        }
+
+        // The ledger broadcast emitted a tool/progress.v1 notification with
+        // matching identity.
+        let event = subscriber
+            .try_recv()
+            .expect("ledger must broadcast tool_progress");
+        let method = match &event.event {
+            UiProtocolLedgerEvent::Notification(n) => n.method(),
+            other => panic!("expected Notification, got {other:?}"),
+        };
+        assert_eq!(method, methods::TOOL_PROGRESS);
+        match &event.event {
+            UiProtocolLedgerEvent::Notification(UiNotification::ToolProgress(payload)) => {
+                assert_eq!(payload.session_id, session_id);
+                assert_eq!(payload.turn_id, turn_id);
+                assert_eq!(payload.tool_call_id, "call_42");
+                assert_eq!(payload.message.as_deref(), Some("phase 2/4"));
+            }
+            other => panic!("expected ToolProgress notification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_pass_through_non_tool_progress_events_without_ledger_emit() {
+        let (inner, reporter) = fixture("alpha2-passthrough");
+
+        reporter.report(ProgressEvent::Thinking { iteration: 3 });
+        reporter.report(ProgressEvent::ToolStarted {
+            name: "shell".into(),
+            tool_id: "call_x".into(),
+            arguments: None,
+        });
+
+        // Inner reporter receives both events; `append_notification` is
+        // skipped entirely for non-ToolProgress events — the public
+        // contract is "ToolProgress is the only mirror".
+        let captured = inner.events.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+    }
+
+    #[test]
+    fn should_emit_tool_progress_on_ws_via_ledger_reporter() {
+        struct SilentInner;
+        impl ProgressReporter for SilentInner {
+            fn report(&self, _event: ProgressEvent) {}
+        }
+
+        let ledger = Arc::new(UiProtocolLedger::new(64));
+        let session_id = SessionKey::new("api", "alpha2-ws");
+        let turn_id = TurnId::new();
+        let mut ws_subscriber = ledger.subscribe(&session_id);
+
+        let bridged: Arc<dyn ProgressReporter> = Arc::new(LedgerToolProgressReporter::new(
+            Arc::new(SilentInner),
+            ledger.clone(),
+            session_id.clone(),
+            turn_id.clone(),
+        ));
+
+        // Fire a single ProgressEvent::ToolProgress, identical to what a
+        // long-running spawn_only tool emits.
+        bridged.report(ProgressEvent::ToolProgress {
+            name: "search".into(),
+            tool_id: "call_42".into(),
+            message: "phase 2/4".into(),
+        });
+
+        // The reporter appended a `tool/progress.v1` notification to the
+        // ledger; the broadcast subscribed above has it ready.
+        let ws_event = ws_subscriber
+            .try_recv()
+            .expect("broadcast must carry tool_progress envelope");
+        match &ws_event.event {
+            UiProtocolLedgerEvent::Notification(UiNotification::ToolProgress(payload)) => {
+                assert_eq!(payload.session_id, session_id);
+                assert_eq!(payload.turn_id, turn_id);
+                assert_eq!(payload.tool_call_id, "call_42");
+                assert_eq!(payload.message.as_deref(), Some("phase 2/4"));
+            }
+            other => panic!("expected ToolProgress notification, got {other:?}"),
+        }
+        // The forwarder serializes the ledger entry into the wire frame via
+        // `into_rpc_notification`. Assert the wire method matches the
+        // protocol spec (`tool/progress.v1`).
+        let rpc = ws_event
+            .event
+            .clone()
+            .into_rpc_notification()
+            .expect("notification serializes");
+        assert_eq!(rpc.method, methods::TOOL_PROGRESS);
+
+        // Single-emit invariant: the broadcast must NOT replay.
+        assert!(
+            ws_subscriber.try_recv().is_err(),
+            "broadcast must emit exactly once"
+        );
+    }
+
+    #[test]
+    fn should_mirror_event_even_when_inner_reporter_panics_into_silence() {
+        // Inner reporter is a no-op silent reporter; ensure ledger emit
+        // still fires and the call returns normally.
+        struct SilentReporter;
+        impl ProgressReporter for SilentReporter {
+            fn report(&self, _event: ProgressEvent) {}
+        }
+        let ledger = Arc::new(UiProtocolLedger::new(64));
+        let session_id = SessionKey::new("api", "alpha2-silent");
+        let turn_id = TurnId::new();
+        let mut subscriber = ledger.subscribe(&session_id);
+
+        let reporter = LedgerToolProgressReporter::new(
+            Arc::new(SilentReporter) as Arc<dyn ProgressReporter>,
+            ledger.clone(),
+            session_id,
+            turn_id,
+        );
+
+        reporter.report(ProgressEvent::ToolProgress {
+            name: "spawn".into(),
+            tool_id: "call_silent".into(),
+            message: "still progressing".into(),
+        });
+
+        let event = subscriber
+            .try_recv()
+            .expect("ledger emit must not depend on inner reporter");
+        match &event.event {
+            UiProtocolLedgerEvent::Notification(UiNotification::ToolProgress(payload)) => {
+                assert_eq!(payload.tool_call_id, "call_silent");
+                assert_eq!(payload.message.as_deref(), Some("still progressing"));
+            }
+            other => panic!("expected ToolProgress notification, got {other:?}"),
+        }
     }
 }

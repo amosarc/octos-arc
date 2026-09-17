@@ -8,8 +8,6 @@ pub(crate) mod coding_tool_contract;
 mod events;
 mod handlers;
 pub mod profile_scope;
-mod ui_protocol_alpha2_bridge;
-mod ui_protocol_alpha9_bridge;
 // Relocated to crate::contracts (Phase 3 of goal-in-chat) so `octos chat
 // --peers` can share the SAME process-global pending-prompt registry the WS
 // path uses without the `api` feature; re-exported here so api-internal paths

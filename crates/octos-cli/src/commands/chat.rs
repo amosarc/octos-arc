@@ -95,7 +95,7 @@ pub struct ChatCommand {
     pub json: bool,
 
     /// Runtime profile to apply at startup (M8.3). Accepts a built-in name
-    /// (`coding`, `coding-full`, `swarm`), a user-dir id under
+    /// (`coding`, `coding-full`), a user-dir id under
     /// `~/.octos/profiles/<id>/`, or an explicit path to a profile
     /// JSON/TOML file.
     ///

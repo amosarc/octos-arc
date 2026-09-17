@@ -351,8 +351,17 @@ file-reading tool. If no tool can answer it, respond with text explaining \
 what's missing.";
 
 pub(super) fn compose_system_prompt(agent: &Agent) -> String {
-    let mut content = agent.system_prompt_snapshot();
+    // planctl: the volatile `arc_host_plan` segment is excluded from the
+    // stable snapshot and re-appended LAST — the base + appends + skills
+    // + discipline prefix stays byte-stable for the provider cache while
+    // the (focus/report/map) tail changes. No plan installed → output is
+    // byte-identical to the pre-planctl behavior.
+    let mut content = agent.system_prompt_snapshot_excluding(&[crate::planctl::SEGMENT_NAME]);
     content.push_str(TOOL_USE_DISCIPLINE);
+    if let Some(body) = agent.arc_plan_segment_body() {
+        content.push_str("\n\n");
+        content.push_str(&body);
+    }
     content
 }
 
@@ -469,11 +478,6 @@ impl Agent {
             parent_session_key: self.parent_session_key.clone(),
             spawn_depth: self.spawn_depth,
             session_scope: self.session_scope.clone(),
-            // Outer-loop #4: forward the build-cache slot this peer's turn
-            // holds so the shell tool injects CARGO_TARGET_DIR per call
-            // (§7.4) — never a process env var (peers share the process).
-            build_cache_slot: self.build_cache_slot.clone(),
-            build_cache_usage: self.build_cache_usage.clone(),
             // #1774: approval-gated edits still honor the post-edit
             // formatting opt-in.
             format_after_edit: self.config.format_after_edit,
@@ -568,12 +572,7 @@ impl Agent {
     ) -> JoinHandle<ToolCallResult> {
         // Clone Arc-wrapped fields so the spawned task is 'static
         let tools = self.tools.clone();
-        // Outer-loop #4: pre-clone this agent's build-cache identity so the
-        // spawned foreground ToolContext can carry it (see the fields below).
-        // Cannot borrow `self` inside the 'static spawned task.
         let llm = self.llm.clone();
-        let ctx_build_cache_slot = self.build_cache_slot.clone();
-        let ctx_build_cache_usage = self.build_cache_usage.clone();
         let reporter = self.reporter();
         let hooks = self.hooks.clone();
         let hook_ctx = self.hook_ctx();
@@ -644,7 +643,7 @@ impl Agent {
         // #1958: tokio task-locals are not inherited across `tokio::spawn`, so
         // a tool that makes its OWN `provider.chat()` sub-call
         // would otherwise run with the DEFAULT routing context — losing the
-        // turn's originating-session attribution (a verifier failover would
+        // turn's originating-session attribution (the sub-call would
         // then publish unattributed). Capture the router context here and
         // re-establish it inside the spawned task around the tool future
         // (below).
@@ -653,8 +652,7 @@ impl Agent {
         // to EVERY foreground tool, and a synchronous `spawn` child or an
         // unresolved-model pipeline node that falls back to `self.llm` would
         // otherwise be pinned to the parent turn's lane (e.g. a research child
-        // filtered to `CodeCapable`). The verifier is a simple completion check
-        // that routes fine on the default lane; attribution is what matters,
+        // filtered to `CodeCapable`); attribution is what matters,
         // and it does not regress a lane-less child.
         let captured_router_ctx = octos_llm::current_router_context();
 
@@ -2031,11 +2029,6 @@ impl Agent {
                 // they fail with "no real provider". Mirror the approval
                 // path (`execute_approved_tool`), which already sets this.
                 llm_provider: llm.clone(),
-                // Outer-loop #4: the foreground tool ctx carries the peer's
-                // held build-cache slot for per-call CARGO_TARGET_DIR
-                // injection in the shell tool (docs/build-cache-pool.md §7.4).
-                build_cache_slot: ctx_build_cache_slot.clone(),
-                build_cache_usage: ctx_build_cache_usage.clone(),
                 ..ToolContext::zero()
             };
             // Thread the typed context into execute_with_context. Legacy tools
@@ -2972,6 +2965,59 @@ mod tests {
         build_spawn_only_produced_files_message, satisfied_completion_content,
         satisfied_delivery_is_failure,
     };
+
+    /// planctl P0 pin: without an installed `arc_host_plan` segment the
+    /// composed system row is EXACTLY snapshot + tool-use discipline —
+    /// byte-identical to the pre-planctl behavior. The plan integration
+    /// (arc_host_plan appended last) must not disturb sessions that never
+    /// carry a plan.
+    #[tokio::test]
+    async fn compose_system_prompt_is_byte_identical_when_no_plan_installed() {
+        use octos_core::AgentId;
+        use octos_llm::{ChatResponse, LlmProvider, ToolSpec};
+        use octos_memory::EpisodeStore;
+
+        struct NoopProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for NoopProvider {
+            async fn chat(
+                &self,
+                _messages: &[octos_core::Message],
+                _tools: &[ToolSpec],
+                _config: &octos_llm::ChatConfig,
+            ) -> eyre::Result<ChatResponse> {
+                eyre::bail!("unused")
+            }
+            fn model_id(&self) -> &str {
+                "mock"
+            }
+            fn provider_name(&self) -> &str {
+                "mock"
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Arc::new(EpisodeStore::open(dir.path().join("mem")).await.unwrap());
+        let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
+        let agent = crate::agent::Agent::new(
+            AgentId::new("planctl-p0"),
+            provider,
+            crate::tools::ToolRegistry::new(),
+            memory,
+        );
+
+        let composed = super::compose_system_prompt(&agent);
+        assert_eq!(
+            composed,
+            format!(
+                "{}{}",
+                agent.system_prompt_snapshot(),
+                super::TOOL_USE_DISCIPLINE
+            ),
+            "no-plan compose must stay byte-identical to legacy"
+        );
+        assert!(!composed.contains(crate::planctl::SENTINEL_BEGIN));
+    }
 
     #[test]
     fn satisfied_contract_in_chat_mode_is_not_a_failure() {

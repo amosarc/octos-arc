@@ -161,7 +161,7 @@ pub enum ProgressEvent {
         session_output_tokens: u64,
         /// TURN-cumulative token counts (every response recorded this
         /// turn so far, including ones that emit no cost update of their
-        /// own — mid-turn tool iterations, the verifier). Metrics
+        /// own — mid-turn tool iterations). Metrics
         /// counters meter the DELTA between successive events, so
         /// nothing is dropped when only the terminal response emits;
         /// the session_* fields are unsuitable for that (their base

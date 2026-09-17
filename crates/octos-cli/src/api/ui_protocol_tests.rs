@@ -1560,7 +1560,6 @@ async fn try_emit_terminal_populates_turn_completed_tokens_and_session_result() 
         &turn_id,
         None,
         Some(details.clone()),
-        None,
     )
     .await;
 
@@ -1909,7 +1908,6 @@ fn test_active_turn(turn_id: TurnId, abort: AbortHandle) -> ActiveTurn {
         profile_id: MAIN_PROFILE_ID.to_owned(),
         state: Arc::new(TokioMutex::new(TurnState::Active)),
         interrupt_tx: Arc::new(TokioMutex::new(Some(tx))),
-        steer: None,
         abort,
     }
 }

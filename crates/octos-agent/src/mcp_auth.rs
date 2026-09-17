@@ -1,19 +1,14 @@
 //! OAuth 2.1 support for MCP streamable-HTTP servers.
 //!
-//! Two halves:
-//! - **Storage**: persist/load access+refresh tokens in the OS keyring, keyed by
-//!   a hash of the server URL. Reused by both the runtime connect path and the
-//!   interactive `octos mcp login` command.
+//! - **Storage**: persist/load/delete access+refresh tokens in the OS keyring,
+//!   keyed by a hash of the server URL. Tokens are provisioned out-of-band
+//!   (there is no interactive login flow in-tree).
 //! - **Runtime connect** ([`connect_oauth`]): load stored tokens, build an rmcp
 //!   `AuthClient` streamable-HTTP transport, and hand back a live session. rmcp
 //!   refreshes the access token automatically when it nears expiry.
-//! - **Login** ([`login`]): the interactive authorization-code flow — metadata
-//!   discovery + dynamic client registration + PKCE (all inside rmcp's
-//!   `OAuthState`), a browser consent open, and a `tiny_http` loopback catcher
-//!   for the redirect. The resulting tokens are written to the keyring.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use eyre::Result;
 use rmcp::model::ClientInfo;
@@ -32,8 +27,6 @@ pub const KEYRING_SERVICE: &str = "octos MCP Credentials";
 
 /// How long to wait for the OAuth `initialize` handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long to wait for the user to complete the browser consent.
-const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Tokens persisted for one MCP server (JSON-serialized into the keyring entry).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,9 +101,7 @@ pub async fn connect_oauth(
     client_info: ClientInfo,
 ) -> Result<McpService> {
     let stored = load_tokens(url)?.ok_or_else(|| {
-        eyre::eyre!(
-            "no stored OAuth tokens for MCP server '{url}'; run `octos mcp login {url}` first"
-        )
+        eyre::eyre!("no stored OAuth tokens for MCP server '{url}'")
     })?;
 
     let token: OAuthTokenResponse = serde_json::from_value(stored.token_response.clone())
@@ -180,90 +171,6 @@ pub async fn connect_oauth(
     Ok(Arc::new(service))
 }
 
-/// Run the interactive OAuth authorization-code flow for a server and persist
-/// the resulting tokens. Opens the consent URL in a browser and catches the
-/// redirect on an ephemeral localhost port.
-pub async fn login(url: &str, scopes: &[String]) -> Result<()> {
-    let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
-
-    require_https(url)?;
-    crate::mcp::reject_private_url_host(url)?;
-    // Route metadata discovery / dynamic registration / token exchange through
-    // the SSRF-validating OAuth client so none of those endpoints can be pointed
-    // at private/metadata addresses (incl. literal IPs the resolver skips).
-    let oauth_http = std::sync::Arc::new(crate::mcp::SsrfOAuthHttpClient::new()?)
-        as std::sync::Arc<dyn rmcp::transport::auth::OAuthHttpClient>;
-    let mut oauth_state = timeout(
-        HANDSHAKE_TIMEOUT,
-        OAuthState::new_with_oauth_http_client(url.to_string(), oauth_http),
-    )
-    .await
-    .map_err(|_| eyre::eyre!("oauth metadata discovery for '{url}' timed out"))?
-    .map_err(|e| eyre::eyre!("oauth init for '{url}': {e}"))?;
-
-    // Loopback catcher on an ephemeral localhost port.
-    let server = tiny_http::Server::http("127.0.0.1:0")
-        .map_err(|e| eyre::eyre!("start loopback callback server: {e}"))?;
-    let port = server
-        .server_addr()
-        .to_ip()
-        .ok_or_else(|| eyre::eyre!("loopback address has no port"))?
-        .port();
-    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-
-    timeout(
-        HANDSHAKE_TIMEOUT,
-        oauth_state.start_authorization(&scope_refs, &redirect_uri, Some("octos")),
-    )
-    .await
-    .map_err(|_| eyre::eyre!("oauth authorization/registration for '{url}' timed out"))?
-    .map_err(|e| {
-        eyre::eyre!("start authorization (metadata discovery / client registration): {e}")
-    })?;
-    let auth_url = oauth_state
-        .get_authorization_url()
-        .await
-        .map_err(|e| eyre::eyre!("build authorization url: {e}"))?;
-
-    println!("Opening your browser to authorize octos for {url} ...");
-    println!("If it does not open, visit this URL:\n  {auth_url}\n");
-    let _ = webbrowser::open(&auth_url);
-
-    // Await the redirect on a blocking worker. The deadline lives *inside*
-    // `wait_for_callback` (via `recv_timeout`) so the blocking task always
-    // terminates — a plain outer `timeout` would leave `recv()` wedged and the
-    // runtime would hang on drop.
-    let deadline = Instant::now() + LOGIN_TIMEOUT;
-    let callback_url = tokio::task::spawn_blocking(move || wait_for_callback(&server, deadline))
-        .await
-        .map_err(|e| eyre::eyre!("callback task failed: {e}"))??;
-
-    // Pass the full callback URL so rmcp also sees the RFC 9207 `iss` parameter
-    // (some authorization servers require it or the exchange fails).
-    oauth_state
-        .handle_callback_url(&callback_url)
-        .await
-        .map_err(|e| eyre::eyre!("exchange authorization code for tokens: {e}"))?;
-
-    let (client_id, creds) = oauth_state
-        .get_credentials()
-        .await
-        .map_err(|e| eyre::eyre!("read credentials after callback: {e}"))?;
-    let creds =
-        creds.ok_or_else(|| eyre::eyre!("authorization succeeded but no credentials returned"))?;
-
-    let stored = StoredTokens {
-        url: url.to_string(),
-        client_id,
-        token_response: serde_json::to_value(&creds)
-            .map_err(|e| eyre::eyre!("serialize token response: {e}"))?,
-        expires_at_ms: expires_at_ms(&creds),
-    };
-    save_tokens(url, &stored)?;
-    println!("\u{2713} Authorized. Tokens stored in the OS keyring (\"{KEYRING_SERVICE}\").");
-    Ok(())
-}
-
 /// Wall-clock expiry (ms) from the token's `expires_in`, if present.
 fn expires_at_ms(creds: &OAuthTokenResponse) -> Option<u64> {
     use oauth2::TokenResponse;
@@ -319,55 +226,6 @@ async fn persist_manager_credentials(url: &str, manager: &AuthorizationManager) 
         if let Err(e) = save_tokens(url, &stored) {
             tracing::warn!(server = url, error = %e, "failed to persist refreshed MCP oauth token");
         }
-    }
-}
-
-/// Block until the OAuth redirect hits the loopback server (or `deadline`);
-/// return the FULL callback URL (so the caller can forward `code`/`state`/`iss`
-/// to rmcp). Uses `recv_timeout` so the caller can bound the wait without
-/// leaving a wedged blocking task.
-fn wait_for_callback(server: &tiny_http::Server, deadline: Instant) -> Result<String> {
-    loop {
-        if Instant::now() >= deadline {
-            eyre::bail!("timed out waiting for authorization (>{LOGIN_TIMEOUT:?})");
-        }
-        let req = match server.recv_timeout(Duration::from_millis(500)) {
-            Ok(Some(r)) => r,
-            Ok(None) => continue, // tick — re-check the deadline
-            Err(e) => eyre::bail!("receive callback request: {e}"),
-        };
-        // `req.url()` is just the path+query; wrap it so `url` can parse it.
-        let full = format!("http://127.0.0.1{}", req.url());
-        let parsed = url::Url::parse(&full).map_err(|e| eyre::eyre!("parse callback url: {e}"))?;
-
-        let (mut has_code, mut has_state, mut err) = (false, false, None);
-        for (k, v) in parsed.query_pairs() {
-            match k.as_ref() {
-                "code" => has_code = true,
-                "state" => has_state = true,
-                "error" => err = Some(v.into_owned()),
-                _ => {}
-            }
-        }
-
-        if let Some(e) = err {
-            let _ = req.respond(tiny_http::Response::from_string(format!(
-                "Authorization failed: {e}. You can close this tab."
-            )));
-            eyre::bail!("authorization denied by provider: {e}");
-        }
-        if has_code && has_state {
-            let _ = req.respond(tiny_http::Response::from_string(
-                "octos authorization complete \u{2014} you can close this tab.",
-            ));
-            // Return the full URL (incl. any `iss`) for rmcp to parse.
-            return Ok(full);
-        }
-        // Stray request (e.g. favicon) — 404 and keep waiting.
-        let _ = req.respond(
-            tiny_http::Response::from_string("waiting for authorization callback")
-                .with_status_code(404),
-        );
     }
 }
 

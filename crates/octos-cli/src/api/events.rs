@@ -3,18 +3,14 @@
 //! Originally the SSE wire format module (M9-α-5/α-6 deleted the chat
 //! SSE transport entirely — see ADR PR #830 / audit issue #845). The
 //! legacy `/api/ws` text-frame handler (the last consumer of the
-//! per-request `ChannelReporter`) was retired in a follow-up cleanup.
-//! The JSON shape produced by [`event_to_json`] is now consumed by:
+//! per-request `ChannelReporter`) was retired in a follow-up cleanup,
+//! along with the swarm-dashboard and `crate::api::swarm` consumers.
+//! The JSON shape produced by [`event_to_json`] is now consumed by the
+//! UI Protocol transport, which reuses `event_to_json` to encode
+//! forwarded progress frames.
 //!
-//! * the harness/admin `/api/events/harness` endpoint (subscribes to
-//!   the broadcaster for M7.6 swarm-dashboard live frames),
-//! * the swarm dispatch / cost-attribution typed event publishers in
-//!   `crate::api::swarm`,
-//! * the UI Protocol v1 WS bridge in `crate::api::ui_protocol`, which
-//!   reuses `event_to_json` to encode forwarded progress frames.
-//!
-//! No SSE wire path remains in the chat transport — every chat client
-//! talks to `/api/ui-protocol/ws` exclusively.
+//! No SSE wire path remains in the chat transport — `octos serve` speaks
+//! the UI Protocol over stdio only.
 
 use octos_agent::ProgressEvent;
 

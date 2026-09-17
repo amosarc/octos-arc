@@ -8,7 +8,7 @@
 //! (scenario "事件写失败不影响主流程").
 //!
 //! `kind` coverage required by the contract: `escalation`,
-//! `steer_consumed`, `turn_error`; stage 2 adds `malformed_exhausted`
+//! `turn_error`; stage 2 adds `malformed_exhausted`
 //! (malformed tool-call self-correction budget exhausted, replaces that
 //! terminal's turn_error row). (The `fallback_switch` kind and its
 //! `model_lane` field were removed with the adaptive routing stack.)

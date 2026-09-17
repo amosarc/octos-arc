@@ -32,7 +32,6 @@ use tracing::{debug, warn};
 
 use crate::abi_schema::COMPACTION_POLICY_SCHEMA_VERSION;
 use crate::harness_events::{HarnessEvent, write_event_to_sink};
-use crate::summarizer::default_summarizer_for_with_provider;
 pub use crate::summarizer::{ExtractiveSummarizer, Summarizer};
 pub use crate::workspace_policy::{CompactionPolicy, CompactionSummarizerKind};
 use crate::workspace_policy::{WorkspaceArtifactsPolicy, WorkspacePolicy};
@@ -612,30 +611,7 @@ impl CompactionRunner {
         }
     }
 
-    /// Build a runner from a typed policy, enabling the LLM-iterative
-    /// summarizer when the policy declares
-    /// [`CompactionSummarizerKind::LlmIterative`].
-    ///
-    /// This is the wiring seam used by `octos-cli` when a workspace policy
-    /// requests the M6.4 iterative flavour: the caller hands in the agent's
-    /// [`LlmProvider`] and this constructor selects the matching summarizer
-    /// via [`default_summarizer_for_with_provider`]. Extractive policies
-    /// behave identically to [`Self::new`].
-    pub fn with_provider(policy: CompactionPolicy, provider: Arc<dyn LlmProvider>) -> Self {
-        let summarizer: Arc<dyn Summarizer> =
-            default_summarizer_for_with_provider(policy.summarizer, Some(provider));
-        Self {
-            policy,
-            summarizer,
-            event_sink: None,
-            repo_label: None,
-            artifacts: WorkspaceArtifactsPolicy::default(),
-            resolved_preserved: Vec::new(),
-        }
-    }
-
-    /// Override the summarizer implementation (e.g. swap in the LLM-iterative
-    /// variant in M6.4).
+    /// Override the summarizer implementation (useful in tests).
     pub fn with_summarizer<S: Summarizer + 'static>(mut self, summarizer: S) -> Self {
         self.summarizer = Arc::new(summarizer);
         self
@@ -1005,9 +981,8 @@ impl CompactionRunner {
 }
 
 fn default_summarizer_for(kind: CompactionSummarizerKind) -> Arc<dyn Summarizer> {
-    // Delegate to the summarizer module so provider-aware wiring
-    // (`default_summarizer_for_with_provider`) and the plain extractive
-    // default live in one place.
+    // Delegate to the summarizer module so the strategy mapping lives in
+    // one place.
     crate::summarizer::default_summarizer_for(kind)
 }
 

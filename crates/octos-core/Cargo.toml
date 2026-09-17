@@ -19,5 +19,4 @@ sha2 = { workspace = true }
 workspace = true
 
 [dev-dependencies]
-tokio-test = { workspace = true }
 tempfile = { workspace = true }

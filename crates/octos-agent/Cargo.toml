@@ -34,43 +34,29 @@ regex = { workspace = true }
 ignore = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
-# MCP over the official rmcp SDK. Client: stdio + streamable-HTTP + OAuth 2.1.
-# Server (`octos mcp-serve`): `server` + `transport-io` (stdio handler) and
-# `transport-streamable-http-server` (the tower service the CLI mounts in axum).
+# MCP over the official rmcp SDK, client side only: stdio + streamable-HTTP +
+# OAuth 2.1 (the server-side features went with the retired `octos mcp-serve`).
 rmcp = { version = "1.8", default-features = false, features = [
     "client",
-    "server",
     "auth",
     "macros",
     "base64",
     "transport-async-rw",
     "transport-child-process",
-    "transport-io",
     "transport-streamable-http-client-reqwest",
-    "transport-streamable-http-server",
 ] }
-# `CancellationToken` for the streamable-HTTP service: rmcp does not re-export
-# it, and the CLI needs it to tear down live SSE sessions on graceful shutdown.
-tokio-util = "0.7"
 oauth2 = "5"
 # rmcp's `AuthClient` wraps a reqwest 0.13 client (rmcp's own reqwest major).
 # Aliased so it coexists with octos's reqwest 0.12; cargo unifies both 0.13
 # users to the same crate instance, so the type matches rmcp's expectations.
 reqwest_rmcp = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls"] }
-# Interactive OAuth login (`octos mcp login`): open the consent URL + catch the
-# loopback redirect.
-tiny_http = "0.12"
-webbrowser = "1"
 # Keyring for MCP OAuth token storage. The persistent platform backend is
 # selected per-OS below (`[target.*]`); without one the crate falls back to a
 # non-persistent in-memory mock, so login would silently lose tokens.
 keyring = { workspace = true }
 url = { workspace = true }
-htmd = { workspace = true }
 dirs = { workspace = true }
 sha2 = { workspace = true }
-flate2 = { workspace = true }
-tar = { workspace = true }
 libc = { workspace = true }
 gix = { workspace = true, optional = true }
 similar = { workspace = true, optional = true }
@@ -78,11 +64,12 @@ tree-sitter = { workspace = true, optional = true }
 tree-sitter-rust = { workspace = true, optional = true }
 tree-sitter-python = { workspace = true, optional = true }
 tree-sitter-javascript = { workspace = true, optional = true }
+# planctl L1 literal layer (ast-gated, alongside the tree-sitter family).
+grep-searcher = { workspace = true, optional = true }
+grep-regex = { workspace = true, optional = true }
 tree-sitter-typescript = { workspace = true, optional = true }
-base64 = { workspace = true }
 pdf-extract = { workspace = true }
 tempfile = { workspace = true }
-redb = { workspace = true }
 
 # Persistent keyring backend per OS for MCP OAuth token storage. Feature-unioned
 # with the base `keyring` dep above; each is compiled only for its target.
@@ -111,13 +98,13 @@ git = ["dep:gix", "dep:similar"]
 # `ast` is a default feature: the testgen pipeline (host-side test-case
 # generation) hard-depends on tree-sitter contract extraction, and a
 # no-ast build would silently lose the coding-agent's test capability.
-ast = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-python", "dep:tree-sitter-javascript", "dep:tree-sitter-typescript"]
+ast = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-python", "dep:tree-sitter-javascript", "dep:tree-sitter-typescript", "dep:grep-searcher", "dep:grep-regex"]
 default = ["ast"]
 
 [lints]
 workspace = true
 
 [dev-dependencies]
-tokio-test = { workspace = true }
-tempfile = { workspace = true }
-wiremock = { workspace = true }
+# Test-time control of tokio's clock (`tokio::time::advance`/`start_paused`);
+# previously supplied transitively by the `tokio-test` dev-dep.
+tokio = { workspace = true, features = ["test-util"] }

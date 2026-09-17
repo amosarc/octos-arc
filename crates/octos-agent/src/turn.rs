@@ -1,7 +1,7 @@
 //! Turn type semantics for distinguishing message categories in the agent loop.
 //!
 //! Provides a typed wrapper around `Message` that distinguishes between
-//! user input, tool results, steering injections, and system context,
+//! user input, tool results, and system context,
 //! enabling the agent loop to handle each category differently.
 //!
 //! TODO: Wire into agent loop to replace raw `Message` handling with typed turns.
@@ -15,8 +15,6 @@ pub enum TurnKind {
     UserInput,
     /// Result from a tool execution.
     ToolResult { tool_name: String },
-    /// Injected follow-up from steering channel.
-    SteeringFollowUp,
     /// System-level reminder injected between turns.
     SystemReminder,
     /// Agent's own response / reasoning.
@@ -80,15 +78,6 @@ impl Turn {
         }
     }
 
-    /// Create a steering follow-up turn.
-    pub fn steering(content: impl Into<String>) -> Self {
-        Self {
-            message: Message::user(content),
-            kind: TurnKind::SteeringFollowUp,
-            iteration: 0,
-        }
-    }
-
     /// Create a system reminder turn.
     pub fn system_reminder(content: impl Into<String>) -> Self {
         Self {
@@ -114,9 +103,9 @@ impl Turn {
         self
     }
 
-    /// Check if this is a user-originated turn (input or steering).
+    /// Check if this is a user-originated turn.
     pub fn is_user_originated(&self) -> bool {
-        matches!(self.kind, TurnKind::UserInput | TurnKind::SteeringFollowUp)
+        matches!(self.kind, TurnKind::UserInput)
     }
 
     /// Check if this is a tool result.
@@ -161,13 +150,6 @@ mod tests {
     }
 
     #[test]
-    fn should_create_steering() {
-        let turn = Turn::steering("focus on tests");
-        assert_eq!(turn.kind, TurnKind::SteeringFollowUp);
-        assert!(turn.is_user_originated());
-    }
-
-    #[test]
     fn should_create_system_reminder() {
         let turn = Turn::system_reminder("Remember the rules");
         assert_eq!(turn.kind, TurnKind::SystemReminder);
@@ -195,7 +177,7 @@ mod tests {
 
     #[test]
     fn should_distinguish_kinds() {
-        assert_ne!(TurnKind::UserInput, TurnKind::SteeringFollowUp);
+        assert_ne!(TurnKind::UserInput, TurnKind::SystemReminder);
         assert_ne!(
             TurnKind::ToolResult {
                 tool_name: "a".into()

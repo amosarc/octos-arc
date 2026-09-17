@@ -17,16 +17,12 @@ pub mod auth;
 // Deliberately NOT `api`-gated: `octos cache …` commands (#5) and peer
 // staging (#4) both need it in unfeatured builds.
 pub mod build_cache;
-/// task-return-unconsumed-steer-inputs: feature-independent shape of the
-/// `turn/steer_dropped` return (the `api` module does the sending).
-#[cfg_attr(not(feature = "api"), allow(dead_code))]
-pub(crate) mod steer_return;
 /// task-interrupt-breaks-progress-wait: the standalone-turn loop's next-step
 /// race (interrupt vs progress), kept feature-independent so it is testable.
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub(crate) mod turn_loop;
 /// task-turn-interrupt-steer-correlation-logs: session/turn-correlated
-/// lifecycle logging for turn/interrupt and turn/steer (the `api` module
+/// lifecycle logging for turn/interrupt (the `api` module
 /// calls these; kept feature-independent so the shape is testable).
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub(crate) mod turn_trace;

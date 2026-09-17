@@ -26,6 +26,7 @@ pub mod mcp;
 pub mod mcp_auth;
 pub mod memory_segment;
 pub mod permissions;
+pub mod planctl;
 pub mod policy;
 pub mod profile;
 pub mod progress;
@@ -39,7 +40,6 @@ pub mod session_usage;
 mod shell_analysis;
 pub mod skills;
 pub mod snapshot;
-pub mod steering;
 pub mod subagent_output;
 pub mod subagent_summary;
 mod subprocess_env;
@@ -76,10 +76,6 @@ pub use agent::{
     },
     memory::MIN_EPISODE_SIMILARITY,
     normalize_tool_call_id,
-    verifier::{
-        AgentVerifierConfig, ErrorClass, TURN_LEDGER_SCHEMA_VERSION, TurnLedgerEntry, TurnOutcome,
-        VerifierVerdict,
-    },
 };
 pub use approval::{
     ApprovalDecision, ApprovalRequestEnvelope, ApprovalRequestSpec, ApprovalResponsePayload,
@@ -137,10 +133,6 @@ pub use session_usage::{SessionUsageHandle, SessionUsageSnapshot, SharedSessionU
 pub use skills::{SkillFilter, SkillInfo, SkillsLoader};
 pub use snapshot::{
     DEFAULT_SNAPSHOT_KEEP_LAST, SnapshotConfig, SnapshotId, SnapshotInfo, SnapshotManager,
-};
-pub use steering::{
-    SharedSteerBuffer, SteerBuffer, SteerDrainedCallback, SteeringMessage, SteeringReceiver,
-    SteeringSender,
 };
 pub use subagent_output::{
     AppendResult, DEFAULT_GC_AGE, DEFAULT_MAX_BYTES_PER_TASK, DEFAULT_MAX_BYTES_TOTAL,

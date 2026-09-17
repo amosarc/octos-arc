@@ -101,9 +101,6 @@ pub enum CompactionSummarizerKind {
     /// Deterministic extractive summarizer (preserves legacy behaviour).
     #[default]
     Extractive,
-    /// LLM-iterative summarizer. Lands in M6.4; the extractive summarizer is
-    /// used as a fallback in the current runtime.
-    LlmIterative,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

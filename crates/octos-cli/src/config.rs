@@ -702,11 +702,11 @@ pub enum QueueMode {
     Collect,
     /// Keep only the latest message, discard older queued messages.
     ///
-    /// Renamed from `steer`: that word means mid-turn INJECTION everywhere
-    /// else in this codebase (`turn/steer`, the agent's `SteerBuffer`),
-    /// where nothing is dropped — the opposite of this variant. The serde
-    /// alias keeps existing configs parsing; the `/queue` chat command
-    /// accepts both spellings.
+    /// Renamed from `steer`: that word meant mid-turn INJECTION everywhere
+    /// else in this codebase, where nothing is dropped — the opposite of
+    /// this variant. (The steering machinery itself has since been
+    /// retired.) The serde alias keeps existing configs parsing; the
+    /// `/queue` chat command accepts both spellings.
     #[serde(alias = "steer")]
     Latest,
     /// Cancel the current run and process the new message immediately.

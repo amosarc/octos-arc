@@ -307,7 +307,7 @@ async fn test_update_summary() {
 
 /// Build a Message with a specific role and `client_message_id` for tests.
 
-// --- list_for_analysis / export_transcript (memory-refresh sweep) ---
+// --- append robustness (torn-tail sealing, crash mid-write) ---
 
 /// Issue #2006: a torn tail (crash mid-write leaves a partial final line
 /// without a newline) must not fuse with the NEXT appended row — the fused

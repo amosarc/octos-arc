@@ -24,11 +24,7 @@ pub use env_hygiene::{
 };
 pub use error::{Error, ErrorKind, Result};
 pub use gateway::{InboundMessage, METADATA_SENDER_USER_ID, MessageOrigin, OutboundMessage};
-pub use git_worktree::{
-    PreparedWorktree, branch_advanced_past, clear_worktree_admin_entry, deliverable_commit_command,
-    git_ref_exists, is_git_repo, prepare_fleet_worktree, probe_git_repo,
-    remove_checkout_keep_branch, worktree_populate_command,
-};
+pub use git_worktree::clear_worktree_admin_entry;
 pub use session_scope::{
     DEFAULT_MULTI_TENANT_SHARED_ZONE_NAMES, MULTI_TENANT_USERS_DIR_NAME,
     MULTI_TENANT_WORKSPACE_DIR_NAME, PathClassification, SESSION_SCOPE_SCHEMA_VERSION, ScopeMode,

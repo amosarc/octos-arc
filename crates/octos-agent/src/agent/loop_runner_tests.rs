@@ -18,14 +18,10 @@ fn should_use_video_call_hint_when_turn_is_flagged_live_video() {
     assert!(out.contains("what am I holding"));
 }
 
-use octos_llm::{
-    ChatResponse, LlmError, LlmErrorKind, LlmProvider, StopReason, TokenUsage as LlmTokenUsage,
-    ToolChoice,
-};
+use octos_llm::{ChatResponse, LlmError, LlmErrorKind, LlmProvider, StopReason, TokenUsage as LlmTokenUsage};
 use octos_memory::EpisodeStore;
 
-#[cfg(unix)]
-use crate::{AgentConfig, AgentVerifierConfig};
+use crate::AgentConfig;
 
 fn tool_use(tool_calls: Vec<ToolCall>, input_tokens: u32, output_tokens: u32) -> ChatResponse {
     ChatResponse {
@@ -430,7 +426,7 @@ impl Tool for StaticResultTool {
     }
 
     fn description(&self) -> &str {
-        "test tool for verifier loop tests"
+        "static-result test tool for loop tests"
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -525,126 +521,6 @@ async fn budget_reminder_injected_before_iteration_cap() {
         saw_notice.load(AtomicOrdering::SeqCst),
         "the model never received the pre-cap budget reminder (#1691)"
     );
-}
-
-struct RepeatAwarePlanner {
-    calls: AtomicUsize,
-    saw_repeating_note: AtomicBool,
-}
-
-impl RepeatAwarePlanner {
-    fn new() -> Self {
-        Self {
-            calls: AtomicUsize::new(0),
-            saw_repeating_note: AtomicBool::new(false),
-        }
-    }
-}
-
-#[async_trait]
-impl LlmProvider for RepeatAwarePlanner {
-    async fn chat(
-        &self,
-        messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &ChatConfig,
-    ) -> Result<ChatResponse> {
-        let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst) + 1;
-        let saw_repeating = messages.iter().any(|message| {
-            message.content.contains("[verifier]") && message.content.contains("verdict: Repeating")
-        });
-        if saw_repeating {
-            self.saw_repeating_note.store(true, AtomicOrdering::SeqCst);
-        }
-        let fix_ran = messages.iter().any(|message| {
-            message.role == MessageRole::Tool && message.content.contains("fixed style")
-        });
-        if fix_ran {
-            return Ok(end_turn("fixed answer", 12, 6));
-        }
-        if saw_repeating {
-            return Ok(tool_use(
-                vec![ToolCall {
-                    id: "fix_call".into(),
-                    name: "fix_tool".into(),
-                    arguments: serde_json::json!({"path": "style.toml", "repair": true}),
-                    metadata: None,
-                }],
-                10,
-                5,
-            ));
-        }
-        Ok(tool_use(
-            vec![ToolCall {
-                id: format!("fail_call_{call}"),
-                name: "fail_tool".into(),
-                arguments: serde_json::json!({"path": "style.toml"}),
-                metadata: None,
-            }],
-            10,
-            5,
-        ))
-    }
-
-    fn model_id(&self) -> &str {
-        "planner-test"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-}
-
-struct LedgerDrivenVerifier {
-    calls: AtomicUsize,
-}
-
-#[async_trait]
-impl LlmProvider for LedgerDrivenVerifier {
-    async fn chat(
-        &self,
-        messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        config: &ChatConfig,
-    ) -> Result<ChatResponse> {
-        self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        assert!(
-            matches!(config.tool_choice, ToolChoice::None),
-            "verifier call must not expose tools"
-        );
-        let prompt = messages
-            .iter()
-            .map(|message| message.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let verdict = if prompt.contains("tool=fix_tool") {
-            r#"{"verdict":"ReadyToAnswer"}"#
-        } else if prompt.contains("repeating=true") {
-            r#"{"verdict":"Repeating","error_class":"ContractFail"}"#
-        } else {
-            r#"{"verdict":"Insufficient","reason":"need a different action"}"#
-        };
-        Ok(ChatResponse {
-            content: Some(verdict.to_string()),
-            reasoning_content: None,
-            tool_calls: vec![],
-            stop_reason: StopReason::EndTurn,
-            usage: LlmTokenUsage {
-                input_tokens: 3,
-                output_tokens: 2,
-                ..Default::default()
-            },
-            provider_index: None,
-        })
-    }
-
-    fn model_id(&self) -> &str {
-        "haiku-test"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock-verifier"
-    }
 }
 
 use crate::tools::{Tool, ToolRegistry, ToolResult};
@@ -1304,67 +1180,6 @@ fn stale_shell_failure_streak(id_prefix: &str) -> Vec<Message> {
         ));
     }
     out
-}
-
-#[tokio::test]
-async fn verifier_repeating_note_changes_next_planner_action() {
-    let dir = tempfile::tempdir().unwrap();
-    let ledger_path = dir.path().join("turn_ledger.jsonl");
-    let planner = Arc::new(RepeatAwarePlanner::new());
-    let verifier = Arc::new(LedgerDrivenVerifier {
-        calls: AtomicUsize::new(0),
-    });
-    let fail_calls = Arc::new(AtomicUsize::new(0));
-    let fix_calls = Arc::new(AtomicUsize::new(0));
-    let mut tools = ToolRegistry::new();
-    tools.register(StaticResultTool::new(
-        "fail_tool",
-        "[VALIDATION FAILED] style TOML is malformed",
-        false,
-        fail_calls.clone(),
-    ));
-    tools.register(StaticResultTool::new(
-        "fix_tool",
-        "fixed style\n\nExit code: 0",
-        true,
-        fix_calls.clone(),
-    ));
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(
-        AgentId::new("verifier-repeat"),
-        planner.clone(),
-        tools,
-        memory,
-    )
-    .with_config(AgentConfig {
-        max_iterations: 12,
-        save_episodes: false,
-        ..Default::default()
-    })
-    .with_verifier_config(
-        AgentVerifierConfig::with_provider(verifier.clone(), "haiku-test")
-            .with_ledger_path(&ledger_path),
-    );
-
-    let response = agent
-        .process_message("repair the generated style", &[], vec![])
-        .await
-        .unwrap();
-
-    assert_eq!(response.content, "fixed answer");
-    assert!(
-        planner.saw_repeating_note.load(AtomicOrdering::SeqCst),
-        "planner must observe the injected Repeating verifier note"
-    );
-    assert_eq!(fail_calls.load(AtomicOrdering::SeqCst), 3);
-    assert_eq!(fix_calls.load(AtomicOrdering::SeqCst), 1);
-    assert!(
-        verifier.calls.load(AtomicOrdering::SeqCst) >= 4,
-        "verifier should classify failures and the ready gate"
-    );
-    let persisted = std::fs::read_to_string(&ledger_path).expect("turn ledger persisted");
-    assert!(persisted.contains("\"tool\":\"fail_tool\""));
-    assert!(persisted.contains("\"tool\":\"fix_tool\""));
 }
 
 // ── is_productive_tool_message (M6.2) ───────────────────────────────
@@ -2161,132 +1976,6 @@ async fn should_classify_hook_deny_as_policy_not_internal_bug() {
     assert_eq!(error_events[0].variant, "policy");
     assert_eq!(error_events[0].recovery, "expected");
     assert!(error_events[0].message.contains("denied by hook"));
-}
-
-// --- Mid-turn steer injection (codex `TurnState.pending_input` parity) ---
-
-/// Per-request prompt capture: `(role, content)` per message, one vec per
-/// LLM call.
-type ObservedRolePrompts = Arc<StdMutex<Vec<Vec<(MessageRole, String)>>>>;
-
-/// Records every prompt as `(role, content)` pairs. Call 0 pushes the given
-/// steer inputs into the shared buffer MID-CALL (simulating a `turn/steer`
-/// racing in while the model streams), then returns a tool call; call 1
-/// returns EndTurn.
-struct SteerDuringToolRoundProvider {
-    calls: AtomicUsize,
-    observed: ObservedRolePrompts,
-    buffer: crate::steering::SharedSteerBuffer,
-    steers: Vec<String>,
-}
-
-#[async_trait]
-impl LlmProvider for SteerDuringToolRoundProvider {
-    async fn chat(
-        &self,
-        messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &octos_llm::ChatConfig,
-    ) -> Result<ChatResponse> {
-        self.observed
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .push(
-                messages
-                    .iter()
-                    .map(|message| (message.role, message.content.clone()))
-                    .collect(),
-            );
-        let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        Ok(if call == 0 {
-            for steer in &self.steers {
-                self.buffer.push(steer.clone());
-            }
-            tool_use(
-                vec![ToolCall {
-                    id: "call_alpha".to_string(),
-                    name: "alpha".to_string(),
-                    arguments: serde_json::json!({}),
-                    metadata: None,
-                }],
-                1,
-                1,
-            )
-        } else {
-            end_turn("done", 1, 1)
-        })
-    }
-
-    fn model_id(&self) -> &str {
-        "mock"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-}
-
-/// Steer landing between tool rounds is drained at the top of the next
-/// iteration, BEFORE the next LLM call, as a plain `role: user` message
-/// appended after the previous round's tool output — no wrapper text.
-#[tokio::test]
-async fn should_fold_steer_into_next_llm_call_when_injected_between_rounds() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut tools = ToolRegistry::with_builtins(dir.path());
-    tools.register(NamedEchoTool {
-        name: "alpha",
-        output: "alpha ok",
-    });
-    let buffer: crate::steering::SharedSteerBuffer =
-        Arc::new(crate::steering::SteerBuffer::default());
-    let observed = Arc::new(StdMutex::new(Vec::new()));
-    let provider: Arc<dyn LlmProvider> = Arc::new(SteerDuringToolRoundProvider {
-        calls: AtomicUsize::new(0),
-        observed: Arc::clone(&observed),
-        buffer: Arc::clone(&buffer),
-        steers: vec!["also check the tests".to_string()],
-    });
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("steer-agent"), provider, tools, memory)
-        .with_steer_buffer(Arc::clone(&buffer));
-
-    let result = agent.process_message("do work", &[], vec![]).await.unwrap();
-    assert_eq!(result.content, "done");
-
-    let observed = observed.lock().unwrap_or_else(|error| error.into_inner());
-    assert_eq!(observed.len(), 2, "tool round + follow-up round");
-    // First call: no steer yet (it lands mid-call).
-    assert!(
-        !observed[0]
-            .iter()
-            .any(|(_, content)| content.contains("also check the tests")),
-        "steer must not time-travel into the request that was already built"
-    );
-    // Second call: the steer is a plain user message with NO wrapper text,
-    // appended AFTER the previous round's tool output.
-    let steer_idx = observed[1]
-        .iter()
-        .position(|(role, content)| *role == MessageRole::User && content == "also check the tests")
-        .expect("second request must carry the steer as a plain role:user message");
-    let tool_idx = observed[1]
-        .iter()
-        .position(|(role, _)| *role == MessageRole::Tool)
-        .expect("second request must carry the tool result");
-    assert!(
-        steer_idx > tool_idx,
-        "steer must append after the prior round's tool output (append-only history)"
-    );
-    // Buffer fully drained.
-    assert!(buffer.is_empty());
-    // No callback registered → the steer row rides the turn output log so
-    // the host's end-of-turn persistence writes it exactly once.
-    assert!(
-        result
-            .messages
-            .iter()
-            .any(|m| m.role == MessageRole::User && m.content == "also check the tests"),
-        "without a drained-callback the steer row must land in the turn output log"
-    );
 }
 
 /// Assistant shell call + its Tool result, as one exchange (spiral-signature

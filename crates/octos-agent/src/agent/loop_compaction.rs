@@ -62,11 +62,10 @@ pub(crate) fn prepare_conversation_messages(
 /// Prepare a task turn for the next model call.
 ///
 /// Task loops need context trimming, system-message normalization, and
-/// tool-call ID normalization. The system-message pass matters once the
-/// opt-in verifier is enabled (#1365): the verifier appends a mid-transcript
-/// `System` note after assistant/tool rows, and providers that require a
-/// single leading system prompt would reject the next task request without
-/// this normalization (codex pre-merge P2). The chat path already runs it via
+/// tool-call ID normalization. The system-message pass keeps providers that
+/// require a single leading system prompt working if any pass ever appends
+/// a mid-transcript `System` note after assistant/tool rows (codex
+/// pre-merge P2). The chat path already runs it via
 /// `prepare_conversation_messages`; mirror it here.
 pub(crate) fn prepare_task_messages(
     agent: &Agent,

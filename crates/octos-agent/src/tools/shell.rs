@@ -191,22 +191,7 @@ impl ShellTool {
         // `strip_trailing_ampersand`).
         let command = strip_trailing_ampersand(raw_command);
 
-        let usage_guard = match begin_build_cache_use(ctx) {
-            Ok(guard) => guard,
-            Err(message) => {
-                return ToolResult {
-                    output: message.to_owned(),
-                    success: false,
-                    ..Default::default()
-                };
-            }
-        };
-        let slot = resolve_build_cache_slot(ctx);
-        let mut cmd = self.sandbox.wrap_command_with_build_cache_slot(
-            &command,
-            effective_cwd,
-            slot.as_deref(),
-        );
+        let mut cmd = self.sandbox.wrap_command(&command, effective_cwd);
         // We return immediately and never read the pipes, so piping stdout/
         // stderr risks a full-buffer deadlock in a chatty child. Discard the
         // std streams (in-command redirects like `> log 2>&1` still win).
@@ -217,7 +202,6 @@ impl ShellTool {
         apply_quarto_tool_env(&mut cmd, &command, effective_cwd);
         apply_git_tool_env(&mut cmd, &command);
         sanitize_command_env(&mut cmd, &EnvAllowlist::empty());
-        apply_build_cache_env(&mut cmd, slot.as_deref());
         apply_harness_event_sink_env(&mut cmd, ctx);
 
         let child = match cmd.spawn() {
@@ -274,7 +258,6 @@ impl ShellTool {
                 let watch_id = id.clone();
                 let watch_label = label.clone();
                 tokio::spawn(async move {
-                    let _usage_guard = usage_guard;
                     let mut child = child;
                     match child.wait().await {
                         Ok(status) if status.success() => sup.mark_completed(&watch_id, vec![]),
@@ -306,7 +289,6 @@ impl ShellTool {
             // still run detached, but reap the child so it doesn't zombie.
             _ => {
                 tokio::spawn(async move {
-                    let _usage_guard = usage_guard;
                     let mut child = child;
                     let _ = child.wait().await;
                 });
@@ -576,66 +558,6 @@ fn apply_harness_event_sink_env(cmd: &mut tokio::process::Command, ctx: &ToolCon
     if let Ok(Some(sink)) = TOOL_CTX.try_with(|inner| inner.harness_event_sink.clone()) {
         cmd.env("OCTOS_EVENT_SINK", sink);
     }
-}
-
-/// Outer-loop #4 (docs/build-cache-pool.md §7.4): inject the build-cache
-/// pool slot's cargo env for a peer turn. `CARGO_TARGET_DIR=<slot>/target`
-/// redirects every cargo invocation into the shared per-repository pool slot
-/// the peer's CURRENT turn holds, and `CARGO_INCREMENTAL=0` is sent
-/// explicitly even when a machine-level `~/.cargo/config.toml` already sets
-/// it — the peer's CARGO_HOME is not under our control and the #1 incident
-/// measured 31 GB of incremental artifacts across 515 sessions.
-///
-/// PER TOOL CALL on purpose: on the serve path a peer shares the process
-/// with the master and every sibling peer, so `std::env::set_var` here would
-/// poison all of them. The slot rides `ToolContext.build_cache_slot`
-/// (populated by the peer turn boot), falling back to the task-local
-/// `TOOL_CTX` for legacy `execute()` callers — the same dual-read pattern as
-/// [`apply_harness_event_sink_env`].
-///
-/// Ordering vs `sanitize_command_env` (which runs before this in both the
-/// foreground and background paths): the sanitizer only strips
-/// secret/injection names (`BLOCKED_ENV_VARS`, registered provider keys,
-/// secret-looking names — see `subprocess_env.rs` / `env_hygiene.rs`), and
-/// neither `CARGO_TARGET_DIR` nor `CARGO_INCREMENTAL` is in that set, so a
-/// value set here survives; setting it AFTER the sanitizer keeps that
-/// property obvious rather than incidental.
-fn resolve_build_cache_slot(ctx: &ToolContext) -> Option<PathBuf> {
-    ctx.build_cache_slot.clone().or_else(|| {
-        TOOL_CTX
-            .try_with(|inner| inner.build_cache_slot.clone())
-            .ok()
-            .flatten()
-    })
-}
-
-fn begin_build_cache_use(
-    ctx: &ToolContext,
-) -> Result<Option<super::BuildCacheUseGuard>, &'static str> {
-    let usage = if ctx.build_cache_slot.is_some() || ctx.build_cache_usage.is_some() {
-        ctx.build_cache_usage.clone()
-    } else {
-        TOOL_CTX
-            .try_with(|inner| inner.build_cache_usage.clone())
-            .ok()
-            .flatten()
-    };
-    match usage {
-        Some(usage) => usage
-            .begin()
-            .map(Some)
-            .ok_or("Build-cache claim is closing; shell command was not started"),
-        None => Ok(None),
-    }
-}
-
-/// Use the SAME resolved option as the sandbox wrapper for this call.
-fn apply_build_cache_env(cmd: &mut tokio::process::Command, slot: Option<&Path>) {
-    let Some(slot) = slot else {
-        return;
-    };
-    cmd.env("CARGO_TARGET_DIR", slot.join("target"))
-        .env("CARGO_INCREMENTAL", "0");
 }
 
 #[derive(Debug, Deserialize)]
@@ -945,28 +867,12 @@ impl Tool for ShellTool {
         // Spawn the child, grab its PID, then timeout on wait_with_output().
         // If timeout fires, kill by PID to prevent orphaned processes.
         // (wait_with_output() takes ownership of child, so we save the PID first.)
-        let usage_guard = match begin_build_cache_use(ctx) {
-            Ok(guard) => guard,
-            Err(message) => {
-                return Ok(ToolResult {
-                    output: message.to_owned(),
-                    success: false,
-                    ..Default::default()
-                });
-            }
-        };
-        let slot = resolve_build_cache_slot(ctx);
-        let mut cmd = self.sandbox.wrap_command_with_build_cache_slot(
-            &input.command,
-            effective_cwd,
-            slot.as_deref(),
-        );
+        let mut cmd = self.sandbox.wrap_command(&input.command, effective_cwd);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         apply_frontend_tool_env(&mut cmd, effective_cwd);
         apply_quarto_tool_env(&mut cmd, &input.command, effective_cwd);
         apply_git_tool_env(&mut cmd, &input.command);
         sanitize_command_env(&mut cmd, &EnvAllowlist::empty());
-        apply_build_cache_env(&mut cmd, slot.as_deref());
         apply_harness_event_sink_env(&mut cmd, ctx);
 
         let child = match cmd.spawn() {
@@ -981,12 +887,9 @@ impl Tool for ShellTool {
         };
         let child_pid = child.id();
 
-        // The waiter owns both the child and the claim usage. Dropping the
-        // caller's future detaches this waiter, so release still waits for exit.
-        let waiter = tokio::spawn(async move {
-            let _usage_guard = usage_guard;
-            child.wait_with_output().await
-        });
+        // Dropping the caller's future detaches this waiter, so the child is
+        // still reaped to completion.
+        let waiter = tokio::spawn(async move { child.wait_with_output().await });
         let result = timeout(timeout_duration, async {
             waiter.await.map_err(std::io::Error::other)?
         })
@@ -1593,9 +1496,3 @@ pub(crate) fn diff_to_receipt(
 
 #[cfg(test)]
 mod change_receipt_tests {}
-
-#[cfg(all(test, target_os = "macos"))]
-mod build_cache_sandbox_handoff_tests {}
-
-#[cfg(all(test, unix))]
-mod build_cache_usage_tests {}
