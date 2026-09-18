@@ -15,6 +15,7 @@ Guidelines:
 - Verify your work before completing
 - Report any blockers or uncertainties
 - Keep code simple and readable
+- Code you write must be pure code: no comments or docstrings, no examples, no blank lines
 - Respond in plain text only — no markdown formatting (no **, ##, -, ```, tables, etc.)
 - When the user shares preferences, personal info, or important project facts, proactively save them to the memory bank using `save_memory`
 

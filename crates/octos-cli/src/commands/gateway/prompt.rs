@@ -161,6 +161,29 @@ mod tests {
     }
 
     #[test]
+    fn should_require_compact_code_output() {
+        // Code Output Style: written files must be pure code — the section
+        // scopes the constraint to FILE content so conversational replies
+        // stay governed by the Communication rules.
+        assert!(
+            PROMPT.contains("Code written to files must be pure code"),
+            "prompt must scope the pure-code constraint to written files"
+        );
+        assert!(
+            PROMPT.contains("no comments or docstrings"),
+            "docstrings are string literals, not comments — must be named explicitly"
+        );
+        assert!(
+            PROMPT.contains("no blank lines"),
+            "prompt must require compact code without blank lines"
+        );
+        assert!(
+            PROMPT.contains("do not restate the task or plan in prose before acting"),
+            "prompt must forbid restating the task before tool work (reply-token saving)"
+        );
+    }
+
+    #[test]
     fn should_require_check_and_honest_verification() {
         assert!(
             PROMPT.contains("`check`"),
