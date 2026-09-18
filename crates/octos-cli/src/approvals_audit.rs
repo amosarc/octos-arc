@@ -327,7 +327,9 @@ mod tests {
     impl AuditClock for FixedClock {
         fn now(&self) -> DateTime<Local> {
             let v = self.millis.fetch_add(self.step_ms, Ordering::SeqCst);
-            DateTime::<Utc>::from_timestamp_millis(v).unwrap_or_else(Utc::now)
+            DateTime::<Utc>::from_timestamp_millis(v)
+                .unwrap_or_else(Utc::now)
+                .with_timezone(&Local)
         }
     }
 

@@ -1106,8 +1106,8 @@ mod tests {
                 })
                 .to_string(),
             ),
-            started_at: Utc::now(),
-            updated_at: Utc::now(),
+            started_at: Utc::now().into(),
+            updated_at: Utc::now().into(),
             completed_at: None,
             output_files: Vec::new(),
             error: None,
