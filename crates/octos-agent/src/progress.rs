@@ -98,7 +98,22 @@ pub enum ProgressEvent {
 
     /// LLM call is being retried — signals stream forwarder to clear its buffer
     /// so partial text from the failed attempt isn't concatenated with the retry.
-    StreamRetry { iteration: u32 },
+    ///
+    /// Buffer-clear contract: this event only CARRIES the locating info —
+    /// `iteration` identifies the assistant segment, `attempt`/`max_attempts`
+    /// (1-based, additive enrichment) identify the retry position. Actually
+    /// clearing the previously streamed partial text is the CLIENT's
+    /// responsibility: the append-only ledger cannot retract deltas, and the
+    /// final `AssistantPersisted` text stays authoritative.
+    StreamRetry {
+        iteration: u32,
+        /// 1-based retry attempt about to START. `None` in legacy emitters.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        /// Total attempts allowed (retry_max + 1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_attempts: Option<u32>,
+    },
 
     /// Cost update after a response.
     CostUpdate {

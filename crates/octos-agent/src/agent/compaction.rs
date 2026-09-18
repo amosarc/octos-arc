@@ -7,6 +7,25 @@ use super::Agent;
 use crate::compaction::CompactionPhase;
 use crate::prompt_context::{PromptContextPhase, PromptContextRequest};
 
+/// Outcome of the overflow-retry compaction pass
+/// ([`Agent::maybe_run_retry_compaction`]).
+pub(super) enum RetryCompactionVerdict {
+    /// A declarative compaction pass ran; its token delta is reported so
+    /// the caller can refuse to retry an unshrunk payload.
+    Compacted {
+        tokens_before: u32,
+        tokens_after: u32,
+    },
+    /// No compaction ran. When `context_manager_owned` is true the
+    /// caller-owned prompt bridge compacts the retry prompt itself
+    /// (retrying is fine); any other no-op means the retry would resend
+    /// the SAME oversized payload.
+    NoOp {
+        context_manager_owned: bool,
+        reason: &'static str,
+    },
+}
+
 impl Agent {
     pub(super) fn trim_to_context_window(&self, messages: &mut Vec<Message>) -> bool {
         use crate::compaction::{MIN_RECENT_MESSAGES, compact_messages, find_recent_boundary};
@@ -21,7 +40,13 @@ impl Agent {
         }
 
         let window = self.llm.context_window();
-        let budget = (window as f64 * 0.8 / crate::compaction::SAFETY_MARGIN) as u32;
+        let raw_budget = (window as f64 * 0.8 / crate::compaction::SAFETY_MARGIN) as u32;
+        // Calibrated budget: the static estimator under-counts CJK-heavy
+        // conversations, so divide by the observed actual/estimated ratio to
+        // trigger compaction before the provider rejects the request. See
+        // [`TokenCalibration`]. Declarative policy budgets (CompactionRunner)
+        // are deliberately NOT calibrated — declared semantics, not guesses.
+        let budget = self.token_calibration.adjusted_budget(raw_budget);
 
         let total: u32 = messages.iter().map(estimate_message_tokens).sum();
         if total <= budget {
@@ -165,6 +190,56 @@ impl Agent {
             return Ok(outcome.summary);
         }
         Ok(None)
+    }
+
+    /// Compaction pass for the `LoopDecision::CompactAndRetry` arm
+    /// (context-overflow retries).
+    ///
+    /// Unlike [`Self::maybe_run_turn_compaction`] — best-effort, silently
+    /// no-ops — this variant REPORTS whether a pass actually ran and how
+    /// much it shrank the conversation. An overflow retry that resends an
+    /// unshrunk payload is a guaranteed second overflow: it burns a full
+    /// provider round-trip and one `context_overflow` bucket unit for
+    /// nothing, so the caller bails when nothing shrank. Note the turn-pass
+    /// `iteration == 1` skip is deliberately absent here: an overflow ON
+    /// the first call has no preflight to lean on, so compact now or the
+    /// retry resends the same payload.
+    pub(super) fn maybe_run_retry_compaction(
+        &self,
+        messages: &mut Vec<Message>,
+    ) -> eyre::Result<RetryCompactionVerdict> {
+        if self.prompt_context_manager.is_some() {
+            return Ok(RetryCompactionVerdict::NoOp {
+                context_manager_owned: true,
+                reason: "caller-owned context manager bridges the retry prompt",
+            });
+        }
+        let Some(runner) = self.compaction_runner.as_ref() else {
+            return Ok(RetryCompactionVerdict::NoOp {
+                context_manager_owned: false,
+                reason: "no compaction runner wired",
+            });
+        };
+        let outcome = runner.run(messages);
+        if outcome.performed {
+            info!(
+                phase = "context_overflow_retry",
+                tokens_before = outcome.tokens_before,
+                tokens_after = outcome.tokens_after,
+                summarizer = outcome.summarizer_kind,
+                "harness compaction pass before overflow retry"
+            );
+            self.enforce_preservation(messages, CompactionPhase::TurnEnd)?;
+            Ok(RetryCompactionVerdict::Compacted {
+                tokens_before: outcome.tokens_before,
+                tokens_after: outcome.tokens_after,
+            })
+        } else {
+            Ok(RetryCompactionVerdict::NoOp {
+                context_manager_owned: false,
+                reason: "compaction pass made no change",
+            })
+        }
     }
 
     /// Ask the caller-owned context bridge to prepare the final model prompt.

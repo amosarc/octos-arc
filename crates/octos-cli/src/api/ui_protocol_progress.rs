@@ -339,9 +339,19 @@ fn map_budget_stop(
     UiProgressMapping::status(context, metadata)
 }
 
+/// Map a `stream_retry` progress event into UI-protocol status metadata.
+///
+/// Buffer-clear contract: the mapped status carries `metadata.iteration`
+/// (the assistant segment to clear) plus `retry.attempt`/`retry.max_attempts`
+/// when the emitter supplied them. Actually clearing the previously streamed
+/// partial text is the CLIENT's responsibility — the append-only ledger
+/// cannot retract deltas, and the final `AssistantPersisted` text stays
+/// authoritative.
 fn map_stream_retry(context: &ProgressMappingContext, event: &Value) -> UiProgressMapping {
     let mut retry = UiRetryBackoff::new();
     retry.reason = string_field(event, &["reason", "message"]);
+    retry.attempt = u32_field(event, &["attempt"]);
+    retry.max_attempts = u32_field(event, &["max_attempts"]);
     let mut metadata = UiProgressMetadata::retry_backoff(retry);
     metadata.message = string_field(event, &["message", "status"]);
     metadata.iteration = u32_field(event, &["iteration"]);

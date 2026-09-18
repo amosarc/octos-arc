@@ -749,7 +749,11 @@ impl Tool for ShellTool {
                 if matches!(decision, ToolApprovalDecision::Deny) {
                     tracing::warn!(command = %input.command, "command denied by interactive approval");
                     return Ok(ToolResult {
-                        output: format!("Command denied by user approval: {}", input.command),
+                        output: format!(
+                            "Command denied by user approval: {}{}",
+                            input.command,
+                            crate::tools::USER_APPROVAL_DENIED_SUFFIX
+                        ),
                         success: false,
                         ..Default::default()
                     });

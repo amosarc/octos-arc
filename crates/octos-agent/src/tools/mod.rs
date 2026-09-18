@@ -506,6 +506,15 @@ pub enum ConcurrencyClass {
     Exclusive,
 }
 
+/// Appended to a tool result when the USER declined an approval request.
+/// Frames the denial as a user decision, not a tool/system failure —
+/// without it, models tend to treat the error like any other failure and
+/// mechanically retry the same (or trivially varied) command, burning a
+/// turn and another approval prompt. Offers the attended path (ask) and
+/// the unattended path (continue differently) so neither session shape
+/// dead-ends.
+pub const USER_APPROVAL_DENIED_SUFFIX: &str = "\n\nThis is not a tool or system failure — the user declined to run it. Do not repeat or minimally vary this command. Ask the user how to proceed, or continue with a different approach.";
+
 /// Result of executing a tool.
 #[derive(Default)]
 pub struct ToolResult {

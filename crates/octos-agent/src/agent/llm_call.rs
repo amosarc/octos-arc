@@ -17,6 +17,17 @@ use super::turn_state::LoopTurnState;
 use crate::hooks::{HookEvent, HookPayload, HookResult};
 use crate::progress::ProgressEvent;
 
+/// Backoff for the EMPTY-response retry branch (the `Ok`-but-retriable arm
+/// of the attempt loop). An empty response is provider jitter, not a
+/// transport fault — waiting seconds before resending an identical request
+/// just pads the turn, so this ladder starts at 250 ms and doubles to a
+/// 2 s cap. The stream-error branch keeps its slower 1 s → 2 s → 4 s
+/// ladder: timeouts and transport drops genuinely need breathing room.
+fn empty_response_retry_delay(attempt: u32) -> Duration {
+    let millis = 250u64.saturating_mul(1u64 << attempt.min(3));
+    Duration::from_millis(millis.min(2_000))
+}
+
 impl Agent {
     /// Maximum retries for transient LLM failures (empty responses, stream errors).
     const LLM_RETRY_MAX: u32 = 3;
@@ -259,6 +270,21 @@ impl Agent {
                     );
                     self.record_prompt_cache_usage(&response, attempt_config, iteration, attempt);
                     if !Self::is_retriable_response(&response) {
+                        // Token-estimate calibration: on a clean FIRST attempt
+                        // the reported usage is exactly this request's prompt,
+                        // so actual-vs-estimated is trustworthy. Retried calls
+                        // merge discarded attempts' usage into the response and
+                        // would overstate `actual`. See [`TokenCalibration`].
+                        if attempt == 0 {
+                            self.token_calibration.observe(
+                                self.llm.estimate_request_tokens(messages, tools_spec),
+                                response
+                                    .usage
+                                    .input_tokens
+                                    .saturating_add(response.usage.cache_read_tokens)
+                                    .saturating_add(response.usage.cache_write_tokens),
+                            );
+                        }
                         // Genuine success -- merge retry usage into response.
                         // Price the FINAL attempt at its own slot BEFORE the
                         // merge, then add the pre-priced retry spend.
@@ -452,7 +478,7 @@ impl Agent {
                     }
 
                     // Retry after accounting for this rejected response above.
-                    let delay = Duration::from_secs(1 << attempt);
+                    let delay = empty_response_retry_delay(attempt);
                     let reason = if response.stop_reason == StopReason::ContentFiltered {
                         "content filtered by safety/moderation"
                     } else {
@@ -461,17 +487,24 @@ impl Agent {
                     warn!(
                         attempt = attempt + 1,
                         max = retry_max,
-                        delay_s = delay.as_secs(),
+                        delay_ms = delay.as_millis() as u64,
                         iteration,
                         stop_reason = ?response.stop_reason,
                         reason,
                         "abnormal LLM response, retrying"
                     );
-                    // Clear stream forwarder buffer before retry so partial
-                    // text from this attempt isn't concatenated with the next.
+                    // Stream-forwarder buffer contract: this event only
+                    // CARRIES the locating info (iteration + attempt/
+                    // max_attempts). Clearing the partial text streamed by
+                    // the failed attempt is the client's responsibility —
+                    // the append-only ledger cannot retract deltas, and the
+                    // final AssistantPersisted text stays authoritative.
                     if emit_progress {
-                        self.reporter()
-                            .report(ProgressEvent::StreamRetry { iteration });
+                        self.reporter().report(ProgressEvent::StreamRetry {
+                            iteration,
+                            attempt: Some(attempt + 1),
+                            max_attempts: Some(retry_max + 1),
+                        });
                         self.reporter().report(ProgressEvent::LlmStatus {
                             message: format!(
                                 "Retrying ({}/{})... {}",
@@ -514,11 +547,16 @@ impl Agent {
                             iteration,
                             "retryable stream error, retrying"
                         );
-                        // Clear stream forwarder buffer before retry so partial
-                        // text from this attempt isn't concatenated with the next.
+                        // Stream-forwarder buffer contract (see the
+                        // empty-response arm above): this event carries the
+                        // locating info; clearing streamed partial text is
+                        // client-side.
                         if emit_progress {
-                            self.reporter()
-                                .report(ProgressEvent::StreamRetry { iteration });
+                            self.reporter().report(ProgressEvent::StreamRetry {
+                                iteration,
+                                attempt: Some(attempt + 1),
+                                max_attempts: Some(retry_max + 1),
+                            });
                             self.reporter().report(ProgressEvent::LlmStatus {
                                 message: format!(
                                     "Retrying ({}/{})... stream error",
@@ -721,6 +759,34 @@ mod tests {
     struct CallCounters {
         chat_stream: AtomicU32,
         chat: AtomicU32,
+    }
+
+    #[test]
+    fn empty_response_retry_ladder_is_fast_and_capped() {
+        use std::time::Duration;
+
+        assert_eq!(
+            super::empty_response_retry_delay(0),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            super::empty_response_retry_delay(1),
+            Duration::from_millis(500)
+        );
+        assert_eq!(
+            super::empty_response_retry_delay(2),
+            Duration::from_millis(1000)
+        );
+        assert_eq!(
+            super::empty_response_retry_delay(3),
+            Duration::from_millis(2000)
+        );
+        // Out-of-range attempts stay bounded — the pure fn must never panic
+        // or overflow regardless of the attempt count handed to it.
+        assert_eq!(
+            super::empty_response_retry_delay(30),
+            Duration::from_millis(2000)
+        );
     }
 
     // ── Provider that truncates a tool call on attempt 1, succeeds on 2 ───────

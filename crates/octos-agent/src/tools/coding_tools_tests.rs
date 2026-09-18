@@ -728,4 +728,56 @@ mod bash_file_writes_28d {
             assert!(!out.output.contains("edit_file / diff_edit"));
         }
     }
+
+    /// The user-declined approval result must carry
+    /// [`crate::tools::USER_APPROVAL_DENIED_SUFFIX`] so the model frames the
+    /// denial as a user decision and does not mechanically retry the command.
+    #[tokio::test]
+    async fn user_approval_denial_carries_non_failure_suffix() {
+        struct DenyAll;
+
+        #[async_trait::async_trait]
+        impl crate::tools::ToolApprovalRequester for DenyAll {
+            async fn request_approval(
+                &self,
+                _request: crate::tools::ToolApprovalRequest,
+            ) -> crate::tools::ToolApprovalDecision {
+                crate::tools::ToolApprovalDecision::Deny
+            }
+        }
+
+        struct AskAlways;
+
+        impl CommandPolicy for AskAlways {
+            fn check(&self, _command: &str, _cwd: &Path) -> Decision {
+                Decision::Ask
+            }
+        }
+
+        let result = crate::tools::TOOL_APPROVAL_CTX
+            .scope(
+                std::sync::Arc::new(DenyAll),
+                request_command_approval(
+                    "exec_command",
+                    "cargo publish --token super-secret",
+                    Path::new("/tmp"),
+                    &(std::sync::Arc::new(AskAlways)
+                        as std::sync::Arc<dyn CommandPolicy>),
+                    ApprovalPolicy::Ask,
+                ),
+            )
+            .await;
+
+        let result = result.expect("a Deny decision must produce a denial ToolResult");
+        assert!(
+            result.output.starts_with("Command denied by user approval"),
+            "unexpected denial output: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains(crate::tools::USER_APPROVAL_DENIED_SUFFIX),
+            "denial output must carry the non-failure suffix, got: {}",
+            result.output
+        );
+    }
 }

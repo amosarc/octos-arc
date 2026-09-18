@@ -22,6 +22,12 @@ pub struct RetryConfig {
     pub initial_delay: Duration,
     /// Maximum delay between retries.
     pub max_delay: Duration,
+    /// Separate ceiling for RATE-LIMIT waits. An explicit provider hint
+    /// ("try again in 300s", typed `retry_after_secs`) is honored up to
+    /// this bound instead of `max_delay`: capping a multi-minute TPM window
+    /// at the 60s generic ceiling just re-hits the same 429 — and burns a
+    /// retry attempt — every minute until the window resets.
+    pub max_rate_limit_delay: Duration,
     /// Multiplier for exponential backoff.
     pub backoff_multiplier: f64,
 }
@@ -32,6 +38,7 @@ impl Default for RetryConfig {
             max_retries: 3,
             initial_delay: Duration::from_secs(1),
             max_delay: Duration::from_secs(60),
+            max_rate_limit_delay: Duration::from_secs(600),
             backoff_multiplier: 2.0,
         }
     }
@@ -45,10 +52,21 @@ pub struct RetryProvider {
 
 impl RetryProvider {
     /// Create a new retry provider wrapping an existing provider.
+    ///
+    /// Reads `OCTOS_LLM_RATE_LIMIT_MAX_DELAY_SECS` to override the 429 wait
+    /// ceiling (clamped to 30..=3600 seconds) — the one knob most
+    /// deployments ever need on this wrapper.
     pub fn new(provider: Arc<dyn LlmProvider>) -> Self {
+        let mut config = RetryConfig::default();
+        if let Some(secs) = std::env::var("OCTOS_LLM_RATE_LIMIT_MAX_DELAY_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            config.max_rate_limit_delay = Duration::from_secs(secs.clamp(30, 3600));
+        }
         Self {
             inner: provider,
-            config: RetryConfig::default(),
+            config,
         }
     }
 
@@ -264,9 +282,33 @@ impl RetryProvider {
     }
 
     /// Extract a longer delay for rate-limit (429 TPM) errors.
-    /// OpenAI errors include "Please try again in 29.159s" — parse that.
-    /// Falls back to 30s if unparseable. Always clamped to `max_delay`.
+    ///
+    /// Source order: the typed `LlmErrorKind::RateLimited { retry_after_secs }`
+    /// hint first (constructed on classified 429s but historically never
+    /// read), then the provider text hint ("Please try again in 29.159s").
+    /// Falls back to 30s if unparseable. All waits clamp to
+    /// `max_rate_limit_delay` — a deliberately higher ceiling than the
+    /// generic `max_delay`, because the provider TOLD us the window length;
+    /// see [`RetryConfig::max_rate_limit_delay`].
     fn rate_limit_delay(&self, error: &eyre::Report) -> Option<Duration> {
+        let clamp =
+            |delay: Duration| delay.min(self.config.max_rate_limit_delay);
+
+        // Typed path: walk the cause chain for `LlmError`, same as
+        // [`Self::should_failover`]. A `RateLimited` kind with an explicit
+        // hint is authoritative regardless of how its Display renders.
+        for cause in error.chain() {
+            if let Some(llm) = cause.downcast_ref::<LlmError>() {
+                if let LlmErrorKind::RateLimited {
+                    retry_after_secs: Some(secs),
+                } = &llm.kind
+                {
+                    // +1s buffer for clock skew between us and the provider.
+                    return Some(clamp(Duration::from_secs(secs.saturating_add(1))));
+                }
+            }
+        }
+
         let msg = error.to_string();
         // Only apply to rate-limit / TPM errors
         let msg_lower = msg.to_lowercase();
@@ -299,15 +341,15 @@ impl RetryProvider {
                     // whole-second count).
                     Duration::from_secs_f64(value)
                 };
-                // Add a 1s buffer, then clamp to `max_delay` so a large or
-                // malformed hint ("try again in 1800s") can't park the whole
-                // provider on a multi-minute sleep past the configured ceiling.
+                // Add a 1s buffer, then clamp to the rate-limit ceiling so a
+                // large or malformed hint ("try again in 1800s") can't park
+                // the whole provider on a sleep past the configured bound.
                 let delay = base.saturating_add(Duration::from_secs(1));
-                return Some(delay.min(self.config.max_delay));
+                return Some(clamp(delay));
             }
         }
-        // Fallback: wait 30s for TPM to reset (still clamped to max_delay).
-        Some(Duration::from_secs(30).min(self.config.max_delay))
+        // Fallback: wait 30s for TPM to reset (also clamped).
+        Some(clamp(Duration::from_secs(30)))
     }
 }
 
@@ -529,8 +571,12 @@ mod tests {
     }
 
     #[test]
-    fn test_rate_limit_delay_clamps_to_max_delay() {
-        // A large (or malformed) hint cannot exceed the configured ceiling.
+    fn test_rate_limit_delay_clamps_to_rate_limit_ceiling() {
+        // A large (or malformed) hint cannot exceed the configured ceiling —
+        // but the ceiling is `max_rate_limit_delay` (600s default), NOT the
+        // generic 60s `max_delay`: the provider told us the window length,
+        // so honoring it up to a wider bound beats re-hitting the 429 every
+        // minute of a 30-minute TPM window.
         let provider = RetryProvider {
             inner: Arc::new(MockProvider),
             config: RetryConfig {
@@ -541,7 +587,57 @@ mod tests {
         let err =
             eyre::eyre!("OpenAI API error: 429 Too Many Requests - Please try again in 1800s");
         let delay = provider.rate_limit_delay(&err).unwrap();
-        assert_eq!(delay, Duration::from_secs(60), "must clamp to max_delay");
+        assert_eq!(
+            delay,
+            Duration::from_secs(600),
+            "1800s hint +1s buffer must clamp to max_rate_limit_delay, not max_delay"
+        );
+    }
+
+    #[test]
+    fn test_rate_limit_delay_prefers_typed_retry_after_hint() {
+        // The typed `RateLimited { retry_after_secs }` hint is authoritative
+        // even when the Display text carries no "try again in" phrase — the
+        // constructor path stores it but historically nothing read it.
+        let provider = RetryProvider {
+            inner: Arc::new(MockProvider),
+            config: RetryConfig::default(),
+        };
+        let err: eyre::Report = LlmError::rate_limited(Some(300)).into();
+        let delay = provider.rate_limit_delay(&err).unwrap();
+        assert_eq!(
+            delay,
+            Duration::from_secs(301),
+            "typed hint +1s buffer, before any Display-text parsing"
+        );
+    }
+
+    #[test]
+    fn test_rate_limit_delay_small_hint_gets_one_second_buffer() {
+        let provider = RetryProvider {
+            inner: Arc::new(MockProvider),
+            config: RetryConfig::default(),
+        };
+        let err = eyre::eyre!("API error: 429 Too Many Requests - Please try again in 5s");
+        let delay = provider.rate_limit_delay(&err).unwrap();
+        assert_eq!(delay, Duration::from_secs(6));
+    }
+
+    #[test]
+    fn test_rate_limit_delay_respects_env_overridable_ceiling_in_config() {
+        // A deployment that lowers the ceiling via RetryConfig (the env
+        // override lands in the same field through `RetryProvider::new`)
+        // still bounds the wait.
+        let provider = RetryProvider {
+            inner: Arc::new(MockProvider),
+            config: RetryConfig {
+                max_rate_limit_delay: Duration::from_secs(45),
+                ..RetryConfig::default()
+            },
+        };
+        let err = eyre::eyre!("rate limit exceeded - Please try again in 120s");
+        let delay = provider.rate_limit_delay(&err).unwrap();
+        assert_eq!(delay, Duration::from_secs(45));
     }
 
     #[test]
@@ -606,6 +702,7 @@ mod tests {
             initial_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(2),
             backoff_multiplier: 2.0,
+            ..RetryConfig::default()
         });
 
         let result = retry.chat(&[], &[], &ChatConfig::default()).await;
@@ -693,6 +790,7 @@ mod tests {
                 initial_delay: Duration::from_millis(1),
                 max_delay: Duration::from_millis(10),
                 backoff_multiplier: 1.0,
+                ..RetryConfig::default()
             },
         };
 

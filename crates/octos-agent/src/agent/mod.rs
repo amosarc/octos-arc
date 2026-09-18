@@ -329,6 +329,116 @@ impl Default for TokenTracker {
     }
 }
 
+/// Session-scoped correction factor between the static token estimator
+/// (`octos_llm::context::estimate_tokens`: ascii/4 + non-ascii/1.5) and the
+/// provider's actual prompt-token accounting.
+///
+/// CJK-heavy conversations run ≈1 token per character while the estimator
+/// assumes 1.5, so static estimates land 30-40% low and the window-derived
+/// compaction budget (`window * 0.8 / SAFETY_MARGIN` ≈ 66.7% of the window)
+/// fires late — right against the provider's rejection line, with only the
+/// context-overflow retry bucket as a backstop. Each clean LLM success (no
+/// discarded retry attempts, so the reported usage is exactly this
+/// request's prompt) feeds `actual / estimate_request_tokens` into an EWMA;
+/// [`Agent::trim_to_context_window`] divides its budget by the smoothed
+/// ratio so compaction triggers BEFORE the provider rejects the request.
+///
+/// The ratio only ever shrinks the budget (clamped ≥ 1.0): compacting a
+/// little early is cheap, while under-estimation kills the whole turn. The
+/// upper clamp bounds the damage of a single skewed sample (e.g. a provider
+/// reporting usage under unexpected keys). Declarative policy budgets
+/// (`CompactionPolicy::token_budget`, `preflight_threshold`) are
+/// intentionally NOT calibrated — they are declared semantics, not
+/// window-derived guesses.
+///
+/// Env knobs (read once per agent at construction):
+/// - `OCTOS_TOKEN_CALIBRATION=0` disables observation and neutralises the budget.
+/// - `OCTOS_TOKEN_CALIBRATION_MAX_MILLI` overrides the upper clamp
+///   (milli-ratio, clamped to 1000..=10_000; default 4000).
+pub(crate) struct TokenCalibration {
+    /// Smoothed `actual / estimated` ratio in milli-units (1000 = 1.0×).
+    ratio_milli: AtomicU32,
+    max_ratio_milli: u32,
+    enabled: bool,
+}
+
+impl TokenCalibration {
+    const NEUTRAL_MILLI: u32 = 1000;
+    const DEFAULT_MAX_MILLI: u32 = 4000;
+
+    pub(crate) fn new() -> Self {
+        let enabled = std::env::var("OCTOS_TOKEN_CALIBRATION")
+            .ok()
+            .map(|value| value != "0")
+            .unwrap_or(true);
+        let max_ratio_milli = std::env::var("OCTOS_TOKEN_CALIBRATION_MAX_MILLI")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .map(|value| value.clamp(Self::NEUTRAL_MILLI, 10_000))
+            .unwrap_or(Self::DEFAULT_MAX_MILLI);
+        Self::with_options(enabled, max_ratio_milli)
+    }
+
+    fn with_options(enabled: bool, max_ratio_milli: u32) -> Self {
+        Self {
+            ratio_milli: AtomicU32::new(Self::NEUTRAL_MILLI),
+            max_ratio_milli: max_ratio_milli.clamp(Self::NEUTRAL_MILLI, 10_000),
+            enabled,
+        }
+    }
+
+    /// Feed one clean-request sample: `estimated` from
+    /// [`LlmProvider::estimate_request_tokens`], `actual` the provider's
+    /// total prompt tokens (`input + cache_read + cache_write` — the cache
+    /// accounting contract in `octos_llm::types`). Zero on either side means
+    /// the provider did not report usable usage — skip.
+    pub(crate) fn observe(&self, estimated: u32, actual: u32) {
+        if !self.enabled || estimated == 0 || actual == 0 {
+            return;
+        }
+        let sample = (((u64::from(actual) * 1000) / u64::from(estimated)) as u32)
+            .clamp(Self::NEUTRAL_MILLI, self.max_ratio_milli);
+        let old = self.ratio_milli.load(Ordering::Relaxed);
+        // EWMA α = 0.25: one request never moves the factor more than a
+        // quarter of the way to its sample.
+        let smoothed = ((u64::from(old) * 3 + u64::from(sample)) / 4) as u32;
+        let smoothed = smoothed.clamp(Self::NEUTRAL_MILLI, self.max_ratio_milli);
+        self.ratio_milli.store(smoothed, Ordering::Relaxed);
+        // Tier-crossing log: serve's rolling log can then explain why
+        // compaction started firing earlier than the raw 66.7% line.
+        let tier = |milli: u32| match milli {
+            0..=1249 => 0u8,
+            1250..=1499 => 1,
+            1500..=1999 => 2,
+            _ => 3,
+        };
+        if tier(smoothed) > tier(old) {
+            tracing::info!(
+                ratio = smoothed as f64 / 1000.0,
+                "token estimate calibration crossed a tier: compaction budget scaled down"
+            );
+        }
+    }
+
+    /// Scale a window-derived budget down by the smoothed ratio. Neutral
+    /// (returns `budget` unchanged) until real samples say otherwise.
+    pub(crate) fn adjusted_budget(&self, budget: u32) -> u32 {
+        if !self.enabled {
+            return budget;
+        }
+        let ratio = self.ratio_milli.load(Ordering::Relaxed);
+        if ratio <= Self::NEUTRAL_MILLI {
+            return budget;
+        }
+        ((u64::from(budget) * u64::from(Self::NEUTRAL_MILLI)) / u64::from(ratio)) as u32
+    }
+
+    #[cfg(test)]
+    fn ratio_milli(&self) -> u32 {
+        self.ratio_milli.load(Ordering::Relaxed)
+    }
+}
+
 /// An agent that can execute tasks.
 pub struct Agent {
     /// Unique identifier for this agent.
@@ -478,6 +588,10 @@ pub struct Agent {
     pub(super) arc_plan: RwLock<Option<crate::planctl::PlanState>>,
     /// `<arc-workspace>` tail blocks appended this turn (cap 8).
     arc_plan_tail_count: std::sync::atomic::AtomicU8,
+    /// Measured correction factor between the static token estimator and the
+    /// provider's actual prompt accounting; shrinks the window-derived
+    /// compaction budget in `trim_to_context_window`. See [`TokenCalibration`].
+    pub(super) token_calibration: TokenCalibration,
 }
 
 impl Agent {
@@ -528,6 +642,7 @@ impl Agent {
             snapshot_manager: None,
             arc_plan: RwLock::new(None),
             arc_plan_tail_count: std::sync::atomic::AtomicU8::new(0),
+            token_calibration: TokenCalibration::new(),
         }
     }
 
@@ -577,6 +692,7 @@ impl Agent {
             snapshot_manager: None,
             arc_plan: RwLock::new(None),
             arc_plan_tail_count: std::sync::atomic::AtomicU8::new(0),
+            token_calibration: TokenCalibration::new(),
         }
     }
 
@@ -1263,6 +1379,70 @@ impl Agent {
     /// Mark the loop-detector warning as having just fired.
     pub(super) fn mark_loop_detected_recently(&self) {
         self.loop_detected_recently.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod token_calibration_tests {
+    use super::TokenCalibration;
+
+    #[test]
+    fn starts_neutral_and_leaves_budget_untouched() {
+        let calib = TokenCalibration::with_options(true, 4000);
+        assert_eq!(calib.ratio_milli(), 1000);
+        assert_eq!(calib.adjusted_budget(12_000), 12_000);
+    }
+
+    #[test]
+    fn observations_converge_and_shrink_budget() {
+        let calib = TokenCalibration::with_options(true, 4000);
+        for _ in 0..24 {
+            calib.observe(1_000, 2_000);
+        }
+        // EWMA α=0.25 converges to ~2000 from below after 24 samples.
+        let ratio = calib.ratio_milli();
+        assert!(
+            (1950..=2000).contains(&ratio),
+            "expected near-2000 convergence, got {ratio}"
+        );
+        let budget = calib.adjusted_budget(10_000);
+        assert!(
+            (5000..=5150).contains(&budget),
+            "budget must scale by ~1/2, got {budget}"
+        );
+    }
+
+    #[test]
+    fn single_skewed_sample_never_exceeds_upper_clamp() {
+        let calib = TokenCalibration::with_options(true, 4000);
+        for _ in 0..16 {
+            calib.observe(1_000, 50_000);
+        }
+        assert!(
+            calib.ratio_milli() <= 4000,
+            "clamped sample must keep the smoothed ratio at or below the max"
+        );
+        assert!(
+            calib.adjusted_budget(8_000) >= 2_000,
+            "budget never shrinks below 1/max of the raw value"
+        );
+    }
+
+    #[test]
+    fn zero_sided_samples_are_ignored() {
+        let calib = TokenCalibration::with_options(true, 4000);
+        calib.observe(0, 5_000);
+        calib.observe(5_000, 0);
+        assert_eq!(calib.ratio_milli(), 1000);
+        assert_eq!(calib.adjusted_budget(9_000), 9_000);
+    }
+
+    #[test]
+    fn disabled_calibration_is_inert() {
+        let calib = TokenCalibration::with_options(false, 4000);
+        calib.observe(1_000, 3_000);
+        assert_eq!(calib.ratio_milli(), 1000);
+        assert_eq!(calib.adjusted_budget(9_000), 9_000);
     }
 }
 

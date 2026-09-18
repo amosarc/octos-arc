@@ -355,4 +355,55 @@ mod tests {
                 .all(|m| m.role != MessageRole::Tool || m.tool_call_id.is_some())
         );
     }
+
+    #[tokio::test]
+    async fn calibrated_budget_trims_conversation_the_static_budget_accepts() {
+        use octos_llm::context::estimate_message_tokens;
+
+        // Window 1200 → raw budget 800 (1200 × 0.8 / 1.2). CJK-heavy filler
+        // whose STATIC estimate fits under the budget — a provider would
+        // really consume ≈2× that in actual tokens. Calibration samples push
+        // the ratio to ~2.35, shrinking the budget so the same conversation
+        // must trim; the neutral agent accepts it unchanged.
+        let cjk_fill = "上下文填充测试".repeat(16); // 112 chars → ~74 static tokens
+        let build = || {
+            let mut messages = vec![sys("prompt")];
+            for _ in 0..10 {
+                messages.push(user(&cjk_fill));
+            }
+            let total: u32 = messages.iter().map(estimate_message_tokens).sum();
+            let raw_budget = (1_200f64 * 0.8 / crate::compaction::SAFETY_MARGIN) as u32;
+            assert!(
+                total <= raw_budget,
+                "fixture must fit the static budget for this test to be meaningful \
+                 ({total} > {raw_budget})"
+            );
+            messages
+        };
+
+        let (_dir, neutral) = setup_agent(1_200).await;
+        let mut untouched = build();
+        assert!(
+            !neutral.trim_to_context_window(&mut untouched),
+            "conversation within the static budget must not trim before calibration"
+        );
+
+        let (_dir, calibrated) = setup_agent(1_200).await;
+        for _ in 0..12 {
+            calibrated.token_calibration.observe(1_000, 2_400);
+        }
+        let budget = calibrated
+            .token_calibration
+            .adjusted_budget((1_200f64 * 0.8 / crate::compaction::SAFETY_MARGIN) as u32);
+        let mut messages = build();
+        let total: u32 = messages.iter().map(estimate_message_tokens).sum();
+        assert!(
+            total > budget,
+            "calibrated budget ({budget}) must fall below the static estimate ({total})"
+        );
+        assert!(
+            calibrated.trim_to_context_window(&mut messages),
+            "calibrated agent must trim a conversation the static budget accepted"
+        );
+    }
 }

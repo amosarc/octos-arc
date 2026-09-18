@@ -905,6 +905,21 @@ fn productive_message_rejects_known_failure_prefixes() {
     ));
 }
 
+#[test]
+fn productive_message_rejects_user_approval_denial_even_when_long() {
+    // The denial result carries `USER_APPROVAL_DENIED_SUFFIX`, which easily
+    // pushes the body past the 128-byte substantive-output bound — the
+    // explicit prefix must keep it non-productive regardless (the command
+    // never ran, so it is not progress and must not earn a grace call).
+    let denial = format!(
+        "Command denied by user approval: cargo publish --token {}{}",
+        "x".repeat(160),
+        crate::tools::USER_APPROVAL_DENIED_SUFFIX
+    );
+    assert!(denial.len() >= 128, "fixture must exceed the 128-byte bound");
+    assert!(!is_productive_tool_message(&denial));
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Review A F-001 — dispatch_loop_error wiring.
 // ─────────────────────────────────────────────────────────────────────
@@ -1154,6 +1169,78 @@ async fn should_compact_and_retry_on_context_overflow() {
         retry_state.counters().context_overflow,
         1,
         "first ContextOverflow observation must bump the bucket counter once"
+    );
+}
+
+#[tokio::test]
+async fn should_bail_on_overflow_when_no_compaction_runner_is_wired() {
+    // Shrink-verification guard: without a CompactionRunner the
+    // CompactAndRetry arm has nothing to compact with — retrying would
+    // resend the exact payload the provider just rejected. The arm must
+    // bail instead of silently burning the retry (and another full
+    // round-trip) on an unchanged prompt.
+    let agent = build_dispatch_test_agent().await;
+    let mut retry_state = LoopRetryState::new();
+    let raw_error: eyre::Report = LlmError::new(
+        LlmErrorKind::ContextOverflow {
+            limit: Some(200_000),
+            used: Some(201_000),
+        },
+        "prompt too long for model window",
+    )
+    .into();
+    let mut messages: Vec<Message> = Vec::new();
+
+    let action =
+        agent.handle_loop_error_with_dispatch(&raw_error, &mut retry_state, 2, &mut messages);
+    assert_eq!(
+        action,
+        LoopErrorAction::Bail,
+        "overflow with no compaction runner must bail instead of a doomed retry"
+    );
+}
+
+#[tokio::test]
+async fn should_bail_on_overflow_when_compaction_cannot_shrink() {
+    // Shrink-verification guard: a runner whose policy budget already fits
+    // the conversation reports performed=false — the pass is a no-op, so
+    // the retry would resend the same oversized payload. The arm must bail.
+    use crate::compaction::{CompactionPolicy, CompactionRunner};
+    use crate::workspace_policy::{CompactionSummarizerKind, WorkspacePolicy};
+
+    let policy = CompactionPolicy {
+        schema_version: crate::abi_schema::COMPACTION_POLICY_SCHEMA_VERSION,
+        // Budget larger than any fixture conversation: nothing to compact.
+        token_budget: 1_000_000,
+        preflight_threshold: None,
+        prune_tool_results_after_turns: None,
+        preserved_artifacts: vec![],
+        preserved_invariants: vec![],
+        summarizer: CompactionSummarizerKind::Extractive,
+    };
+    let runner = CompactionRunner::new(policy);
+    let agent = build_dispatch_test_agent()
+        .await
+        .with_compaction_runner(Arc::new(runner))
+        .with_compaction_workspace(WorkspacePolicy::for_session());
+
+    let mut retry_state = LoopRetryState::new();
+    let raw_error: eyre::Report = LlmError::new(
+        LlmErrorKind::ContextOverflow {
+            limit: Some(200_000),
+            used: Some(201_000),
+        },
+        "prompt too long for model window",
+    )
+    .into();
+    let mut messages: Vec<Message> = Vec::new();
+
+    let action =
+        agent.handle_loop_error_with_dispatch(&raw_error, &mut retry_state, 2, &mut messages);
+    assert_eq!(
+        action,
+        LoopErrorAction::Bail,
+        "overflow with a no-op compaction pass must bail instead of a doomed retry"
     );
 }
 

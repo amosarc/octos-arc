@@ -1706,11 +1706,45 @@ fn malformed_approval_params_return_invalid_params_not_unsupported() {
     assert!(error.message.contains(methods::APPROVAL_RESPOND));
 }
 
+/// `stream_retry` maps to `retry_backoff` status metadata carrying the
+/// assistant-segment `iteration` plus the additive attempt/max_attempts —
+/// the locating info a client needs to clear its partially-streamed buffer
+/// before the retry attempt's deltas arrive (the clear itself stays
+/// client-side; the append-only ledger cannot retract deltas).
+#[test]
+fn stream_retry_status_carries_segment_iteration_and_attempt_position() {
+    let session_id = SessionKey("local:test".into());
+    let turn_id = TurnId::new();
+    let context = ProgressMappingContext::new(session_id, turn_id);
+    let event = json!({
+        "type": "stream_retry",
+        "message": "stream error",
+        "iteration": 3,
+        "attempt": 2,
+        "max_attempts": 4,
+    });
+    let mapping = map_progress_json(&context, &event);
+
+    let status = mapping.status.expect("stream_retry maps to a status");
+    let metadata = &status.event.metadata;
+    assert_eq!(
+        metadata.iteration,
+        Some(3),
+        "metadata.iteration must identify the assistant segment to clear"
+    );
+    let retry = metadata
+        .retry
+        .as_ref()
+        .expect("retry_backoff metadata must carry the retry payload");
+    assert_eq!(retry.attempt, Some(2));
+    assert_eq!(retry.max_attempts, Some(4));
+    assert_eq!(retry.reason.as_deref(), Some("stream error"));
+}
+
 /// Progress-mapped `approval_requested` events are stored for respond, and a
 /// successful respond serializes as a typed JSON-RPC result frame.
 #[test]
-fn progress_approval_request_is_stored_and_responds_with_typed_result() {
-    let contracts = UiProtocolContractStores::default();
+fn progress_approval_request_is_stored_and_responds_with_typed_result() {    let contracts = UiProtocolContractStores::default();
     let session_id = SessionKey("local:test".into());
     let turn_id = TurnId::new();
     let context = ProgressMappingContext::new(session_id.clone(), turn_id);

@@ -149,6 +149,18 @@ mod tests {
     }
 
     #[test]
+    fn should_require_parallel_batching() {
+        assert!(
+            PROMPT.contains("run in parallel"),
+            "prompt must tell the model independent read-only calls run in parallel"
+        );
+        assert!(
+            PROMPT.contains("Batch independent read-only calls"),
+            "prompt must instruct batching independent read-only calls into one response"
+        );
+    }
+
+    #[test]
     fn should_require_check_and_honest_verification() {
         assert!(
             PROMPT.contains("`check`"),

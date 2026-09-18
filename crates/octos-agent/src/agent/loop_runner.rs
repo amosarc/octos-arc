@@ -18,6 +18,7 @@ use super::convergence::{
 };
 use super::loop_compaction::{prepare_conversation_messages, prepare_task_messages};
 use super::loop_state::{LoopDecision, LoopRetryState, SHELL_SPIRAL_VARIANT};
+use super::compaction::RetryCompactionVerdict;
 use super::message_repair::sanitize_tool_call_id;
 use super::turn_state::{LoopTurnState, attach_partial_usage};
 use super::{Agent, AssistantSegmentProvenance, ConversationResponse, TASK_REPORTER, TokenTracker};
@@ -346,8 +347,10 @@ impl Agent {
     /// `match action { Retry => continue, Bail => return Err(e) }`.
     ///
     /// `CompactAndRetry` is handled in-band: the method calls
-    /// [`Self::maybe_run_turn_compaction`] before returning `Retry` so the
-    /// caller does not have to thread compaction state across error sites.
+    /// [`Self::maybe_run_retry_compaction`] before returning `Retry` so the
+    /// caller does not have to thread compaction state across error sites,
+    /// and BAILS when the pass did not actually shrink the conversation (a
+    /// doomed overflow resend) or preservation validation failed.
     ///
     /// This is the wiring seam added for Review A F-001. Prior to this
     /// patch every error site in `process_message` / `run_task` classified
@@ -378,12 +381,47 @@ impl Agent {
                     iteration,
                     "loop retry: compacting context before retry"
                 );
-                if let Err(error) = self.maybe_run_turn_compaction(messages, iteration) {
-                    tracing::warn!(
-                        error = %error,
-                        "loop retry: compaction preservation failed; bailing"
-                    );
-                    return LoopErrorAction::Bail;
+                match self.maybe_run_retry_compaction(messages) {
+                    Ok(RetryCompactionVerdict::Compacted {
+                        tokens_before,
+                        tokens_after,
+                    }) => {
+                        // A retry that resends a barely-shrunk payload is a
+                        // guaranteed second overflow — bail instead of
+                        // burning the round-trip and another bucket unit.
+                        if tokens_after as f64 > tokens_before as f64 * 0.9 {
+                            tracing::warn!(
+                                tokens_before,
+                                tokens_after,
+                                "loop retry: compaction shrank the context by less than 10%; bailing instead of a doomed resend"
+                            );
+                            return LoopErrorAction::Bail;
+                        }
+                    }
+                    Ok(RetryCompactionVerdict::NoOp {
+                        context_manager_owned: false,
+                        reason,
+                    }) => {
+                        tracing::warn!(
+                            reason,
+                            iteration,
+                            "loop retry: nothing compacted before overflow retry; bailing instead of resending the same payload"
+                        );
+                        return LoopErrorAction::Bail;
+                    }
+                    // The context bridge owns the retry prompt and compacts
+                    // it in the prepare step right below — retry is safe.
+                    Ok(RetryCompactionVerdict::NoOp {
+                        context_manager_owned: true,
+                        ..
+                    }) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "loop retry: compaction preservation failed; bailing"
+                        );
+                        return LoopErrorAction::Bail;
+                    }
                 }
                 self.prepare_prompt_with_context_manager(
                     messages,
@@ -3035,6 +3073,11 @@ fn is_productive_tool_message(content: &str) -> bool {
         || trimmed.starts_with("Path outside working directory")
         || trimmed.starts_with("(no output)")
         || trimmed.starts_with("File not found")
+        // User approval denial: the command never ran, so the result must
+        // not count as progress — and the appended
+        // `USER_APPROVAL_DENIED_SUFFIX` can push a short refusal past the
+        // 128-byte substantive-body bound below.
+        || trimmed.starts_with("Command denied by user approval")
         || (trimmed.starts_with("Tool '")
             && (trimmed.contains("panicked") || trimmed.contains("timed out")))
     {

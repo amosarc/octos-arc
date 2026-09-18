@@ -213,12 +213,30 @@ pub(crate) fn event_to_json(event: &ProgressEvent, thread_id: Option<&str>) -> s
                 "iteration": iteration,
             })
         }
-        ProgressEvent::StreamRetry { iteration } => {
-            serde_json::json!({
+        ProgressEvent::StreamRetry {
+            iteration,
+            attempt,
+            max_attempts,
+        } => {
+            // Additive enrichment: `attempt`/`max_attempts` only appear when
+            // the emitter supplied them, so legacy event consumers keep
+            // seeing the original JSON shape.
+            let mut value = serde_json::json!({
                 "type": "stream_retry",
                 "message": "stream retry",
                 "iteration": iteration,
-            })
+            });
+            let obj = value.as_object_mut().expect("stream_retry json object");
+            if let Some(attempt) = attempt {
+                obj.insert("attempt".to_string(), serde_json::Value::from(*attempt));
+            }
+            if let Some(max_attempts) = max_attempts {
+                obj.insert(
+                    "max_attempts".to_string(),
+                    serde_json::Value::from(*max_attempts),
+                );
+            }
+            value
         }
     };
     if let (Some(tid), Some(obj)) = (thread_id, value.as_object_mut()) {
@@ -493,8 +511,21 @@ mod tests {
                 serde_json::json!({"type": "llm_status", "message": "retrying", "iteration": 2}),
             ),
             (
-                ProgressEvent::StreamRetry { iteration: 3 },
-                serde_json::json!({"type": "stream_retry", "message": "stream retry", "iteration": 3}),
+                ProgressEvent::StreamRetry {
+                    iteration: 3,
+                    attempt: Some(2),
+                    max_attempts: Some(4),
+                },
+                serde_json::json!({"type": "stream_retry", "message": "stream retry", "iteration": 3, "attempt": 2, "max_attempts": 4}),
+            ),
+            (
+                // Legacy emitter shape: additive fields stay absent.
+                ProgressEvent::StreamRetry {
+                    iteration: 1,
+                    attempt: None,
+                    max_attempts: None,
+                },
+                serde_json::json!({"type": "stream_retry", "message": "stream retry", "iteration": 1}),
             ),
         ];
         for (event, expected) in cases {

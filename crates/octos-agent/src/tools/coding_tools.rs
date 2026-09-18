@@ -292,7 +292,10 @@ async fn request_command_approval(
                 .await;
             if matches!(decision, ToolApprovalDecision::Deny) {
                 Some(ToolResult {
-                    output: format!("Command denied by user approval: {command}"),
+                    output: format!(
+                        "Command denied by user approval: {command}{}",
+                        crate::tools::USER_APPROVAL_DENIED_SUFFIX
+                    ),
                     success: false,
                     structured_metadata: Some(json!({
                         "kind": "approval_denied",
