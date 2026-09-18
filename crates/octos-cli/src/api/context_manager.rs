@@ -9,7 +9,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use chrono::Utc;
 use octos_agent::normalize_tool_call_id;
 use octos_core::{Message, MessageRole, ToolCall};
 use octos_llm::ToolSpec;
@@ -640,7 +639,7 @@ pub(crate) fn persist_context_manager_snapshot(
             .and_then(|name| name.to_str())
             .unwrap_or("context-ledger.json"),
         std::process::id(),
-        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        chrono::Local::now().timestamp_nanos_opt().unwrap_or_default()
     );
     let tmp_path = parent.join(tmp_name);
     let bytes = serde_json::to_vec_pretty(&manager.snapshot())
@@ -715,7 +714,7 @@ fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
             .and_then(|name| name.to_str())
             .unwrap_or("tool-output.txt"),
         std::process::id(),
-        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        chrono::Local::now().timestamp_nanos_opt().unwrap_or_default()
     );
     let tmp_path = parent.join(tmp_name);
     std::fs::write(&tmp_path, bytes).map_err(|err| {
@@ -1698,7 +1697,7 @@ impl ContextManager {
             source,
             semantic_group_id,
             source_ref,
-            recorded_at_ms: Utc::now().timestamp_millis(),
+            recorded_at_ms: chrono::Local::now().timestamp_millis(),
             in_flight,
         };
         self.ledger_items.push(item.clone());
@@ -1874,7 +1873,7 @@ impl ContextManager {
             source,
             semantic_group_id,
             source_ref: Some(source_ref),
-            recorded_at_ms: Utc::now().timestamp_millis(),
+            recorded_at_ms: chrono::Local::now().timestamp_millis(),
             in_flight: false,
         };
         self.insert_source_item_ordered(item);
@@ -2346,7 +2345,7 @@ impl ContextManager {
         policy: CompactContextPolicy,
     ) -> ContextCompactionRecord {
         let summary = summary.into();
-        let started_at_ms = Utc::now().timestamp_millis();
+        let started_at_ms = chrono::Local::now().timestamp_millis();
         let input_generation = self.generation;
         let input_hash = self.transcript_hash();
         let input_projection_hash = self.active_projection_content_hash();
@@ -2395,7 +2394,7 @@ impl ContextManager {
         let candidate_fingerprint =
             compaction_candidate_fingerprint_for(&policy, &dropped_item_ids);
         let summary_item_id = TranscriptItemId::new(format!("ctxitem_{:06}", self.next_item_seq));
-        let recorded_at_ms = Utc::now().timestamp_millis();
+        let recorded_at_ms = chrono::Local::now().timestamp_millis();
         let summary_insert_index = compaction_summary_insert_index(&retained);
         let build_candidate = |summary_text: &str| {
             let replacement_transcript_hash = hash_json(&json!({
@@ -2478,7 +2477,7 @@ impl ContextManager {
                         trigger,
                         checkpoint_id,
                         started_at_ms,
-                        completed_at_ms: Utc::now().timestamp_millis(),
+                        completed_at_ms: chrono::Local::now().timestamp_millis(),
                         input_generation,
                         output_generation: None,
                         input_transcript_hash: input_hash,
@@ -2532,7 +2531,7 @@ impl ContextManager {
             trigger,
             checkpoint_id,
             started_at_ms,
-            completed_at_ms: Utc::now().timestamp_millis(),
+            completed_at_ms: chrono::Local::now().timestamp_millis(),
             input_generation,
             output_generation: Some(self.generation),
             input_transcript_hash: input_hash,
@@ -2642,7 +2641,7 @@ impl ContextManager {
         policy: CompactContextPolicy,
         error: impl Into<String>,
     ) -> ContextCompactionRecord {
-        let now = Utc::now().timestamp_millis();
+        let now = chrono::Local::now().timestamp_millis();
         let input_hash = self.transcript_hash();
         let input_projection_hash = self.active_projection_content_hash();
         let policy_fingerprint = hash_json(&json!(&policy));
@@ -3071,7 +3070,7 @@ impl ContextManager {
             source: TranscriptItemSource::Synthetic,
             semantic_group_id: None,
             source_ref: None,
-            recorded_at_ms: Utc::now().timestamp_millis(),
+            recorded_at_ms: chrono::Local::now().timestamp_millis(),
             in_flight: false,
         });
         ForkedChildContext {
@@ -3098,7 +3097,7 @@ impl ContextManager {
         ContextCheckpointId::new(format!(
             "ctxchk_{:06}_{}",
             self.generation + 1,
-            Utc::now().timestamp_millis()
+            chrono::Local::now().timestamp_millis()
         ))
     }
 
@@ -3106,7 +3105,7 @@ impl ContextManager {
         ContextCompactionId::new(format!(
             "ctxcmp_{:06}_{}",
             self.generation + 1,
-            Utc::now().timestamp_millis()
+            chrono::Local::now().timestamp_millis()
         ))
     }
 
@@ -3586,7 +3585,7 @@ fn message(role: MessageRole, content: impl Into<String>) -> Message {
         reasoning_content: None,
         client_message_id: None,
         thread_id: None,
-        timestamp: Utc::now(),
+        timestamp: chrono::Local::now(),
     }
 }
 
@@ -4121,7 +4120,7 @@ mod tests {
             reasoning_content: None,
             client_message_id: None,
             thread_id: Some(thread_id.into()),
-            timestamp: chrono::Utc::now(),
+            timestamp: chrono::Local::now(),
         }
     }
 

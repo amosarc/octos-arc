@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
-
+use chrono::Local;
 use octos_core::SessionKey;
 use octos_core::ui_protocol::{
     ApprovalDecidedEvent, ApprovalDecision, ApprovalId, ApprovalRequestedEvent,
@@ -321,7 +321,7 @@ pub(crate) fn build_decided_event(
     params: &ApprovalRespondParams,
     outcome: &RespondOutcome,
     decided_by: impl Into<String>,
-    decided_at: chrono::DateTime<chrono::Utc>,
+    decided_at: chrono::DateTime<Local>,
 ) -> ApprovalDecidedEvent {
     let turn_id = outcome
         .context
@@ -675,7 +675,7 @@ mod tests {
         let outcome = store
             .respond_with_context(params.clone())
             .expect("decide manually");
-        let event = build_decided_event(&params, &outcome, "user:tester", chrono::Utc::now());
+        let event = build_decided_event(&params, &outcome, "user:tester", chrono::Local::now());
 
         assert_eq!(event.turn_id, turn_id);
         assert_eq!(event.scope.as_deref(), Some("session"));

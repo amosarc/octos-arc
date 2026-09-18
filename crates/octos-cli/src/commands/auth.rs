@@ -300,7 +300,7 @@ fn set_key_with_save(
                 keychain::set_secret(&account, &secret)?;
             }
             profile.config.env_vars.insert(name.to_string(), marker);
-            profile.updated_at = chrono::Utc::now();
+            profile.updated_at = chrono::Local::now();
             // #2234/45b — store-then-save with rollback: if the profile
             // save fails after the secret landed, delete the freshly
             // stored account so a half-applied update leaves no orphan.
@@ -514,7 +514,7 @@ fn remove_key(name: &str, profile_id: Option<&str>) -> Result<()> {
     for mut profile in all_profiles {
         if to_update.contains(profile.id.as_str()) {
             profile.config.env_vars.remove(name);
-            profile.updated_at = chrono::Utc::now();
+            profile.updated_at = chrono::Local::now();
             store.save(&profile)?;
             updated_count += 1;
         }
@@ -586,7 +586,7 @@ mod tests {
         id: &str,
         llm: Option<crate::profiles::LlmProfileConfig>,
     ) -> crate::profiles::UserProfile {
-        let now = chrono::Utc::now();
+        let now = chrono::Local::now();
         crate::profiles::UserProfile {
             id: id.to_string(),
             name: id.to_string(),

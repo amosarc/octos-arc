@@ -1,6 +1,6 @@
 //! Core type definitions.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -176,7 +176,7 @@ pub struct Message {
     /// in-memory so `Session::threads()` produces sensible groupings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTime<Local>,
 }
 
 impl Message {
@@ -200,7 +200,7 @@ impl Message {
             reasoning_content: None,
             client_message_id: None,
             thread_id: Some(thread_id.0),
-            timestamp: Utc::now(),
+            timestamp: chrono::Local::now(),
         }
     }
 
@@ -219,7 +219,7 @@ impl Message {
             reasoning_content: None,
             client_message_id: None,
             thread_id: None,
-            timestamp: Utc::now(),
+            timestamp: chrono::Local::now(),
         }
     }
 
@@ -240,7 +240,7 @@ impl Message {
             reasoning_content: None,
             client_message_id: None,
             thread_id: None,
-            timestamp: Utc::now(),
+            timestamp: chrono::Local::now(),
         }
     }
 
@@ -260,7 +260,7 @@ impl Message {
             reasoning_content: None,
             client_message_id: None,
             thread_id: None,
-            timestamp: Utc::now(),
+            timestamp: chrono::Local::now(),
         }
     }
 }
@@ -529,7 +529,7 @@ mod tests {
             reasoning_content: None,
             client_message_id: None,
             thread_id: None,
-            timestamp: Utc::now(),
+            timestamp: chrono::Local::now(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("Hello"));

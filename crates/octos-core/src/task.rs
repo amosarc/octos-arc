@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{Message, TaskId};
@@ -19,15 +19,15 @@ pub struct Task {
     /// Context passed to the agent.
     pub context: TaskContext,
     /// When the task was created.
-    pub created_at: DateTime<Utc>,
+    pub created_at: DateTime<Local>,
     /// When the task was last updated.
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: DateTime<Local>,
 }
 
 impl Task {
     /// Create a new task with the given kind and context.
     pub fn new(kind: TaskKind, context: TaskContext) -> Self {
-        let now = Utc::now();
+        let now = chrono::Local::now();
         Self {
             id: TaskId::new(),
             status: TaskStatus::Pending,

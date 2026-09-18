@@ -906,7 +906,7 @@ async fn update_plan_body(_: &dyn Tool, args: &Value, ctx: &ToolContext) -> Resu
     // Live path: stream the checklist as a `plan/updated` notification (gated
     // by `plan.todos.v1` on the serve side). `ToolContext::zero()` carries a
     // `SilentReporter`, so the `execute()` entry point is a safe no-op.
-    let record = normalize_plan(args, chrono::Utc::now().timestamp_millis());
+    let record = normalize_plan(args, chrono::Local::now().timestamp_millis());
     if let Ok(plan_value) = serde_json::to_value(&record) {
         ctx.reporter
             .report(crate::progress::ProgressEvent::PlanUpdated { plan: plan_value });
@@ -1580,7 +1580,7 @@ async fn send_input_body(_: &dyn Tool, args: &Value, ctx: &ToolContext) -> Resul
     let mut recorded = serde_json::Map::new();
     recorded.insert("agent_id".to_string(), Value::String(target.clone()));
     recorded.insert("request".to_string(), args.clone());
-    recorded.insert("recorded_at".to_string(), json!(chrono::Utc::now()));
+    recorded.insert("recorded_at".to_string(), json!(chrono::Local::now()));
     let mut merged = serde_json::Map::new();
     if let Some(existing) = task.tool_input {
         merged.insert("original_tool_input".to_string(), existing);

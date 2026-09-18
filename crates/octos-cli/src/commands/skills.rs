@@ -1191,7 +1191,7 @@ fn write_source_info(dest: &Path, spec: &RepoSpec, branch: &str) -> Result<()> {
         repo: spec.source.clone(),
         subdir: spec.subdir.clone(),
         branch: branch.to_string(),
-        installed_at: chrono::Utc::now().to_rfc3339(),
+        installed_at: chrono::Local::now().to_rfc3339(),
     };
     std::fs::write(dest.join(".source"), serde_json::to_string_pretty(&info)?)?;
     Ok(())

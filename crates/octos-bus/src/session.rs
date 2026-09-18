@@ -5,7 +5,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 use eyre::Result;
 use lru::LruCache;
 use metrics::counter;
@@ -322,14 +322,14 @@ enum SessionControlRecord {
     /// from the transcript accumulated up to this point in the log. Written by
     /// [`SessionManager::rollback_last_n_user_turns`] and replayed on every
     /// load (append-only, never a truncation).
-    Rollback { num_turns: u32, at: DateTime<Utc> },
+    Rollback { num_turns: u32, at: DateTime<chrono::Local> },
 }
 
 /// Serialize a rollback control record to its single-line JSONL form.
 fn rollback_marker_line(num_turns: u32) -> Result<String> {
     let record = SessionControlRecord::Rollback {
         num_turns,
-        at: Utc::now(),
+        at: chrono::Local::now(),
     };
     Ok(serde_json::to_string(&record)?)
 }
@@ -344,7 +344,7 @@ fn rollback_marker_line(num_turns: u32) -> Result<String> {
 /// element of a session-length `Vec` (clippy `large_enum_variant`).
 enum SessionTimelineItem {
     Message(Box<Message>),
-    Rollback { num_turns: u32, at: DateTime<Utc> },
+    Rollback { num_turns: u32, at: DateTime<Local> },
 }
 
 /// Parse a session JSONL's post-meta lines into an ordered timeline WITHOUT
@@ -531,7 +531,7 @@ pub struct ChildSessionContract {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub join_state: Option<ChildSessionJoinState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub joined_at: Option<DateTime<Utc>>,
+    pub joined_at: Option<DateTime<Local>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_action: Option<ChildSessionFailureAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -582,8 +582,8 @@ struct SessionMeta {
     title_manual: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     child_contracts: Vec<ChildSessionContract>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+    created_at: DateTime<Local>,
+    updated_at: DateTime<Local>,
 }
 
 /// A conversation session with message history.
@@ -606,13 +606,13 @@ pub struct Session {
     /// Durable child-session contracts associated with this session.
     pub child_contracts: Vec<ChildSessionContract>,
     pub messages: Vec<Message>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Local>,
+    pub updated_at: DateTime<Local>,
 }
 
 impl Session {
     fn new(key: SessionKey) -> Self {
-        let now = Utc::now();
+        let now = chrono::Local::now();
         let topic = key.topic().map(|t| t.to_string());
         Self {
             key,
@@ -834,7 +834,7 @@ impl SessionManager {
         let observer_root = self.data_dir();
         let session = self.get_or_create(key).await;
         session.messages.push(message);
-        session.updated_at = Utc::now();
+        session.updated_at = chrono::Local::now();
         record_session_persist("committed");
         let committed_seq = session.messages.len().saturating_sub(1);
         // UPCR-2026-012: post-commit observer fan-out. Fires AFTER the
@@ -1181,8 +1181,8 @@ impl SessionManager {
                     title,
                     title_manual,
                     child_contracts,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: chrono::Local::now(),
+                    updated_at: chrono::Local::now(),
                 };
                 writeln!(file, "{}", serde_json::to_string(&meta)?)?;
             } else {
@@ -1298,7 +1298,7 @@ impl SessionManager {
         // channel preserved, raw SPA parents yield raw children.
         let new_key = parent_key.fork_child(new_chat_id);
 
-        let now = Utc::now();
+        let now = chrono::Local::now();
         let session = Session {
             key: new_key.clone(),
             parent_key: Some(parent_key.clone()),
@@ -1437,7 +1437,7 @@ impl SessionManager {
         // turn continues from the trimmed transcript.
         if let Some(session) = self.cache.get_mut(&key.0) {
             drop_last_n_user_turns(&mut session.messages, num_turns);
-            session.updated_at = Utc::now();
+            session.updated_at = chrono::Local::now();
         }
         Ok(dropped)
     }
@@ -1752,7 +1752,7 @@ impl SessionHandle {
             return Err(error);
         }
         self.session.messages.push(message.clone());
-        self.session.updated_at = Utc::now();
+        self.session.updated_at = chrono::Local::now();
         record_session_persist("committed");
         // Derive the committed sequence from the ON-DISK transcript, not
         // from this handle's in-memory mirror. The caller holds the per-key
@@ -1919,8 +1919,8 @@ impl SessionHandle {
                     title,
                     title_manual,
                     child_contracts,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: chrono::Local::now(),
+                    updated_at: chrono::Local::now(),
                 };
                 writeln!(file, "{}", serde_json::to_string(&meta)?)?;
             } else {

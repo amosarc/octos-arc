@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{Local};
 use octos_core::Message;
 use octos_llm::{ChatConfig, LlmProvider};
 use tokio::task::JoinHandle;
@@ -387,7 +387,7 @@ struct LastTickSummary {
     /// When the summary was actually PRODUCED (the model call that emitted
     /// it). Reused on deduped ticks so the event's `at` never lies about
     /// production time; tick_seq alone conveys that the watcher is live.
-    produced_at: chrono::DateTime<chrono::Utc>,
+    produced_at: chrono::DateTime<Local>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -446,7 +446,7 @@ async fn summarize_tick(
         return None;
     }
 
-    let produced_at = Utc::now();
+    let produced_at = chrono::Local::now();
     *last = Some(LastTickSummary {
         prompt,
         summary: trimmed.clone(),
@@ -469,7 +469,7 @@ fn emit_progress(
     task_id: &str,
     summary: &str,
     tick_seq: u32,
-    produced_at: chrono::DateTime<chrono::Utc>,
+    produced_at: chrono::DateTime<Local>,
 ) {
     let event = HarnessEvent::subagent_progress(
         session_id.to_string(),

@@ -1348,7 +1348,7 @@ mod tests {
                 reasoning_content: None,
                 client_message_id: None,
                 thread_id: None,
-                timestamp: chrono::Utc::now(),
+                timestamp: chrono::Local::now(),
             },
             Message {
                 role: MessageRole::Tool,
@@ -1359,7 +1359,7 @@ mod tests {
                 reasoning_content: None,
                 client_message_id: None,
                 thread_id: None,
-                timestamp: chrono::Utc::now(),
+                timestamp: chrono::Local::now(),
             },
         ];
         let (contents, _) = build_gemini_contents(&messages);
@@ -1387,7 +1387,7 @@ mod tests {
                 reasoning_content: None,
                 client_message_id: None,
                 thread_id: None,
-                timestamp: chrono::Utc::now(),
+                timestamp: chrono::Local::now(),
             },
         ];
 

@@ -8,7 +8,7 @@
 //! backend support lands behind capabilities.
 
 use crate::{SessionKey, TaskId};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1721,7 +1721,7 @@ pub struct HydratedMessage {
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_message_id: Option<String>,
-    pub persisted_at: DateTime<Utc>,
+    pub persisted_at: DateTime<Local>,
     /// Reasoning/thinking text captured for this message (#1502), when the
     /// provider emitted it. Surfaced on hydrate so the "· reasoning" block
     /// survives a client restart instead of silently vanishing — the store
@@ -1786,9 +1786,9 @@ pub struct HydratedTurn {
     pub turn_id: TurnId,
     pub state: TurnLifecycleState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Local>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completed_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Local>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
 }
@@ -1971,9 +1971,9 @@ pub struct TurnStateGetResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_state: Option<UiContextState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Local>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completed_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Local>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
     /// Persisted-message seqs owned by this turn. Empty for `unknown` and for
@@ -2079,7 +2079,7 @@ pub struct TurnSpawnCompleteEvent {
     /// without a wire-breaking enum change.
     pub source: String,
     pub cursor: UiCursor,
-    pub persisted_at: DateTime<Utc>,
+    pub persisted_at: DateTime<Local>,
     /// REQUIRED. The full assistant text for the completion bubble.
     pub content: String,
     /// File attachments for this completion (e.g. `_report.md`,
@@ -2126,7 +2126,7 @@ pub struct MessageMeta {
     /// `MessageMeta.message_id`). Stable across replays.
     pub message_id: String,
     /// RFC 3339 wall-clock time the row committed.
-    pub persisted_at: DateTime<Utc>,
+    pub persisted_at: DateTime<Local>,
     /// File attachments persisted with the message — typically a single
     /// `.md` / `.mp3` / `.pptx` artefact emitted by `spawn_only` background
     /// tools (`deep_search`, `mofa_*`, `fm_tts`) or an explicit `send_file`.
@@ -2548,7 +2548,7 @@ pub enum PayloadV2 {
         tool_call_id: Option<String>,
         message_id: String,
         source: String,
-        persisted_at: DateTime<Utc>,
+        persisted_at: DateTime<Local>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         media: Vec<String>,
     },
@@ -2732,7 +2732,7 @@ impl UiCommand {
 pub struct UiPaneSnapshot {
     pub session_id: SessionKey,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generated_at: Option<DateTime<Utc>>,
+    pub generated_at: Option<DateTime<Local>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<UiWorkspacePaneSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2800,7 +2800,7 @@ pub struct UiArtifactPaneItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Local>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3329,7 +3329,7 @@ impl UiProgressEvent {
 pub struct TurnStartedEvent {
     pub session_id: SessionKey,
     pub turn_id: TurnId,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTime<Local>,
     /// UPCR-2026-014 (M9-α-9): optional sub-topic suffix that scopes the
     /// turn within a session (mirrors the `<session>#<topic>` shape
     /// carried on REST/SSE chat). Multi-topic specs need this to filter
@@ -3621,7 +3621,7 @@ pub struct ApprovalDecidedEvent {
     pub decision: ApprovalDecision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
-    pub decided_at: DateTime<Utc>,
+    pub decided_at: DateTime<Local>,
     pub decided_by: String,
     #[serde(default)]
     pub auto_resolved: bool,
@@ -3647,7 +3647,7 @@ impl ApprovalDecidedEvent {
             turn_id,
             decision,
             scope: None,
-            decided_at: Utc::now(),
+            decided_at: chrono::Local::now(),
             decided_by: decided_by.into(),
             auto_resolved: false,
             policy_id: None,

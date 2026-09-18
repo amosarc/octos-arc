@@ -691,7 +691,7 @@ impl Agent {
                     reasoning_content: None,
                     client_message_id: None,
                     thread_id: None,
-                    timestamp: chrono::Utc::now(),
+                    timestamp: chrono::Local::now(),
                 }];
 
                 // #1587: session-start conversational episodic recall.
@@ -763,7 +763,7 @@ impl Agent {
                     reasoning_content: None,
                     client_message_id: None,
                     thread_id: None,
-                    timestamp: chrono::Utc::now(),
+                    timestamp: chrono::Local::now(),
                 };
                 messages.push(current_user.clone());
 
@@ -923,7 +923,7 @@ impl Agent {
                                         reasoning_content: None,
                                         client_message_id: None,
                                         thread_id: None,
-                                        timestamp: chrono::Utc::now(),
+                                        timestamp: chrono::Local::now(),
                                     },
                                 );
                             }
@@ -2638,7 +2638,7 @@ impl Agent {
                     &matched_name,
                     &matched_id,
                     matched_args,
-                    chrono::Utc::now(),
+                    chrono::Local::now(),
                 );
                 let tool_placeholder = |tc_id: &str, content: String| Message {
                     role: MessageRole::Tool,
@@ -2649,7 +2649,7 @@ impl Agent {
                     reasoning_content: None,
                     client_message_id: None,
                     thread_id: None,
-                    timestamp: chrono::Utc::now(),
+                    timestamp: chrono::Local::now(),
                 };
                 match outcome {
                     Ok(Some(draft)) => {
@@ -3536,7 +3536,7 @@ fn inject_loop_detected_synthetic_results_with_log(
             reasoning_content: None,
             client_message_id: None,
             thread_id: None,
-            timestamp: chrono::Utc::now(),
+            timestamp: chrono::Local::now(),
         };
         messages.push(tool_msg.clone());
         rows_for_log.push(tool_msg);

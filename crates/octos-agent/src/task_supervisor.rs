@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 use metrics::counter;
 use octos_core::TaskId;
 use serde::{Deserialize, Serialize};
@@ -229,16 +229,16 @@ pub struct BackgroundTask {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_join_state: Option<ChildSessionJoinState>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub child_joined_at: Option<DateTime<Utc>>,
+    pub child_joined_at: Option<DateTime<Local>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_failure_action: Option<ChildSessionFailureAction>,
     pub status: TaskStatus,
     pub runtime_state: TaskRuntimeState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_detail: Option<String>,
-    pub started_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
+    pub started_at: DateTime<Local>,
+    pub updated_at: DateTime<Local>,
+    pub completed_at: Option<DateTime<Local>>,
     pub output_files: Vec<String>,
     pub error: Option<String>,
     /// Full final output text of the worker, recorded via
@@ -1166,8 +1166,8 @@ impl TaskSupervisor {
             }
             task.status = TaskStatus::Cancelled;
             task.runtime_state = TaskRuntimeState::Cancelled;
-            task.updated_at = Utc::now();
-            task.completed_at = Some(Utc::now());
+            task.updated_at = chrono::Local::now();
+            task.completed_at = Some(chrono::Local::now());
             if task.error.is_none() {
                 task.error = Some("cancelled by supervisor".to_string());
             }
@@ -1530,8 +1530,8 @@ impl TaskSupervisor {
             status: TaskStatus::Spawned,
             runtime_state: TaskRuntimeState::Spawned,
             runtime_detail: None,
-            started_at: Utc::now(),
-            updated_at: Utc::now(),
+            started_at: chrono::Local::now(),
+            updated_at: chrono::Local::now(),
             completed_at: None,
             output_files: Vec::new(),
             error: None,
@@ -1628,7 +1628,7 @@ impl TaskSupervisor {
             // Stamp updated_at so reconnect hydration / dashboards see
             // the projection update even when no lifecycle transition
             // fires.
-            task.updated_at = Utc::now();
+            task.updated_at = chrono::Local::now();
             task.clone()
         };
         self.notify_change(&snapshot);
@@ -1656,7 +1656,7 @@ impl TaskSupervisor {
                 return;
             }
             task.workspace_root = Some(workspace_root.to_string());
-            task.updated_at = Utc::now();
+            task.updated_at = chrono::Local::now();
             task.clone()
         };
         self.notify_change(&snapshot);
@@ -1697,7 +1697,7 @@ impl TaskSupervisor {
                 task.status = TaskStatus::Running;
                 task.runtime_state = TaskRuntimeState::ExecutingTool;
                 task.runtime_detail = None;
-                task.updated_at = Utc::now();
+                task.updated_at = chrono::Local::now();
                 Some(task.clone())
             } else {
                 None
@@ -1738,7 +1738,7 @@ impl TaskSupervisor {
                 let previous_detail = task.runtime_detail.clone();
                 task.runtime_state = runtime_state;
                 task.runtime_detail = runtime_detail;
-                task.updated_at = Utc::now();
+                task.updated_at = chrono::Local::now();
                 (Some(task.clone()), previous_detail)
             } else {
                 (None, None)
@@ -1820,8 +1820,8 @@ impl TaskSupervisor {
                 }
                 task.status = TaskStatus::Completed;
                 task.runtime_state = TaskRuntimeState::Completed;
-                task.updated_at = Utc::now();
-                task.completed_at = Some(Utc::now());
+                task.updated_at = chrono::Local::now();
+                task.completed_at = Some(chrono::Local::now());
                 let artifact_count = output_files.len() as u32;
                 task.output_files = output_files;
                 if task.artifact_count.is_some() || artifact_count > 0 {
@@ -1881,7 +1881,7 @@ impl TaskSupervisor {
                         FINAL_OUTPUT_CAP_BYTES,
                         "\n…[final output truncated]",
                     ));
-                    task.updated_at = Utc::now();
+                    task.updated_at = chrono::Local::now();
                     Some(task.clone())
                 }
                 None => None,
@@ -1959,8 +1959,8 @@ impl TaskSupervisor {
                 } else if !already_failed {
                     task.failed_by_observer = true;
                 }
-                task.updated_at = Utc::now();
-                task.completed_at = Some(Utc::now());
+                task.updated_at = chrono::Local::now();
+                task.completed_at = Some(chrono::Local::now());
                 if task.summary.is_none() {
                     task.summary = Some(error.chars().take(1200).collect());
                 }
@@ -2176,11 +2176,11 @@ impl TaskSupervisor {
                 task.child_terminal_state = Some(terminal_state);
                 task.child_join_state = Some(join_state.clone());
                 task.child_joined_at = match join_state {
-                    ChildSessionJoinState::Joined => Some(Utc::now()),
+                    ChildSessionJoinState::Joined => Some(chrono::Local::now()),
                     ChildSessionJoinState::Orphaned => None,
                 };
                 task.child_failure_action = failure_action;
-                task.updated_at = Utc::now();
+                task.updated_at = chrono::Local::now();
                 Some(task.clone())
             } else {
                 None

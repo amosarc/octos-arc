@@ -50,8 +50,8 @@ pub(crate) fn local_profile(id: &str, config: &Config) -> UserProfile {
         parent_id: None,
         data_dir: None,
         config: settings,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: chrono::Local::now(),
+        updated_at: chrono::Local::now(),
     }
 }
 

@@ -39,7 +39,7 @@ fn tool_out(tool_call_id: impl Into<String>, content: impl Into<String>) -> Mess
         reasoning_content: None,
         client_message_id: None,
         thread_id: None,
-        timestamp: chrono::Utc::now(),
+        timestamp: chrono::Local::now(),
     }
 }
 
@@ -811,7 +811,7 @@ fn intra_turn_window_skips_stale_shell_history_from_prior_turn() {
         reasoning_content: None,
         client_message_id: None,
         thread_id: None,
-        timestamp: chrono::Utc::now(),
+        timestamp: chrono::Local::now(),
     });
     messages.push(Message {
         role: MessageRole::Tool,
@@ -822,7 +822,7 @@ fn intra_turn_window_skips_stale_shell_history_from_prior_turn() {
         reasoning_content: None,
         client_message_id: None,
         thread_id: None,
-        timestamp: chrono::Utc::now(),
+        timestamp: chrono::Local::now(),
     });
 
     // Whole-history scan still matches the stale streak — that's the
@@ -874,7 +874,7 @@ fn stale_shell_failure_streak(id_prefix: &str) -> Vec<Message> {
             reasoning_content: None,
             client_message_id: None,
             thread_id: None,
-            timestamp: chrono::Utc::now(),
+            timestamp: chrono::Local::now(),
         });
         out.push(tool_out(
             id,
@@ -1040,7 +1040,7 @@ async fn shell_spiral_dispatch_marks_loop_detected_recently() {
             reasoning_content: None,
             client_message_id: None,
             thread_id: None,
-            timestamp: chrono::Utc::now(),
+            timestamp: chrono::Local::now(),
         });
         messages.push(tool_out(call_id, "error[E0999]: broken\n\nExit code: 101"));
     }
@@ -1124,7 +1124,7 @@ async fn should_compact_and_retry_on_context_overflow() {
         reasoning_content: None,
         client_message_id: None,
         thread_id: None,
-        timestamp: chrono::Utc::now(),
+        timestamp: chrono::Local::now(),
     }];
     for i in 0..14 {
         messages.push(Message {
@@ -1136,7 +1136,7 @@ async fn should_compact_and_retry_on_context_overflow() {
             reasoning_content: None,
             client_message_id: None,
             thread_id: None,
-            timestamp: chrono::Utc::now(),
+            timestamp: chrono::Local::now(),
         });
         messages.push(Message {
             role: MessageRole::Assistant,
@@ -1147,7 +1147,7 @@ async fn should_compact_and_retry_on_context_overflow() {
             reasoning_content: None,
             client_message_id: None,
             thread_id: None,
-            timestamp: chrono::Utc::now(),
+            timestamp: chrono::Local::now(),
         });
     }
 
@@ -1699,7 +1699,7 @@ fn spiral_shell_exchange(id: &str, command: &str, output: &str) -> [Message; 2] 
             reasoning_content: None,
             client_message_id: None,
             thread_id: None,
-            timestamp: chrono::Utc::now(),
+            timestamp: chrono::Local::now(),
         },
         tool_out(id, output),
     ]

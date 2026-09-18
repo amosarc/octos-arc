@@ -161,7 +161,7 @@ fn event(project: &Path, state: &str, message: &str) -> Result<()> {
     writeln!(
         output,
         "{}",
-        json!({"type":"runner_state","state":state,"timestamp":chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),"message":message})
+        json!({"type":"runner_state","state":state,"timestamp":chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),"message":message})
     )?;
     Ok(())
 }
@@ -403,7 +403,7 @@ pub fn execute(options: ArcCommand, identity: BinaryIdentity<'_>) -> Result<Valu
         &previous.as_ref().map(|value| &value.tree),
     )?;
     write_json(&run_dir.join("delta.json"), &delta)?;
-    let mut report = json!({"schema_version":1,"run_id":run_id,"mode":options.mode,"status":"prepared","requirements_sha256":specification.sha256,"previous_requirements_sha256":previous.as_ref().map(|value| &value.sha256),"delta":delta,"source_before":before,"official_evaluation":"not_run","score":null,"evidence":[],"started_at":chrono::Utc::now().to_rfc3339()});
+    let mut report = json!({"schema_version":1,"run_id":run_id,"mode":options.mode,"status":"prepared","requirements_sha256":specification.sha256,"previous_requirements_sha256":previous.as_ref().map(|value| &value.sha256),"delta":delta,"source_before":before,"official_evaluation":"not_run","score":null,"evidence":[],"started_at":chrono::Local::now().to_rfc3339()});
     write_json(&run_dir.join("report.json"), &report)?;
     if options.prepare_only {
         return Ok(report);

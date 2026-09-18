@@ -720,8 +720,8 @@ mod tests {
                 gateway: GatewaySettings::default(),
                 ..Default::default()
             },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: chrono::Local::now(),
+            updated_at: chrono::Local::now(),
         };
 
         let err = ProfileRuntime::bootstrap(&profile, &data_dir, None, BootstrapRole::Serve)
@@ -821,8 +821,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: chrono::Local::now(),
+            updated_at: chrono::Local::now(),
         };
 
         let rt = ProfileRuntime::bootstrap(&profile, &data_dir, None, BootstrapRole::Serve)
@@ -911,8 +911,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: chrono::Local::now(),
+            updated_at: chrono::Local::now(),
         };
 
         // Simulates `octos serve`: bootstraps first as `Serve`,

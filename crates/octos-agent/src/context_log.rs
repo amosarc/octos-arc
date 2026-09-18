@@ -61,7 +61,7 @@ impl ContextLogger {
         let inner = enabled.then(|| {
             let run_id = format!(
                 "{}-{}",
-                chrono::Utc::now().format("%Y%m%d-%H%M%S%3f"),
+                chrono::Local::now().format("%Y%m%d-%H%M%S%3f"),
                 std::process::id()
             );
             std::sync::Arc::new(Inner {
@@ -110,7 +110,7 @@ impl ContextLogger {
         let seq = inner.seq.fetch_add(1, Ordering::Relaxed);
         record["seq"] = json!(seq);
         record["ts"] =
-            json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            json!(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
         record["run_id"] = json!(inner.run_id);
         let line = record.to_string();
         if let Err(error) = std::fs::OpenOptions::new()

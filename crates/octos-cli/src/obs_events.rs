@@ -31,7 +31,7 @@ pub(crate) struct ObsEvent<'a> {
 impl<'a> ObsEvent<'a> {
     pub(crate) fn new(kind: &'a str, detail: &'a str) -> Self {
         Self {
-            ts: chrono::Utc::now().to_rfc3339(),
+            ts: chrono::Local::now().to_rfc3339(),
             kind,
             session: None,
             detail,

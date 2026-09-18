@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 use octos_core::{AgentId, TaskId};
 use serde::{Deserialize, Serialize};
 
@@ -55,7 +55,7 @@ pub struct Episode {
     /// Files that were modified.
     pub files_modified: Vec<PathBuf>,
     /// When this episode was created.
-    pub created_at: DateTime<Utc>,
+    pub created_at: DateTime<Local>,
 }
 
 impl Episode {
@@ -78,7 +78,7 @@ impl Episode {
             source: EpisodeSource::Task,
             key_decisions: Vec::new(),
             files_modified: Vec::new(),
-            created_at: Utc::now(),
+            created_at: chrono::Local::now(),
         }
     }
 }

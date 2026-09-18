@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
@@ -361,7 +361,7 @@ pub struct HarnessSubagentProgressEvent {
     /// task. Useful for clients that want to deduplicate or show "tick N".
     pub tick_seq: u32,
     /// When the summary was produced (wall-clock, UTC).
-    pub at: chrono::DateTime<chrono::Utc>,
+    pub at: chrono::DateTime<Local>,
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
 }
@@ -400,7 +400,7 @@ impl HarnessEvent {
         task_id: impl Into<String>,
         summary: impl Into<String>,
         tick_seq: u32,
-        at: chrono::DateTime<chrono::Utc>,
+        at: chrono::DateTime<Local>,
     ) -> Self {
         Self {
             schema: HARNESS_EVENT_SCHEMA_V1.to_string(),
@@ -1015,7 +1015,7 @@ mod tests {
             task_id.clone(),
             "parsing response",
             3,
-            chrono::Utc::now(),
+            chrono::Local::now(),
         );
         supervisor.apply_harness_event(&task_id, &event).unwrap();
 

@@ -131,8 +131,8 @@ mod tests {
                 skills,
                 ..Default::default()
             },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: chrono::Local::now(),
+            updated_at: chrono::Local::now(),
         }
     }
 
@@ -224,8 +224,8 @@ mod tests {
                 gateway: GatewaySettings::default(),
                 ..Default::default()
             },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: chrono::Local::now(),
+            updated_at: chrono::Local::now(),
         };
         let child = UserProfile {
             id: "dspfac--newsbot".into(),
@@ -238,8 +238,8 @@ mod tests {
                 gateway: GatewaySettings::default(),
                 ..Default::default()
             },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: chrono::Local::now(),
+            updated_at: chrono::Local::now(),
         };
 
         store.save(&parent).unwrap();

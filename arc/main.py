@@ -361,6 +361,40 @@ def _probe_routes_on(smoke_port: int, probes: list, extra_ports: list,
     return None
 
 
+def _ensure_host_toolchain(log) -> None:
+    """宿主尽算原则：Tier-2 评测链(@playwright/test + chromium)由 main 在
+    启动时装好——模型零参与(不探测、不安装、不跑规格)。失败不致命：
+    Tier-2 自会降级为 model final check。"""
+    lg = Path(__file__).resolve().parent / "local-grader"
+    lg_cli = lg / "node_modules" / "@playwright" / "test" / "cli.js"
+    env = dict(os.environ, npm_config_registry=scaffold.NPM_REGISTRY)
+    quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not lg_cli.is_file():
+        log("[toolchain] installing @playwright/test into local-grader ...")
+        try:
+            subprocess.run(["npm", "install", "--no-audit", "--no-fund",
+                            "--loglevel", "error"], cwd=lg, env=env,
+                           timeout=600, check=True, **quiet)
+            log("[toolchain] @playwright/test installed")
+        except (OSError, subprocess.SubprocessError) as exc:
+            log(f"[toolchain] @playwright/test install failed (non-fatal, "
+                f"Tier-2 will degrade): {exc}")
+            return
+    pw_bin = lg / "node_modules" / ".bin" / "playwright"
+    cache = ((Path.home() / "Library" / "Caches" / "ms-playwright")
+             if sys.platform == "darwin"
+             else Path.home() / ".cache" / "ms-playwright")
+    if pw_bin.is_file() and not (cache.is_dir()
+                                 and any(cache.glob("chromium-*"))):
+        log("[toolchain] installing chromium browser ...")
+        try:
+            subprocess.run([str(pw_bin), "install", "chromium"], cwd=lg,
+                           env=env, timeout=900, check=True, **quiet)
+            log("[toolchain] chromium installed")
+        except (OSError, subprocess.SubprocessError) as exc:
+            log(f"[toolchain] chromium install failed (non-fatal): {exc}")
+
+
 def _run_staged_playwright(output_dir: Path, smoke_port: int,
                            tests_dir: Path | None,
                            extra_ports: list | None = None) -> tuple | None:
@@ -1187,10 +1221,17 @@ system prompt applies exactly; the focus section lists this node's \
 acceptance signals and action chains. Extend the existing app, never \
 rewrite working files. Do not commit.\
 Definition of done for this node: every action chain under FOCUS walks \
-through on the RUNNING app; if npx playwright is available, prove it by \
-running the staged specs (grep this node) — red means fix, not report.\
+through on the RUNNING app — curl the API on the smoke port and check \
+the served UI; red means fix, not report. Do NOT run the staged \
+Playwright specs yourself: @playwright/test is not installed in this \
+workspace, do not install it, do not invoke npx playwright (the host \
+executes the specs after your turn and fixes-or-fails on the result).\
 PORT DISCIPLINE: run any dev/test server ONLY on port {smoke}; NEVER \
-bind port {port}. Stop every server you started when done.\
+bind port {port}. To keep a server alive ACROSS tool calls start it \
+detached ONCE — `nohup env PORT={smoke} node backend/src/index.js \
+>/tmp/srv.log 2>&1 & echo $! > /tmp/srv.pid` — then reuse it with curl; \
+a plain `cmd &` dies with the tool call. Kill it by \
+`kill $(cat /tmp/srv.pid)` when done.\
 
 {node_spec}"""
 
@@ -1655,6 +1696,9 @@ def main() -> int:
             else:
                 log("[plan] OCTOS_ARC_HOST_SCAFFOLD=0; scaffolding left to the model")
         # 模板已就位时依赖由宿主预装(模型零安装);codegen 门控紧随其后。
+        # Tier-2 评测链同样宿主自举，均只做一次、幂等。
+        if os.environ.get("OCTOS_ARC_PREWARM", "1") != "0":
+            _ensure_host_toolchain(log)
         template_ready = scaffold.template_ready(output_dir)
         codegen_on = (os.environ.get("OCTOS_ARC_HOST_CODEGEN", "1") != "0"
                       and bool(scaffolded) and template_ready)
@@ -2036,6 +2080,25 @@ def main() -> int:
                     if f_err is not None:
                         ok = False
                         text = f"host final rehearsal red: {f_err[:500]}"
+                    elif tier2_run and tier2_run[1] > 0:
+                        # The turn just fixed Tier-2 red — re-run the specs
+                        # so the repair is verified by ground truth, not by
+                        # the model's self-report.
+                        r_ok, r_fail, r_digest = _run_staged_playwright(
+                            output_dir, smoke_port, tests_dir,
+                            spec_ports_extra) or (0, 0, "")
+                        log(f"[plan] Tier-2 re-run after fix: "
+                            f"{r_ok}p/{r_fail}f")
+                        hs["spec_run_rerun"] = {"passed": r_ok,
+                                                "failed": r_fail,
+                                                "digest": r_digest}
+                        if r_fail > 0:
+                            ok = False
+                            text = (f"Tier-2 still red after fix turn "
+                                    f"({r_fail} failed): {r_digest}")
+                        elif r_ok > 0:
+                            log("[plan] Tier-2 re-run all green; "
+                                "fix verified by ground truth")
             else:
                 log("[flow] final verification turn starting")
                 t0 = time.time()

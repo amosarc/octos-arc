@@ -14,7 +14,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use octos_core::ui_protocol::ApprovalDecidedEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -103,15 +103,15 @@ fn parse_bool(value: &str) -> Option<bool> {
 
 /// Pluggable clock so size-rotation tests can pin the file epoch suffix.
 pub trait AuditClock: Send + Sync {
-    fn now(&self) -> DateTime<Utc>;
+    fn now(&self) -> DateTime<Local>;
 }
 
 #[derive(Debug, Default)]
 pub struct SystemAuditClock;
 
 impl AuditClock for SystemAuditClock {
-    fn now(&self) -> DateTime<Utc> {
-        Utc::now()
+    fn now(&self) -> DateTime<Local> {
+        Local::now()
     }
 }
 
@@ -325,7 +325,7 @@ mod tests {
     }
 
     impl AuditClock for FixedClock {
-        fn now(&self) -> DateTime<Utc> {
+        fn now(&self) -> DateTime<Local> {
             let v = self.millis.fetch_add(self.step_ms, Ordering::SeqCst);
             DateTime::<Utc>::from_timestamp_millis(v).unwrap_or_else(Utc::now)
         }
@@ -339,7 +339,7 @@ mod tests {
             turn_id: TurnId::new(),
             decision,
             scope: None,
-            decided_at: Utc::now(),
+            decided_at: chrono::Local::now(),
             decided_by: "user:test".into(),
             auto_resolved: false,
             policy_id: None,
@@ -394,7 +394,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let audit_dir = temp.path().join("audit");
         fs::create_dir_all(&audit_dir).unwrap();
-        let stale_ms = Utc::now().timestamp_millis() - 100 * 86_400_000;
+        let stale_ms = chrono::Local::now().timestamp_millis() - 100 * 86_400_000;
         let stale_path = audit_dir.join(format!("approvals-{stale_ms}.log"));
         std::fs::write(&stale_path, "{}\n").unwrap();
         let cfg = ApprovalsAuditConfig {

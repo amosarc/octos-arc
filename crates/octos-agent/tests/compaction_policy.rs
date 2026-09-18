@@ -36,7 +36,7 @@ fn make_msg(
         reasoning_content: None,
         client_message_id: None,
         thread_id: None,
-        timestamp: chrono::Utc::now(),
+        timestamp: chrono::Local::now(),
     }
 }
 

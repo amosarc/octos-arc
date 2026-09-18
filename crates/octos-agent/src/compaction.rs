@@ -20,7 +20,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use octos_core::{Message, MessageRole};
 use octos_llm::ChatConfig;
 use octos_llm::LlmProvider;
@@ -750,7 +749,7 @@ impl CompactionRunner {
                 reasoning_content: None,
                 client_message_id: None,
                 thread_id: None,
-                timestamp: Utc::now(),
+                timestamp: chrono::Local::now(),
             },
         );
         outcome.performed = true;
@@ -1389,7 +1388,7 @@ mod tests {
             reasoning_content: None,
             client_message_id: None,
             thread_id: None,
-            timestamp: chrono::Utc::now(),
+            timestamp: chrono::Local::now(),
         }
     }
 

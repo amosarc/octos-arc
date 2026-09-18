@@ -670,7 +670,7 @@ impl Agent {
             reasoning_content: response.reasoning_content.clone(),
             client_message_id: None,
             thread_id: None,
-            timestamp: chrono::Utc::now(),
+            timestamp: chrono::Local::now(),
         }
     }
 }

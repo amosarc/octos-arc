@@ -3985,7 +3985,7 @@ impl Tool for SpawnTool {
                     sender_id: "subagent".into(),
                     chat_id: format!("{origin_channel}:{origin_chat_id}"),
                     content,
-                    timestamp: chrono::Utc::now(),
+                    timestamp: chrono::Local::now(),
                     media: vec![],
                     metadata: serde_json::json!({
                         "deliver_to_channel": origin_channel,

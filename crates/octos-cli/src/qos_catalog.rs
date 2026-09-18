@@ -364,7 +364,7 @@ pub(crate) fn derive_cold_start_qos_catalog(entries: &[ModelCatalogEntry]) -> Qo
         .collect();
 
     QosCatalog {
-        updated_at: chrono::Utc::now().to_rfc3339(),
+        updated_at: chrono::Local::now().to_rfc3339(),
         models,
     }
 }

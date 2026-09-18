@@ -1001,7 +1001,7 @@ impl StagingNote {
         fm.push_str(&format!("kind: {}\n", self.kind.as_str()));
         fm.push_str(&format!(
             "created_at: {}\n",
-            chrono::Utc::now().to_rfc3339()
+            chrono::Local::now().to_rfc3339()
         ));
         if let Some(key) = &self.session_key {
             fm.push_str(&format!(

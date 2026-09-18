@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 use eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +23,7 @@ pub struct AuthCredential {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Local>>,
     pub provider: String,
     /// "oauth", "device_code", or "paste_token".
     pub auth_method: String,
@@ -32,7 +32,7 @@ pub struct AuthCredential {
 impl AuthCredential {
     /// Whether this credential has expired.
     pub fn is_expired(&self) -> bool {
-        self.expires_at.is_some_and(|exp| exp < Utc::now())
+        self.expires_at.is_some_and(|exp| exp < chrono::Local::now())
     }
 }
 
@@ -196,7 +196,7 @@ mod tests {
         let expired = AuthCredential {
             access_token: "t".to_string(),
             refresh_token: None,
-            expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
+            expires_at: Some(chrono::Local::now() - chrono::Duration::hours(1)),
             provider: "test".to_string(),
             auth_method: "oauth".to_string(),
         };
@@ -205,7 +205,7 @@ mod tests {
         let valid = AuthCredential {
             access_token: "t".to_string(),
             refresh_token: None,
-            expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+            expires_at: Some(chrono::Local::now() + chrono::Duration::hours(1)),
             provider: "test".to_string(),
             auth_method: "oauth".to_string(),
         };

@@ -1,6 +1,6 @@
 //! Gateway message types for channel-based communication.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
 /// Provenance of an inbound message: who put it on the bus.
@@ -34,7 +34,7 @@ pub struct InboundMessage {
     pub sender_id: String,
     pub chat_id: String,
     pub content: String,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTime<Local>,
     #[serde(default)]
     pub media: Vec<String>,
     #[serde(default = "default_metadata")]
@@ -79,7 +79,7 @@ mod tests {
             sender_id: "local".into(),
             chat_id: "default".into(),
             content: "test message".into(),
-            timestamp: Utc::now(),
+            timestamp: chrono::Local::now(),
             media: vec!["image.png".into()],
             metadata: serde_json::json!({"key": "value"}),
             message_id: None,

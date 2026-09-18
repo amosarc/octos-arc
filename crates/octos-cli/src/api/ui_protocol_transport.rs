@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use octos_agent::{
     Agent, BackgroundResultKind, BackgroundResultPayload, PromptContextManager, PromptContextPhase,
     PromptContextReport, PromptContextRequest, ToolApprovalDecision, ToolApprovalRequest,
@@ -4181,7 +4181,7 @@ impl octos_agent::ToolApprovalRequester for UiProtocolApprovalRequester {
                 turn_id: self.turn_id.clone(),
                 decision: hit.decision.clone(),
                 scope: Some(hit.scope_wire().to_owned()),
-                decided_at: Utc::now(),
+                decided_at: chrono::Local::now(),
                 decided_by: String::new(),
                 auto_resolved: true,
                 policy_id: Some(policy_id),
@@ -6278,7 +6278,7 @@ fn resolve_local_display_name(
 /// default config, `now` timestamps. The single construction site for the
 /// `profile/local/create` family so the three call sites cannot drift.
 fn new_local_user_profile(profile_id: &str, name: String) -> crate::profiles::UserProfile {
-    let now = Utc::now();
+    let now = chrono::Local::now();
     crate::profiles::UserProfile {
         id: profile_id.to_owned(),
         name,
@@ -7694,7 +7694,7 @@ async fn raw_profile_llm_select(
     // rebuild. `applied` stays persistence-only; the runtime disposition is
     // stamped onto the result separately.
     let transition = if !already_primary {
-        profile.updated_at = Utc::now();
+        profile.updated_at = chrono::Local::now();
         store
             .save_with_merge(&mut profile)
             .map_err(|err| RpcError::internal_error(format!("failed to save profile: {err}")))?;
@@ -7882,7 +7882,7 @@ async fn raw_profile_llm_upsert(
         &profile_id,
     )
     .map_err(|msg| RpcError::invalid_params(msg))?;
-    profile.updated_at = Utc::now();
+    profile.updated_at = chrono::Local::now();
     store
         .save_with_merge(&mut profile)
         .map_err(|err| RpcError::internal_error(format!("failed to save profile: {err}")))?;
@@ -7989,7 +7989,7 @@ async fn raw_profile_llm_delete(
         return Ok(result);
     }
 
-    profile.updated_at = Utc::now();
+    profile.updated_at = chrono::Local::now();
     store
         .save_with_merge(&mut profile)
         .map_err(|err| RpcError::internal_error(format!("failed to save profile: {err}")))?;
@@ -8224,7 +8224,7 @@ async fn raw_profile_llm_test(
         reasoning_content: None,
         client_message_id: None,
         thread_id: None,
-        timestamp: Utc::now(),
+        timestamp: chrono::Local::now(),
     }];
     let canonical_family = octos_llm::registry::lookup(&family_id)
         .map(|entry| entry.name)
@@ -8771,7 +8771,7 @@ async fn raw_profile_sub_providers_upsert(
         &profile_id,
     )
     .map_err(|msg| RpcError::invalid_params(msg))?;
-    profile.updated_at = Utc::now();
+    profile.updated_at = chrono::Local::now();
     store
         .save_with_merge(&mut profile)
         .map_err(|err| RpcError::internal_error(format!("failed to save profile: {err}")))?;
@@ -8830,7 +8830,7 @@ async fn raw_profile_sub_providers_remove(
             false,
         ));
     }
-    profile.updated_at = Utc::now();
+    profile.updated_at = chrono::Local::now();
     store
         .save_with_merge(&mut profile)
         .map_err(|err| RpcError::internal_error(format!("failed to save profile: {err}")))?;
@@ -11509,7 +11509,7 @@ fn build_pane_snapshot(
 
     UiPaneSnapshot {
         session_id: session_id.clone(),
-        generated_at: Some(Utc::now()),
+        generated_at: Some(chrono::Local::now()),
         workspace: Some(workspace),
         artifacts: Some(artifacts),
         git: Some(git),
@@ -11683,7 +11683,7 @@ fn collect_artifact_items(
         let modified = metadata
             .modified()
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        let updated_at = Some(chrono::DateTime::<Utc>::from(modified));
+        let updated_at = Some(chrono::DateTime::<Local>::from(modified));
         let relative = path.strip_prefix(root).unwrap_or(&path);
         let relative_path = relative.to_string_lossy().to_string();
         artifacts.push((
@@ -12423,7 +12423,7 @@ async fn handle_approval_respond(
         &params,
         &outcome,
         connection_profile_id.unwrap_or(""),
-        Utc::now(),
+        chrono::Local::now(),
     );
     emit_approval_decided(ws, ledger, &event, tool_name.as_deref());
 
@@ -12557,7 +12557,7 @@ fn hydrated_canonical_message_identities(
     }
     struct Identity<'a> {
         message_id: &'a str,
-        persisted_at: chrono::DateTime<Utc>,
+        persisted_at: chrono::DateTime<Local>,
         owner: &'a str,
         content: &'a str,
         media: &'a [String],
@@ -13842,7 +13842,7 @@ fn build_btw_messages(
             reasoning_content: None,
             client_message_id: None,
             thread_id: None,
-            timestamp: Utc::now(),
+            timestamp: chrono::Local::now(),
         },
         Message {
             role: MessageRole::User,
@@ -13853,7 +13853,7 @@ fn build_btw_messages(
             reasoning_content: None,
             client_message_id: None,
             thread_id: None,
-            timestamp: Utc::now(),
+            timestamp: chrono::Local::now(),
         },
     ]
 }
@@ -14297,8 +14297,8 @@ fn turn_state_to_lifecycle(state: &TurnState) -> TurnLifecycleState {
 #[derive(Debug, Default, Clone)]
 struct TurnLedgerProjection {
     state: Option<TurnLifecycleState>,
-    started_at: Option<DateTime<Utc>>,
-    completed_at: Option<DateTime<Utc>>,
+    started_at: Option<DateTime<Local>>,
+    completed_at: Option<DateTime<Local>>,
     thread_id: Option<String>,
 }
 
@@ -14323,11 +14323,11 @@ fn project_turn_from_ledger(
                 }
             }
             UiNotification::TurnCompleted(completed) if completed.turn_id == *target => {
-                projection.completed_at = Some(Utc::now());
+                projection.completed_at = Some(chrono::Local::now());
                 projection.state = Some(TurnLifecycleState::Completed);
             }
             UiNotification::TurnError(errored) if errored.turn_id == *target => {
-                projection.completed_at = Some(Utc::now());
+                projection.completed_at = Some(chrono::Local::now());
                 projection.state = Some(if errored.code == "interrupted" {
                     TurnLifecycleState::Interrupted
                 } else {
@@ -14415,7 +14415,7 @@ async fn collect_session_turns(
             }
         })
         .collect();
-    turns.sort_by_key(|t| t.started_at.unwrap_or_else(Utc::now));
+    turns.sort_by_key(|t| t.started_at.unwrap_or_else(chrono::Local::now));
     turns
 }
 
@@ -14760,7 +14760,7 @@ async fn run_standalone_turn(
     let started = UiNotification::TurnStarted(octos_core::ui_protocol::TurnStartedEvent {
         session_id: session_id.clone(),
         turn_id: turn_id.clone(),
-        timestamp: Utc::now(),
+        timestamp: chrono::Local::now(),
         // UPCR-2026-014 (M9-α-9): legacy WS turn-start path; topic is
         // not in scope here (the SSE bridge surfaces it via α-9).
         topic: None,
@@ -18991,7 +18991,7 @@ fn append_appui_transcript_frame(direction: &str, frame: Value) {
     append_appui_evidence_jsonl(
         "appui-transcript.jsonl",
         json!({
-            "ts": Utc::now().to_rfc3339(),
+            "ts": chrono::Local::now().to_rfc3339(),
             "direction": direction,
             "frame": frame,
         }),

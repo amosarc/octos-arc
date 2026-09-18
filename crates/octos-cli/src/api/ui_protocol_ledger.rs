@@ -4390,7 +4390,7 @@ mod tests {
                     assistant_segment_id: "thread-live:assistant:1".into(),
                     meta: octos_core::ui_protocol::MessageMeta {
                         message_id: "msg-1".into(),
-                        persisted_at: chrono::Utc::now(),
+                        persisted_at: chrono::Local::now(),
                         media: vec![],
                     },
                 },

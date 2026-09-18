@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 use eyre::{Result, WrapErr, bail};
 use serde::{Deserialize, Serialize};
 
@@ -41,9 +41,9 @@ pub struct UserProfile {
     /// Inline configuration.
     pub config: ProfileConfig,
     /// When this profile was created.
-    pub created_at: DateTime<Utc>,
+    pub created_at: DateTime<Local>,
     /// When this profile was last modified.
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: DateTime<Local>,
 }
 
 /// LLM and gateway configuration for a profile.
@@ -1370,8 +1370,8 @@ mod tests {
             parent_id: None,
             public_subdomain: None,
             config: ProfileConfig::default(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: chrono::Local::now(),
+            updated_at: chrono::Local::now(),
         };
         store.save(&healthy).unwrap();
 
@@ -1425,8 +1425,8 @@ mod tests {
                 ],
                 ..Default::default()
             },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: chrono::Local::now(),
+            updated_at: chrono::Local::now(),
         };
 
         let config = config_from_profile(&profile);
@@ -1456,8 +1456,8 @@ mod tests {
             parent_id: None,
             public_subdomain: None,
             config: ProfileConfig::default(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: chrono::Local::now(),
+            updated_at: chrono::Local::now(),
         };
 
         // Default: profiles_dir/{id}/data
@@ -1482,8 +1482,8 @@ mod tests {
             parent_id: None,
             public_subdomain: None,
             config: ProfileConfig::default(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: chrono::Local::now(),
+            updated_at: chrono::Local::now(),
         };
         store.save(&profile).unwrap();
 
@@ -1504,8 +1504,8 @@ mod tests {
             parent_id: None,
             public_subdomain: None,
             config: ProfileConfig::default(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: chrono::Local::now(),
+            updated_at: chrono::Local::now(),
         }
     }
 

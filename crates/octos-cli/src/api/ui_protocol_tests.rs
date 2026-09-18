@@ -82,7 +82,7 @@ fn open_snapshot_padding_history(messages: usize) -> Vec<octos_core::Message> {
             reasoning_content: None,
             client_message_id: None,
             thread_id: None,
-            timestamp: chrono::Utc::now(),
+            timestamp: chrono::Local::now(),
         })
         .collect()
 }
@@ -184,7 +184,7 @@ fn local_profile_state(dir: &Path) -> AppState {
 }
 
 fn profile_for_runtime_message(id: &str) -> crate::profiles::UserProfile {
-    let now = Utc::now();
+    let now = chrono::Local::now();
     crate::profiles::UserProfile {
         id: id.to_string(),
         name: id.to_string(),
@@ -561,7 +561,7 @@ fn test_message(role: MessageRole, content: impl Into<String>) -> Message {
         reasoning_content: None,
         client_message_id: None,
         thread_id: None,
-        timestamp: chrono::Utc::now(),
+        timestamp: chrono::Local::now(),
     }
 }
 
@@ -1233,8 +1233,8 @@ async fn launch_resolve_prefers_persisted_default_profile() {
             .collect(),
             ..Default::default()
         },
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: chrono::Local::now(),
+        updated_at: chrono::Local::now(),
     };
 
     let mut state = AppState::empty_for_tests();
@@ -2727,7 +2727,7 @@ fn audit_log_records_every_decision() {
             &params,
             &outcome,
             "user:test",
-            chrono::Utc::now(),
+            chrono::Local::now(),
         );
         let tool_name = outcome.context.as_ref().map(|ctx| ctx.tool_name.clone());
         log.record(&event, tool_name.as_deref()).expect("write");
@@ -2770,7 +2770,7 @@ async fn prg_state_with_persisted_turns(
         let mut guard = manager.lock().await;
         for n in 1..=turns {
             let tid = format!("t{n}");
-            let now = Utc::now() + chrono::Duration::milliseconds((n as i64) * 2);
+            let now = chrono::Local::now() + chrono::Duration::milliseconds((n as i64) * 2);
             let user = Message {
                 role: MessageRole::User,
                 content: format!("turn {n}"),
@@ -2921,7 +2921,7 @@ fn assistant_persisted_v2_for(session: &SessionKey) -> UiNotification {
                 assistant_segment_id: "thread-1:assistant:1".into(),
                 meta: MessageMeta {
                     message_id: "msg-1".into(),
-                    persisted_at: Utc::now(),
+                    persisted_at: chrono::Local::now(),
                     media: vec![],
                 },
             },

@@ -20,7 +20,7 @@
 //! - responses are bound to the originating room and validated against the
 //!   rule's `authorized_approvers` snapshot.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,7 +44,7 @@ pub struct ApprovalRequestSpec {
     pub summary: String,
     pub risk_level: ApprovalRiskLevel,
     pub authorized_approvers: Vec<String>,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: DateTime<Local>,
     pub on_timeout: ApprovalTimeoutBehavior,
 }
 
@@ -66,7 +66,7 @@ pub struct ApprovalRequestEnvelope {
     pub summary: String,
     pub risk_level: ApprovalRiskLevel,
     pub authorized_approvers: Vec<String>,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: DateTime<Local>,
     pub on_timeout: ApprovalTimeoutBehavior,
 }
 
@@ -104,7 +104,7 @@ impl HumanApprovalRules {
         tool_name: &str,
         tool_id: &str,
         tool_args: serde_json::Value,
-        now: DateTime<Utc>,
+        now: DateTime<Local>,
     ) -> Result<Option<PendingApprovalDraft>, String> {
         let Some(rule) = self.matching_rule(tool_name) else {
             return Ok(None);
@@ -192,7 +192,7 @@ fn compact_tool_args(args: &serde_json::Value) -> String {
 fn next_request_id() -> String {
     static SEQ: AtomicU64 = AtomicU64::new(1);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    format!("req_{}_{}", Utc::now().timestamp_millis(), seq)
+    format!("req_{}_{}", chrono::Local::now().timestamp_millis(), seq)
 }
 
 pub fn digest_tool_args(args: &serde_json::Value) -> String {
@@ -229,7 +229,7 @@ mod tests {
                 "shell",
                 "tc-shell",
                 serde_json::json!({"command": "echo hi"}),
-                Utc::now(),
+                chrono::Local::now(),
             )
             .unwrap()
             .unwrap();
