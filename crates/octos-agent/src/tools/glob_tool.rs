@@ -560,7 +560,6 @@ fn run_glob_legacy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     use crate::tools::test_fixture::escape_ctx;
 

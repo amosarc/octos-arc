@@ -84,7 +84,6 @@ impl ScanResult {
     pub fn is_clean(&self) -> bool {
         self.threats.is_empty()
     }
-
 }
 
 // ---------------------------------------------------------------------------

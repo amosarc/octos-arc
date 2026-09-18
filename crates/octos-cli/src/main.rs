@@ -105,11 +105,14 @@ fn main() -> Result<()> {
 ///
 /// When `log_dir` is `Some`, logs are also written to daily-rotated files
 /// under that directory (e.g. `~/.octos/logs/serve.2026-03-09.log`), keeping
-/// the last 7 days.  The returned guard must be held for the program lifetime.
+/// the last 7 days. Rotation boundaries follow the machine's LOCAL timezone
+/// (`tracing-appender-localtime`; upstream `tracing-appender` splits on UTC
+/// days, which mislabels evenings/nights in UTC+8 as the previous day). The
+/// returned guard must be held for the program lifetime.
 fn init_tracing(
     log_dir: Option<&std::path::Path>,
     reserve_stdout: bool,
-) -> Result<Option<tracing_appender::non_blocking::WorkerGuard>> {
+) -> Result<Option<tracing_appender_localtime::non_blocking::WorkerGuard>> {
     use std::io::IsTerminal as _;
     use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriterExt};
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -134,16 +137,17 @@ fn init_tracing(
     let _unused_has_rolling = has_rolling_file_logs; // retained for future use
 
     if let Some(dir) = log_dir {
-        // Rolling daily log file, keep last 7 days
-        let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
-            .rotation(tracing_appender::rolling::Rotation::DAILY)
-            .filename_prefix("serve")
-            .filename_suffix("log")
-            .max_log_files(7)
-            .build(dir)
-            .map_err(|e| eyre::eyre!("failed to create log file appender: {e}"))?;
+        // Rolling daily log file (LOCAL-time day boundary), keep last 7 days.
+        let file_appender =
+            tracing_appender_localtime::rolling::RollingFileAppender::builder()
+                .rotation(tracing_appender_localtime::rolling::Rotation::DAILY)
+                .filename_prefix("serve")
+                .filename_suffix("log")
+                .max_log_files(7)
+                .build(dir)
+                .map_err(|e| eyre::eyre!("failed to create log file appender: {e}"))?;
 
-        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        let (non_blocking, guard) = tracing_appender_localtime::non_blocking(file_appender);
         let writer = if enable_console {
             BoxMakeWriter::new(std::io::stderr.and(non_blocking))
         } else {

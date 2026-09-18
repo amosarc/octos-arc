@@ -2028,7 +2028,6 @@ fn capability_gated_notifications_require_negotiation() {
         ..Default::default()
     };
     assert!(live_event_passes_capability_filter(&plan, negotiated));
-
 }
 #[tokio::test]
 async fn session_open_rejects_cwd_without_negotiated_feature() {

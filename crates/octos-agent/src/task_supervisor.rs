@@ -22,7 +22,6 @@ use serde_json::Value;
 use crate::harness_events::{HarnessEvent, HarnessEventPayload};
 use crate::progress::{ProgressEvent, ProgressReporter};
 
-
 /// Cap on the number of child tasks any single parent session may register
 /// in the supervisor. Hit by the mini4/river runaway: a pipeline node spawned
 /// 65,535 children into a single session before the host disk filled up.
@@ -369,7 +368,6 @@ impl BackgroundTask {
 /// Callback invoked when a task's status changes.
 type OnChangeCallback = Arc<dyn Fn(&BackgroundTask) + Send + Sync>;
 
-
 /// Payload emitted when a `spawn_only` background task transitions to
 /// `Failed`. Consumers (e.g. the session actor) use this to schedule a
 /// synthetic recovery turn so the LLM can re-engage with an actionable
@@ -418,7 +416,6 @@ pub struct RelaunchOpts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_node: Option<String>,
 }
-
 
 /// Error variants for [`TaskSupervisor::cancel`]. Mapped to HTTP status
 /// codes by the API layer:
@@ -983,7 +980,6 @@ impl AckAndPending {
         }
         true
     }
-
 }
 
 /// Pending failure entry — see the field-level doc on
@@ -1070,7 +1066,6 @@ impl TaskSupervisor {
         }
     }
 
-
     /// Set a callback that fires whenever a task's status changes.
     pub fn set_on_change(&self, cb: impl Fn(&BackgroundTask) + Send + Sync + 'static) {
         let mut guard = self.on_change.lock().unwrap_or_else(|e| e.into_inner());
@@ -1089,9 +1084,6 @@ impl TaskSupervisor {
         let mut guard = self.on_failure.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(Box::new(cb));
     }
-
-
-
 
     /// #2055 review round 2 — copy the REGISTRATION observers from `parent`
     /// onto this (freshly created) supervisor: the `on_register` callback
@@ -1144,7 +1136,6 @@ impl TaskSupervisor {
             .unwrap_or_else(|e| e.into_inner());
         *guard = Some(reporter);
     }
-
 
     /// Acquire (or create) the cancel token for `task_id`. Workers should
     /// call this once at the top of their critical section and then poll
@@ -1357,7 +1348,13 @@ impl TaskSupervisor {
         tool_input: Option<Value>,
         originating_client_message_id: Option<String>,
     ) -> String {
-        match self.register_full(tool_name, tool_call_id, session_key, tool_input, originating_client_message_id) {
+        match self.register_full(
+            tool_name,
+            tool_call_id,
+            session_key,
+            tool_input,
+            originating_client_message_id,
+        ) {
             Ok(id) => id,
             Err(error) => {
                 tracing::error!(
@@ -2314,8 +2311,6 @@ impl TaskSupervisor {
         }
     }
 
-
-
     /// Return all non-completed (active) tasks.
     pub fn get_active_tasks(&self) -> Vec<BackgroundTask> {
         let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
@@ -2341,7 +2336,6 @@ impl TaskSupervisor {
             .cloned()
             .collect()
     }
-
 }
 
 /// RAII guard that drives a background task to a terminal state if its
@@ -2411,10 +2405,6 @@ impl Drop for TaskTerminalGuard {
         }
     }
 }
-
-
-
-
 
 #[cfg(test)]
 #[path = "task_supervisor_tests.rs"]

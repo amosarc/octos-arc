@@ -24,16 +24,11 @@ use super::message_repair::{
 /// 5. truncate old tool outputs
 /// 6. normalize tool call IDs
 pub(crate) fn prepare_conversation_messages(agent: &Agent, messages: &mut Vec<Message>) {
-    if agent.trim_to_context_window(messages) {
-    }
-    if normalize_system_messages(messages) {
-    }
-    if repair_message_order(messages) {
-    }
-    if repair_tool_pairs(messages) {
-    }
-    if synthesize_missing_tool_results(messages) {
-    }
+    if agent.trim_to_context_window(messages) {}
+    if normalize_system_messages(messages) {}
+    if repair_message_order(messages) {}
+    if repair_tool_pairs(messages) {}
+    if synthesize_missing_tool_results(messages) {}
     // With a caller-owned ContextManager the bridge replaces the vector with
     // its canonical frame before the model call, so this truncation cannot
     // affect the final prompt — but it mutates frame-derived rows (the
@@ -41,10 +36,8 @@ pub(crate) fn prepare_conversation_messages(agent: &Agent, messages: &mut Vec<Me
     // 800-char cut here) and breaks the bridge's contiguous coverage match,
     // which then re-records the whole conversation as duplicates. Tool-output
     // bounding is the ContextManager's job there (ToolOutputPolicy).
-    if agent.prompt_context_manager.is_none() && truncate_old_tool_results(messages) {
-    }
-    if normalize_tool_call_ids(messages) {
-    }
+    if agent.prompt_context_manager.is_none() && truncate_old_tool_results(messages) {}
+    if normalize_tool_call_ids(messages) {}
 }
 
 /// Prepare a task turn for the next model call.
@@ -56,12 +49,9 @@ pub(crate) fn prepare_conversation_messages(agent: &Agent, messages: &mut Vec<Me
 /// pre-merge P2). The chat path already runs it via
 /// `prepare_conversation_messages`; mirror it here.
 pub(crate) fn prepare_task_messages(agent: &Agent, messages: &mut Vec<Message>) {
-    if agent.trim_to_context_window(messages) {
-    }
-    if normalize_system_messages(messages) {
-    }
-    if normalize_tool_call_ids(messages) {
-    }
+    if agent.trim_to_context_window(messages) {}
+    if normalize_system_messages(messages) {}
+    if normalize_tool_call_ids(messages) {}
 }
 
 #[cfg(test)]

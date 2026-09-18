@@ -1062,8 +1062,6 @@ fn validate_workspace_hint(hint: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
-    
-
     use std::sync::Arc;
 
     #[tokio::test]
@@ -1147,17 +1145,11 @@ tools = ["read_file"]
         assert!(runtime.tools.get("bg_research").is_none());
     }
 
-    
-
     use octos_agent::{
         EffectivePermissions, PermissionProfile, RuntimeMode, SandboxConfig, SandboxMode,
     };
 
     use octos_core::Message;
-
-    
-
-    
 
     use tempfile::TempDir;
 

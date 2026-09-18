@@ -257,7 +257,8 @@ fn should_emit_tool_progress_on_completion_with_tool_call_id() {
 #[test]
 fn cancel_running_task_transitions_to_cancelled_and_fires_token() {
     let supervisor = TaskSupervisor::new();
-    let task_id = supervisor.register_with_input("bg_research", "call-cancel-1", Some("session-A"), None);
+    let task_id =
+        supervisor.register_with_input("bg_research", "call-cancel-1", Some("session-A"), None);
     supervisor.mark_running(&task_id);
     let token = supervisor.cancel_token(&task_id);
     assert!(!token.is_cancelled());
@@ -301,7 +302,8 @@ fn mark_completed_after_cancel_does_not_overwrite_cancelled_state() {
         });
     }
 
-    let task_id = supervisor.register_with_input("bg_research", "call-race-1", Some("session-X"), None);
+    let task_id =
+        supervisor.register_with_input("bg_research", "call-race-1", Some("session-X"), None);
     supervisor.mark_running(&task_id); // notify #1
     supervisor.cancel(&task_id).expect("cancel should succeed"); // notify #2
 
@@ -348,7 +350,8 @@ fn mark_completed_after_cancel_does_not_overwrite_cancelled_state() {
 fn relaunch_failed_task_creates_lineage_stamped_successor() {
     let supervisor = TaskSupervisor::new();
 
-    let task_id = supervisor.register_with_input("bg_research", "call-relaunch-1", Some("session-D"), None);
+    let task_id =
+        supervisor.register_with_input("bg_research", "call-relaunch-1", Some("session-D"), None);
     supervisor.mark_running(&task_id);
     supervisor.mark_failed(&task_id, "node 'design' failed".to_string());
 
@@ -368,9 +371,11 @@ fn relaunch_failed_task_creates_lineage_stamped_successor() {
     assert_eq!(new_task.session_key.as_deref(), Some("session-D"));
     // Lineage edge is stamped in runtime_detail for callers to surface.
     let detail = new_task.runtime_detail.as_deref().unwrap_or_default();
-    assert!(detail.contains(&format!("\"relaunched_from\":\"{task_id}\"")), "{detail}");
+    assert!(
+        detail.contains(&format!("\"relaunched_from\":\"{task_id}\"")),
+        "{detail}"
+    );
 }
-
 
 /// STEP 2: a guard armed after `mark_running` and dropped WITHOUT a
 /// terminal call drives the task to `Failed` with the dropped-worker
@@ -406,4 +411,3 @@ fn terminal_guard_marks_failed_when_dropped_while_active() {
 // rebuild and empties only on true termination or a cross-process
 // restart, so live-set consumers (the detached-fanout cap) never
 // mistake it for gone.
-

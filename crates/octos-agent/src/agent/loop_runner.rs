@@ -479,7 +479,6 @@ impl Agent {
         }
     }
 
-
     /// Build a `ChatConfig` with optional `chat_max_tokens` / `chat_temperature`
     /// overrides from `AgentConfig`. Delegates to [`build_chat_config`].
     fn chat_config(&self) -> ChatConfig {

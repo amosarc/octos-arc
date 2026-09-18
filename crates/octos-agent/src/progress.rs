@@ -184,4 +184,3 @@ pub struct SilentReporter;
 impl ProgressReporter for SilentReporter {
     fn report(&self, _event: ProgressEvent) {}
 }
-

@@ -100,9 +100,8 @@ pub async fn connect_oauth(
     url: &str,
     client_info: ClientInfo,
 ) -> Result<McpService> {
-    let stored = load_tokens(url)?.ok_or_else(|| {
-        eyre::eyre!("no stored OAuth tokens for MCP server '{url}'")
-    })?;
+    let stored = load_tokens(url)?
+        .ok_or_else(|| eyre::eyre!("no stored OAuth tokens for MCP server '{url}'"))?;
 
     let token: OAuthTokenResponse = serde_json::from_value(stored.token_response.clone())
         .map_err(|e| eyre::eyre!("parse stored oauth token: {e}"))?;

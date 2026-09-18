@@ -236,5 +236,4 @@ mod tests {
         assert_eq!(ctx.working_dir, PathBuf::new());
         assert!(ctx.working_memory.is_empty());
     }
-
 }

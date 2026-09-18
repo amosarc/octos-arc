@@ -2048,7 +2048,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
- "tracing-appender",
+ "tracing-appender-localtime",
  "tracing-subscriber",
  "uuid",
 ]
@@ -3409,13 +3409,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-appender"
+name = "tracing-appender-localtime"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "786d480bce6247ab75f005b14ae1624ad978d3029d9113f0a22fa1ac773faeaf"
+checksum = "670bc982b2c71a1e7784dd30699144e125920d9cfc058a9d797c11447abf841e"
 dependencies = [
+ "chrono",
  "crossbeam-channel",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
  "time",
  "tracing-subscriber",
 ]

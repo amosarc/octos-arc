@@ -130,7 +130,6 @@ impl SubAgentOutputRouter {
         self
     }
 
-
     /// Resolve the per-task output file path.
     ///
     /// `session_id` (e.g. `agent:<tool_call_id>`) and `task_id` are attacker-
@@ -289,7 +288,6 @@ impl SubAgentOutputRouter {
         }
     }
 
-
     fn ensure_handle(
         &self,
         handles: &mut MutexGuard<'_, HashMap<String, LogHandle>>,
@@ -352,8 +350,8 @@ impl SubAgentOutputRouter {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use super::*;
+    use std::path::Path;
     use std::thread::sleep;
 
     fn make_router(dir: &Path) -> SubAgentOutputRouter {

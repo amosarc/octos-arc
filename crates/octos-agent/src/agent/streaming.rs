@@ -622,8 +622,7 @@ impl Agent {
         let total_usage = turn.total_usage();
         let session_input_tokens = u64::from(total_usage.input_tokens);
         let session_output_tokens = u64::from(total_usage.output_tokens);
-        let session_cost =
-            turn.has_priced_usage().then(|| turn.spend_usd());
+        let session_cost = turn.has_priced_usage().then(|| turn.spend_usd());
         // Carry the model id so chat clients can render
         // `model · tokens_in / tokens_out · duration` footers. Skip the
         // synthesis if the provider returns an empty identifier — empty
@@ -711,14 +710,11 @@ mod tests {
 
     use std::sync::Arc;
 
-    
-    
     use futures::StreamExt;
     use futures::stream;
     use octos_core::AgentId;
     use octos_llm::{
-        ChatStream, LlmProvider, StopReason, StreamError, StreamEvent,
-        TokenUsage as LlmTokenUsage,
+        ChatStream, LlmProvider, StopReason, StreamError, StreamEvent, TokenUsage as LlmTokenUsage,
     };
     use octos_memory::EpisodeStore;
     use tempfile::TempDir;

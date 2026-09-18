@@ -100,7 +100,8 @@ metrics = "0.24"
 # Tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-appender = "0.2"
+# tracing-appender 的本地时间分支:按天分割以本地时区为准(上游按 UTC 切)。
+tracing-appender-localtime = "0.2"
 # Archive extraction
 flate2 = "1"
 tar = "0.4"

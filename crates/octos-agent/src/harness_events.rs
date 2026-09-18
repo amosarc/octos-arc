@@ -180,7 +180,6 @@ fn register_sink_context(sink: String, context: HarnessEventSinkContext) {
     contexts.insert(sink, context);
 }
 
-
 fn unregister_sink_context(sink: &str) {
     let mut contexts = sink_contexts().lock().unwrap_or_else(|e| e.into_inner());
     contexts.remove(sink);
@@ -392,8 +391,6 @@ impl HarnessEvent {
             },
         }
     }
-
-
 
     /// Build a `SubagentProgress` event (M8.7). Emitted every tick while a
     /// spawn_only sub-agent is running so operators can see a live

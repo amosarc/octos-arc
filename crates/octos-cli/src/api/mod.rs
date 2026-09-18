@@ -154,7 +154,7 @@ pub struct AppState {
     pub sessions: Option<Arc<tokio::sync::Mutex<octos_bus::SessionManager>>>,
 
     /// Server start time.
-     pub ui_protocol: UiProtocolRuntimeResources,
+    pub ui_protocol: UiProtocolRuntimeResources,
 
     /// Opt-in for the no-password "solo" REST login (`/api/auth/solo*`).
     /// OFF by default; set by `octos serve --solo` / `OCTOS_SOLO_LOGIN=1`.

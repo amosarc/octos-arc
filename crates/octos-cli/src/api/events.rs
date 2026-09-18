@@ -469,7 +469,9 @@ mod tests {
                 serde_json::json!({"type": "file_modified", "path": "src/lib.rs"}),
             ),
             (
-                ProgressEvent::PlanUpdated { plan: serde_json::json!({"items": [1]}) },
+                ProgressEvent::PlanUpdated {
+                    plan: serde_json::json!({"items": [1]}),
+                },
                 serde_json::json!({"type": "plan_updated", "plan": {"items": [1]}}),
             ),
             (

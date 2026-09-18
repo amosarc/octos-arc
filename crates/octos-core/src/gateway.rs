@@ -3,7 +3,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-
 /// Provenance of an inbound message: who put it on the bus.
 ///
 /// Content-triggered automation (e.g. forced background workflows) must only
@@ -65,7 +64,6 @@ pub struct OutboundMessage {
 fn default_metadata() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }
-
 
 /// Metadata key carrying the sender identity on outbound messages
 /// (channel-adapter identity assertion).

@@ -15,9 +15,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use super::mcp_agent::{
-    DispatchContextContract, DispatchRequest, DispatchResponse,
-    McpAgentBackendConfig, SharedBackend, build_backend_from_config, build_dispatch_event_payload,
-    dispatch_with_metrics,
+    DispatchContextContract, DispatchRequest, DispatchResponse, McpAgentBackendConfig,
+    SharedBackend, build_backend_from_config, build_dispatch_event_payload, dispatch_with_metrics,
 };
 use super::{Tool, ToolPolicy, ToolRegistry, ToolResult};
 use crate::file_state_cache::FileStateCache;
@@ -1441,7 +1440,6 @@ impl SpawnTool {
             .clone()
             .unwrap_or_else(|| DEFAULT_MCP_AGENT_TOOL_NAME.to_string());
 
-
         let request = DispatchRequest::new(tool_name, task).with_context_contract(
             // #1021 / M17-C — populate backend_kind/agent_id/risk so the
             // evidence ledger can identify this unmanaged dispatch
@@ -2166,7 +2164,8 @@ fn deliverable_artifact_glob(deliverable: Option<&str>) -> Option<String> {
 /// artifact-glob resolution.
 fn seed_deliverable_contract(output_dir: &Path, artifact_glob: &str) -> Result<()> {
     use crate::workspace_policy::{
-        WorkspaceArtifactsPolicy, WorkspacePolicy, WorkspacePolicyKind, WorkspacePolicyWorkspace, write_workspace_policy,
+        WorkspaceArtifactsPolicy, WorkspacePolicy, WorkspacePolicyKind, WorkspacePolicyWorkspace,
+        write_workspace_policy,
     };
     use std::collections::BTreeMap;
 
@@ -2587,7 +2586,6 @@ impl Tool for SpawnTool {
                 "workflow": workflow.clone(),
                 "additional_instructions": input.additional_instructions,
             });
-
 
             let (response, event) = {
                 let request = DispatchRequest::new(tool_name, dispatch_payload)

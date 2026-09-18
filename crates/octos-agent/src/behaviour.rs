@@ -379,7 +379,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("output.mp3"), b"audio data").unwrap();
 
-        let result = run_action_with_context(temp.path(), &ActionContext::default(), "file_exists:output.mp3").unwrap();
+        let result = run_action_with_context(
+            temp.path(),
+            &ActionContext::default(),
+            "file_exists:output.mp3",
+        )
+        .unwrap();
         assert_eq!(result, ActionResult::Pass);
     }
 
@@ -389,27 +394,41 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("output")).unwrap();
         std::fs::write(temp.path().join("output/deck.pptx"), b"slides").unwrap();
 
-        let result = run_action_with_context(temp.path(), &ActionContext::default(), "file_exists:output/*.pptx").unwrap();
+        let result = run_action_with_context(
+            temp.path(),
+            &ActionContext::default(),
+            "file_exists:output/*.pptx",
+        )
+        .unwrap();
         assert_eq!(result, ActionResult::Pass);
     }
 
     #[test]
     fn should_return_notify_with_message() {
         let temp = tempfile::tempdir().unwrap();
-        let result = run_action_with_context(temp.path(), &ActionContext::default(), "notify_user:TTS generation failed").unwrap();
+        let result = run_action_with_context(
+            temp.path(),
+            &ActionContext::default(),
+            "notify_user:TTS generation failed",
+        )
+        .unwrap();
         assert_eq!(
             result,
             ActionResult::Notify {
                 message: "TTS generation failed".into()
             }
         );
-        assert!(matches!(result, ActionResult::Pass | ActionResult::Notify { .. }));
+        assert!(matches!(
+            result,
+            ActionResult::Pass | ActionResult::Notify { .. }
+        ));
     }
 
     #[test]
     fn should_reject_unknown_action() {
         let temp = tempfile::tempdir().unwrap();
-        let result = run_action_with_context(temp.path(), &ActionContext::default(), "unknown_action:arg");
+        let result =
+            run_action_with_context(temp.path(), &ActionContext::default(), "unknown_action:arg");
         assert!(result.is_err());
     }
 
@@ -436,7 +455,12 @@ mod tests {
         std::fs::write(&outside_file, b"sensitive").unwrap();
 
         // Try to clean up ../secret.txt — should be blocked
-        let result = run_action_with_context(&workspace, &ActionContext::default(), "cleanup:../secret.txt").unwrap();
+        let result = run_action_with_context(
+            &workspace,
+            &ActionContext::default(),
+            "cleanup:../secret.txt",
+        )
+        .unwrap();
         assert_eq!(result, ActionResult::Pass); // cleanup always passes
         // But the file outside workspace must NOT be deleted
         assert!(outside_file.exists(), "path traversal should be blocked");
@@ -453,8 +477,7 @@ mod tests {
             "notify_user:done".to_string(),
         ];
 
-        let results =
-            evaluate_actions_with_context(temp.path(), &ActionContext::default(), &specs);
+        let results = evaluate_actions_with_context(temp.path(), &ActionContext::default(), &specs);
         assert_eq!(results.len(), 3);
         assert!(matches!(
             results[0].1,

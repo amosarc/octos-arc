@@ -966,8 +966,6 @@ mod tests {
     // Phase 2-C: SessionScope integration tests for ReadFileTool.
     // -----------------------------------------------------------------------
 
-    
-
     #[tokio::test]
     async fn read_file_refuses_out_of_scope_path() {
         // An absolute path outside every declared zone classifies as

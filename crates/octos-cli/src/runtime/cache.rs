@@ -725,19 +725,9 @@ async fn background_sweep_loop(inner: CacheStorage, idle_ttl: Duration, shutdown
 mod tests {
     use super::*;
 
-    
-
     use std::sync::Arc;
 
-    
-
     use octos_agent::SandboxConfig;
-
-    
-
-    
-
-    
 
     use tempfile::TempDir;
 

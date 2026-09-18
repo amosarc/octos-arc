@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex as StdMutex, Weak};
 use octos_agent::TaskSupervisor;
 use octos_core::SessionKey;
 
-
 /// Shared lookup table for session-scoped background task supervisors.
 #[derive(Default, Clone)]
 pub struct SessionTaskQueryStore {
@@ -33,9 +32,6 @@ struct SessionTaskQueryEntry {
     supervisor: Weak<TaskSupervisor>,
     data_dir: PathBuf,
 }
-
-
-
 
 impl SessionTaskQueryStore {
     pub fn register(
@@ -90,7 +86,6 @@ impl SessionTaskQueryStore {
         live
     }
 
-
     /// C8 / GAP A: return the raw [`octos_agent::BackgroundTask`] snapshots for
     /// `session_key` (and every reachable descendant session), each paired with
     /// the owning supervisor's `data_dir` for path encoding. Mirrors
@@ -132,10 +127,6 @@ impl SessionTaskQueryStore {
 
         tasks
     }
-
-
-
-
 }
 
 #[cfg(test)]
@@ -210,5 +201,4 @@ mod tests {
             "the later supervisor's own task must surface"
         );
     }
-
 }

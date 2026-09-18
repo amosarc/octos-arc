@@ -30,7 +30,8 @@ uuid = { workspace = true }
 color-eyre = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-tracing-appender = { workspace = true }
+# 按天分割以本地时区为准(上游 tracing-appender 按 UTC 切日)。
+tracing-appender-localtime = { workspace = true }
 rustyline = { workspace = true }
 reqwest = { workspace = true }
 sha2 = { workspace = true }

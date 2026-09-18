@@ -87,7 +87,6 @@ impl ShellTool {
         self
     }
 
-
     /// Set a custom command policy.
     /// #28b — set the bash file-writes knob (defaults to `Allow`).
     pub fn with_bash_file_writes(mut self, mode: crate::tools::policy::BashFileWrites) -> Self {

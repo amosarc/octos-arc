@@ -904,7 +904,6 @@ impl CompactionRunner {
 
         Ok(PreservationLedger { preserved, missing })
     }
-
 }
 
 fn default_summarizer_for(kind: CompactionSummarizerKind) -> Arc<dyn Summarizer> {

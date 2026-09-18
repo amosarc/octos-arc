@@ -25,9 +25,9 @@ pub use gateway::{InboundMessage, MessageOrigin, OutboundMessage};
 pub use git_worktree::clear_worktree_admin_entry;
 pub use session_scope::{
     DEFAULT_MULTI_TENANT_SHARED_ZONE_NAMES, MULTI_TENANT_USERS_DIR_NAME,
-    MULTI_TENANT_WORKSPACE_DIR_NAME, PathClassification, ScopeMode,
-    SessionScope, SessionScopeError, canonical_root_lossy, canonicalize_lossy,
-    canonicalize_skill_read_zones, is_safe_session_id,
+    MULTI_TENANT_WORKSPACE_DIR_NAME, PathClassification, ScopeMode, SessionScope,
+    SessionScopeError, canonical_root_lossy, canonicalize_lossy, canonicalize_skill_read_zones,
+    is_safe_session_id,
 };
 pub use task::{
     TASK_RESULT_SCHEMA_VERSION, Task, TaskContext, TaskKind, TaskResult, TaskStatus, TokenUsage,

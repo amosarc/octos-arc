@@ -60,7 +60,6 @@ impl WriteFileTool {
         self.file_access = file_access;
         self
     }
-
 }
 
 #[derive(Debug, Deserialize)]
@@ -363,7 +362,6 @@ impl WriteFileTool {
             }
         }
 
-
         // Create parent directories if needed (generic, unfenced path).
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.wrap_err_with(|| {
@@ -419,7 +417,6 @@ impl WriteFileTool {
                 }
             }
         }
-
 
         // #1774: opt-in post-edit formatting. Runs BEFORE cache invalidation
         // and the git snapshot so both observe the final on-disk content.
@@ -531,7 +528,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use octos_core::SessionScope;
-    
 
     #[tokio::test]
     async fn write_file_uses_scope_workspace_as_base_dir_for_relative_paths() {

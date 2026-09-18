@@ -718,7 +718,6 @@ impl Agent {
         self.subagent_summary_generator.as_ref()
     }
 
-
     /// Record the owning session key so pipeline workers / spawn
     /// children can register child tasks against the parent session
     /// in the supervisor's task store. M8 parity.
@@ -830,9 +829,9 @@ impl Agent {
     /// Returns the attached snapshot manager, if any. Lets hosts (and the
     /// follow-up UI/RPC surface) list/restore snapshots for this agent's
     /// workspace.
-    
+
     /// Set per-session runtime limits for tool execution.
-    
+
     /// Wire the declarative compaction runner (harness M6.3). Optional — when
     /// absent, the loop falls back to the legacy extractive trim path.
     pub fn with_compaction_runner(
@@ -865,7 +864,6 @@ impl Agent {
     /// sequence of transient rate-limits spread across two turns never
     /// triggers the per-bucket exhaustion path because the counters reset
     /// on every turn boundary.
-    
 
     /// Get a snapshot of the current hook context.
     pub(super) fn hook_ctx(&self) -> Option<HookContext> {

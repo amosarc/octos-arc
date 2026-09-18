@@ -151,6 +151,13 @@ pub fn context_window_tokens(model_id: &str) -> u32 {
     {
         return 1_048_576;
     }
+    // agnes-3.0-flash (agnes coding plan) is absent from the runtime catalog.
+    // Its real context window is 512k; the 128k conservative default made the
+    // AppUI compaction threshold derive to 89.6k and re-trim long turns that
+    // were nowhere near the model's capacity.
+    if m.contains("agnes") {
+        return 512_000;
+    }
     // Conservative default for unknown models
     128_000
 }
@@ -169,6 +176,10 @@ pub fn max_output_tokens(model_id: &str) -> u32 {
     // substring branches below (e.g. minimax-m3 before the generic minimax).
     if m.contains("deepseek-v4") {
         384_000
+    } else if m.contains("agnes") {
+        // agnes-3.0-flash native max completion is 64k (the ARC driver pins
+        // gateway.max_output_tokens to the same figure).
+        65_536
     } else if m.contains("minimax-m3") || m.contains("kimi-k3") {
         // kimi-k3 default max completion is 131072 (settable up to 1M);
         // must win over the broader "kimi" branch below.
@@ -337,6 +348,18 @@ mod tests {
         );
         // Guard: a substring `k3` in an unrelated model is NOT the coding plan.
         assert_eq!(context_window_tokens("mock-k3000"), 128_000);
+    }
+
+    #[test]
+    fn should_use_512k_context_for_agnes_when_not_in_catalog() {
+        // agnes-3.0-flash is absent from the runtime catalog; its real window
+        // is 512k (the 128k default derived an 89.6k compaction threshold
+        // that re-trimmed long ARC turns far below capacity) and native max
+        // completion is 64k.
+        assert_eq!(context_window_tokens("agnes-3.0-flash"), 512_000);
+        assert_eq!(context_window_tokens("custom/agnes-3.0-flash"), 512_000);
+        assert_eq!(max_output_tokens("agnes-3.0-flash"), 65_536);
+        assert_eq!(max_output_tokens("custom/agnes-3.0-flash"), 65_536);
     }
 
     #[test]

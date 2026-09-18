@@ -230,7 +230,7 @@ impl Tool for ListDirTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use tempfile::TempDir;
 
     use crate::tools::test_fixture::{escape_ctx_with_skill_zones, scoped_ctx};

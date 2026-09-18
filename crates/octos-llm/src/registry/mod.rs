@@ -347,7 +347,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 pub(crate) mod cache_breakpoint_probe {
     //! Both Anthropic-protocol zai lanes must keep explicit `cache_control`

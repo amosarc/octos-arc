@@ -18,7 +18,9 @@ fn should_use_video_call_hint_when_turn_is_flagged_live_video() {
     assert!(out.contains("what am I holding"));
 }
 
-use octos_llm::{ChatResponse, LlmError, LlmErrorKind, LlmProvider, StopReason, TokenUsage as LlmTokenUsage};
+use octos_llm::{
+    ChatResponse, LlmError, LlmErrorKind, LlmProvider, StopReason, TokenUsage as LlmTokenUsage,
+};
 use octos_memory::EpisodeStore;
 
 use crate::AgentConfig;
@@ -539,11 +541,10 @@ part two"
     assert_eq!(result.token_usage.output_tokens, 21);
     let second_prompt = &calls[1].0;
     assert!(second_prompt.iter().any(|m| m.content == "part one"));
-    assert!(
-        second_prompt
-            .iter()
-            .any(|m| m.content.contains("Continue directly from where you stopped"))
-    );
+    assert!(second_prompt.iter().any(|m| {
+        m.content
+            .contains("Continue directly from where you stopped")
+    }));
 }
 
 #[tokio::test]
@@ -594,8 +595,14 @@ async fn process_message_preserves_tool_pair_order_across_iterations() {
         ),
         end_turn("done", 0, 0),
     ]));
-    let agent =
-        boot_agent("test-agent", dir.path(), provider, tools, AgentConfig::default()).await;
+    let agent = boot_agent(
+        "test-agent",
+        dir.path(),
+        provider,
+        tools,
+        AgentConfig::default(),
+    )
+    .await;
 
     let result = agent.process_message("do work", &[], vec![]).await.unwrap();
     let roles: Vec<MessageRole> = result.messages.iter().map(|m| m.role).collect();
@@ -640,8 +647,14 @@ async fn terminal_tool_failure_blocks_a_rewritten_retry_in_the_same_turn() {
         lesson_call("call_lesson_0", "first"),
         lesson_call("call_lesson_1", "rewritten"),
     ]));
-    let agent =
-        boot_agent("test-agent", dir.path(), provider, tools, AgentConfig::default()).await;
+    let agent = boot_agent(
+        "test-agent",
+        dir.path(),
+        provider,
+        tools,
+        AgentConfig::default(),
+    )
+    .await;
 
     let result = agent
         .process_message("teach me", &[], vec![])
@@ -687,21 +700,35 @@ fn split_tool_calls_caps_parallel_batches() {
 fn recover_shell_retry_output_prefers_diff_like_success() {
     let messages = vec![
         Message::user("show a diff"),
-                assistant_with_calls(vec![tool_call("call_shell_1", "shell", serde_json::json!({"command": "git diff -- notes.txt"}))]),
+        assistant_with_calls(vec![tool_call(
+            "call_shell_1",
+            "shell",
+            serde_json::json!({"command": "git diff -- notes.txt"}),
+        )]),
         tool_out(
             "call_shell_1",
             "fatal: not a git repository\n\nExit code: 128",
         ),
-                assistant_with_calls(vec![
-tool_call("call_shell_2", "shell", serde_json::json!({"command": "cd /tmp && git diff -- notes.txt"}))
-        ]),
+        assistant_with_calls(vec![tool_call(
+            "call_shell_2",
+            "shell",
+            serde_json::json!({"command": "cd /tmp && git diff -- notes.txt"}),
+        )]),
         tool_out(
             "call_shell_2",
             "diff --git a/notes.txt b/notes.txt\n--- a/notes.txt\n+++ b/notes.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n\nExit code: 0",
         ),
-                assistant_with_calls(vec![tool_call("call_shell_3", "shell", serde_json::json!({"command": "git status --short"}))]),
+        assistant_with_calls(vec![tool_call(
+            "call_shell_3",
+            "shell",
+            serde_json::json!({"command": "git status --short"}),
+        )]),
         tool_out("call_shell_3", "(no output)\n\nExit code: 0"),
-                assistant_with_calls(vec![tool_call("call_shell_4", "shell", serde_json::json!({"command": "git diff -- notes.txt"}))]),
+        assistant_with_calls(vec![tool_call(
+            "call_shell_4",
+            "shell",
+            serde_json::json!({"command": "git diff -- notes.txt"}),
+        )]),
         tool_out(
             "call_shell_4",
             "fatal: not a git repository\n\nExit code: 128",
@@ -742,9 +769,9 @@ fn current_user_turn_start_returns_index_of_last_user_message() {
 fn latest_tool_batch_contains_picks_up_shell_in_mixed_batch() {
     let messages = vec![
         Message::user("repair"),
-                assistant_with_calls(vec![
-tool_call("call_shell", "shell", serde_json::json!({"command": "ls"})),
-tool_call("call_read", "read_file", serde_json::json!({"path": "x"}))
+        assistant_with_calls(vec![
+            tool_call("call_shell", "shell", serde_json::json!({"command": "ls"})),
+            tool_call("call_read", "read_file", serde_json::json!({"path": "x"})),
         ]),
         tool_out("call_shell", "failed"),
         tool_out("call_read", "{ \"x\": 1 }"),
@@ -1187,7 +1214,8 @@ async fn should_bail_on_authentication_error_without_compaction() {
     let mut retry_state = LoopRetryState::new();
     let mut messages: Vec<Message> = Vec::new();
 
-    let auth_error: eyre::Report = LlmError::new(LlmErrorKind::Authentication, "invalid API key").into();
+    let auth_error: eyre::Report =
+        LlmError::new(LlmErrorKind::Authentication, "invalid API key").into();
     let action =
         agent.handle_loop_error_with_dispatch(&auth_error, &mut retry_state, 1, &mut messages);
     assert_eq!(
@@ -1352,9 +1380,16 @@ async fn run_task_keeps_success_when_workspace_has_no_policy() {
     // No-policy workspace must stay Success (no regression).
     let dir = tempfile::tempdir().unwrap();
     let tools = ToolRegistry::with_builtins(dir.path());
-    let provider: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider::new(vec![end_turn("done", 0, 0)]));
-    let agent =
-        boot_agent("no-contract", dir.path(), provider, tools, AgentConfig::default()).await;
+    let provider: Arc<dyn LlmProvider> =
+        Arc::new(ScriptedProvider::new(vec![end_turn("done", 0, 0)]));
+    let agent = boot_agent(
+        "no-contract",
+        dir.path(),
+        provider,
+        tools,
+        AgentConfig::default(),
+    )
+    .await;
     let task = Task::new(
         TaskKind::Code {
             instruction: "Hi".into(),
@@ -1525,10 +1560,16 @@ async fn should_classify_hook_deny_as_policy_not_internal_bug() {
         requires_bin: None,
     }]));
     let sink_path = dir.path().join("harness-events.jsonl");
-    let agent = boot_agent("hookdeny-policy", dir.path(), provider, tools, AgentConfig::default())
-        .await
-        .with_hooks(hooks)
-        .with_harness_event_sink(sink_path.to_string_lossy().into_owned());
+    let agent = boot_agent(
+        "hookdeny-policy",
+        dir.path(),
+        provider,
+        tools,
+        AgentConfig::default(),
+    )
+    .await
+    .with_hooks(hooks)
+    .with_harness_event_sink(sink_path.to_string_lossy().into_owned());
 
     let result = agent.run_task(&task_for("hi", dir.path())).await;
 
@@ -1688,9 +1729,14 @@ async fn truncated_tool_output_reaches_the_model_with_its_recovery_advice() {
         ),
         end_turn("done", 0, 0),
     ]));
-    let agent =
-        boot_agent("truncation-recovery", dir.path(), provider, tools, AgentConfig::default())
-            .await;
+    let agent = boot_agent(
+        "truncation-recovery",
+        dir.path(),
+        provider,
+        tools,
+        AgentConfig::default(),
+    )
+    .await;
 
     let result = agent.process_message("go", &[], vec![]).await.unwrap();
 
@@ -1769,9 +1815,14 @@ async fn malformed_toolcall_feedback_lets_model_self_correct_and_survive() {
     });
     let tools = ToolRegistry::new();
     let dir = tempfile::tempdir().unwrap();
-    let agent =
-        boot_agent("malformed-feedback", dir.path(), provider, tools, AgentConfig::default())
-            .await;
+    let agent = boot_agent(
+        "malformed-feedback",
+        dir.path(),
+        provider,
+        tools,
+        AgentConfig::default(),
+    )
+    .await;
     let response = agent
         .process_message("do the thing with a tool", &[], vec![])
         .await
@@ -1852,8 +1903,14 @@ async fn malformed_exhaustion_error_carries_marker() {
     });
     let tools = ToolRegistry::new();
     let dir = tempfile::tempdir().unwrap();
-    let agent =
-        boot_agent("malformed-marker", dir.path(), provider, tools, AgentConfig::default()).await;
+    let agent = boot_agent(
+        "malformed-marker",
+        dir.path(),
+        provider,
+        tools,
+        AgentConfig::default(),
+    )
+    .await;
     let err = agent
         .process_message("never produces valid JSON", &[], vec![])
         .await

@@ -71,9 +71,8 @@ use crate::progress::ProgressEvent;
 use crate::task_supervisor::{TaskRuntimeState, TaskTerminalGuard};
 use crate::tools::spawn::{BackgroundResultKind, BackgroundResultPayload};
 use crate::tools::{
-    ConcurrencyClass, TOOL_APPROVAL_CTX, TOOL_CTX, TURN_ATTACHMENT_CTX,
-    ToolApprovalRequester, ToolContext, USER_QUESTION_CTX,
-    UserQuestionRequester,
+    ConcurrencyClass, TOOL_APPROVAL_CTX, TOOL_CTX, TURN_ATTACHMENT_CTX, ToolApprovalRequester,
+    ToolContext, USER_QUESTION_CTX, UserQuestionRequester,
 };
 use crate::workspace_contract::{SpawnTaskContractResult, enforce_spawn_task_contract};
 
@@ -1913,10 +1912,13 @@ impl Agent {
                 tool_cascades,
             ) = match result {
                 Ok(tool_result) => {
-                    debug!(
+                    // INFO(原 debug):serve 滚动日志默认 info 过滤,提级后
+                    // 每次工具执行都留下"此刻在做什么"的轨迹。
+                    info!(
                         tool = %tc_name,
                         success = tool_result.success,
                         duration_ms = duration.as_millis() as u64,
+                        output_bytes = tool_result.output.len(),
                         "tool completed"
                     );
 
@@ -2977,9 +2979,7 @@ mod tests {
 
     use async_trait::async_trait;
     use octos_core::{AgentId, ToolCall};
-    use octos_llm::{
-        ChatResponse, LlmProvider,
-    };
+    use octos_llm::{ChatResponse, LlmProvider};
     use octos_memory::EpisodeStore;
 
     use crate::agent::{Agent, AgentConfig};

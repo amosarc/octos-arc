@@ -1253,7 +1253,7 @@ mod tests {
                     read_allow_paths: Vec::new(),
                     workspace_write: false,
                     repo_git_write: None,
-                            write_allow_globs: None,
+                    write_allow_globs: None,
                 },
             ),
             (
@@ -1264,7 +1264,7 @@ mod tests {
                     read_allow_paths: Vec::new(),
                     workspace_write: true,
                     repo_git_write: None,
-                            write_allow_globs: Some(vec!["out.txt".into()]),
+                    write_allow_globs: Some(vec!["out.txt".into()]),
                 },
             ),
         ] {

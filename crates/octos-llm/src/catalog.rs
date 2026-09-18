@@ -6,7 +6,6 @@
 //! single source of truth the provider registry reads family defaults from
 //! and the CLI seeds context-window / pricing tables from.
 
-
 use serde::{Deserialize, Serialize};
 
 /// Model capability type for routing decisions.

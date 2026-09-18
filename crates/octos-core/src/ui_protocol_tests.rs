@@ -474,15 +474,21 @@ fn round_trip_rpc_error(err: &RpcError) -> RpcError {
 fn approval_not_pending_carries_recorded_decision() {
     // Hosts hand-roll the `-32011` + `recorded_decision` payload (spec §10);
     // the reader must accept exactly that shape.
-    let approve = RpcError::new(rpc_error_codes::APPROVAL_NOT_PENDING, "approval is no longer pending")
-        .with_data(json!({ "recorded_decision": "approve" }));
+    let approve = RpcError::new(
+        rpc_error_codes::APPROVAL_NOT_PENDING,
+        "approval is no longer pending",
+    )
+    .with_data(json!({ "recorded_decision": "approve" }));
     assert_eq!(
         round_trip_rpc_error(&approve).recorded_decision(),
         Some(ApprovalDecision::Approve),
     );
 
-    let deny = RpcError::new(rpc_error_codes::APPROVAL_NOT_PENDING, "approval is no longer pending")
-        .with_data(json!({ "recorded_decision": "deny" }));
+    let deny = RpcError::new(
+        rpc_error_codes::APPROVAL_NOT_PENDING,
+        "approval is no longer pending",
+    )
+    .with_data(json!({ "recorded_decision": "deny" }));
     assert_eq!(
         round_trip_rpc_error(&deny).recorded_decision(),
         Some(ApprovalDecision::Deny),
@@ -843,7 +849,10 @@ fn topic_method_reads_explicit_field_then_session_suffix_across_event_classes() 
     // One row per topic-bearing event class (#1329 lineage): the accessor
     // rule is shared — explicit `topic` field wins, else the session_id
     // suffix, else None — but each class must keep exercising it.
-    let cases: Vec<(&str, Box<dyn Fn(SessionKey, Option<String>) -> UiNotification>)> = vec![
+    let cases: Vec<(
+        &str,
+        Box<dyn Fn(SessionKey, Option<String>) -> UiNotification>,
+    )> = vec![
         (
             "ToolStarted",
             Box::new(|session, topic| {
@@ -958,85 +967,106 @@ fn stamp_topic_from_session_populates_new_topic_class_events() {
     // so a topic-scoped subscriber always routes correctly even when a caller
     // forgets to stamp.
     let rows: Vec<(&str, Ctor)> = vec![
-        ("ToolStarted", Box::new(|| {
-            UiNotification::ToolStarted(ToolStartedEvent {
-                session_id: topic_session(),
-                topic: None,
-                turn_id: TurnId::new(),
-                tool_call_id: "tc".into(),
-                tool_name: "shell".into(),
-                arguments: None,
-            })
-        })),
-        ("ToolProgress", Box::new(|| {
-            UiNotification::ToolProgress(ToolProgressEvent {
-                session_id: topic_session(),
-                topic: None,
-                turn_id: TurnId::new(),
-                tool_call_id: "tc".into(),
-                message: None,
-                progress_pct: None,
-            })
-        })),
-        ("ToolCompleted", Box::new(|| {
-            UiNotification::ToolCompleted(ToolCompletedEvent {
-                session_id: topic_session(),
-                topic: None,
-                turn_id: TurnId::new(),
-                tool_call_id: "tc".into(),
-                tool_name: "shell".into(),
-                success: Some(true),
-                output_preview: None,
-                duration_ms: None,
-            })
-        })),
-        ("ApprovalAutoResolved", Box::new(|| {
-            UiNotification::ApprovalAutoResolved(ApprovalAutoResolvedEvent {
-                session_id: topic_session(),
-                topic: None,
-                approval_id: ApprovalId::new(),
-                turn_id: TurnId::new(),
-                tool_name: "shell".into(),
-                scope: approval_scopes::SESSION.into(),
-                scope_match: "exact".into(),
-                decision: ApprovalDecision::Approve,
-            })
-        })),
-        ("ApprovalDecided", Box::new(|| {
-            UiNotification::ApprovalDecided(ApprovalDecidedEvent {
-                session_id: topic_session(),
-                topic: None,
-                approval_id: ApprovalId::new(),
-                turn_id: TurnId::new(),
-                decision: ApprovalDecision::Approve,
-                scope: None,
-                decided_at: Utc::now(),
-                decided_by: "user:test".into(),
-                auto_resolved: false,
-                policy_id: None,
-                client_note: None,
-            })
-        })),
-        ("ApprovalCancelled", Box::new(|| {
-            UiNotification::ApprovalCancelled(ApprovalCancelledEvent {
-                session_id: topic_session(),
-                topic: None,
-                approval_id: ApprovalId::new(),
-                turn_id: TurnId::new(),
-                reason: approval_cancelled_reasons::TURN_INTERRUPTED.into(),
-            })
-        })),
-        ("FileAttached", Box::new(|| {
-            UiNotification::FileAttached(FileAttachedEvent {
-                session_id: topic_session(),
-                topic: None,
-                turn_id: TurnId::new(),
-                path: "/tmp/deck.pptx".into(),
-                tool_call_id: None,
-                attachment_owner: None,
-                mime: None,
-            })
-        })),
+        (
+            "ToolStarted",
+            Box::new(|| {
+                UiNotification::ToolStarted(ToolStartedEvent {
+                    session_id: topic_session(),
+                    topic: None,
+                    turn_id: TurnId::new(),
+                    tool_call_id: "tc".into(),
+                    tool_name: "shell".into(),
+                    arguments: None,
+                })
+            }),
+        ),
+        (
+            "ToolProgress",
+            Box::new(|| {
+                UiNotification::ToolProgress(ToolProgressEvent {
+                    session_id: topic_session(),
+                    topic: None,
+                    turn_id: TurnId::new(),
+                    tool_call_id: "tc".into(),
+                    message: None,
+                    progress_pct: None,
+                })
+            }),
+        ),
+        (
+            "ToolCompleted",
+            Box::new(|| {
+                UiNotification::ToolCompleted(ToolCompletedEvent {
+                    session_id: topic_session(),
+                    topic: None,
+                    turn_id: TurnId::new(),
+                    tool_call_id: "tc".into(),
+                    tool_name: "shell".into(),
+                    success: Some(true),
+                    output_preview: None,
+                    duration_ms: None,
+                })
+            }),
+        ),
+        (
+            "ApprovalAutoResolved",
+            Box::new(|| {
+                UiNotification::ApprovalAutoResolved(ApprovalAutoResolvedEvent {
+                    session_id: topic_session(),
+                    topic: None,
+                    approval_id: ApprovalId::new(),
+                    turn_id: TurnId::new(),
+                    tool_name: "shell".into(),
+                    scope: approval_scopes::SESSION.into(),
+                    scope_match: "exact".into(),
+                    decision: ApprovalDecision::Approve,
+                })
+            }),
+        ),
+        (
+            "ApprovalDecided",
+            Box::new(|| {
+                UiNotification::ApprovalDecided(ApprovalDecidedEvent {
+                    session_id: topic_session(),
+                    topic: None,
+                    approval_id: ApprovalId::new(),
+                    turn_id: TurnId::new(),
+                    decision: ApprovalDecision::Approve,
+                    scope: None,
+                    decided_at: Utc::now(),
+                    decided_by: "user:test".into(),
+                    auto_resolved: false,
+                    policy_id: None,
+                    client_note: None,
+                })
+            }),
+        ),
+        (
+            "ApprovalCancelled",
+            Box::new(|| {
+                UiNotification::ApprovalCancelled(ApprovalCancelledEvent {
+                    session_id: topic_session(),
+                    topic: None,
+                    approval_id: ApprovalId::new(),
+                    turn_id: TurnId::new(),
+                    reason: approval_cancelled_reasons::TURN_INTERRUPTED.into(),
+                })
+            }),
+        ),
+        (
+            "FileAttached",
+            Box::new(|| {
+                UiNotification::FileAttached(FileAttachedEvent {
+                    session_id: topic_session(),
+                    topic: None,
+                    turn_id: TurnId::new(),
+                    path: "/tmp/deck.pptx".into(),
+                    tool_call_id: None,
+                    attachment_owner: None,
+                    mime: None,
+                })
+            }),
+        ),
     ];
 
     for (name, ctor) in rows {
@@ -1048,9 +1078,11 @@ fn stamp_topic_from_session_populates_new_topic_class_events() {
             "{name}: stamp must populate the topic from the session suffix"
         );
         // The stamped topic must also survive onto the wire for routing.
-        let wire = serde_json::to_value(event.into_rpc_notification().unwrap_or_else(|e| {
-            panic!("{name}: wire serialize failed: {e}")
-        }))
+        let wire = serde_json::to_value(
+            event
+                .into_rpc_notification()
+                .unwrap_or_else(|e| panic!("{name}: wire serialize failed: {e}")),
+        )
         .unwrap_or_else(|e| panic!("{name}: to_value failed: {e}"));
         assert_eq!(
             wire["params"]["topic"],

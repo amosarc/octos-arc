@@ -20,7 +20,6 @@
 //! - responses are bound to the originating room and validated against the
 //!   rule's `authorized_approvers` snapshot.
 
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -205,10 +204,6 @@ pub fn digest_tool_args(args: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-
-
-
 
     #[test]
     fn test_approval_policy_first_match_wins() {

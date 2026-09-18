@@ -125,7 +125,6 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-
 /// Default name of the per-session workspace subdirectory inside
 /// `<root>/users/<session_id>/`. Held as a constant so the resolver
 /// in `handlers.rs` and any future migration share the literal.

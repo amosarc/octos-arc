@@ -166,7 +166,9 @@ mod tests {
             _config: &octos_llm::ChatConfig,
         ) -> Result<octos_llm::ChatResponse> {
             self.0.lock().unwrap().push(messages.to_vec());
-            Ok(octos_llm::ChatResponse::end_turn("ephemeral-fixture-answer"))
+            Ok(octos_llm::ChatResponse::end_turn(
+                "ephemeral-fixture-answer",
+            ))
         }
 
         fn provider_name(&self) -> &str {

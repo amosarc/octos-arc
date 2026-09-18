@@ -616,7 +616,7 @@ mod tests {
         );
     }
 
-#[tokio::test]
+    #[tokio::test]
     async fn test_reopen_persists_data() {
         let dir = tempfile::tempdir().unwrap();
         {
@@ -631,9 +631,10 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            results.iter().any(|(ep, _)| ep.summary == "persistent data"),
+            results
+                .iter()
+                .any(|(ep, _)| ep.summary == "persistent data"),
             "reopened store must still recall the persisted episode"
         );
     }
-
 }

@@ -272,7 +272,6 @@ fn should_replace_old_tool_results_with_typed_placeholder() {
     assert!(placeholder.original_byte_len.unwrap_or(0) > 0);
 }
 
-
 #[test]
 fn compaction_policy_schema_version_is_pinned() {
     assert_eq!(COMPACTION_POLICY_SCHEMA_VERSION, 1);

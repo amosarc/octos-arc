@@ -32,9 +32,7 @@ pub use cache_manifest::{
     PromptCacheInputManifest, RouterContext, current_router_context, record_prompt_cache_usage,
     with_prompt_cache_observation_context, with_router_context,
 };
-pub use catalog::{
-    ModelCatalogEntry, ModelType, QosCatalog,
-};
+pub use catalog::{ModelCatalogEntry, ModelType, QosCatalog};
 pub use config::{
     CacheRetention, ChatConfig, PromptCacheContext, ReasoningEffort, ResponseFormat,
     SemanticCheckpointHint, ToolChoice,
@@ -44,9 +42,9 @@ pub use embedding::{EmbeddingProvider, OpenAIEmbedder};
 pub use error::{LlmError, LlmErrorKind, StreamError};
 pub use failover::ProviderChain;
 pub use provider::{
-    ApiStyle, DEFAULT_LLM_CONNECT_TIMEOUT_SECS, DEFAULT_LLM_TIMEOUT_SECS, LaneFailure,
-    LlmProvider, OperationalStage, attribute_lane_failures, build_http_client,
-    lane_failure_summary, operational_error_message, transport_error_message,
+    ApiStyle, DEFAULT_LLM_CONNECT_TIMEOUT_SECS, DEFAULT_LLM_TIMEOUT_SECS, LaneFailure, LlmProvider,
+    OperationalStage, attribute_lane_failures, build_http_client, lane_failure_summary,
+    operational_error_message, transport_error_message,
 };
 pub use retry::{RetryConfig, RetryProvider};
 pub use types::{

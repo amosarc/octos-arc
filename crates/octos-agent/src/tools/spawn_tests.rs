@@ -105,11 +105,13 @@ async fn background_deliverable_auto_materializes_inline_final_output() {
         // run of identical turns — exhaustion still fails loudly.
         Arc::new(ScriptedProvider::new(
             (0..16)
-                .map(|_| end_turn(
-                    &format!("# Code Review\n\n{}", "detailed finding. ".repeat(60)),
-                    0,
-                    0,
-                ))
+                .map(|_| {
+                    end_turn(
+                        &format!("# Code Review\n\n{}", "detailed finding. ".repeat(60)),
+                        0,
+                        0,
+                    )
+                })
                 .collect(),
         )),
         Arc::new(create_test_store().await),
@@ -534,7 +536,10 @@ async fn background_child_transcript_streams_to_router_and_final_output_is_recor
 
     // (a) the transcript reached the parent's router file.
     let mut transcript = String::new();
-    for sess in std::fs::read_dir(temp.path().join("router")).unwrap().flatten() {
+    for sess in std::fs::read_dir(temp.path().join("router"))
+        .unwrap()
+        .flatten()
+    {
         for file in std::fs::read_dir(sess.path()).unwrap().flatten() {
             let bytes = std::fs::read(file.path()).unwrap_or_default();
             transcript.push_str(&String::from_utf8_lossy(&bytes));

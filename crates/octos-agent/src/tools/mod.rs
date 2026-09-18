@@ -771,7 +771,6 @@ pub mod write_file;
 pub mod check;
 pub mod check_background_tasks;
 
-
 #[cfg(feature = "ast")]
 pub mod code_structure;
 
@@ -810,7 +809,6 @@ pub use write_file::WriteFileTool;
 
 pub use check::CheckTool;
 pub use check_background_tasks::CheckBackgroundTasksTool;
-
 
 #[cfg(feature = "ast")]
 pub use code_structure::CodeStructureTool;
@@ -2021,9 +2019,7 @@ pub(crate) mod test_fixture {
     /// `(workspace, outside, ctx)`; scenario-specific files and symlinks
     /// stay in the test body so each security assertion remains local and
     /// explicit.
-    pub(crate) fn escape_ctx(
-        tool_id: &str,
-    ) -> (tempfile::TempDir, tempfile::TempDir, ToolContext) {
+    pub(crate) fn escape_ctx(tool_id: &str) -> (tempfile::TempDir, tempfile::TempDir, ToolContext) {
         escape_ctx_with_skill_zones(tool_id, &[])
     }
 
@@ -2041,4 +2037,3 @@ pub(crate) mod test_fixture {
         (workspace, outside, scoped_ctx(tool_id, scope))
     }
 }
-

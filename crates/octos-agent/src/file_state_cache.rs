@@ -332,8 +332,8 @@ impl Clone for FileStateCache {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
     use super::*;
+    use std::time::Duration;
 
     fn mk_entry(path: &str, mtime: SystemTime, size: usize) -> CacheEntry {
         CacheEntry::new(

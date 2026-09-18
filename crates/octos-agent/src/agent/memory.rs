@@ -616,7 +616,13 @@ mod tests {
         // The store write is awaited (the embed is fire-and-forget); the
         // episode is BM25-findable in its cwd immediately.
         let hits = memory
-            .find_relevant_hybrid_scored_filtered("websocket gateway keepalive", None, 20, None, false)
+            .find_relevant_hybrid_scored_filtered(
+                "websocket gateway keepalive",
+                None,
+                20,
+                None,
+                false,
+            )
             .await
             .unwrap();
         assert!(

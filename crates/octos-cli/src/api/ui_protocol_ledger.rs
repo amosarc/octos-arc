@@ -62,8 +62,8 @@ use octos_agent::{ProgressEvent, ProgressReporter};
 use octos_core::SessionKey;
 use octos_core::ui_protocol::{
     Envelope, EnvelopeNotification, EnvelopeV2, EnvelopeV2Notification, Payload, PayloadV2,
-    RpcError, RpcNotification, SessionOpened, TaskRuntimeState, ToolProgressEvent, TurnCompletedEvent,
-    TurnErrorEvent, TurnId, UiCursor, UiNotification, UiProgressEvent, methods,
+    RpcError, RpcNotification, SessionOpened, TaskRuntimeState, ToolProgressEvent,
+    TurnCompletedEvent, TurnErrorEvent, TurnId, UiCursor, UiNotification, UiProgressEvent, methods,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};

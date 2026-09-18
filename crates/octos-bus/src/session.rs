@@ -40,7 +40,6 @@ const CURRENT_SESSION_SCHEMA: u32 = 1;
 pub type MessageCommitObserver =
     std::sync::Arc<dyn Fn(&SessionKey, &Message, usize) + Send + Sync + 'static>;
 
-
 type ScopedCommitObservers = std::collections::HashMap<
     PathBuf,
     std::sync::Weak<dyn Fn(&SessionKey, &Message, usize) + Send + Sync>,
@@ -639,7 +638,6 @@ impl Session {
         }
     }
 
-
     fn merge_child_contract(update: ChildSessionContract, existing: &mut ChildSessionContract) {
         existing.task_label = update.task_label;
         existing.parent_session_key = update.parent_session_key;
@@ -669,20 +667,13 @@ impl Session {
             existing.output_files = update.output_files;
         }
     }
-
-
 }
-
 
 /// Default maximum number of sessions kept in memory.
 const DEFAULT_MAX_SESSIONS: usize = 1000;
 
 /// Maximum session file size we'll load (10 MB). Prevents OOM on corrupted/adversarial files.
 const MAX_SESSION_FILE_SIZE: u64 = 10 * 1024 * 1024;
-
-
-
-
 
 pub struct SessionManager {
     sessions_dir: PathBuf,
@@ -1388,7 +1379,6 @@ impl SessionManager {
         Ok(())
     }
 
-
     /// Drop the cached in-memory copy of a session so the next read consults
     /// disk. Required by callers that write through alternate channels (e.g.
     /// `SessionHandle`) and must keep the manager's LRU cache from serving
@@ -1504,8 +1494,6 @@ impl SessionManager {
         .map_err(|e| eyre::eyre!("spawn_blocking join error: {e}"))??;
         Ok(())
     }
-
-
 }
 
 // ── SessionHandle ──────────────────────────────────────────────────────────
@@ -1594,7 +1582,6 @@ pub async fn persist_message_through_canonical_path(
     // `add_message_with_seq` here would deadlock.
     handle.add_message_with_seq_unlocked(message).await
 }
-
 
 impl SessionHandle {
     /// Open or create a session handle for the given key.
@@ -1708,7 +1695,6 @@ impl SessionHandle {
         let encoded = encode_path_component(topic);
         user_sessions_dir.join(format!(".migrated.{encoded}"))
     }
-
 
     /// Encode a path component (base key) for safe directory names.
     fn encode_path_component(s: &str) -> String {
@@ -1991,12 +1977,6 @@ impl SessionHandle {
         })
     }
 }
-
-
-
-
-
-
 
 /// fsync a directory so a rename into it is durable. Best-effort: on non-Unix
 /// std cannot open a directory for syncing, so the rename there is only as

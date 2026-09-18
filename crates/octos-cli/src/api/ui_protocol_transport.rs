@@ -33,14 +33,13 @@ use octos_core::ui_protocol::{
     TurnErrorPartialResult, TurnId, TurnInterruptParams, TurnInterruptResult, TurnLifecycleState,
     TurnSessionResult, TurnStartParams, TurnStateGetParams, TurnStateGetResult, TurnTerminalError,
     TurnTerminalOutcome, UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
-    UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
-    UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1, UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1,
-    UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1, UI_PROTOCOL_FEATURE_PLAN_TODOS_V1,
-    UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1, UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2,
-    UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1, UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1,
-    UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1, UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1,
-    UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1, UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1,
-    UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
+    UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1, UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
+    UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1, UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1,
+    UI_PROTOCOL_FEATURE_PLAN_TODOS_V1, UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1,
+    UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2, UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
+    UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1, UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
+    UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1, UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1,
+    UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1, UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
     UiArtifactPaneItem, UiArtifactPaneSnapshot, UiCommand, UiContextCompactionRecord,
     UiContextNormalizationReport, UiContextState, UiCursor, UiFileMutationNotice, UiGitHistoryItem,
     UiGitPaneSnapshot, UiGitStatusItem, UiNotification, UiPaneSnapshot, UiPaneSnapshotLimitation,
@@ -6438,7 +6437,12 @@ pub(crate) fn create_or_get_local_solo_profile(
         // Idempotent re-create: the profile (and its metadata) already match.
         write_local_profile_metadata(&profile_store, profile, &username)?;
         persist_default_if_requested(&profile_store, &params, &profile_id)?;
-        return Ok(assemble_local_solo_result(&profile_id, name, &username, false));
+        return Ok(assemble_local_solo_result(
+            &profile_id,
+            name,
+            &username,
+            false,
+        ));
     }
 
     let profile = new_local_user_profile(&profile_id, name);
@@ -15611,14 +15615,13 @@ async fn run_standalone_turn(
         BoundedChannelReporter::new(progress_tx.clone(), progress_dropped.clone())
             .with_thread_id(Some(turn_id.0.to_string())),
     );
-    let reporter: Arc<dyn octos_agent::ProgressReporter> = Arc::new(
-        super::ui_protocol_ledger::LedgerToolProgressReporter::new(
+    let reporter: Arc<dyn octos_agent::ProgressReporter> =
+        Arc::new(super::ui_protocol_ledger::LedgerToolProgressReporter::new(
             inner_reporter,
             ledger.clone(),
             session_id.clone(),
             turn_id.clone(),
-        ),
-    );
+        ));
     let progress_tx_for_result = progress_tx.clone();
     // C1 fix: the supervisor `on_change` callback is now wired earlier
     // early in this function so terminal `task_updated` events are not
@@ -15710,7 +15713,7 @@ async fn run_standalone_turn(
     )
     .with_config(agent_config.clone())
     .with_system_prompt(stable_system_prompt)
-    .with_prompt_cache_epoch_id(prompt_cache_epoch_id)    // #1696 soak fix: thread the session key into every ToolContext this
+    .with_prompt_cache_epoch_id(prompt_cache_epoch_id) // #1696 soak fix: thread the session key into every ToolContext this
     // turn builds. Without it anything reading
     // `ToolContext::parent_session_key` sees no session on AppUI turns
     // while the gateway actor path carried it fine.
@@ -19286,8 +19289,7 @@ fn send_notification_lifecycle(
     // ledger append above still happens so the canonical envelope
     // emit (via `ledger.emit_envelope` on the same handler path)
     // delivers via the broadcast forwarder.
-    let Some((delivery_metric, method, event_for_wire)) =
-        prepare_direct_send(ws, ledger, event)
+    let Some((delivery_metric, method, event_for_wire)) = prepare_direct_send(ws, ledger, event)
     else {
         return Ok(());
     };
@@ -19331,8 +19333,7 @@ fn send_notification_durable(
     // forwarder. Ledger append still occurs above so OTHER
     // connections (without the feature) receive the legacy shape via
     // their own forwarders.
-    let Some((delivery_metric, method, event_for_wire)) =
-        prepare_direct_send(ws, ledger, event)
+    let Some((delivery_metric, method, event_for_wire)) = prepare_direct_send(ws, ledger, event)
     else {
         return Ok(());
     };
@@ -19469,7 +19470,14 @@ fn send_ledger_event_durable(
     ledger: &UiProtocolLedger,
     event: UiProtocolLedgerEvent,
 ) -> Result<(), SendError> {
-    deliver_ledger_frame!(ws, ledger, event, frame, method, ws.send_durable(frame, &method))
+    deliver_ledger_frame!(
+        ws,
+        ledger,
+        event,
+        frame,
+        method,
+        ws.send_durable(frame, &method)
+    )
 }
 
 /// Async twin of [`send_ledger_event_durable`] for the live-forwarder task

@@ -52,7 +52,6 @@ pub(crate) const CODING_DYNAMIC_TOOL_SEARCH_CAPABILITY_V1: &str = "coding.dynami
 pub(crate) const CODING_BASH_CAPABILITY_V1: &str = "coding.bash.v1";
 pub(crate) const CODING_DELEGATE_CAPABILITY_V1: &str = "coding.delegate.v1";
 
-
 pub(crate) const CODING_P0_REQUIRED_TOOL_NAMES: &[&str] = &[
     "apply_patch",
     "exec_command",

@@ -127,8 +127,6 @@ impl LoopTurnState {
         );
     }
 
-    
-    
     pub(crate) fn check_budget(
         &self,
         agent: &Agent,

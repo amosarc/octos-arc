@@ -112,7 +112,6 @@ impl SubAgentSummaryRegistry {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.len()
     }
-
 }
 
 /// Source of the activity lines fed into the summary LLM.

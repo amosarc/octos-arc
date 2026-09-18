@@ -395,7 +395,6 @@ impl<T> RpcRequest<T> {
             params,
         }
     }
-
 }
 
 /// Generic JSON-RPC success envelope.
@@ -414,7 +413,6 @@ impl<T> RpcResponse<T> {
             result,
         }
     }
-
 }
 
 /// Generic JSON-RPC notification envelope.
@@ -433,7 +431,6 @@ impl<T> RpcNotification<T> {
             params,
         }
     }
-
 }
 
 /// JSON-RPC error object.
@@ -591,7 +588,6 @@ impl RpcErrorResponse {
             error,
         }
     }
-
 }
 
 fn validate_jsonrpc_version(jsonrpc: &str) -> Result<(), RpcError> {
@@ -804,7 +800,6 @@ impl UiProtocolVersion {
             jsonrpc: JSON_RPC_VERSION.to_owned(),
         }
     }
-
 }
 
 /// Capability payload suitable for a client/server handshake.
@@ -967,7 +962,6 @@ impl UiProtocolCapabilities {
             .iter()
             .any(|candidate| candidate == feature)
     }
-
 }
 
 /// Result of comparing a server's advertised [`UiProtocolCapabilities`] against
@@ -994,8 +988,7 @@ pub enum ProtocolCompat {
     SchemaIncompatible { server: u32, client: u32 },
 }
 
-impl ProtocolCompat {
-}
+impl ProtocolCompat {}
 
 /// Pure protocol-compatibility comparator (no new deps; reasons only over the
 /// existing protocol consts + the advertised capability payload).
@@ -3062,7 +3055,6 @@ impl UiRpcResult {
             Self::SessionBtw(result) => serde_json::to_value(result),
         }
     }
-
 }
 
 /// Heuristic gate for `UiRpcResult::UnsupportedCapability` decoding: returns
@@ -3274,7 +3266,6 @@ impl UiProgressMetadata {
         metadata.token_cost = Some(update);
         metadata
     }
-
 }
 
 /// Standalone rich progress notification payload.

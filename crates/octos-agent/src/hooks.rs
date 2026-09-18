@@ -627,7 +627,6 @@ impl HookPayload {
     }
 }
 
-
 /// Typed error for a before-hook policy deny that escapes as an
 /// `eyre::Report` (#2249). A deny is expected policy behaviour, not a
 /// harness fault — carrying a type (instead of a bare `eyre::bail!` string)

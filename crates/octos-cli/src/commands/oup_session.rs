@@ -504,7 +504,9 @@ mod tests {
             let _drop = ProviderDrop(self.dropped.clone());
             self.started.notify_one();
             self.release.notified().await;
-            Ok(octos_llm::ChatResponse::end_turn("Other connection completed"))
+            Ok(octos_llm::ChatResponse::end_turn(
+                "Other connection completed",
+            ))
         }
         fn provider_name(&self) -> &str {
             "local"

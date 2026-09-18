@@ -58,7 +58,6 @@ pub struct VectorCoverage {
 }
 
 impl VectorCoverage {
-
     /// Fraction of documents reachable by vector search, `0.0..=1.0`.
     /// An empty index reports `1.0` — nothing is missing.
     pub fn ratio(&self) -> f64 {
@@ -204,7 +203,6 @@ impl HybridIndex {
         }
     }
 
-
     /// Snapshot of how much of this index is reachable by vector search.
     ///
     /// `len()` counts DOCUMENTS; this counts how many of them actually carry a
@@ -323,7 +321,6 @@ impl HybridIndex {
             hnsw.insert((&normalized, doc_idx));
         }
     }
-
 
     /// Add an embedding to an existing document (by episode_id).
     /// Returns false if the episode_id is not found or dimension mismatches.
@@ -660,12 +657,8 @@ mod tests {
         index.insert("ep3", "rust async programming", Some(&[0.1, 0.9, 0.0, 0.0]));
 
         // Query embedding is close to ep2/ep3
-        let results = index.search_scored_filtered(
-            "rust programming",
-            Some(&[0.0, 1.0, 0.0, 0.0]),
-            3,
-            None,
-        );
+        let results =
+            index.search_scored_filtered("rust programming", Some(&[0.0, 1.0, 0.0, 0.0]), 3, None);
         assert_eq!(results.len(), 3);
         // With default weights (0.7 vector + 0.3 bm25), ep3 should rank well (has "rust" + close embedding)
     }

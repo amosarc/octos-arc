@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use octos_core::{Message, ToolCall};
-use octos_llm::{ChatConfig, ChatResponse, LlmProvider, ToolSpec, TokenUsage};
+use octos_llm::{ChatConfig, ChatResponse, LlmProvider, TokenUsage, ToolSpec};
 
 /// `(messages, tools, config)` of one provider request, in call order.
 pub(crate) type RecordedCall = (Vec<Message>, Vec<ToolSpec>, ChatConfig);
@@ -174,8 +174,11 @@ pub(crate) async fn boot_agent(
     tools: crate::tools::ToolRegistry,
     config: crate::AgentConfig,
 ) -> crate::Agent {
-    let memory =
-        Arc::new(octos_memory::EpisodeStore::open(data_dir.join("memory")).await.unwrap());
+    let memory = Arc::new(
+        octos_memory::EpisodeStore::open(data_dir.join("memory"))
+            .await
+            .unwrap(),
+    );
     crate::Agent::new(octos_core::AgentId::new(id), provider, tools, memory).with_config(
         crate::AgentConfig {
             save_episodes: false,

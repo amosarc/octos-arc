@@ -906,7 +906,6 @@ impl MemoryStore {
         }
         Ok(path)
     }
-
 }
 
 /// Who authored a staging note. `Host` notes come from paths with no model
@@ -1026,9 +1025,7 @@ impl StagingNote {
     }
 }
 
-impl MemoryStore {
-
-}
+impl MemoryStore {}
 
 /// Extract an abstract from entity content.
 /// Skips YAML frontmatter, takes first non-empty non-heading line, truncates to 100 chars.

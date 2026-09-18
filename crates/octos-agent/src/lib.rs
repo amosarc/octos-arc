@@ -75,12 +75,11 @@ pub use agent::{
     normalize_tool_call_id,
 };
 pub use approval::{
-    ApprovalRequestEnvelope, ApprovalRequestSpec,
-    ApprovalRiskLevel, ApprovalRule, ApprovalTimeoutBehavior,
-    HumanApprovalRules, PendingApprovalDraft,
+    ApprovalRequestEnvelope, ApprovalRequestSpec, ApprovalRiskLevel, ApprovalRule,
+    ApprovalTimeoutBehavior, HumanApprovalRules, PendingApprovalDraft,
 };
-pub use file_state_cache::{FILE_UNCHANGED_STUB_PREFIX,
-    FileStateCache, format_file_unchanged_stub,
+pub use file_state_cache::{
+    FILE_UNCHANGED_STUB_PREFIX, FileStateCache, format_file_unchanged_stub,
 };
 pub use harness_errors::{HarnessError, HarnessErrorEvent, OCTOS_LOOP_ERROR_TOTAL, RecoveryHint};
 pub use harness_events::{
@@ -90,8 +89,7 @@ pub use harness_events::{
     MAX_HARNESS_EVENT_LINE_BYTES,
 };
 pub use hooks::{
-    HookConfig, HookContext, HookDeniedError, HookEvent, HookExecutor, HookPayload,
-    HookResult,
+    HookConfig, HookContext, HookDeniedError, HookEvent, HookExecutor, HookPayload, HookResult,
 };
 pub use mcp::{McpClient, McpServerConfig};
 pub use memory_segment::{
@@ -117,8 +115,8 @@ pub use snapshot::{
     DEFAULT_SNAPSHOT_KEEP_LAST, SnapshotConfig, SnapshotId, SnapshotInfo, SnapshotManager,
 };
 pub use subagent_output::{
-    AppendResult, DEFAULT_MAX_BYTES_PER_TASK, DEFAULT_MAX_BYTES_TOTAL,
-    DEFAULT_PREVIEW_BYTES, SubAgentOutputRouter,
+    AppendResult, DEFAULT_MAX_BYTES_PER_TASK, DEFAULT_MAX_BYTES_TOTAL, DEFAULT_PREVIEW_BYTES,
+    SubAgentOutputRouter,
 };
 pub use subagent_summary::{
     AgentSummaryGenerator, DEFAULT_SUBAGENT_SUMMARY_MIN_RUNTIME, DEFAULT_SUBAGENT_SUMMARY_TICK,
@@ -126,10 +124,9 @@ pub use subagent_summary::{
 };
 pub use summarizer::{ExtractiveSummarizer, Summarizer};
 pub use task_supervisor::{
-    BackgroundTask, RegisterTaskError, RelaunchOpts, SpawnOnlyFailureSignal,
-    TaskCancelError, TaskCancelToken, TaskLifecycleState, TaskRelaunchError,
-    TaskRuntimeState, TaskStatus, TaskSupervisor, TaskTerminalGuard,
-    parse_alternatives,
+    BackgroundTask, RegisterTaskError, RelaunchOpts, SpawnOnlyFailureSignal, TaskCancelError,
+    TaskCancelToken, TaskLifecycleState, TaskRelaunchError, TaskRuntimeState, TaskStatus,
+    TaskSupervisor, TaskTerminalGuard, parse_alternatives,
 };
 pub use tools::{
     AskUserQuestionTool, BackgroundResultKind, BackgroundResultPayload, CheckBackgroundTasksTool,
@@ -146,8 +143,8 @@ pub use tools::{
 };
 pub use workspace_policy::{
     CompactionPolicy, CompactionSummarizerKind, WORKSPACE_POLICY_FILE, WorkspaceArtifactsPolicy,
-    WorkspacePolicy, WorkspacePolicyKind, WorkspaceSpawnTaskPolicy,
-    read_workspace_policy, workspace_policy_path, write_workspace_policy,
+    WorkspacePolicy, WorkspacePolicyKind, WorkspaceSpawnTaskPolicy, read_workspace_policy,
+    workspace_policy_path, write_workspace_policy,
 };
 
 #[cfg(test)]

@@ -317,6 +317,23 @@ impl Agent {
                             );
                             let _ = hooks.run(HookEvent::AfterLlmCall, &payload).await;
                         }
+                        // 感知面:每次真实成功的 LLM 调用都留下 INFO 轨迹
+                        //(模型/迭代/用量/时延/去向),serve 的滚动日志文件
+                        // 由此回答"agent 此刻在处理什么"。
+                        info!(
+                            model = %self.llm.model_id(),
+                            iteration,
+                            attempt,
+                            streamed,
+                            input_tokens = response.usage.input_tokens,
+                            output_tokens = response.usage.output_tokens,
+                            cache_read_tokens = response.usage.cache_read_tokens,
+                            reasoning_tokens = response.usage.reasoning_tokens,
+                            duration_ms = call_start.elapsed().as_millis() as u64,
+                            stop = ?response.stop_reason,
+                            tool_calls = response.tool_calls.len(),
+                            "llm call completed"
+                        );
                         return Ok((response, streamed, attributed_cost));
                     }
 
