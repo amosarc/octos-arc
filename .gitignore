@@ -81,3 +81,4 @@ tsconfig.tsbuildinfo
 # must replace the local build before packaging — never commit the binary).
 /octos-arc-bundle.zip
 /arc/bin/octos
+/octos-arc-linux-x86.zip

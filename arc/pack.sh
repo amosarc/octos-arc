@@ -1,8 +1,121 @@
 #!/bin/sh
-# 把 arc/ 打成 ARC 平台要的提交包（main.py 必须在 zip 根目录）
+# 把 arc/ 打成 ARC 平台要的提交包。
+# 平台规范（同 pack-linux-x86.sh）：zip 根必须有 main.py / requirements.txt /
+# template/(frontend+backend+README.md+template.yaml)；平台把 template/ 铺成
+# 初始工作区，再调 python3 main.py <requirements-source> --output-dir <workspace>。
+# 布局参考 agent-arc-based：入口在根、模板在 template/，开发件(测试脚本、
+# 打分器、本地题目副本)一律不进包。
 set -e
 cd "$(dirname "$0")"
-rm -f ../octos-arc-bundle.zip
-zip -qr ../octos-arc-bundle.zip main.py plan_envelope.py measure_tokens.py octos_stdio.py requirements.txt arcbench_agent_runtime public-tests bin scaffold scaffold_test.py template_smoke.js -x '*/__pycache__/*' '*.pyc'
-echo "打包完成：$(cd .. && pwd)/octos-arc-bundle.zip"
-shasum -a 256 ../octos-arc-bundle.zip
+ROOT="$(pwd)"
+
+# 平台跑 Linux x86_64：内核二进制必须先就位（README「Linux x86_64 发布」流程）。
+[ -f bin/octos ] || { echo "缺少 bin/octos；先交叉编译并拷入（见 README）"; exit 1; }
+file bin/octos | grep -q "ELF 64-bit LSB.*x86-64" || { echo "bin/octos 不是 linux x86-64 ELF"; exit 1; }
+
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+PKG="$STAGE/octos-arc-bundle"
+mkdir -p "$PKG"
+
+# template/ 打包时由 scaffold 单源直接现生成到 arc/template/（打包即物化：
+# 仓库里始终有可浏览的模板目录，内容永远与单源一致；scaffold 只写不删，
+# 故先清空再生成，manifest 删掉的条目不会残留）。
+rm -rf template
+python3 - <<'PYEOF'
+import sys, pathlib
+sys.path.insert(0, ".")
+import scaffold
+written = scaffold.scaffold(pathlib.Path("template"))
+print("template/: 由 scaffold 现生成 %d 件" % len(written))
+PYEOF
+cat > template/template.yaml <<'EOF'
+schema_version: "1.0"
+id: web-react-express
+name: Web Application (React + Express)
+type: web_app
+version: 1.0.0
+description: Full-stack React and Express application template for generation agents.
+stack:
+  frontend:
+    framework: Vite
+    library: React
+    language: JavaScript
+  backend:
+    framework: Express
+    language: JavaScript
+    database: JSON file store (backend/data/db.json)
+  tests:
+    e2e: Playwright
+copy:
+  exclude:
+    - template.yaml
+    - frontend/node_modules
+    - frontend/dist
+    - backend/node_modules
+preview:
+  html: frontend/dist/index.html
+  assets: frontend/dist/assets
+agent_guidance:
+  ui_root: frontend/src
+  api_root: backend/src/app.js
+  function_root: backend/src
+  db_root: backend/src/database
+  schema_source: backend/data/schema.json
+  e2e_test_root: .arc/acceptance
+EOF
+cat > template/README.md <<'EOF'
+# Web Template
+
+Single-origin web application: Express serves `/api/*` routes and the built
+frontend from `frontend/dist` (SPA fallback), listening on `PORT` plus every
+port in `ARC_EXTRA_PORTS`.
+
+- `frontend/`: React + Vite; `npm run build` produces `frontend/dist/`.
+- `backend/`: Express; data model is declared in `backend/data/schema.json`
+  and compiled by the host into `backend/src/database/schema.js`; JSON store
+  at `backend/data/db.json`; auth (register/login/logout/me) and CRUD are
+  engine-driven; task-specific endpoints go in `backend/src/routes/index.js`.
+- npm dependencies are prewarmed by the host; never run npm install in turns.
+EOF
+
+# arc-template/：模板目录（对齐 agent-arc-based 布局）。参考项目 template/ 与
+# arc-template/templates/web-react-express/ 逐字节一致，此处同构：镜像现生成的
+# template/ + catalog.yaml 登记模板清单。同样每次打包现生成。
+rm -rf arc-template
+mkdir -p arc-template/templates
+cp -R template arc-template/templates/web-react-express
+cat > arc-template/catalog.yaml <<'EOF'
+schema_version: "1.0"
+templates:
+  - id: web-react-express
+    name: Web Application (React + Express)
+    type: web_app
+    version: 1.0.0
+    path: templates/web-react-express
+    stack:
+      - Vite
+      - React
+      - JavaScript
+      - Express
+      - JSON file store
+      - Playwright
+EOF
+
+# 运行时必需：main.py 顶层 import(plan_envelope/scaffold/arcbench_agent_runtime)
+# + 惰性 import(octos_stdio) + 验收测试(public-tests) + 内核(bin/) + 初始模板(template/)
+cp main.py plan_envelope.py octos_stdio.py requirements.txt "$PKG/"
+cp -R arcbench_agent_runtime public-tests scaffold bin "$PKG/"
+cp -R template "$PKG/template"
+cp -R arc-template "$PKG/arc-template"
+
+# 先 import 后清理：python 生成步骤会重新产生 __pycache__，收尾统一扫掉
+# （先清理后生成会让 pyc 回流进包——pack-linux-x86.sh 曾踩此坑）。
+cd "$PKG"
+find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+find . -name '*.pyc' -o -name .DS_Store -delete
+
+rm -f "$ROOT/../octos-arc-bundle.zip"
+zip -qr "$ROOT/../octos-arc-bundle.zip" .
+echo "打包完成：$ROOT/../octos-arc-bundle.zip"
+shasum -a 256 "$ROOT/../octos-arc-bundle.zip"

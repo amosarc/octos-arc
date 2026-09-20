@@ -199,6 +199,7 @@ def _rehearse_startup(output_dir: Path, smoke_port: int, *,
     backend = output_dir / "backend"
     if not (frontend.is_dir() and backend.is_dir()):
         return "frontend/ or backend/ missing at workspace root"
+    _stop_dev_server(smoke_port)
 
     def run_cmd(cmd: list, cwd: Path, timeout: int) -> tuple:
         try:
@@ -361,10 +362,75 @@ def _probe_routes_on(smoke_port: int, probes: list, extra_ports: list,
     return None
 
 
-def _ensure_host_toolchain(log) -> None:
+def _ensure_dev_server(output_dir: Path, smoke_port: int,
+                       extra_ports: list, log) -> bool:
+    """回合开始时保证宿主托管服务在线(已在线则复用,不重复拉起)。"""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{smoke_port}/api/health", timeout=2) as r:
+            if r.status == 200:
+                return True
+    except OSError:
+        pass
+    return _boot_dev_server(output_dir, smoke_port, extra_ports, log)
+
+
+def _stop_dev_server(smoke_port: int) -> None:
+    """宿主托管的 dev server 在彩排/Tier-2 前必须让位(它们要自行冷启动)。"""
+    try:
+        out = subprocess.run(["lsof", "-ti", f"TCP:{smoke_port}",
+                              "-sTCP:LISTEN"], capture_output=True,
+                             text=True, timeout=10).stdout
+        for pid in out.split():
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _boot_dev_server(output_dir: Path, smoke_port: int,
+                     extra_ports: list, log) -> bool:
+    """宿主尽算：宿主把后端以分离会话启动在冒烟端口并等健康检查通过，
+    模型回合内只 curl 验证，不自行管理服务进程。返回是否就绪。"""
+    backend = output_dir / "backend"
+    if not (backend / "src" / "index.js").is_file():
+        return False
+    env = plan_envelope.rehearsal_boot_env(os.environ, smoke_port,
+                                           extra_ports)
+    log_fh = open(output_dir / ".arc" / "host-dev-server.log", "ab")
+    try:
+        subprocess.Popen(["node", "src/index.js"], cwd=backend, env=env,
+                         stdout=log_fh, stderr=subprocess.STDOUT,
+                         start_new_session=True)
+    except OSError as exc:
+        log(f"[dev-server] boot failed (non-fatal): {exc}")
+        return False
+    import urllib.request
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{smoke_port}/api/health",
+                    timeout=2) as resp:
+                if resp.status == 200:
+                    log(f"[dev-server] app live on {smoke_port} "
+                        "(host-managed)")
+                    return True
+        except OSError:
+            time.sleep(1)
+    log("[dev-server] health check timed out (non-fatal); "
+        "model falls back to self-managed server")
+    return False
+
+
+def _ensure_host_toolchain(log) -> Path | None:
     """宿主尽算原则：Tier-2 评测链(@playwright/test + chromium)由 main 在
-    启动时装好——模型零参与(不探测、不安装、不跑规格)。失败不致命：
-    Tier-2 自会降级为 model final check。"""
+    启动时装好——模型零安装。装好后返回 local-grader 的 @playwright/test
+    cli 路径(供给模型一条可直接自验的命令)；失败返回 None(不致命，
+    Tier-2 自会降级为 model final check)。"""
     lg = Path(__file__).resolve().parent / "local-grader"
     lg_cli = lg / "node_modules" / "@playwright" / "test" / "cli.js"
     env = dict(os.environ, npm_config_registry=scaffold.NPM_REGISTRY)
@@ -379,7 +445,7 @@ def _ensure_host_toolchain(log) -> None:
         except (OSError, subprocess.SubprocessError) as exc:
             log(f"[toolchain] @playwright/test install failed (non-fatal, "
                 f"Tier-2 will degrade): {exc}")
-            return
+            return None
     pw_bin = lg / "node_modules" / ".bin" / "playwright"
     cache = ((Path.home() / "Library" / "Caches" / "ms-playwright")
              if sys.platform == "darwin"
@@ -393,6 +459,7 @@ def _ensure_host_toolchain(log) -> None:
             log("[toolchain] chromium installed")
         except (OSError, subprocess.SubprocessError) as exc:
             log(f"[toolchain] chromium install failed (non-fatal): {exc}")
+    return lg_cli
 
 
 def _run_staged_playwright(output_dir: Path, smoke_port: int,
@@ -436,6 +503,7 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
     # Boot the app on the smoke port for the duration of the run; specs
     # derive their origin from E2E_BASE_URL (default hardcodes 3301) —
     # set it explicitly, and dual-listen spec base ports as a fallback.
+    _stop_dev_server(smoke_port)
     backend = output_dir / "backend"
     env = plan_envelope.rehearsal_boot_env(os.environ, smoke_port,
                                            extra_ports or [])
@@ -1221,17 +1289,16 @@ system prompt applies exactly; the focus section lists this node's \
 acceptance signals and action chains. Extend the existing app, never \
 rewrite working files. Do not commit.\
 Definition of done for this node: every action chain under FOCUS walks \
-through on the RUNNING app — curl the API on the smoke port and check \
-the served UI; red means fix, not report. Do NOT run the staged \
-Playwright specs yourself: @playwright/test is not installed in this \
-workspace, do not install it, do not invoke npx playwright (the host \
-executes the specs after your turn and fixes-or-fails on the result).\
-PORT DISCIPLINE: run any dev/test server ONLY on port {smoke}; NEVER \
-bind port {port}. To keep a server alive ACROSS tool calls start it \
-detached ONCE — `nohup env PORT={smoke} node backend/src/index.js \
->/tmp/srv.log 2>&1 & echo $! > /tmp/srv.pid` — then reuse it with curl; \
-a plain `cmd &` dies with the tool call. Kill it by \
-`kill $(cat /tmp/srv.pid)` when done.\
+through on the RUNNING app; red means fix, not report. All spec \
+dependencies are preinstalled by the host — to run the staged specs use \
+the SPEC RUN command below verbatim; NEVER npm install anything and \
+never invoke bare `npx playwright`.\
+PORT DISCIPLINE: NEVER bind port {port}. The app is ALREADY RUNNING, \
+host-managed, on port {smoke} — verify by curl directly; do NOT start \
+your own server. After editing backend/src run \
+`sh .arc/host/restart-server.sh` (host-provided) to pick changes up; \
+after editing frontend run `npm run build --prefix frontend` — the \
+running server serves the fresh dist immediately, no restart needed.\
 
 {node_spec}"""
 
@@ -1679,9 +1746,34 @@ def main() -> int:
         scaffolded: list[str] = []
         probe_list: list[dict] = []
         spec_ports_extra: list[int] = []
+        # 模板已就位时依赖由宿主预装(模型零安装)。Tier-2 评测链同样宿主
+        # 自举，均只做一次、幂等。
+        toolchain_cli = None
+        if os.environ.get("OCTOS_ARC_PREWARM", "1") != "0":
+            toolchain_cli = _ensure_host_toolchain(log)
+        spec_run_cmd = (
+            "\nSPEC RUN (host-provided, deps preinstalled — use verbatim "
+            "from the workspace root):\n"
+            f"node {toolchain_cli} test --config "
+            ".arc/acceptance/playwright.config.ts --reporter=line\n"
+            if toolchain_cli else "")
         if plan_on and tests_dir:
             stage_dir = plan_envelope.stage_specs(tests_dir, output_dir)
             log(f"[plan] staged acceptance specs at {stage_dir}")
+            # 宿主尽算：模型自验所需的 config 与依赖链接一并备好，
+            # 模型只跑 SPEC RUN 一条命令，不装任何东西。
+            if toolchain_cli is not None:
+                (stage_dir / "playwright.config.ts").write_text(
+                    "import { defineConfig } from '@playwright/test';\n"
+                    "export default defineConfig({ testDir: '.',\n"
+                    "  use: { baseURL: "
+                    f"'http://127.0.0.1:{smoke_port}' }} }});\n",
+                    encoding="utf-8")
+                try:
+                    (stage_dir / "node_modules").symlink_to(
+                        toolchain_cli.parents[2], target_is_directory=True)
+                except OSError:
+                    pass
             spec_map = plan_envelope.spec_to_node_map(tests_dir, atomic_nodes)
             log(f"[plan] spec→node map: {spec_map}")
             probe_list = plan_envelope.probe_routes(stage_dir)
@@ -1689,17 +1781,38 @@ def main() -> int:
             spec_ports_extra = sorted(
                 {p for p in spec_base_ports(tests_dir)
                  if p not in (args.web_port, smoke_port)})
-            if os.environ.get("OCTOS_ARC_HOST_SCAFFOLD", "1") != "0":
-                scaffolded = scaffold.scaffold(output_dir)
-                log(f"[plan] host scaffold wrote {len(scaffolded)} file(s): "
-                    f"{scaffolded}")
-            else:
-                log("[plan] OCTOS_ARC_HOST_SCAFFOLD=0; scaffolding left to the model")
+        # 宿主模板无条件落盘：平台在 agent 退出后强制检查 workspace 的
+        # frontend/ 与 backend/，与 plan 能力、验收测试是否定位到均无关；
+        # 落盘是确定性本地写文件，skeleton 轮只负责在模板之上补全。
+        if os.environ.get("OCTOS_ARC_HOST_SCAFFOLD", "1") != "0":
+            scaffolded = scaffold.scaffold(output_dir)
+            log(f"[plan] host scaffold wrote {len(scaffolded)} file(s): "
+                f"{scaffolded}")
+        else:
+            log("[plan] OCTOS_ARC_HOST_SCAFFOLD=0; scaffolding left to the model")
         # 模板已就位时依赖由宿主预装(模型零安装);codegen 门控紧随其后。
-        # Tier-2 评测链同样宿主自举，均只做一次、幂等。
-        if os.environ.get("OCTOS_ARC_PREWARM", "1") != "0":
-            _ensure_host_toolchain(log)
         template_ready = scaffold.template_ready(output_dir)
+        if template_ready:
+            # 宿主托管的 dev server 一键重启脚本：模型改了 backend/src 后
+            # 只跑它，进程管理零参与。
+            host_dir = output_dir / ".arc" / "host"
+            host_dir.mkdir(parents=True, exist_ok=True)
+            (host_dir / "restart-server.sh").write_text(
+                "#!/bin/sh\n"
+                "# Host-provided: restart the dev server after backend/src "
+                "changes.\n"
+                'PORT="${1:-' + str(smoke_port) + '}"\n'
+                'cd "$(dirname "$0")/../../backend" || exit 1\n'
+                'lsof -ti TCP:"$PORT" -sTCP:LISTEN | xargs -r kill 2>/dev/null\n'
+                "sleep 1\n"
+                'PORT="$PORT" nohup node src/index.js '
+                '>> ../.arc/host-dev-server.log 2>&1 &\n'
+                "i=0; while [ $i -lt 30 ]; do\n"
+                '  curl -sf "http://127.0.0.1:$PORT/api/health" >/dev/null '
+                "2>&1 && { echo \"server ready on $PORT\"; exit 0; }\n"
+                "  sleep 1; i=$((i+1)); done\n"
+                'echo "server failed; see .arc/host-dev-server.log"; exit 1\n',
+                encoding="utf-8")
         codegen_on = (os.environ.get("OCTOS_ARC_HOST_CODEGEN", "1") != "0"
                       and bool(scaffolded) and template_ready)
         if template_ready and os.environ.get("OCTOS_ARC_PREWARM", "1") != "0":
@@ -1885,13 +1998,16 @@ def main() -> int:
                         host_signals=hs0 or None)
                     node_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
                         node_id=node_id, node_spec=describe_node(node),
-                        port=args.web_port, smoke=smoke_port)
+                        port=args.web_port, smoke=smoke_port) + spec_run_cmd
                 else:
                     node_prompt = NODE_PROMPT_TEMPLATE.format(
                         port=args.web_port, smoke=smoke_port,
                         node_spec=describe_node(node)) + tests_prompt_slim
                 if codegen_on and not scaffold.schema_path(output_dir).exists():
                     node_prompt += SCHEMA_DIRECTIVE
+                if template_ready:
+                    _ensure_dev_server(output_dir, smoke_port,
+                                       spec_ports_extra, log)
                 ok, text = driver.run(node_prompt, node_timeout)
                 log(f"[flow] node {node_id} {'ok' if ok else 'FAILED'} "
                     f"in {time.time()-t0:.0f}s: {text[-300:]!r}")
@@ -2071,6 +2187,9 @@ def main() -> int:
                             f"{tier2_run[0]} staged specs PASS on port "
                             f"{smoke_port}. Do not re-run suites; spot-check "
                             "one chain if you must, then end the turn.")
+                    final_prompt += spec_run_cmd
+                    _ensure_dev_server(output_dir, smoke_port,
+                                       spec_ports_extra, log)
                     log("[flow] final verification turn starting (slim, "
                         f"{len(probe_list)} route probe(s))")
                     t0 = time.time()
@@ -2140,6 +2259,8 @@ def main() -> int:
                 )
                 log(f"[rehearsal] repair turn "
                     f"{'ok' if ok_r else 'FAILED'}: {text_r[-200:]!r}")
+            # 交付前清场：宿主托管的 dev server 不得占住冒烟端口。
+            _stop_dev_server(smoke_port)
         finally:
             watchdog_stop.set()
             driver.close()
