@@ -106,6 +106,11 @@ EOF
 # + 惰性 import(octos_stdio) + 验收测试(public-tests) + 内核(bin/) + 初始模板(template/)
 cp main.py plan_envelope.py octos_stdio.py requirements.txt "$PKG/"
 cp -R arcbench_agent_runtime public-tests scaffold bin "$PKG/"
+# Tier-2 评测链物料：只带清单文件，node_modules 由容器内
+# _ensure_host_toolchain 幂等安装落地（2026-09-20 漏打导致安装 ENOENT、
+# 自验命令链整体降级）。
+mkdir -p "$PKG/local-grader"
+cp local-grader/package.json local-grader/package-lock.json "$PKG/local-grader/"
 cp -R template "$PKG/template"
 cp -R arc-template "$PKG/arc-template"
 

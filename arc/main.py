@@ -15,7 +15,12 @@ Configuration is via environment variables:
     OCTOS_MODEL     (override model name)
     OCTOS_BIN       (path to the octos binary; default: ./bin/octos then PATH)
     OCTOS_MAX_ITERATIONS (default 500)
-    OCTOS_NODE_TIMEOUT   (seconds per requirement node, default 1200)
+    OCTOS_NODE_TIMEOUT   (idle seconds per requirement node, default 1200)
+    OCTOS_TIME_BUDGET    (wall-clock seconds for the whole flow, default 5400)
+    OCTOS_NODE_WALL      (hard wall clock per turn, default 45% of budget)
+    OCTOS_FINAL_RESERVE  (tail slice kept for final verification, default
+                          max(300, budget//9))
+    OCTOS_NODE_FLOOR     (min remaining seconds to start a new node, default 300)
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from pathlib import Path
 
 import yaml
@@ -69,6 +75,18 @@ def _postflight_structure_check(output_dir: Path, web_port: int = 3000) -> None:
     time because a smoke-test server from a failed generation turn was still
     holding it.
     """
+    # 兜底:二进制若仍在 cwd 落了隐藏 .octos/(context-logs),收进可见的
+    # octos-logs/ 下,保证日志目录始终与 backend/ 同级可见。
+    hidden = output_dir / ".octos"
+    if hidden.is_dir():
+        target = output_dir / "octos-logs" / "dot-octos"
+        if not target.exists():
+            try:
+                shutil.move(str(hidden), str(target))
+                print(f"[postflight] relocated .octos/ -> octos-logs/dot-octos/",
+                      flush=True)
+            except OSError as exc:
+                print(f"[postflight] could not relocate .octos/: {exc}", flush=True)
     tree_lines = []
     for root, dirs, files in os.walk(output_dir):
         dirs[:] = [d for d in dirs
@@ -400,7 +418,9 @@ def _boot_dev_server(output_dir: Path, smoke_port: int,
         return False
     env = plan_envelope.rehearsal_boot_env(os.environ, smoke_port,
                                            extra_ports)
-    log_fh = open(output_dir / ".arc" / "host-dev-server.log", "ab")
+    dev_log_dir = output_dir / "octos-logs"
+    dev_log_dir.mkdir(parents=True, exist_ok=True)
+    log_fh = open(dev_log_dir / "host-dev-server.log", "ab")
     try:
         subprocess.Popen(["node", "src/index.js"], cwd=backend, env=env,
                          stdout=log_fh, stderr=subprocess.STDOUT,
@@ -426,21 +446,45 @@ def _boot_dev_server(output_dir: Path, smoke_port: int,
     return False
 
 
+def _local_grader_root() -> Path:
+    """Single resolver for the Tier-2 toolchain location, shared by the
+    install path and the grader path (they used to each compute
+    `Path(__file__).parent / "local-grader"` independently). Prefers the
+    local-grader/ shipped next to main.py (pack.sh); falls back to a
+    scratch dir when the bundle lacks it — 2026-09-20: the platform
+    package omitted local-grader/ and npm install died on ENOENT, which
+    cascaded into a missing playwright.config.ts, an empty SPEC RUN
+    command, and the model hand-rolling its own Playwright verification."""
+    lg = Path(__file__).resolve().parent / "local-grader"
+    if (lg / "package.json").is_file():
+        return lg
+    fallback = Path(tempfile.gettempdir()) / "octos-local-grader"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
 def _ensure_host_toolchain(log) -> Path | None:
     """宿主尽算原则：Tier-2 评测链(@playwright/test + chromium)由 main 在
     启动时装好——模型零安装。装好后返回 local-grader 的 @playwright/test
     cli 路径(供给模型一条可直接自验的命令)；失败返回 None(不致命，
     Tier-2 自会降级为 model final check)。"""
-    lg = Path(__file__).resolve().parent / "local-grader"
+    lg = _local_grader_root()
     lg_cli = lg / "node_modules" / "@playwright" / "test" / "cli.js"
     env = dict(os.environ, npm_config_registry=scaffold.NPM_REGISTRY)
     quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if not lg_cli.is_file():
         log("[toolchain] installing @playwright/test into local-grader ...")
         try:
-            subprocess.run(["npm", "install", "--no-audit", "--no-fund",
-                            "--loglevel", "error"], cwd=lg, env=env,
-                           timeout=600, check=True, **quiet)
+            if (lg / "package.json").is_file():
+                subprocess.run(["npm", "install", "--no-audit", "--no-fund",
+                                "--loglevel", "error"], cwd=lg, env=env,
+                               timeout=600, check=True, **quiet)
+            else:
+                # Fallback dir has no manifest; install without touching one.
+                subprocess.run(["npm", "install", "--no-save", "--no-audit",
+                                "--no-fund", "--loglevel", "error",
+                                "@playwright/test"], cwd=lg, env=env,
+                               timeout=600, check=True, **quiet)
             log("[toolchain] @playwright/test installed")
         except (OSError, subprocess.SubprocessError) as exc:
             log(f"[toolchain] @playwright/test install failed (non-fatal, "
@@ -486,8 +530,8 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
     # Prefer the bundled local-grader install (version-matched browsers are
     # already cached); npx --yes pulls latest, which may need a browser
     # build the sandbox cannot download.
-    lg_cli = (Path(__file__).resolve().parent / "local-grader"
-              / "node_modules" / "@playwright" / "test" / "cli.js")
+    lg_cli = (_local_grader_root() / "node_modules" / "@playwright" / "test"
+              / "cli.js")
     if lg_cli.is_file():
         cmd = [shutil.which("node") or "node", str(lg_cli),
                "test", "--reporter=json"]
@@ -667,9 +711,16 @@ NODE_NUDGE_PROMPT = (
 # ---------------------------------------------------------------- requirements
 
 def load_requirement_tree(req_dir: Path) -> dict:
+    if not req_dir.is_dir():
+        raise ValueError(f"requirement dir not found: {req_dir}")
     req_file = req_dir / "requirements.yaml"
     if not req_file.exists():
         req_file = req_dir / "requirements.yml"
+    if not req_file.exists():
+        # 带上目录内容清单，缺文件时一眼看出平台传的是什么布局。
+        contents = ", ".join(sorted(p.name for p in req_dir.iterdir())[:20])
+        raise ValueError(
+            f"requirements.yaml not found in {req_dir} (contents: {contents or 'empty'})")
     data = yaml.safe_load(req_file.read_text(encoding="utf-8"))
     if isinstance(data, dict) and "id" not in data:
         for wrapper in ("root", "requirement"):
@@ -799,21 +850,51 @@ def _download_octos(dest_dir: Path) -> str:
     return str(binary)
 
 
+def _ensure_octos_executable(path: Path, source: str) -> str:
+    """zip 解压可能丢失执行位；使用前检测并补上 chmod 755。
+
+    补不上(只读挂载等)则抛带路径的错误——宁可快速失败并留下
+    明确日志，也不要让后续 spawn 的 PermissionError 被吞掉。
+    """
+    if not os.access(path, os.X_OK):
+        try:
+            path.chmod(0o755)
+            log(f"[bin] restored exec bit on {path} ({source})")
+        except OSError as exc:
+            raise RuntimeError(
+                f"octos binary at {path} ({source}) is not executable "
+                f"and chmod failed: {exc}") from exc
+    return str(path)
+
+
 def find_octos() -> str:
     env_bin = os.environ.get("OCTOS_BIN")
     if env_bin and Path(env_bin).exists():
-        return env_bin
+        return _ensure_octos_executable(Path(env_bin), "OCTOS_BIN")
     bundled = Path(__file__).resolve().parent / "bin" / "octos"
     if bundled.exists():
-        return str(bundled)
+        return _ensure_octos_executable(bundled, "bundled")
     found = shutil.which("octos")
     if found:
         return found
     cache_dir = Path(os.environ.get("OCTOS_CACHE_DIR", "/tmp/octos-bin"))
     cached = cache_dir / "octos"
     if cached.exists():
-        return str(cached)
+        return _ensure_octos_executable(cached, "cache")
     return _download_octos(cache_dir)
+
+
+def _ignore_logs_in_workspace_git(output_dir: Path) -> None:
+    """workspace 仓库忽略日志目录:磁盘上可见可收集,但不进 traceability 提交。"""
+    gi = output_dir / ".gitignore"
+    existing = gi.read_text(encoding="utf-8") if gi.is_file() else ""
+    lines = set(existing.splitlines())
+    missing = [line for line in ("octos-logs/", ".octos/") if line not in lines]
+    if missing:
+        gi.write_text(
+            existing.rstrip("\n") + ("\n" if existing else "")
+            + "\n".join(missing) + "\n",
+            encoding="utf-8")
 
 
 def build_octos_env(config_dir: Path) -> dict:
@@ -1038,21 +1119,39 @@ class OctosDriver:
             self._session.open()
         return self._session
 
-    def run(self, prompt: str, timeout: int) -> tuple[bool, str]:
+    def run(self, prompt: str, timeout: int,
+            wall: int | None = None) -> tuple[bool, str]:
+        """Run one turn. `timeout` is the idle budget (resets on every
+        protocol event); `wall` is a hard wall clock for the whole turn
+        INCLUDING retries — on expiry the session is killed and whatever
+        already landed on disk stays (the node loop's rehearsal gates
+        then recover the partial work)."""
+        cancel = threading.Event()
         if self.mode == "chat":
+            cap = min(timeout, wall) if wall is not None else timeout
             fn = lambda p: run_octos(self.octos_bin, self.cwd, p, self.env,
-                                     self.data_dir, timeout, self.max_iterations)
+                                     self.data_dir, cap, self.max_iterations)
         else:
-            fn = lambda p: self._run_stdio(p, timeout)
+            fn = lambda p: self._run_stdio(p, timeout, wall, cancel)
         if self.plan_capable and self.envelope is not None and prompt:
             # planctl marker: the kernel strips it before the model ever
             # sees the prompt; the plan rides the system row instead.
             prompt = plan_envelope.render_marked_prompt(self.envelope, prompt)
-        return self._run_with_heartbeat(
-            lambda: self._run_with_retries(fn, prompt))
+        ok, text = self._run_with_heartbeat(
+            lambda: self._run_with_retries(fn, prompt, cancel), wall, cancel)
+        if not ok and self._orphaned_turn(text):
+            # The kernel-side turn may still be live (idle/wall cut) or the
+            # process is already dead; either way a follow-up turn/start on
+            # this session would collide, so reset before the next turn.
+            # (Transient retries already do this mid-run; this covers the
+            # plain-failure path too — 2026-09-20 it silently degraded the
+            # next node to one-shot chat mode.)
+            self.close()
+        return ok, text
 
-    @staticmethod
-    def _run_with_heartbeat(fn) -> tuple[bool, str]:
+    def _run_with_heartbeat(self, fn, wall: int | None = None,
+                            cancel: threading.Event | None = None
+                            ) -> tuple[bool, str]:
         """Run a turn in a thread, logging a keepalive line every 30s.
 
         Round 21 was SIGTERMed ~7 min into a silent final-verification turn.
@@ -1061,8 +1160,12 @@ class OctosDriver:
         stronger hypothesis — earlier 7.5-min silent turns survived, and
         there is no stage time cap: round 20 generated for 44 min). The
         keepalive covers the first; OCTOS_SMOKE_PORT covers the second.
+
+        `wall` caps the whole call: on expiry we set `cancel` (no further
+        retries / chat fallback) and kill the session so the worker's
+        run_turn notices within one 5s poll. A turn cut this way returns
+        failure; files written before the cut stay on disk.
         """
-        import threading
         box: dict = {}
 
         def target() -> None:
@@ -1074,10 +1177,26 @@ class OctosDriver:
         th = threading.Thread(target=target, daemon=True)
         th.start()
         t0 = time.time()
+        deadline = t0 + wall if wall is not None else None
         while True:
-            th.join(30)
+            # Cap the join by the deadline — a fixed 30s wait sleeps right
+            # past a smaller wall and the thread dies before the check.
+            wait = 30.0
+            if deadline is not None:
+                wait = max(min(wait, deadline - time.time()), 0.05)
+            th.join(wait)
             if not th.is_alive():
                 break
+            if deadline is not None and time.time() >= deadline:
+                log(f"[flow] turn wall clock exceeded "
+                    f"({int(time.time() - t0)}s ≥ {wall}s cap); "
+                    f"cutting the turn")
+                if cancel is not None:
+                    cancel.set()
+                self.close()
+                th.join(60)
+                return (False, f"turn cut by host wall clock ({wall}s cap; "
+                        f"{int(time.time() - t0)}s elapsed)")
             log(f"[flow] turn still running ({int(time.time() - t0)}s elapsed)")
         return box.get("r", (False, "turn thread ended without result"))
 
@@ -1098,24 +1217,33 @@ class OctosDriver:
 
     @staticmethod
     def _orphaned_turn(text: str) -> bool:
-        """A timeout means the kernel-side turn may STILL be running — we
-        just stopped waiting. A follow-up turn/start on the same session
-        would collide with that orphan, so timeouts must reset the session;
-        other transient errors (API bursts surfacing as turn/error) leave
-        the session idle and recoverable in-place."""
+        """The kernel-side turn may STILL be running (idle/wall cut) or its
+        process is already dead — either way a follow-up turn/start on the
+        same session would collide, so these must reset the session; other
+        transient errors (API bursts surfacing as turn/error) leave the
+        session idle and recoverable in-place."""
         lowered = text.lower()
         return any(k in lowered for k in (
-            "idle timeout", "wall clock", "octos turn timed out"))
+            "idle timeout", "wall clock", "octos turn timed out",
+            "process exited"))
 
-    def _run_with_retries(self, fn, prompt: str, attempts: int = 4) -> tuple[bool, str]:
+    def _run_with_retries(self, fn, prompt: str, cancel: threading.Event | None,
+                          attempts: int = 4) -> tuple[bool, str]:
         ok, text = fn(prompt)
         for attempt in range(2, attempts + 1):
+            if cancel is not None and cancel.is_set():
+                break
             if ok or not self._transient(text):
                 break
             wait = 30 * (attempt - 1)
             print(f"[driver] transient error, retry {attempt}/{attempts} "
                   f"after {wait}s: {text[:200]}", flush=True)
-            time.sleep(wait)
+            if cancel is not None:
+                cancel.wait(wait)  # abort the backoff instantly on a cut
+            else:
+                time.sleep(wait)
+            if cancel is not None and cancel.is_set():
+                break
             if self._orphaned_turn(text):
                 # Orphaned kernel turn: killing the session also kills it.
                 self.close()
@@ -1138,15 +1266,23 @@ class OctosDriver:
                 ok, text = fn(followup)
         return ok, text
 
-    def _run_stdio(self, prompt: str, timeout: int) -> tuple[bool, str]:
+    def _run_stdio(self, prompt: str, timeout: int, wall: int | None = None,
+                   cancel: threading.Event | None = None) -> tuple[bool, str]:
         try:
-            return self._get_session().run_turn(prompt, timeout=float(timeout))
+            return self._get_session().run_turn(
+                prompt, timeout=float(timeout),
+                wall_timeout=float(wall) if wall is not None else None)
         except Exception as exc:
+            if cancel is not None and cancel.is_set():
+                # Host-side wall cut: no chat fallback, no retries — return
+                # so the flow regains control immediately.
+                return False, f"turn cut by host wall clock: {exc}"[:500]
             # Fall back to a fresh one-shot chat for this turn.
             self.close()
-            chat_ok, chat_text = run_octos(self.octos_bin, self.cwd, prompt,
-                                           self.env, self.data_dir, timeout,
-                                           self.max_iterations)
+            chat_ok, chat_text = run_octos(
+                self.octos_bin, self.cwd, prompt, self.env, self.data_dir,
+                min(timeout, wall) if wall is not None else timeout,
+                self.max_iterations)
             if chat_ok:
                 return True, chat_text
             return False, f"stdio driver error: {exc}; chat fallback: {chat_text}"[:1000]
@@ -1728,7 +1864,21 @@ def main() -> int:
         # stop starting new turns and go straight to postflight — a partial
         # template that exits cleanly scores better than a SIGTERM mid-turn
         # (round 21 died that way and produced zero executed tests).
-        budget = int(os.environ.get("OCTOS_TIME_BUDGET", "2700"))
+        # 2026-09-21: 2700→5400 — the platform window is ~90 min (a full
+        # run incl. grading took ~50 min without any container kill).
+        budget = int(os.environ.get("OCTOS_TIME_BUDGET", "5400"))
+        # The budget is only checked BETWEEN turns, so one slow turn can
+        # legally eat it all (2026-09-20 ticketbooking: REQ-1.1 streamed
+        # 2667s of reasoning on a 2700s budget and starved four nodes —
+        # the idle timeout never fires while events keep flowing). These
+        # three knobs make the spend fair: every turn gets a hard wall
+        # clock, the final verification pass keeps a tail slice, and a new
+        # node is not started when the tail is all that's left.
+        node_wall = int(os.environ.get(
+            "OCTOS_NODE_WALL", str(int(budget * 0.45))))
+        final_reserve = int(os.environ.get(
+            "OCTOS_FINAL_RESERVE", str(max(300, budget // 9))))
+        node_floor = int(os.environ.get("OCTOS_NODE_FLOOR", "300"))
         t_run_start = time.time()
         # Smoke tests must NEVER use the grading port: round 21 was SIGTERMed
         # minutes after the final-verification turn started a server on
@@ -1751,24 +1901,35 @@ def main() -> int:
         toolchain_cli = None
         if os.environ.get("OCTOS_ARC_PREWARM", "1") != "0":
             toolchain_cli = _ensure_host_toolchain(log)
-        spec_run_cmd = (
-            "\nSPEC RUN (host-provided, deps preinstalled — use verbatim "
-            "from the workspace root):\n"
-            f"node {toolchain_cli} test --config "
-            ".arc/acceptance/playwright.config.ts --reporter=line\n"
-            if toolchain_cli else "")
+        if toolchain_cli is not None:
+            spec_run_cmd = (
+                "\nSPEC RUN (host-provided, deps preinstalled — use verbatim "
+                "from the workspace root):\n"
+                f"node {toolchain_cli} test --config "
+                ".arc/acceptance/playwright.config.ts --reporter=line\n")
+        else:
+            # The node prompt promises a verbatim SPEC RUN command; an empty
+            # string broke that contract (2026-09-20: the model then hunted
+            # for a Playwright install and burned 330s on tool timeouts).
+            # Mirror the Tier-2 degradation path instead.
+            spec_run_cmd = (
+                "\nSPEC RUN (host-provided fallback — use verbatim from the "
+                "workspace root):\n"
+                "npx --yes @playwright/test test --config "
+                ".arc/acceptance/playwright.config.ts --reporter=line\n")
         if plan_on and tests_dir:
             stage_dir = plan_envelope.stage_specs(tests_dir, output_dir)
             log(f"[plan] staged acceptance specs at {stage_dir}")
-            # 宿主尽算：模型自验所需的 config 与依赖链接一并备好，
-            # 模型只跑 SPEC RUN 一条命令，不装任何东西。
+            # 宿主尽算：自验 config 无条件落盘（内容只依赖冒烟口）——
+            # 工具链缺席时模型至少拿到可用的 config；依赖软链仍以
+            # 工具链就位为前提。
+            (stage_dir / "playwright.config.ts").write_text(
+                "import { defineConfig } from '@playwright/test';\n"
+                "export default defineConfig({ testDir: '.',\n"
+                "  use: { baseURL: "
+                f"'http://127.0.0.1:{smoke_port}' }} }});\n",
+                encoding="utf-8")
             if toolchain_cli is not None:
-                (stage_dir / "playwright.config.ts").write_text(
-                    "import { defineConfig } from '@playwright/test';\n"
-                    "export default defineConfig({ testDir: '.',\n"
-                    "  use: { baseURL: "
-                    f"'http://127.0.0.1:{smoke_port}' }} }});\n",
-                    encoding="utf-8")
                 try:
                     (stage_dir / "node_modules").symlink_to(
                         toolchain_cli.parents[2], target_is_directory=True)
@@ -1806,23 +1967,36 @@ def main() -> int:
                 'lsof -ti TCP:"$PORT" -sTCP:LISTEN | xargs -r kill 2>/dev/null\n'
                 "sleep 1\n"
                 'PORT="$PORT" nohup node src/index.js '
-                '>> ../.arc/host-dev-server.log 2>&1 &\n'
+                '>> ../octos-logs/host-dev-server.log 2>&1 &\n'
                 "i=0; while [ $i -lt 30 ]; do\n"
                 '  curl -sf "http://127.0.0.1:$PORT/api/health" >/dev/null '
                 "2>&1 && { echo \"server ready on $PORT\"; exit 0; }\n"
                 "  sleep 1; i=$((i+1)); done\n"
-                'echo "server failed; see .arc/host-dev-server.log"; exit 1\n',
+                'echo "server failed; see octos-logs/host-dev-server.log"; '
+                "exit 1\n",
                 encoding="utf-8")
         codegen_on = (os.environ.get("OCTOS_ARC_HOST_CODEGEN", "1") != "0"
                       and bool(scaffolded) and template_ready)
         if template_ready and os.environ.get("OCTOS_ARC_PREWARM", "1") != "0":
             scaffold.prewarm_deps(output_dir, log)
 
+        def remaining() -> float:
+            return budget - (time.time() - t_run_start)
+
         def time_up() -> bool:
-            return time.time() - t_run_start > budget
-        data_dir = Path(tempfile.mkdtemp(prefix="octos-data-"))
+            return remaining() <= 0
+        # 日志统一落 workspace 根下可见的 octos-logs/(与 backend/ 同级):
+        # 二进制状态与上下文日志(llm.jsonl)、driver 事件流、宿主
+        # dev-server 日志都收敛于此;不用 .octos 这类隐藏目录。
+        logs_dir = output_dir / "octos-logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        _ignore_logs_in_workspace_git(output_dir)
+        data_dir = logs_dir / "state"
+        data_dir.mkdir(parents=True, exist_ok=True)
         config_dir = Path(tempfile.mkdtemp(prefix="octos-config-"))
         env = build_octos_env(config_dir)
+        # --data-dir 只覆盖 chat 模式;stdio 模式读环境变量,双保险。
+        env["OCTOS_HOME"] = str(data_dir)
         # Make the smoke port the INHERITED default for anything the agent
         # starts: generated apps read `process.env.PORT || <grading port>`,
         # so a bare `npm start` inside a turn would otherwise bind the
@@ -1843,7 +2017,7 @@ def main() -> int:
         watchdog.start()
         driver = OctosDriver(
             octos_bin, output_dir, env, data_dir, max_iter,
-            events_log=output_dir / ".arc" / "octos-events.jsonl",
+            events_log=logs_dir / "octos-events.jsonl",
         )
         driver.plan_capable = plan_on
         plan_ports = {"grade": args.web_port, "smoke": smoke_port,
@@ -1892,7 +2066,9 @@ def main() -> int:
                 else:
                     sk_prompt = APP_SKELETON_PROMPT.format(
                         port=args.web_port, smoke=smoke_port) + tests_prompt
-                skeleton_ok, skeleton_text = driver.run(sk_prompt, node_timeout)
+                sk_wall = max(120, min(node_wall, int(remaining() - final_reserve)))
+                skeleton_ok, skeleton_text = driver.run(
+                    sk_prompt, min(node_timeout, sk_wall), sk_wall)
                 log(f"[flow] skeleton turn attempt {sk_attempt} "
                     f"{'ok' if skeleton_ok else 'FAILED'} "
                     f"in {time.time()-t0:.0f}s: {skeleton_text[-300:]!r}")
@@ -1918,7 +2094,7 @@ def main() -> int:
                             break
                         log(f"[flow] nudge turn {nudge}/2: push the model "
                             f"to actually write files")
-                        n_ok, n_text = driver.run(NUDGE_PROMPT, 600)
+                        n_ok, n_text = driver.run(NUDGE_PROMPT, 420, 420)
                         log(f"[flow] nudge {nudge} "
                             f"{'ok' if n_ok else 'FAILED'}: "
                             f"{n_text[-200:]!r}")
@@ -1935,7 +2111,7 @@ def main() -> int:
                         for rg_attempt in range(1, 3):
                             if time_up():
                                 break
-                            driver.run(syntax_repair_prompt(syn), 600)
+                            driver.run(syntax_repair_prompt(syn), 420, 420)
                             syn = js_syntax_errors(output_dir)
                             if not syn:
                                 log(f"[gate] syntax repaired "
@@ -1974,7 +2150,11 @@ def main() -> int:
             failed: list[str] = []
             for idx, node in enumerate(atomic_nodes, 1):
                 node_id = str(node.get("id"))
-                if time_up():
+                # Stricter than time_up(): don't START a node when only the
+                # final-verification tail is left — a node turn that would
+                # eat the reserve leaves the run unverified (2026-09-20:
+                # four nodes starved this way).
+                if remaining() < final_reserve + node_floor:
                     log(f"[flow] time budget exhausted; skipping {node_id} "
                         f"and remaining nodes")
                     events.mark_implementation_started(node_id)
@@ -2008,7 +2188,8 @@ def main() -> int:
                 if template_ready:
                     _ensure_dev_server(output_dir, smoke_port,
                                        spec_ports_extra, log)
-                ok, text = driver.run(node_prompt, node_timeout)
+                wall = max(120, min(node_wall, int(remaining() - final_reserve)))
+                ok, text = driver.run(node_prompt, min(node_timeout, wall), wall)
                 log(f"[flow] node {node_id} {'ok' if ok else 'FAILED'} "
                     f"in {time.time()-t0:.0f}s: {text[-300:]!r}")
                 if not ok:
@@ -2031,7 +2212,7 @@ def main() -> int:
                         if time_up():
                             break
                         ng_t0 = time.time()
-                        driver.run(NODE_NUDGE_PROMPT, 600)
+                        driver.run(NODE_NUDGE_PROMPT, 420, 420)
                         if project_files_changed(output_dir, ng_t0):
                             nudged = True
                             log(f"[gate] {node_id}: nudge {ng} produced "
@@ -2049,7 +2230,7 @@ def main() -> int:
                     for rg_attempt in range(1, 3):
                         if time_up():
                             break
-                        driver.run(syntax_repair_prompt(syn), 600)
+                        driver.run(syntax_repair_prompt(syn), 420, 420)
                         syn = js_syntax_errors(output_dir)
                         if not syn:
                             log(f"[gate] {node_id} syntax repaired "
@@ -2084,10 +2265,12 @@ def main() -> int:
                         for fix_attempt in (1, 2):
                             if time_up():
                                 break
+                            r_wall = max(120, min(
+                                node_wall, int(remaining() - final_reserve)))
                             driver.run(REHEARSAL_REPAIR_PROMPT.format(
                                 error=r_err[-1200:],
                                 port=args.web_port, smoke=smoke_port),
-                                node_timeout)
+                                min(node_timeout, r_wall), r_wall)
                             r_err, r_report = rehearse_node(
                                 output_dir, smoke_port, probe_list,
                                 spec_ports_extra)
@@ -2193,7 +2376,9 @@ def main() -> int:
                     log("[flow] final verification turn starting (slim, "
                         f"{len(probe_list)} route probe(s))")
                     t0 = time.time()
-                    ok, text = driver.run(final_prompt, node_timeout)
+                    f_wall = max(120, min(node_wall, int(remaining())))
+                    ok, text = driver.run(
+                        final_prompt, min(node_timeout, f_wall), f_wall)
                     log(f"[flow] final check {'ok' if ok else 'FAILED'} "
                         f"in {time.time()-t0:.0f}s: {text[-300:]!r}")
                     if f_err is not None:
@@ -2221,10 +2406,11 @@ def main() -> int:
             else:
                 log("[flow] final verification turn starting")
                 t0 = time.time()
+                f_wall = max(120, min(node_wall, int(remaining())))
                 ok, text = driver.run(
                     FINAL_CHECK_PROMPT.format(port=args.web_port,
                                               smoke=smoke_port) + tests_prompt_slim,
-                    node_timeout,
+                    min(node_timeout, f_wall), f_wall,
                 )
                 log(f"[flow] final check {'ok' if ok else 'FAILED'} "
                     f"in {time.time()-t0:.0f}s: {text[-300:]!r}")
@@ -2251,11 +2437,14 @@ def main() -> int:
                 if rehearsal == 3:
                     log("[rehearsal] giving up; submitting as-is")
                     break
+                # Post-budget by design (grading readiness beats the clock),
+                # but still wall-capped: an uncapped repair here could burn
+                # up to 3 × the 1h hard wall AFTER the budget is gone.
                 ok_r, text_r = driver.run(
                     REHEARSAL_REPAIR_PROMPT.format(
                         error=err[-1200:], port=args.web_port,
                         smoke=smoke_port),
-                    node_timeout,
+                    420, 420,
                 )
                 log(f"[rehearsal] repair turn "
                     f"{'ok' if ok_r else 'FAILED'}: {text_r[-200:]!r}")
@@ -2264,12 +2453,18 @@ def main() -> int:
         finally:
             watchdog_stop.set()
             driver.close()
+        # A budget-skipped final pass says nothing about node tests — the
+        # platform's own Playwright run is the verdict there, so leave the
+        # nodes unmarked instead of blanket-failing the ones that landed.
+        final_skipped = (not ok) and text.startswith("skipped: time budget")
         for node in atomic_nodes:
             node_id = str(node.get("id"))
-            if node_id in failed or not ok:
+            if node_id in failed:
                 events.mark_test_failed(node_id, "final verification did not pass")
-            else:
+            elif ok:
                 events.mark_test_passed(node_id, "verified by octos final check")
+            elif not final_skipped:
+                events.mark_test_failed(node_id, "final verification did not pass")
         runtime.git.commit("chore: final verification pass")
 
         if failed:
@@ -2291,6 +2486,10 @@ def main() -> int:
                 pass
         return 0
     except Exception as exc:  # platform judges by events, not exit code
+        # 平台只看退出码与 SDK 事件；traceback 必须同时落在 stdout/stderr
+        # 工件里，否则秒退原因只存在 traceability 记录中、无法排查。
+        log(f"[fatal] {type(exc).__name__}: {exc}")
+        traceback.print_exc()
         _postflight_structure_check(output_dir, args.web_port)
         _free_web_port(args.web_port)
         events.mark_run_failed(str(exc)[:1000])

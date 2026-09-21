@@ -155,7 +155,8 @@ class OctosStdioSession:
             params["profile_id"] = self.profile_id
         self._send("session/open", params, want_response=True, timeout=timeout)
 
-    def run_turn(self, text: str, timeout: float = 1800.0) -> tuple[bool, str]:
+    def run_turn(self, text: str, timeout: float = 1800.0,
+                 wall_timeout: float | None = None) -> tuple[bool, str]:
         """Run one turn; stream events to on_event. Returns (ok, full_text).
 
         `timeout` is an IDLE budget, not a wall clock: the deadline resets
@@ -163,8 +164,13 @@ class OctosStdioSession:
         progressing turn is never killed mid-write. The 2026-09-16
         ticket-booking baseline lost a 1200s wall-clock turn that was
         actively streaming (slow provider: 30-60s TTFB, 0.3-15 tok/s),
-        leaving server.js truncated mid-declaration. A hard wall clock
-        (3x the idle budget, min 1h) still guards a truly stuck turn.
+        leaving server.js truncated mid-declaration.
+
+        `wall_timeout`, when given, IS a hard wall clock for the whole
+        turn: the host uses it to enforce per-node budget shares. Without
+        it the wall defaults to 3x the idle budget (min 1h) — which let a
+        single 2667s reasoning-heavy turn starve four sibling nodes on
+        2026-09-20.
         """
         turn_id = str(uuid.uuid4())
         self._send("turn/start", {
@@ -174,7 +180,9 @@ class OctosStdioSession:
         }, want_response=True, timeout=60.0)
 
         chunks: list[str] = []
-        hard_deadline = time.monotonic() + max(timeout * 3, 3600.0)
+        hard_deadline = time.monotonic() + (
+            wall_timeout if wall_timeout is not None
+            else max(timeout * 3, 3600.0))
         idle_deadline = time.monotonic() + timeout
         while True:
             now = time.monotonic()
@@ -186,8 +194,12 @@ class OctosStdioSession:
                 return False, (f"octos process exited {self.proc.returncode}; "
                                f"stderr tail: {self.stderr_tail()}")
             try:
+                # Cap the wait at 5s so a killed/exited process is noticed
+                # within one poll even when the idle deadline is far away
+                # (the stdout reader exits on EOF without a sentinel).
                 frame = self._notifications.get(
-                    timeout=max(min(idle_deadline, hard_deadline) - now, 0.05))
+                    timeout=min(max(min(idle_deadline, hard_deadline) - now,
+                                    0.05), 5.0))
             except queue.Empty:
                 continue
             method = frame.get("method", "")
