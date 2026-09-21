@@ -50,8 +50,8 @@ impl Tool for DiffEditTool {
     }
 
     fn description(&self) -> &str {
-        "Apply a unified diff to a file. Supports fuzzy matching (+-3 lines offset). \
-         Use standard unified diff format with @@ -start,count +start,count @@ headers."
+        "Apply a unified diff (with @@ -start,count +start,count @@ headers) to a file; \
+         tolerates +-3 line drift."
     }
 
     fn tags(&self) -> &[&str] {

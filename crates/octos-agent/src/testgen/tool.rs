@@ -61,11 +61,9 @@ impl Tool for TestgenTool {
     }
 
     fn description(&self) -> &str {
-        "Host-driven test pipeline. `scaffold` extracts the API contract + validation checklist \
-         from backend source and writes test skeletons with pre-named stub cases — fill EVERY \
-         stub, keep the titles, never edit application source. `verify` returns the host verdict: \
-         covered (done) / gap (fill the listed stubs) / app_bug (application is wrong — report, \
-         do not fix) / test_err (your test code is broken — fix it)."
+        "Host-driven test pipeline. `scaffold`: extract contract + write skeletons with pre-named \
+         stubs — fill EVERY stub, keep titles, never edit app source. `verify`: verdict — \
+         covered / gap (fill stubs) / app_bug (report) / test_err (fix your test)."
     }
 
     fn tags(&self) -> &[&str] {
@@ -79,7 +77,7 @@ impl Tool for TestgenTool {
                 "action": {
                     "type": "string",
                     "enum": ["scaffold", "verify"],
-                    "description": "scaffold: extract contract + write skeletons. verify: run the ledger check + suite and get the verdict."
+                    "description": "scaffold: extract contract + write skeletons. verify: run the check + suite, get the verdict."
                 },
                 "targets": {
                     "type": "array",

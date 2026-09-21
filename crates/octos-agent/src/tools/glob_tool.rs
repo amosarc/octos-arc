@@ -107,7 +107,7 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files matching a glob pattern. Use ** for recursive matching. Examples: '**/*.rs' finds all Rust files, 'src/**/*.py' finds Python files in src."
+        "Find files by glob ('**' recurses), e.g. '**/*.rs' or 'src/**/*.py'."
     }
 
     fn tags(&self) -> &[&str] {

@@ -63,6 +63,34 @@ pub struct FileChurnSignal {
     pub escalation: bool,
 }
 
+/// Green-stop signal: the same staged acceptance spec (`.arc/acceptance/…`,
+/// the host's verbatim SPEC RUN command) passed IDENTICALLY twice with no
+/// source-editing tool call in between. The node is verified done; the
+/// conversation loop arms a short force-stop so the model wraps up instead
+/// of re-verifying what is already green (keep-25: turns kept running
+/// 200+s after a green spec run — the success signal never became a stop
+/// signal).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GreenStopSignal {
+    /// Trimmed spec-run command, for logs only.
+    pub command: String,
+    /// Tests passed in the (identical) green runs.
+    pub passed: u32,
+}
+
+/// Per-turn green-stop tracking. A source edit (write_file / edit_file /
+/// diff_edit / apply_patch via [`mutation_path`]) between two green runs
+/// means the second green verifies NEW code — that is a fresh baseline, not
+/// a redundant re-check, so it re-arms instead of firing. Shell commands
+/// (npm run build, restart-server, curl) do NOT reset: dist/重启 are
+/// derived state, idempotent without a source edit.
+#[derive(Debug, Default)]
+struct GreenStopState {
+    last_green: Option<(u64, u32)>,
+    source_edit_since_green: bool,
+    pending: Option<GreenStopSignal>,
+}
+
 /// Tracks tool call patterns and detects loops.
 pub struct LoopDetector {
     /// Ring buffer of recent tool call signatures (name + args).
@@ -89,6 +117,7 @@ pub struct LoopDetector {
     /// An unchanged asynchronous peer snapshot requests reflection, not a
     /// fabricated final or an abort before its next read can observe progress.
     pending_peer_polling: Option<String>,
+    green: GreenStopState,
 }
 
 impl LoopDetector {
@@ -108,6 +137,7 @@ impl LoopDetector {
                 .unwrap_or(5),
             pending_file_churn: None,
             pending_peer_polling: None,
+            green: GreenStopState::default(),
         }
     }
 
@@ -154,6 +184,63 @@ impl LoopDetector {
 
     pub fn take_peer_polling_signal(&mut self) -> Option<String> {
         self.pending_peer_polling.take()
+    }
+
+    /// Record one completed tool call for green-stop tracking. Call AFTER
+    /// execution, in tool-result order (same site as [`Self::record_result`]).
+    ///
+    /// A shell call whose command references the host's staged acceptance
+    /// specs (`.arc/acceptance`) with a green Playwright summary is a "green
+    /// run". The same command going green again with NO source edit since
+    /// the previous green arms a [`GreenStopSignal`]. Fires once per pair;
+    /// after firing the pair state clears (a later green starts a new pair).
+    pub fn record_green_stop(&mut self, tool_name: &str, args: &serde_json::Value, result: &str) {
+        if mutation_path(tool_name, args).is_some() {
+            self.green.source_edit_since_green = true;
+            return;
+        }
+        let Some(command) = args
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|cmd| !cmd.is_empty())
+        else {
+            return;
+        };
+        if !command.contains(".arc/acceptance") {
+            return;
+        }
+        let Some(passed) = parse_green_summary(result) else {
+            return;
+        };
+        let mut hasher = DefaultHasher::new();
+        command.hash(&mut hasher);
+        let signature = hasher.finish();
+        match self.green.last_green {
+            Some((prior_signature, prior_passed))
+                if prior_signature == signature
+                    && prior_passed == passed
+                    && !self.green.source_edit_since_green =>
+            {
+                self.green.pending = Some(GreenStopSignal {
+                    command: command.chars().take(160).collect(),
+                    passed,
+                });
+                self.green.last_green = None;
+                self.green.source_edit_since_green = false;
+            }
+            _ => {
+                self.green.last_green = Some((signature, passed));
+                self.green.source_edit_since_green = false;
+            }
+        }
+    }
+
+    /// Take the pending green-stop signal, if the last completed batch
+    /// armed one. Mirrors [`Self::take_file_churn_signal`] /
+    /// [`Self::take_peer_polling_signal`].
+    pub fn take_green_stop_signal(&mut self) -> Option<GreenStopSignal> {
+        self.green.pending.take()
     }
 
     /// #1765: record a tool call for the doom-loop guard and return the
@@ -323,10 +410,124 @@ fn mutation_path(tool_name: &str, args: &serde_json::Value) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// Extract the passed-test count from a Playwright summary, `Some` only for
+/// an unambiguously green run: at least one `N passed` line and no
+/// `failed` / `flaky` / `did not run` / `interrupted` line anywhere in the
+/// output. Playwright prints the summary as
+/// `  3 passed (12.4s)`; failures print `  2 failed │ 1 passed`.
+fn parse_green_summary(result: &str) -> Option<u32> {
+    let mut passed: Option<u32> = None;
+    for line in result.lines() {
+        let line = line.trim();
+        let digits: String = line.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            continue;
+        }
+        let after = line[digits.len()..].trim_start();
+        if after.starts_with("passed") {
+            passed = digits.parse().ok();
+        } else if after.starts_with("failed")
+            || after.starts_with("flaky")
+            || after.starts_with("did not run")
+            || after.starts_with("interrupted")
+        {
+            return None;
+        }
+    }
+    passed.filter(|count| *count > 0)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ---------- green-stop (loop_detect) ----------
+
+    const SPEC_CMD: &str = "npx playwright test .arc/acceptance/REQ-1.1.spec.ts --workers=1";
+    const GREEN_OUT: &str =
+        "Running 1 test using 1 worker\n\n  ✓ REQ-1.1\n\n  1 passed (5.6s)";
+
+    fn record_spec(mut detector: &mut LoopDetector, command: &str, output: &str) {
+        detector.record_green_stop("shell", &json!({ "command": command }), output);
+    }
+
+    #[test]
+    fn green_summary_parses_pure_pass() {
+        assert_eq!(parse_green_summary("  3 passed (12.4s)"), Some(3));
+        assert_eq!(parse_green_summary(GREEN_OUT), Some(1));
+        assert_eq!(parse_green_summary("  0 passed (2.0s)"), None);
+    }
+
+    #[test]
+    fn green_summary_rejects_failures_flaky_and_interruptions() {
+        assert_eq!(parse_green_summary("  2 failed │ 1 passed (3.0s)"), None);
+        assert_eq!(parse_green_summary("  1 flaky (3.0s)"), None);
+        assert_eq!(parse_green_summary("  2 did not run (3.0s)"), None);
+        assert_eq!(parse_green_summary("  1 interrupted (3.0s)"), None);
+        assert_eq!(parse_green_summary("no summary at all"), None);
+    }
+
+    #[test]
+    fn identical_double_green_with_no_edit_arms_signal() {
+        let mut d = LoopDetector::new(10);
+        assert!(d.take_green_stop_signal().is_none());
+        record_spec(&mut d, SPEC_CMD, GREEN_OUT);
+        assert!(d.take_green_stop_signal().is_none(), "first green only arms");
+        record_spec(&mut d, SPEC_CMD, GREEN_OUT);
+        let signal = d.take_green_stop_signal().expect("second identical green fires");
+        assert_eq!(signal.passed, 1);
+        assert!(signal.command.contains("REQ-1.1"));
+        // fires once per pair
+        assert!(d.take_green_stop_signal().is_none());
+    }
+
+    #[test]
+    fn source_edit_between_greens_rearms_instead_of_firing() {
+        let mut d = LoopDetector::new(10);
+        record_spec(&mut d, SPEC_CMD, GREEN_OUT);
+        d.record_green_stop(
+            "edit_file",
+            &json!({ "path": "frontend/src/main.jsx", "old": "a", "new": "b" }),
+            "ok",
+        );
+        // A shell build between greens does NOT count as a source edit.
+        d.record_green_stop(
+            "shell",
+            &json!({ "command": "npm run build --prefix frontend" }),
+            "built",
+        );
+        record_spec(&mut d, SPEC_CMD, GREEN_OUT);
+        assert!(
+            d.take_green_stop_signal().is_none(),
+            "green after an edit verifies NEW code: fresh baseline, no fire"
+        );
+        // A third green with no further edit now fires.
+        record_spec(&mut d, SPEC_CMD, GREEN_OUT);
+        assert!(d.take_green_stop_signal().is_some());
+    }
+
+    #[test]
+    fn different_pass_counts_do_not_fire() {
+        let mut d = LoopDetector::new(10);
+        record_spec(&mut d, SPEC_CMD, "  1 passed (1.0s)");
+        record_spec(&mut d, SPEC_CMD, "  2 passed (1.0s)");
+        assert!(d.take_green_stop_signal().is_none());
+    }
+
+    #[test]
+    fn non_spec_commands_are_ignored() {
+        let mut d = LoopDetector::new(10);
+        for _ in 0..3 {
+            d.record_green_stop(
+                "shell",
+                &json!({ "command": "npm run build --prefix frontend" }),
+                GREEN_OUT,
+            );
+        }
+        assert!(d.take_green_stop_signal().is_none());
+    }
 
     fn detector_with_churn_threshold(threshold: usize) -> LoopDetector {
         let mut detector = LoopDetector::new(10);

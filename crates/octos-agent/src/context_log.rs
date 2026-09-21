@@ -109,8 +109,7 @@ impl ContextLogger {
         let inner = self.inner.as_ref().expect("resolve_dir implies inner");
         let seq = inner.seq.fetch_add(1, Ordering::Relaxed);
         record["seq"] = json!(seq);
-        record["ts"] =
-            json!(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+        record["ts"] = json!(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
         record["run_id"] = json!(inner.run_id);
         let line = record.to_string();
         if let Err(error) = std::fs::OpenOptions::new()
@@ -128,6 +127,13 @@ impl ContextLogger {
     }
 
     /// Record one LLM attempt: the full request context the model saw.
+    ///
+    /// `prefix_fingerprint` carries the redacted prompt-cache manifest
+    /// (per-segment hashes + estimated tokens) so offline token reports can
+    /// compute exact common-prefix reuse between consecutive requests.
+    /// `compaction_event` attributes any history rewrite this iteration to a
+    /// concrete compaction pass (`agent::compaction::CompactionEvent`);
+    /// `None` when no pass fired.
     pub fn log_llm_request(
         &self,
         workspace_root: Option<&Path>,
@@ -136,23 +142,28 @@ impl ContextLogger {
         model: &str,
         messages: &[Message],
         tool_names: &[String],
+        prefix_fingerprint: Option<serde_json::Value>,
+        compaction_event: Option<serde_json::Value>,
     ) {
         if !self.is_enabled() {
             return;
         }
-        self.append(
-            workspace_root,
-            "llm.jsonl",
-            json!({
-                "kind": "llm_request",
-                "iteration": iteration,
-                "attempt": attempt,
-                "model": model,
-                "message_count": messages.len(),
-                "messages": messages,
-                "tools": tool_names,
-            }),
-        );
+        let mut record = json!({
+            "kind": "llm_request",
+            "iteration": iteration,
+            "attempt": attempt,
+            "model": model,
+            "message_count": messages.len(),
+            "messages": messages,
+            "tools": tool_names,
+        });
+        if let Some(fingerprint) = prefix_fingerprint {
+            record["prefix_fingerprint"] = fingerprint;
+        }
+        if let Some(event) = compaction_event.filter(|event| !event.is_null()) {
+            record["compaction_event"] = event;
+        }
+        self.append(workspace_root, "llm.jsonl", record);
     }
 
     /// Record one LLM attempt's parsed response.
@@ -233,7 +244,7 @@ mod tests {
     fn disabled_logger_is_a_full_noop() {
         let ws = workspace();
         let logger = ContextLogger::new(false);
-        logger.log_llm_request(Some(ws.path()), 1, 0, "test-model", &[], &[]);
+        logger.log_llm_request(Some(ws.path()), 1, 0, "test-model", &[], &[], None, None);
         assert!(!logger.is_enabled());
         assert!(logger.dir().is_none());
         assert!(
@@ -262,6 +273,20 @@ mod tests {
             "test-model",
             &messages,
             &["shell".to_string()],
+            Some(serde_json::json!({
+                "schema": "octos.prompt-cache-fingerprint.v1",
+                "stable_prefix_hash": "abc",
+                "conversation_segments": [
+                    {"kind": "user", "hash": "def", "estimated_tokens": 2}
+                ]
+            })),
+            Some(serde_json::json!({
+                "path": "preflight_trim",
+                "tokens_before": 100,
+                "tokens_after": 40,
+                "budget_tokens": 60,
+                "window_tokens": 128000
+            })),
         );
         let response = octos_llm::ChatResponse {
             content: Some("hi".to_string()),
@@ -293,6 +318,9 @@ mod tests {
         assert_eq!(req["kind"], "llm_request");
         assert_eq!(req["messages"][0]["content"], "hello");
         assert_eq!(req["tools"][0], "shell");
+        assert_eq!(req["prefix_fingerprint"]["stable_prefix_hash"], "abc");
+        assert_eq!(req["compaction_event"]["path"], "preflight_trim");
+        assert_eq!(req["compaction_event"]["window_tokens"], 128000);
         let resp: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
         assert_eq!(resp["kind"], "llm_response");
         assert_eq!(resp["stop_reason"], "end_turn");

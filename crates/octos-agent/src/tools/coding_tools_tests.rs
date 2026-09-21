@@ -97,7 +97,9 @@ const CODEX_P0: &[&str] = &[
 #[test]
 fn builtins_expose_codex_p0_tool_names() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let registry = ToolRegistry::with_builtins(temp.path());
+    // Codex naming-parity is about the REGISTERED surface; spec-slim hides
+    // `exec_command` by design, so pin parity against the full array.
+    let registry = ToolRegistry::with_builtins(temp.path()).with_spec_slim(false);
     let names: std::collections::HashSet<_> =
         registry.specs().into_iter().map(|spec| spec.name).collect();
     for name in CODEX_P0 {
@@ -761,8 +763,7 @@ mod bash_file_writes_28d {
                     "exec_command",
                     "cargo publish --token super-secret",
                     Path::new("/tmp"),
-                    &(std::sync::Arc::new(AskAlways)
-                        as std::sync::Arc<dyn CommandPolicy>),
+                    &(std::sync::Arc::new(AskAlways) as std::sync::Arc<dyn CommandPolicy>),
                     ApprovalPolicy::Ask,
                 ),
             )
@@ -775,7 +776,9 @@ mod bash_file_writes_28d {
             result.output
         );
         assert!(
-            result.output.contains(crate::tools::USER_APPROVAL_DENIED_SUFFIX),
+            result
+                .output
+                .contains(crate::tools::USER_APPROVAL_DENIED_SUFFIX),
             "denial output must carry the non-failure suffix, got: {}",
             result.output
         );

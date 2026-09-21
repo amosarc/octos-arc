@@ -5,7 +5,7 @@
     python3 measure_tokens.py arc/arc-output/<run> [run2 ...]
     python3 measure_tokens.py --all arc/arc-output/
 
-口径与 2026-09-17 基线一致:遍历 <run>/.octos/context-logs/*/llm.jsonl 的
+口径与 2026-09-17 基线一致:遍历 <run>/octos-logs/**/llm.jsonl(旧布局 .octos/context-logs/*/llm.jsonl 兼容)的
 kind=llm_response 记录,累加 usage;缺 cache_read_tokens 键按 0 计。
 
 缓存失效口径(cache<1000 视为未命中):miss=未命中请求数;fresh=未命中请求的
@@ -29,11 +29,22 @@ import collections
 from pathlib import Path
 
 
+def _llm_log_files(run: Path) -> list:
+    """新布局 octos-logs/(可见,与 backend 同级)优先,兼容旧 .octos/。"""
+    files = list(run.glob("octos-logs/**/llm.jsonl"))
+    files += run.glob(".octos/context-logs/*/llm.jsonl")
+    return sorted(set(files))
+
+
+def _has_llm_logs(run: Path) -> bool:
+    return (run / "octos-logs").is_dir() or (run / ".octos").is_dir()
+
+
 def scan_run(run: Path) -> dict:
     tot: collections.Counter = collections.Counter()
     tools: collections.Counter = collections.Counter()
     calls = 0
-    for f in sorted(run.glob(".octos/context-logs/*/llm.jsonl")):
+    for f in _llm_log_files(run):
         for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
             try:
                 r = json.loads(line)
@@ -65,8 +76,8 @@ def main(argv: list[str]) -> int:
     runs: list[Path] = []
     for a in argv:
         p = Path(a)
-        if a == "--all" or (p.is_dir() and not (p / ".octos").exists()):
-            runs.extend(sorted(x for x in p.iterdir() if (x / ".octos").exists()))
+        if a == "--all" or (p.is_dir() and not _has_llm_logs(p)):
+            runs.extend(sorted(x for x in p.iterdir() if _has_llm_logs(x)))
         else:
             runs.append(p)
     if not runs:

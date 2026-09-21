@@ -111,11 +111,10 @@ impl Tool for GrepTool {
     fn description(&self) -> &str {
         static DESCRIPTION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
-                "Search file contents using regex. Respects .gitignore. Use file_pattern to \
-                 filter which files to search (e.g., '*.rs'). Use path to scope the search to a \
-                 specific directory. Output is truncated beyond {} bytes (middle elided) and \
-                 each matched line beyond {GREP_MAX_LINE_LENGTH} chars, so prefer narrow \
-                 patterns and path/file_pattern filters over broad sweeps.",
+                "Regex content search, .gitignore-aware. `file_pattern` filters files \
+                 (e.g. '*.rs'), `path` scopes the directory. Output truncates beyond {} \
+                 bytes (middle elided) and per line at {GREP_MAX_LINE_LENGTH} chars — \
+                 prefer narrow patterns over broad sweeps.",
                 octos_core::tool_output_limit("grep")
             )
         });
@@ -132,27 +131,27 @@ impl Tool for GrepTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Regex pattern to search for"
+                    "description": "Regex to search for"
                 },
                 "path": {
                     "type": "string",
-                    "description": "Optional directory to search under (defaults to the working directory)"
+                    "description": "Directory to search under (defaults to cwd)"
                 },
                 "file_pattern": {
                     "type": "string",
-                    "description": "Glob pattern to filter files (e.g., '*.rs', '*.py')"
+                    "description": "Glob filter, e.g. '*.rs'"
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of matches (default: 50)"
+                    "description": "Max matches (default 50)"
                 },
                 "context": {
                     "type": "integer",
-                    "description": "Lines of context around matches (default: 0)"
+                    "description": "Context lines around matches (default 0)"
                 },
                 "ignore_case": {
                     "type": "boolean",
-                    "description": "Case insensitive search (default: false)"
+                    "description": "Case-insensitive search (default false)"
                 }
             },
             "required": ["pattern"]

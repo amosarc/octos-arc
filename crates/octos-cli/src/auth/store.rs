@@ -32,7 +32,8 @@ pub struct AuthCredential {
 impl AuthCredential {
     /// Whether this credential has expired.
     pub fn is_expired(&self) -> bool {
-        self.expires_at.is_some_and(|exp| exp < chrono::Local::now())
+        self.expires_at
+            .is_some_and(|exp| exp < chrono::Local::now())
     }
 }
 

@@ -26,6 +26,30 @@ pub(super) enum RetryCompactionVerdict {
     },
 }
 
+/// One compaction pass, recorded by whichever message-prep path performed it
+/// and consumed by the next `log_llm_request` row (`compaction_event` in
+/// `llm.jsonl`). Offline token reports use it to attribute cache
+/// invalidations and history rewrites to a concrete cause instead of
+/// guessing from history-byte drops.
+#[derive(Clone, Debug, serde::Serialize)]
+pub(super) struct CompactionEvent {
+    /// Which pass fired: `preflight_trim` (legacy extractive trim),
+    /// `fallback_truncate`, `policy_preflight`, `policy_turn`,
+    /// `overflow_retry`.
+    pub path: &'static str,
+    /// Estimated conversation tokens before the pass (when the pass knows).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_before: Option<u32>,
+    /// Estimated tokens after the pass (when the pass knows).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_after: Option<u32>,
+    /// Calibrated budget the trim decided against (trim paths only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
+    /// Provider context window at decision time.
+    pub window_tokens: u32,
+}
+
 impl Agent {
     pub(super) fn trim_to_context_window(&self, messages: &mut Vec<Message>) -> bool {
         use crate::compaction::{MIN_RECENT_MESSAGES, compact_messages, find_recent_boundary};
@@ -67,7 +91,17 @@ impl Agent {
 
         // If recent messages alone exceed budget, fall back to simple truncation
         if system_tokens + recent_tokens >= budget {
-            return self.fallback_truncate(messages, budget);
+            let truncated = self.fallback_truncate(messages, budget);
+            if truncated {
+                self.record_compaction(CompactionEvent {
+                    path: "fallback_truncate",
+                    tokens_before: Some(total),
+                    tokens_after: None,
+                    budget_tokens: Some(budget),
+                    window_tokens: window,
+                });
+            }
+            return truncated;
         }
 
         let old_messages = &messages[1..split];
@@ -106,7 +140,32 @@ impl Agent {
             "compacted conversation history ({} token budget)",
             budget
         );
+        self.record_compaction(CompactionEvent {
+            path: "preflight_trim",
+            tokens_before: Some(total),
+            tokens_after: Some(summary_tokens + system_tokens + recent_tokens),
+            budget_tokens: Some(budget),
+            window_tokens: window,
+        });
         true
+    }
+
+    /// Record the most recent compaction pass for the next
+    /// `log_llm_request` row. Overwritten each pass; taken by the LLM call
+    /// site ([`Agent::take_compaction_event`]).
+    pub(super) fn record_compaction(&self, event: CompactionEvent) {
+        *self
+            .last_compaction_event
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(event);
+    }
+
+    /// Take the compaction pass recorded since the last model call, if any.
+    pub(super) fn take_compaction_event(&self) -> Option<CompactionEvent> {
+        self.last_compaction_event
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     /// Run preflight compaction before the first LLM call if the wired
@@ -131,6 +190,15 @@ impl Agent {
             return Ok(None);
         }
         let outcome = runner.run(messages);
+        if outcome.performed {
+            self.record_compaction(CompactionEvent {
+                path: "policy_preflight",
+                tokens_before: Some(outcome.tokens_before),
+                tokens_after: Some(outcome.tokens_after),
+                budget_tokens: None,
+                window_tokens: self.llm.context_window(),
+            });
+        }
         info!(
             phase = "preflight",
             performed = outcome.performed,
@@ -186,6 +254,13 @@ impl Agent {
                 summarizer = outcome.summarizer_kind,
                 "harness M6.3 compaction per-turn pass"
             );
+            self.record_compaction(CompactionEvent {
+                path: "policy_turn",
+                tokens_before: Some(outcome.tokens_before),
+                tokens_after: Some(outcome.tokens_after),
+                budget_tokens: None,
+                window_tokens: self.llm.context_window(),
+            });
             self.enforce_preservation(messages, CompactionPhase::TurnEnd)?;
             return Ok(outcome.summary);
         }
@@ -229,6 +304,13 @@ impl Agent {
                 summarizer = outcome.summarizer_kind,
                 "harness compaction pass before overflow retry"
             );
+            self.record_compaction(CompactionEvent {
+                path: "overflow_retry",
+                tokens_before: Some(outcome.tokens_before),
+                tokens_after: Some(outcome.tokens_after),
+                budget_tokens: None,
+                window_tokens: self.llm.context_window(),
+            });
             self.enforce_preservation(messages, CompactionPhase::TurnEnd)?;
             Ok(RetryCompactionVerdict::Compacted {
                 tokens_before: outcome.tokens_before,

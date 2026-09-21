@@ -65,7 +65,7 @@ impl Tool for EditFileTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing a string with a new string. An exact match of old_string is preferred; when none exists, whitespace-, indentation- and escape-tolerant fuzzy matching is tried as a fallback. The old_string must identify a single location."
+        "Replace `old_string` with `new_string` in a file; exact match preferred, tolerant fallback tried. `old_string` must identify one unique location."
     }
 
     fn tags(&self) -> &[&str] {
@@ -84,15 +84,15 @@ impl Tool for EditFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file to edit (alias: filePath)"
+                    "description": "Path to the file to edit"
                 },
                 "old_string": {
                     "type": "string",
-                    "description": "The string to find and replace. An exact match is preferred; minor whitespace/indentation/escape differences are tolerated as a fallback. Must identify a unique location. (alias: oldString)"
+                    "description": "Text to find; must be unique"
                 },
                 "new_string": {
                     "type": "string",
-                    "description": "The string to replace it with (alias: newString)"
+                    "description": "Replacement text"
                 }
             },
             "required": ["path", "old_string", "new_string"]

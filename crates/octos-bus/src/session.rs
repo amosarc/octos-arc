@@ -322,7 +322,10 @@ enum SessionControlRecord {
     /// from the transcript accumulated up to this point in the log. Written by
     /// [`SessionManager::rollback_last_n_user_turns`] and replayed on every
     /// load (append-only, never a truncation).
-    Rollback { num_turns: u32, at: DateTime<chrono::Local> },
+    Rollback {
+        num_turns: u32,
+        at: DateTime<chrono::Local>,
+    },
 }
 
 /// Serialize a rollback control record to its single-line JSONL form.

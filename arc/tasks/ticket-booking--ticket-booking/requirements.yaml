@@ -1,139 +1,342 @@
 id: ROOT
-name: '火车票预订演示系统'
+name: Train Ticket Booking Demo
 type: FOLDER
-description: |-
-  一个小型火车票预订网站，访客可以注册账号、登录系统、搜索已发布的车次，并在登录后提交乘客信息完成订票。
-  账号、登录会话和已确认订单需要持久化，页面刷新或服务重启后仍可恢复。
-  系统只实现教学演示所需的完整主流程，不包含在线支付、退票、改签、取消订单、座位库存扣减、历史订单列表和时刻表管理。
-  首页视觉参考：![首页](./reference/homepage.png)
 dependencies: []
+description: >-
+  A small website where visitors can register or sign in, search published trains, select a journey, and create a booking. Accounts, sessions, and confirmed bookings persist. Payment, cancellation, refunds, seat inventory, order history, and timetable administration are outside scope.
 children:
   - id: REQ-1
-    name: '注册旅客账号'
-    type: ATOMIC
-    description: |-
-      Validation 契约：应用必须支持直接访问 `/register`，首页必须提供可点击的 `Register` 链接进入该页面。注册页必须提供以下稳定且唯一的中文可访问名称，供 Playwright 使用 `getByLabel` 或 `getByRole` 定位，控件必须与对应 label 原生关联，不得依赖 CSS class、DOM 顺序或 placeholder：`用户名` 为必填文本输入框；`登录密码` 为必填密码输入框，并显示随输入动态变化的三段密码强度指示器；`确认密码` 为必填密码输入框；`证件类型` 为必填原生下拉选择框，选项包括“请选择证件类型”（初始值）、“居民身份证”、“护照”、“港澳居民来往内地通行证”、“台湾居民来往大陆通行证”和“外国人永久居留身份证”；`姓名` 为必填文本输入框；`证件号码` 为必填文本输入框；`优惠（待）类型` 为必填原生下拉选择框，初始提示为“请选择乘客类型”，选项包括“成人”、“儿童”、“学生”、“残疾军人”和“其他优惠类型”；`邮箱` 为可选 email 输入框；`国家/地区代码` 为手机号组合控件中的必填下拉选择框，默认值为 `+86`，并至少提供 `+84` 等国际区号；`手机号` 为必填文本输入框；必须有 accessible name 包含 `服务条款` 或 `隐私政策` 的必选复选框；必须有 accessible name 为 `下一步` 的提交按钮。有效数据提交后必须调用注册接口、创建登录会话并导航回 `/`，首页显示提交的用户名和 accessible name 为 `Sign out` 的退出链接，刷新后仍保持登录；缺失、格式错误、密码不一致、重复用户名或重复邮箱、未同意协议时，必须显示可见的中文错误消息，且不得创建账号或登录会话。
-      实现旅客注册页面和注册接口，从首页点击 `Register` 进入。
-      页面提供用户名、登录密码、确认密码、证件类型、姓名、证件号码、优惠（待）类型、邮箱、国家/地区代码、手机号、服务条款和隐私政策复选框以及“下一步”按钮。
-      前端负责必填提示和基础交互，后端必须再次完成全部校验，不能依赖前端结果。
-      用户名、登录密码、确认密码、证件类型、姓名、证件号码、优惠（待）类型、国家/地区代码和手机号均为必填，邮箱为可选，服务条款和隐私政策必须同意。
-      姓名去除首尾空格后应包含 2–100 个非空白字符；
-      证件号码只能包含 6–30 个 ASCII 字母、数字或连字符；
-      证件类型必须从页面提供的有效选项中选择，优惠（待）类型必须从页面提供的有效选项中选择，手机号必须与国家/地区代码组合通过校验。
-      用户名只能包含 3–32 个 ASCII 字母、数字、连字符或下划线。
-      邮箱填写时必须是完整有效的地址且不超过 254 个字符。
-      登录密码长度为 12–128 个字符，并至少包含大写字母、小写字母、数字和特殊字符；
-      确认密码必须一致；
-      用户必须接受服务条款和隐私政策。
-      用户名和邮箱都必须唯一，邮箱重复判断忽略大小写。
-      注册接口使用服务端生成的账号标识和会话令牌，禁止返回密码或密码摘要。
-      有效提交将账号安全写入持久化文件、创建登录会话并返回首页；
-      页面显示当前用户名和“退出登录”。
-      任何缺失、格式错误或重复数据都显示明确错误，不得创建账号或会话。
-      账号写入应采用安全的读改写流程，避免文件损坏和只写入一半的数据。
-      演示数据使用唯一用户名 `tb-user-<时间戳>-<随机值>`、由该用户名生成的有效邮箱、密码 `Valid-password-123!`、姓名 `Ticket User <时间戳>-<随机值>`、证件类型 `护照`、证件号码 `P<时间戳数字>`、优惠（待）类型 `成人`、国家/地区代码 `+84` 和有效手机号 `912345678`。
-      重复场景复用相同用户名或邮箱；
-      无效示例包括用户名 `bad username!`、邮箱 `not-an-email`、密码 `short`、两次密码不一致、缺少证件号码或未勾选协议。
-      可选视觉参考：![注册页面](./reference/register.png)
+    name: Public home page and account access
+    type: FOLDER
     dependencies: []
-    scenarios:
-      - name: '使用有效资料注册并保持登录'
-        steps:
-          - keyword: GIVEN
-            content: |-
-               一名未登录访客准备了唯一且符合规则的账号和旅客资料。
-          - keyword: WHEN
-            content: |-
-               访客填写注册表单、接受服务条款并点击“下一步”。
-          - keyword: THEN
-            content: |-
-               系统保存账号并创建会话，首页显示用户名和“退出登录”，刷新页面后仍保持登录。
-      - name: '拒绝缺失或格式错误的资料'
-        steps:
-          - keyword: GIVEN
-            content: |-
-               注册资料存在必填项缺失、格式错误、日期无效、弱密码、确认密码不一致或未接受协议。
-          - keyword: WHEN
-            content: |-
-               访客提交注册表单。
-          - keyword: THEN
-            content: |-
-               页面显示对应错误，系统不创建账号，也不创建登录会话。
-      - name: '拒绝重复用户名或邮箱'
-        steps:
-          - keyword: GIVEN
-            content: |-
-               系统中已经存在相同用户名或大小写不同但内容相同的邮箱。
-          - keyword: WHEN
-            content: |-
-               访客再次提交注册。
-          - keyword: THEN
-            content: |-
-               系统返回重复账号错误，原账号保持不变且不产生新的账号或会话。
+    description: >-
+      The public header provides Register and Login when signed out, and the username and Sign out when signed in. Registration creates an account and session; login restores a session for an existing account.
+    children:
+      - id: REQ-1.1
+        name: Register a traveler account
+        type: ATOMIC
+        dependencies: []
+        description: |-
+          Function: Register displays Nationality, Name, Passport number, Passport expiration date, Date of birth, Gender, Username, Email address, Password, Confirm password, a Terms of service/Privacy policy checkbox, and Next step. All fields are required. Name must contain 2–100 non-whitespace characters; passport number must contain 6–30 ASCII letters, digits, or hyphens; birth date must be in the past and passport expiration in the future. Username must be 3–32 ASCII letters, digits, hyphens, or underscores. Email must be valid and at most 254 characters. Password must be 12–128 characters and include uppercase, lowercase, digit, and special characters; confirmation must match. Username and email are unique, with email compared case-insensitively. A valid submission saves the account, signs the user in, and returns home. Invalid or duplicate input shows an error and creates no account or session.
+
+          Required system data: The system must allow creation of independent accounts with username `tb-user-<timestamp>-<random>`, an email generated from that username using a valid domain, password `Valid-password-123!`, name `Ticket User <timestamp>-<random>`, nationality `Vietnam`, passport number `P<timestamp-digits>`, passport expiration date `2035-12-31`, date of birth `1995-06-15`, and gender `Male`. Duplicate-account examples reuse the same username or email. Invalid examples include username `bad username!`, email `not-an-email`, password `short`, a mismatched confirmation, a missing passport number, and unchecked terms.
+
+          Optional visual reference: ![image](./reference/register.png)
+        scenarios:
+          - name: Register a valid traveler
+            steps:
+              - keyword: GIVEN
+                content: A signed-out visitor has unique valid account and traveler details.
+              - keyword: WHEN
+                content: The visitor completes Register, accepts the terms, and clicks Next step.
+              - keyword: THEN
+                content: The home page shows the username and Sign out, including after reload.
+          - name: Reject duplicate username
+            steps:
+              - keyword: GIVEN
+                content: The username is already registered.
+              - keyword: WHEN
+                content: The visitor submits registration.
+              - keyword: THEN
+                content: Registration is rejected without a session.
+          - name: Reject duplicate email
+            steps:
+              - keyword: GIVEN
+                content: The email belongs to another account.
+              - keyword: WHEN
+                content: The visitor submits registration.
+              - keyword: THEN
+                content: Registration is rejected without a session.
+          - name: Reject mismatched passwords
+            steps:
+              - keyword: GIVEN
+                content: Password and confirmation differ.
+              - keyword: WHEN
+                content: The visitor submits registration.
+              - keyword: THEN
+                content: A validation error is shown.
+          - name: Reject additional invalid registration combinations
+            steps:
+              - keyword: GIVEN
+                content: Required traveler details are missing or the terms are not accepted.
+              - keyword: WHEN
+                content: The visitor submits registration.
+              - keyword: THEN
+                content: The relevant error is shown and no session is created.
+          - name: Reject malformed credentials
+            steps:
+              - keyword: GIVEN
+                content: Username, email, or password is malformed.
+              - keyword: WHEN
+                content: The visitor submits registration.
+              - keyword: THEN
+                content: No account or session is created.
+
+      - id: REQ-1.2
+        name: Sign in with an existing account
+        type: ATOMIC
+        dependencies:
+          - REQ-1.1
+        description: |-
+          Function: Login provides Username or email, Password, and Login controls. The identifier is trimmed; email matching is case-insensitive and the password must match exactly. Valid credentials create a reload-persistent session and return home. Empty, unknown, or incorrect credentials show one generic error and leave the visitor signed out.
+
+          Required system data: The system must contain an account created through REQ-1.1 with username `tb-user-<timestamp>-<random>`, an email generated from that username using a valid domain, and password `Valid-password-123!`. Valid login examples use that username or email, including values with leading and trailing spaces. Invalid examples use password `incorrect-password` or an email that does not belong to any account.
+
+          Optional visual reference: ![image](./reference/login.png)
+        scenarios:
+          - name: Sign in with username
+            steps:
+              - keyword: GIVEN
+                content: A saved account exists and the visitor is signed out.
+              - keyword: WHEN
+                content: The visitor submits its username and the correct password.
+              - keyword: THEN
+                content: The home page shows the saved username and Sign out, including after reload.
+          - name: Sign in with case-insensitive email
+            steps:
+              - keyword: GIVEN
+                content: A saved account has an email address.
+              - keyword: WHEN
+                content: The visitor signs in using different email casing.
+              - keyword: THEN
+                content: Login succeeds and the session persists.
+          - name: Reject wrong or incomplete credentials
+            steps:
+              - keyword: GIVEN
+                content: The identifier or password is missing or incorrect.
+              - keyword: WHEN
+                content: The visitor submits Login.
+              - keyword: THEN
+                content: The same generic error is shown.
+          - name: Reject unknown account
+            steps:
+              - keyword: GIVEN
+                content: No account matches the identifier.
+              - keyword: WHEN
+                content: The visitor submits Login.
+              - keyword: THEN
+                content: The visitor remains signed out.
+          - name: Trim account identifier
+            steps:
+              - keyword: GIVEN
+                content: The identifier contains surrounding whitespace.
+              - keyword: WHEN
+                content: The visitor submits valid credentials.
+              - keyword: THEN
+                content: Login succeeds.
+          - name: Trim both username and email identifiers
+            steps:
+              - keyword: GIVEN
+                content: Valid username and email identifiers contain surrounding whitespace.
+              - keyword: WHEN
+                content: The visitor signs in with each identifier.
+              - keyword: THEN
+                content: Both normalized identifiers are accepted.
+
   - id: REQ-2
-    name: '登录和退出账号'
-    type: ATOMIC
-    description: |-
-      Validation 契约：应用必须支持直接访问 `/login`，首页必须提供可通过 Playwright `getByRole('link')` 定位的 `登录` 或 `Login` 入口。登录页只需实现账号密码登录核心功能，不需要实现二维码、扫码登录、宣传内容、忘记密码或其他扩展功能；必须提供与 label 原生关联且可通过 Playwright `getByLabel` 或 `getByRole` 定位的控件：中文可访问名称 `用户名或邮箱`（同时兼容 `Username or email`）的文本输入框，中文可访问名称 `密码`（同时兼容 `Password`）的密码输入框，以及中文可访问名称 `立即登录` 或 `登录`（同时兼容 `Login` 或 `Sign in`）的提交按钮。登录输入框必须支持用户名或邮箱，服务端应去除账号标识首尾空格，用户名按保存值匹配，邮箱匹配忽略大小写，密码必须完全匹配且区分大小写。有效用户名和密码登录、使用大小写不同的邮箱登录、错误密码或不完整凭据登录、未知账号登录是必须通过的四个核心场景；错误密码、不完整凭据和未知账号必须显示完全相同的通用错误消息，错误语义可使用中文“无效凭据”“登录失败”“账号或密码错误”或兼容英文 `invalid credentials`、`login failed`、`sign-in failed`、`incorrect credentials`、`incorrect password`、`wrong credentials`、`wrong password`，且不得泄露账号是否存在。成功登录后必须导航到 `/`，首页显示当前用户名和可访问名称为 `退出登录` 或 `Sign out` 的退出链接，刷新后仍保持登录；失败登录不得显示退出链接，也不得创建或改变登录会话。
-      实现登录页面、登录接口、会话恢复和退出登录。
-      从首页点击“登录”进入登录页面。
-      登录页面提供“用户名或邮箱”“密码”和“登录”控件。
-      提交时去除账号标识首尾空格；
-      用户名按保存值匹配，邮箱匹配忽略大小写，密码必须完全一致。
-      后端从持久化账号文件读取用户，验证成功后生成不可预测的会话令牌并保存会话，随后返回首页。
-      首页在未登录状态显示“注册”和“登录”，登录后显示当前用户名和“退出登录”。
-      浏览器通过安全的会话凭据恢复身份，刷新页面后仍应保持登录。
-      点击“退出登录”后，服务端删除或失效当前会话，浏览器清除会话凭据并恢复未登录导航状态；
-      再次刷新不能恢复已经退出的会话。
-      用户名、邮箱或密码为空，账号不存在，或者密码错误时，统一显示不泄露账号是否存在的登录失败提示，并保持未登录状态。
-      接口响应不能返回密码、密码摘要或其他用户的资料。
-      演示时使用通过 REQ-1 创建的唯一账号，正确密码为 `Valid-password-123!`；
-      有效示例可使用用户名或邮箱并允许首尾空格，无效示例使用 `incorrect-password` 或不存在的邮箱。
-      可选视觉参考：![登录页面](./reference/login.png)
+    name: Search trains and select a journey
+    type: FOLDER
+    dependencies: []
+    description: >-
+      Any visitor can search the timetable by origin, destination, and date. Results show matching trains and allow one journey to be opened for booking. Searching does not create an account or booking.
+    children:
+      - id: REQ-2.1
+        name: Search valid criteria and show matching trains
+        type: ATOMIC
+        dependencies: []
+        description: |-
+          Function: The home page provides required From, To, Date, and Search controls. Values are trimmed; From and To must differ case-insensitively, and Date must use a published date value. A valid search opens results showing the normalized criteria, result count, and matching train cards with train number, route, times, and Book. Each Book action has an accessible name identifying its train number. Invalid input stays on the home page with an error.
+
+          Required system data: The system must contain a bookable train `G532` from `Shanghai` to `Beijing` on `Sun, May 31`, with Shanghai/ShanghaiHongqiao as its displayed departure location and Beijing/BeijingNan as its displayed arrival location. It must also contain a bookable train `G561` from `Beijing` to `Tianjin` on the same date. Both records must have stable displayed departure and arrival times. Invalid search examples omit From, To, or Date, or use `Shanghai` and ` shanghai ` as the same-city pair.
+
+          Optional visual reference: ![image](./reference/search-form.png) ![image](./reference/search-results.png)
+        scenarios:
+          - name: Show matching trains
+            steps:
+              - keyword: GIVEN
+                content: The timetable contains a train matching the entered route and date.
+              - keyword: WHEN
+                content: The visitor searches with valid criteria, optionally surrounded by spaces.
+              - keyword: THEN
+                content: Results show normalized criteria and only the matching train cards.
+          - name: Reject incomplete search input
+            steps:
+              - keyword: GIVEN
+                content: A required search field is missing.
+              - keyword: WHEN
+                content: The visitor clicks Search.
+              - keyword: THEN
+                content: The home page shows an error and no result list.
+          - name: Trim search values
+            steps:
+              - keyword: GIVEN
+                content: Search criteria contain surrounding whitespace.
+              - keyword: WHEN
+                content: The visitor searches a published route.
+              - keyword: THEN
+                content: The normalized criteria and matching train are shown.
+          - name: Search a second supported route
+            steps:
+              - keyword: GIVEN
+                content: A second published route exists.
+              - keyword: WHEN
+                content: The visitor searches that route.
+              - keyword: THEN
+                content: Its matching result is shown.
+          - name: Search supported routes with normalized criteria
+            steps:
+              - keyword: GIVEN
+                content: Multiple supported routes and normalized criteria are available.
+              - keyword: WHEN
+                content: The visitor searches each supported route.
+              - keyword: THEN
+                content: Each search shows only its matching train.
+          - name: Reject missing search combinations
+            steps:
+              - keyword: GIVEN
+                content: One or more required search fields are missing.
+              - keyword: WHEN
+                content: The visitor searches.
+              - keyword: THEN
+                content: An error is shown without results.
+          - name: Reject same-city search
+            steps:
+              - keyword: GIVEN
+                content: Origin and destination are the same city.
+              - keyword: WHEN
+                content: The visitor searches.
+              - keyword: THEN
+                content: The search is rejected.
+      - id: REQ-2.2
+        name: Select a train and open its booking entry
+        type: ATOMIC
+        dependencies:
+          - REQ-2.1
+        description: |-
+          Function: Clicking the Book action identified by a train number opens the booking entry for that exact train and searched date, showing its train number, route, and times. The system must not substitute another result.
+
+          Required system data: The system must provide the two bookable records defined in REQ-2.1: `G532` for `Shanghai` to `Beijing` and `G561` for `Beijing` to `Tianjin`, both on `Sun, May 31`.
+
+          Optional visual reference: ![image](./reference/search-results.png) ![image](./reference/booking-page.png)
+        scenarios:
+          - name: Open the selected train
+            steps:
+              - keyword: GIVEN
+                content: Search results contain a bookable train.
+              - keyword: WHEN
+                content: The visitor clicks that train's Book button.
+              - keyword: THEN
+                content: The booking entry shows the same train, route, times, and date.
+          - name: Open each supported route
+            steps:
+              - keyword: GIVEN
+                content: Search results contain either supported bookable route.
+              - keyword: WHEN
+                content: The visitor clicks Book on the selected train.
+              - keyword: THEN
+                content: The booking page preserves the exact train and date for that route.
+  - id: REQ-3
+    name: Create and view a booking
+    type: FOLDER
     dependencies:
       - REQ-1
-    scenarios:
-      - name: '使用用户名登录并恢复会话'
-        steps:
-          - keyword: GIVEN
-            content: |-
-               系统中存在一个已注册账号，访客当前未登录。
-          - keyword: WHEN
-            content: |-
-               访客使用带有可选首尾空格的用户名和正确密码登录。
-          - keyword: THEN
-            content: |-
-               首页显示保存的用户名和“退出登录”，刷新页面后会话仍然有效。
-      - name: '使用邮箱登录'
-        steps:
-          - keyword: GIVEN
-            content: |-
-               系统中存在一个带有有效邮箱的已注册账号。
-          - keyword: WHEN
-            content: |-
-               访客使用大小写不同的邮箱和正确密码登录。
-          - keyword: THEN
-            content: |-
-               系统识别同一账号并建立登录会话。
-      - name: '拒绝无效凭据'
-        steps:
-          - keyword: GIVEN
-            content: |-
-               登录标识或密码为空、不存在或不正确。
-          - keyword: WHEN
-            content: |-
-               访客点击“登录”。
-          - keyword: THEN
-            content: |-
-               页面显示统一的登录失败提示，不透露账号是否存在，也不创建会话。
-      - name: '退出当前会话'
-        steps:
-          - keyword: GIVEN
-            content: |-
-               用户已经登录并位于任意公开页面。
-          - keyword: WHEN
-            content: |-
-               用户点击“退出登录”。
-          - keyword: THEN
-            content: |-
-               当前会话失效，页面恢复“注册”和“登录”入口，刷新后仍保持退出状态。
+      - REQ-2
+    description: >-
+      A signed-in user can review the selected train, enter passenger and ticket details, and confirm one persistent booking. Invalid or unauthorized actions create no booking.
+    children:
+      - id: REQ-3.1
+        name: Display a selected train on the protected booking page
+        type: ATOMIC
+        dependencies:
+          - REQ-1.2
+          - REQ-2.2
+        description: |-
+          Function: For a signed-in user, the Booking page shows the selected train number, route, times, and date above Passenger information and the booking form. Opening the page is read-only. A signed-out visitor must sign in and cannot submit; missing or unavailable train context shows the REQ-2.2 error instead of the form.
+
+          Required system data: The system must allow creation of a unique REQ-1.1 account and provide the bookable `G532` (`Shanghai` to `Beijing`) and `G561` (`Beijing` to `Tianjin`) journeys on `Sun, May 31`. The selected train summary must display the corresponding train number, cities or stations, times, and date. The signed-out case uses the same valid selected journey after the account signs out.
+        scenarios:
+          - name: Show the selected journey
+            steps:
+              - keyword: GIVEN
+                content: A signed-in traveler selected a published train.
+              - keyword: WHEN
+                content: The Booking page opens.
+              - keyword: THEN
+                content: It shows the selected train summary and Passenger information without creating a booking.
+          - name: Preserve summaries across journeys
+            steps:
+              - keyword: GIVEN
+                content: A signed-in traveler opens booking entries for different supported trains.
+              - keyword: WHEN
+                content: The traveler changes the selected journey before submitting.
+              - keyword: THEN
+                content: Each booking page shows the corresponding train summary without mixing route or date data.
+          - name: Block a signed-out visitor
+            steps:
+              - keyword: GIVEN
+                content: A visitor has a valid selected journey but no session.
+              - keyword: WHEN
+                content: The visitor opens its booking page.
+              - keyword: THEN
+                content: The page requests sign-in and provides no working submission action.
+
+      - id: REQ-3.2
+        name: Confirm passenger details and create one booking record
+        type: ATOMIC
+        dependencies:
+          - REQ-3.1
+        description: |-
+          Function: The booking form requires Passenger name, ID number, Nationality, Ticket class, Ticket type, and Terms of service acceptance. Trimmed name and nationality must contain 2–100 and 2–60 visible characters; ID number must contain 6–30 ASCII letters, digits, or hyphens. Place order opens a summary; Confirm creates exactly one booking and shows its booking number and submitted details. Invalid fields create no booking, and repeated confirmation or reload must keep the same record.
+
+          Required system data: Each booking example uses a unique REQ-1.1 account and an independent selected journey. The system must provide `G532` from `Shanghai` to `Beijing` and `G561` from `Beijing` to `Tianjin` on `Sun, May 31`. Valid booking data is (1) passenger `Nguyen Duc Minh`, ID `C612345677`, nationality `Vietnam`, class `standing ticket`, type `Adult`; and (2) passenger `Chen Li`, ID `D712345678`, nationality `Vietnam`, class `Business Class`, type `Adult`. Invalid examples use name `A`, ID `12345`, an empty nationality, or unchecked terms. Ticket class and type are selected explicitly rather than relying on defaults. Confirmation state and booking IDs must remain independent between accounts.
+
+          Optional visual reference: ![image](./reference/booking-page.png)
+        scenarios:
+          - name: Create one valid booking
+            steps:
+              - keyword: GIVEN
+                content: A signed-in traveler has an isolated account and selected journey.
+              - keyword: WHEN
+                content: The traveler enters valid details, accepts the terms, reviews the summary, and confirms.
+              - keyword: THEN
+                content: One booking number and the submitted journey, passenger, and ticket details are shown and persist after reload.
+          - name: Create supported ticket variants
+            steps:
+              - keyword: GIVEN
+                content: A signed-in traveler selects a supported route and ticket class such as standing ticket or Business Class.
+              - keyword: WHEN
+                content: The traveler submits valid passenger details and confirms the order.
+              - keyword: THEN
+                content: One booking is created with the selected route, class, and passenger details.
+          - name: Reject invalid passenger details
+            steps:
+              - keyword: GIVEN
+                content: A required field is missing or invalid, or terms are not accepted.
+              - keyword: WHEN
+                content: The traveler clicks Place order.
+              - keyword: THEN
+                content: The form shows an error and opens neither the confirmation summary nor a booking.
+          - name: Reject multiple invalid combinations
+            steps:
+              - keyword: GIVEN
+                content: Several passenger fields are invalid in turn.
+              - keyword: WHEN
+                content: The traveler attempts each order.
+              - keyword: THEN
+                content: Each attempt is rejected without a booking.
+          - name: Reject short passenger values
+            steps:
+              - keyword: GIVEN
+                content: Passenger name or ID is shorter than the documented minimum.
+              - keyword: WHEN
+                content: The traveler attempts to place the order.
+              - keyword: THEN
+                content: Validation errors are shown and no booking or confirmation summary is created.
+          - name: Create a booking with another seat type
+            steps:
+              - keyword: GIVEN
+                content: A valid traveler selects another supported seat type.
+              - keyword: WHEN
+                content: The traveler confirms the order.
+              - keyword: THEN
+                content: The selected seat type is persisted.

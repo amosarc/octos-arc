@@ -1744,7 +1744,8 @@ fn stream_retry_status_carries_segment_iteration_and_attempt_position() {
 /// Progress-mapped `approval_requested` events are stored for respond, and a
 /// successful respond serializes as a typed JSON-RPC result frame.
 #[test]
-fn progress_approval_request_is_stored_and_responds_with_typed_result() {    let contracts = UiProtocolContractStores::default();
+fn progress_approval_request_is_stored_and_responds_with_typed_result() {
+    let contracts = UiProtocolContractStores::default();
     let session_id = SessionKey("local:test".into());
     let turn_id = TurnId::new();
     let context = ProgressMappingContext::new(session_id.clone(), turn_id);

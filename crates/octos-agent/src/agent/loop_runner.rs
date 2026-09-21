@@ -13,12 +13,12 @@ use tracing::{Instrument, info, info_span, warn};
 
 use super::activity::{ActivityTrackingReporter, LoopActivityState};
 use super::budget::BudgetStop;
+use super::compaction::RetryCompactionVerdict;
 use super::convergence::{
     CheckpointReason, ConvergenceController, active_tokens, is_checkpoint_context,
 };
 use super::loop_compaction::{prepare_conversation_messages, prepare_task_messages};
 use super::loop_state::{LoopDecision, LoopRetryState, SHELL_SPIRAL_VARIANT};
-use super::compaction::RetryCompactionVerdict;
 use super::message_repair::sanitize_tool_call_id;
 use super::turn_state::{LoopTurnState, attach_partial_usage};
 use super::{Agent, AssistantSegmentProvenance, ConversationResponse, TASK_REPORTER, TokenTracker};
@@ -988,6 +988,27 @@ impl Agent {
                         ));
                         grace_iteration = true;
                     }
+                    // Green-stop fuse (loop_detect): the model had its grace
+                    // iterations after a verified-green signal and the turn
+                    // still wants another LLM call. End it — every further
+                    // call re-verifies work that is already green.
+                    if turn.green_stop_due() {
+                        return Ok(ConversationResponse {
+                            content: GREEN_STOP_TERMINAL_MESSAGE.to_string(),
+                            reasoning_content: None,
+                            provider_metadata: None,
+                            token_usage: turn.total_usage().clone(),
+                            estimated_spend_usd: turn.priced_spend(),
+                            files_modified,
+                            files_to_send,
+                            streamed: false,
+                            assistant_segments: turn_output_log.provenance.clone(),
+                            messages: turn_output_log.messages.clone(),
+                            tool_results: tool_structured_metadata.clone(),
+                            synthesized_from_spawn_only: false,
+                            pending_approval: None,
+                        });
+                    }
 
                     let iteration = turn.advance_iteration();
                     turn_output_log.provenance.final_iteration = iteration;
@@ -1727,6 +1748,35 @@ impl Agent {
 
                             if let Some(tool_name) = loop_detector.take_peer_polling_signal() {
                                 convergence.force(CheckpointReason::PeerPolling { tool_name });
+                            }
+
+                            // Green-stop (loop_detect): the same staged
+                            // acceptance spec went green twice with no source
+                            // edit in between — the node is verified done.
+                            // Tell the model to wrap up NOW and arm a short
+                            // force-stop fuse; a model that keeps re-running
+                            // commands burns the shared wall clock for zero
+                            // score (keep-25: 200+s of post-green lingering
+                            // per node).
+                            if let Some(signal) = loop_detector.take_green_stop_signal() {
+                                turn.arm_green_stop(turn.iteration());
+                                self.reporter().report(ProgressEvent::LlmStatus {
+                                    message: format!(
+                                        "Green stop armed: '{}' passed {} identically \
+                                         twice with no source edits",
+                                        signal.command, signal.passed
+                                    ),
+                                    iteration,
+                                });
+                                messages.push(Message::user(format!(
+                                    "[green stop] The staged acceptance spec just passed \
+                                     IDENTICALLY twice ({} tests) and you changed no source \
+                                     file between the runs — this requirement is verified \
+                                     DONE. Do NOT run any more commands, tests or builds. \
+                                     Use your next response to write the final summary of \
+                                     what was implemented, then finish.",
+                                    signal.passed
+                                )));
                             }
 
                             if let Some(churn) = loop_detector.take_file_churn_signal() {
@@ -2844,6 +2894,7 @@ impl Agent {
                 if let Some(hint) = loop_detector.record_result(name, args, &result_before_hint) {
                     message.content.push_str(&hint);
                 }
+                loop_detector.record_green_stop(name, args, &result_before_hint);
                 if let Some(hint) = loop_detector.record_file_mutation(
                     name,
                     args,
@@ -3583,6 +3634,17 @@ fn loop_detected_terminal_message() -> String {
      Please rephrase your request or try a different angle."
         .to_string()
 }
+
+/// Terminal content for a green-stopped turn (loop_detect): the staged
+/// acceptance spec passed identically twice with no source edit between,
+/// the model was told to wrap up, and the grace iterations elapsed. The
+/// host's node loop treats this as a normal completed turn and gates the
+/// on-disk result with its own rehearsal.
+const GREEN_STOP_TERMINAL_MESSAGE: &str =
+    "[green stop] The staged acceptance spec passed identically twice with no \
+     source changes between the runs; the turn ended after the wrap-up window \
+     to bank the verified result. The requirement under work is considered \
+     complete.";
 
 fn is_useful_shell_output(content: &str) -> bool {
     let trimmed = content.trim();

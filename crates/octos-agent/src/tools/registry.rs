@@ -204,6 +204,41 @@ pub struct ToolRegistry {
     /// cloned into workspace snapshots so sub-agent tool calls land in the
     /// same `.octos/context-logs/` record stream.
     context_log: std::sync::OnceLock<std::sync::Arc<crate::context_log::ContextLogger>>,
+    /// Spec-slim switch (token plan iteration 1): when true, alias tools in
+    /// [`SPEC_SLIM_EXCLUDED`] stay registered and executable but are omitted
+    /// from `specs()`, so every request sends one name per capability instead
+    /// of two or three. Fixed at construction from `OCTOS_SPEC_SLIM`
+    /// (`0` restores the full array); snapshots inherit the parent's value so
+    /// a session never changes spec shape mid-stream (prompt-cache prefix).
+    spec_slim: bool,
+}
+
+/// Alias tools hidden from `specs()` while spec-slim is active.
+///
+/// Real-run telemetry (181 tool calls across the ticket-booking + dice
+/// benchmark logs): `bash` 66%, `read_file` 23%, and every name in this
+/// table zero — `shell`/`exec_command` duplicate the `bash` surface,
+/// `delegate` duplicates `spawn_agent` + `wait_agent`. They remain
+/// REGISTERED (execute-side routing, policy groups, `tool_search` catalog
+/// and `CWD_BOUND_TOOLS` rebind all still cover them), so a model that
+/// calls one anyway succeeds; only the provider-facing spec array —
+/// the first segment of every cached prompt prefix — stops paying for
+/// the duplicate descriptions on every turn.
+pub const SPEC_SLIM_EXCLUDED: &[&str] = &[
+    "shell",
+    "exec_command",
+    "delegate",
+    // Discovery meta-tools are pointless while RFC-0 keeps every tool in
+    // `specs()` — there is nothing left to discover. They stay registered so
+    // a model that calls one anyway gets a real answer.
+    "tool_search",
+    "tool_suggest",
+];
+
+/// Construction-time default for [`ToolRegistry::spec_slim`]: enabled unless
+/// `OCTOS_SPEC_SLIM=0`.
+fn spec_slim_default() -> bool {
+    !std::env::var("OCTOS_SPEC_SLIM").is_ok_and(|value| value == "0")
 }
 
 /// Default per-tool execution-timeout backstop (seconds) for the registry
@@ -245,6 +280,7 @@ impl ToolRegistry {
             // `rebind_cwd_with_permissions`) overwrite this below.
             sandbox: Arc::new(NoSandbox),
             context_log: std::sync::OnceLock::new(),
+            spec_slim: spec_slim_default(),
         }
     }
 
@@ -592,6 +628,13 @@ impl ToolRegistry {
                 .is_some_and(|active| contexts.iter().any(|allowed| allowed == active))
     }
 
+    /// Get the provider-facing tool specs.
+    ///
+    /// With spec-slim active ([`SPEC_SLIM_EXCLUDED`]; `OCTOS_SPEC_SLIM=0`
+    /// restores the full array) alias duplicates are omitted. Every hidden
+    /// name stays registered and executable — `execute*` resolves from
+    /// [`Self::tools`], not from this array — so a model that calls a hidden
+    /// alias anyway still succeeds; the alias is merely not advertised.
     pub fn specs(&self) -> Vec<ToolSpec> {
         let mut cache = self.cached_specs.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref specs) = *cache {
@@ -599,9 +642,10 @@ impl ToolRegistry {
         }
 
         // RFC-0 (#1289): every enabled tool is emitted every turn. The only
-        // exclusions remaining are provider-policy denials and
-        // context-filter misses. There is no recency-based (LRU) deferral
-        // nor an `activate_tools` meta-tool description to inject.
+        // exclusions remaining are provider-policy denials, context-filter
+        // misses, and the spec-slim alias set. There is no recency-based
+        // (LRU) deferral nor an `activate_tools` meta-tool description to
+        // inject.
         let mut specs: Vec<ToolSpec> = self
             .tools
             .values()
@@ -619,6 +663,7 @@ impl ToolRegistry {
                 })
             })
             .filter(|t| self.active_context_allows(t.as_ref()))
+            .filter(|t| !(self.spec_slim && SPEC_SLIM_EXCLUDED.contains(&t.name())))
             .map(|t| ToolSpec {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
@@ -836,6 +881,7 @@ impl ToolRegistry {
             // confinement as the parent.
             sandbox: self.sandbox.clone(),
             context_log: self.context_log.clone(),
+            spec_slim: self.spec_slim,
         };
         // #1148 codex P2: the cloned `tool_search` / `tool_suggest`
         // Arcs still point to the PARENT's catalog cell. Re-register
@@ -1058,6 +1104,19 @@ fn panic_to_failed_result(name: &str, panic: Box<dyn std::any::Any + Send>) -> T
 }
 
 impl ToolRegistry {
+    /// Override the construction-time spec-slim default ([`spec_slim_default`]).
+    ///
+    /// Tests use this to pin one side of the slim behavior without touching
+    /// process-global env; operators get the same effect via
+    /// `OCTOS_SPEC_SLIM=0`. Call before the first `specs()` — the spec cache
+    /// is invalidated here, but a mid-session flip would still change the
+    /// provider-facing prefix shape (see [`SPEC_SLIM_EXCLUDED`]).
+    pub fn with_spec_slim(mut self, enabled: bool) -> Self {
+        self.spec_slim = enabled;
+        self.invalidate_cache();
+        self
+    }
+
     /// Create a registry with built-in tools for the given working directory.
     pub fn with_builtins(cwd: impl AsRef<Path>) -> Self {
         Self::with_builtins_and_sandbox(cwd, Box::new(NoSandbox))

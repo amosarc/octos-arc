@@ -741,7 +741,7 @@ pub trait Tool: Send + Sync {
 // Tool registry (extracted to its own module)
 pub(crate) mod read_window;
 mod registry;
-pub use registry::ToolRegistry;
+pub use registry::{SPEC_SLIM_EXCLUDED, ToolRegistry};
 
 // Tool policy
 pub mod policy;

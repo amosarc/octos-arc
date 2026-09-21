@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import shutil
 import signal
 import socket
@@ -472,37 +474,87 @@ def _ensure_host_toolchain(log) -> Path | None:
     lg_cli = lg / "node_modules" / "@playwright" / "test" / "cli.js"
     env = dict(os.environ, npm_config_registry=scaffold.NPM_REGISTRY)
     quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # Version alignment (2026-09-21 keep-25-run5): the runner image ships a
+    # GLOBAL @playwright/test plus its matching chromium build under
+    # PLAYWRIGHT_BROWSERS_PATH=/ms-playwright, but local-grader's manifest
+    # pins ^1.63 — a version-skewed install demands a browser DOWNLOAD for
+    # the newer build, and when the CDN is unreachable the in-turn SPEC RUN
+    # dies for the whole run (run4 downloaded fine; run5 did not). Install
+    # the image's exact version instead and reuse its browsers: zero
+    # network dependency for the verification chain.
+    image_pw = shutil.which("playwright")
+    image_version = None
+    if image_pw:
+        try:
+            probe = subprocess.run([image_pw, "--version"], capture_output=True,
+                                   text=True, timeout=60, errors="replace")
+            m = re.search(r"(\d+\.\d+\.\d+)", probe.stdout or "")
+            image_version = m.group(1) if m else None
+        except (OSError, subprocess.SubprocessError):
+            image_version = None
+    browsers_dir = None
+    for candidate in (os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
+                      "/ms-playwright"):
+        if candidate and Path(candidate).is_dir() \
+                and any(Path(candidate).glob("chromium-*")):
+            browsers_dir = Path(candidate)
+            break
+
+    # Align ONLY when we can reuse the image's browsers; on a dev host
+    # (no browsers_dir) the manifest install + user-cache download is the
+    # proven path and a host-global playwright version need not match it.
+    image_version = image_version if browsers_dir is not None else None
     if not lg_cli.is_file():
-        log("[toolchain] installing @playwright/test into local-grader ...")
-        try:
-            if (lg / "package.json").is_file():
-                subprocess.run(["npm", "install", "--no-audit", "--no-fund",
-                                "--loglevel", "error"], cwd=lg, env=env,
-                               timeout=600, check=True, **quiet)
-            else:
-                # Fallback dir has no manifest; install without touching one.
-                subprocess.run(["npm", "install", "--no-save", "--no-audit",
-                                "--no-fund", "--loglevel", "error",
-                                "@playwright/test"], cwd=lg, env=env,
-                               timeout=600, check=True, **quiet)
-            log("[toolchain] @playwright/test installed")
-        except (OSError, subprocess.SubprocessError) as exc:
-            log(f"[toolchain] @playwright/test install failed (non-fatal, "
-                f"Tier-2 will degrade): {exc}")
-            return None
+        if image_version:
+            log(f"[toolchain] installing @playwright/test@{image_version} "
+                f"(image-aligned) ...")
+            try:
+                subprocess.run(
+                    ["npm", "install", "--no-save", "--no-audit", "--no-fund",
+                     "--loglevel", "error", f"@playwright/test@{image_version}"],
+                    cwd=lg, env=env, timeout=600, check=True, **quiet)
+                log("[toolchain] @playwright/test installed")
+            except (OSError, subprocess.SubprocessError) as exc:
+                log(f"[toolchain] aligned install failed ({exc}); "
+                    "falling back to manifest install")
+                image_version = None
+        if not image_version:
+            log("[toolchain] installing @playwright/test into local-grader ...")
+            try:
+                if (lg / "package.json").is_file():
+                    subprocess.run(["npm", "install", "--no-audit", "--no-fund",
+                                    "--loglevel", "error"], cwd=lg, env=env,
+                                   timeout=600, check=True, **quiet)
+                else:
+                    # Fallback dir has no manifest; install without touching one.
+                    subprocess.run(["npm", "install", "--no-save", "--no-audit",
+                                    "--no-fund", "--loglevel", "error",
+                                    "@playwright/test"], cwd=lg, env=env,
+                                   timeout=600, check=True, **quiet)
+                log("[toolchain] @playwright/test installed")
+            except (OSError, subprocess.SubprocessError) as exc:
+                log(f"[toolchain] @playwright/test install failed (non-fatal, "
+                    f"Tier-2 will degrade): {exc}")
+                return None
     pw_bin = lg / "node_modules" / ".bin" / "playwright"
-    cache = ((Path.home() / "Library" / "Caches" / "ms-playwright")
-             if sys.platform == "darwin"
-             else Path.home() / ".cache" / "ms-playwright")
-    if pw_bin.is_file() and not (cache.is_dir()
-                                 and any(cache.glob("chromium-*"))):
-        log("[toolchain] installing chromium browser ...")
-        try:
-            subprocess.run([str(pw_bin), "install", "chromium"], cwd=lg,
-                           env=env, timeout=900, check=True, **quiet)
-            log("[toolchain] chromium installed")
-        except (OSError, subprocess.SubprocessError) as exc:
-            log(f"[toolchain] chromium install failed (non-fatal): {exc}")
+    if browsers_dir is not None:
+        # Image browsers already match the aligned install — skip the
+        # download entirely (this is the whole point of aligning).
+        log(f"[toolchain] chromium present at {browsers_dir}; no download")
+    else:
+        cache = ((Path.home() / "Library" / "Caches" / "ms-playwright")
+                 if sys.platform == "darwin"
+                 else Path.home() / ".cache" / "ms-playwright")
+        if pw_bin.is_file() and not (cache.is_dir()
+                                     and any(cache.glob("chromium-*"))):
+            log("[toolchain] installing chromium browser ...")
+            try:
+                subprocess.run([str(pw_bin), "install", "chromium"], cwd=lg,
+                               env=env, timeout=900, check=True, **quiet)
+                log("[toolchain] chromium installed")
+            except (OSError, subprocess.SubprocessError) as exc:
+                log(f"[toolchain] chromium install failed (non-fatal): {exc}")
     return lg_cli
 
 
@@ -744,6 +796,55 @@ def flatten_atomic(node: dict, out: list | None = None) -> list[dict]:
     return out
 
 
+_SENTINEL_PARENT = object()
+
+
+def flatten_atomic_with_parent(node: dict, parent_id: str | None = None,
+                               out: list | None = None
+                               ) -> list[tuple[dict, str | None]]:
+    """flatten_atomic, but each leaf carries its parent FOLDER's id.
+
+    Sibling leaves under one parent are usually variants of the same
+    feature (keep REQ-2.3.x delete/undo/trash) — the parent id is what
+    node batching groups on. Same traversal/order as flatten_atomic.
+    """
+    if out is None:
+        out = []
+    node_type = str(node.get("type") or "").upper()
+    if node_type == "ATOMIC" or (not node.get("children") and node_type != "FOLDER"):
+        out.append((node, parent_id))
+    own_id = str(node.get("id")) if node.get("id") is not None else parent_id
+    for child in node.get("children") or []:
+        if isinstance(child, dict):
+            flatten_atomic_with_parent(child, own_id, out)
+    return out
+
+
+def group_siblings(tree: dict, max_batch: int) -> list[list[dict]]:
+    """Batch CONSECUTIVE atomic leaves that share the same parent FOLDER.
+
+    max_batch is clamped to [1, 4]; ≤1 gives one leaf per batch (the
+    legacy per-node behavior — the OCTOS_ARC_NODE_BATCH=1 rollback
+    switch). A longer sibling run chunks sequentially in document order
+    (keep's REQ-2.7 ×5 with max_batch=2 → [2, 2, 1]). The flattened
+    order of the batches equals flatten_atomic(tree) exactly, so
+    dependency order across batches is unchanged.
+    """
+    max_batch = max(1, min(4, max_batch))
+    batches: list[list[dict]] = []
+    current: list[dict] = []
+    current_parent: object = _SENTINEL_PARENT
+    for node, parent in flatten_atomic_with_parent(tree):
+        if current and (parent != current_parent or len(current) >= max_batch):
+            batches.append(current)
+            current = []
+        current.append(node)
+        current_parent = parent
+    if current:
+        batches.append(current)
+    return batches
+
+
 def describe_node(node: dict) -> str:
     lines = [f"ID: {node.get('id')}", f"Name: {node.get('name', '')}"]
     if node.get("description"):
@@ -851,19 +952,21 @@ def _download_octos(dest_dir: Path) -> str:
 
 
 def _ensure_octos_executable(path: Path, source: str) -> str:
-    """zip 解压可能丢失执行位；使用前检测并补上 chmod 755。
+    """zip 解压可能丢失执行位；使用前无条件补 chmod 755。
 
-    补不上(只读挂载等)则抛带路径的错误——宁可快速失败并留下
+    不能只信 os.access(X_OK): virtiofs/overlay 等挂载会谎报可执行,
+    真正 execve 时才 EACCES(2026-09-21 本地模拟实测)。所以总是 chmod,
+    chmod 失败且确实不可执行时抛带路径的错误——宁可快速失败并留下
     明确日志，也不要让后续 spawn 的 PermissionError 被吞掉。
     """
-    if not os.access(path, os.X_OK):
-        try:
-            path.chmod(0o755)
-            log(f"[bin] restored exec bit on {path} ({source})")
-        except OSError as exc:
+    try:
+        path.chmod(0o755)
+    except OSError as exc:
+        if not os.access(path, os.X_OK):
             raise RuntimeError(
                 f"octos binary at {path} ({source}) is not executable "
                 f"and chmod failed: {exc}") from exc
+        log(f"[bin] chmod on {path} failed but file is executable ({exc})")
     return str(path)
 
 
@@ -972,6 +1075,14 @@ def build_octos_env(config_dir: Path) -> dict:
     # npmjs.org is slow/unreliable from the ARC runner network.
     env.setdefault("npm_config_registry", "https://registry.npmmirror.com")
     env.setdefault("NPM_CONFIG_REGISTRY", "https://registry.npmmirror.com")
+    # Convergence reflection intervals (kernel convergence.rs defaults 20
+    # calls / 300s). keep-25 runs showed reflections fire ONLY in runaway
+    # turns (0 in every ≤34-iteration turn; 2-10 in the 51-136 tail) and a
+    # reflection can never end a turn (it always continues the loop) — it is
+    # a queued LLM round trip of pure queue-latency cost. Halve the fire
+    # rate on both axes; operator-provided values still win (setdefault).
+    env.setdefault("OCTOS_CONVERGENCE_LLM_CALLS", "40")
+    env.setdefault("OCTOS_CONVERGENCE_SECS", "600")
     # Compaction threshold: octos derives it as context_window × 7/10. agnes
     # (512k window, 64k max output) used to fall back to the 128k unknown-
     # model default → an 89.6k threshold that re-trimmed long turns nowhere
@@ -1208,6 +1319,11 @@ class OctosDriver:
             "temporarily unavailable", "503", "502", "429", "rate limit",
             "timeout", "timed out", "connection reset", "overloaded",
             "failed to send", "streaming request",
+            # keep-25-run1: agnes 线流式中途断连,整节点 209s 报废——
+            # "connection closed" 既非 reset 也非 orphaned(会话可原地续),
+            # 短退避重试即可救回。
+            "connection closed", "connection_closed", "connection aborted",
+            "econnreset", "socket hang up",
             # Round 22: the platform-injected key returned HTTP 403
             # "Authentication failed" mid-run after ~25 min of working
             # requests; round 23 got HTTP 401 "无效的令牌" from the start.
@@ -1435,8 +1551,25 @@ your own server. After editing backend/src run \
 `sh .arc/host/restart-server.sh` (host-provided) to pick changes up; \
 after editing frontend run `npm run build --prefix frontend` — the \
 running server serves the fresh dist immediately, no restart needed.\
+OPERATION BUDGET: land this node in at most ~40 tool operations. Plan \
+silently, read each file at most once, write whole files in one edit, \
+then verify once; re-reading files you just wrote, micro-edits, and \
+repeat builds burn the shared wall clock and starve the remaining \
+requirements (a skipped node scores zero for every test behind it).\
 
 {node_spec}"""
+
+BATCH_DIRECTIVE = """\
+BATCH MODE: this turn implements the {count} focus nodes IN THE LISTED \
+ORDER, one at a time. After finishing each node, immediately verify it by \
+running ONLY that node's staged spec (SPEC RUN command + the file path(s) \
+below); a red spec means fix that node before moving on. The turn is \
+complete when EVERY focus node's spec is green — then write a short \
+per-node summary and finish. Do not re-run an earlier node's spec after \
+later edits unless you changed code it covers.\
+Per-node staged specs:
+{specs}
+"""
 
 # plan §4: schema-first directive for the first node turn (host template
 # present). The model declares data; the host compiles schema.json →
@@ -1561,6 +1694,10 @@ extend via src/routes/index.js, backend/data/schema.json, and the \
 frontend.
 - Keep the architecture intact: `npm run build` in frontend/ and \
 `npm run start` in backend/ MUST keep working.
+- Operation budget: land this node in at most ~40 tool operations — \
+read each file at most once, write whole files in one edit, verify \
+once. Re-reading what you just wrote or repeated builds starve the \
+remaining requirements.
 
 """ + UI_CONTRACT_RECAP + """
 - After implementing, run `npm run build` in frontend/ and restart the \
@@ -1858,26 +1995,49 @@ def main() -> int:
             log(f"[plan] version probe failed ({exc}); legacy prompts")
         log(f"[plan] host plan {'ENABLED' if plan_on else 'disabled'} "
             f"(OCTOS_ASSUME_ARC_PLAN={os.environ.get('OCTOS_ASSUME_ARC_PLAN', '<unset>')})")
+        # P1 sibling batching: one turn implements up to N consecutive
+        # leaves of the same parent FOLDER (plan_on path only — the legacy
+        # path stays per-node). OCTOS_ARC_NODE_BATCH=1 is the rollback
+        # switch (every leaf its own turn, legacy behavior).
+        batch_n = int(os.environ.get("OCTOS_ARC_NODE_BATCH", "2"))
+        node_batches = group_siblings(tree, batch_n) if plan_on else \
+            [[n] for n in atomic_nodes]
+        max_batch = max((len(b) for b in node_batches), default=1)
+        # Iteration-cap coupling: a healthy node needs 3-40 kernel
+        # iterations (keep-25 data, median ~15), so a batch of B legitimately
+        # needs up to ~40×B. The profile cap is session-wide, so scale it to
+        # the LARGEST batch before the session bootstraps: max(env, 40×B).
+        # Batch 2 keeps the validated cap 100; 3→120, 4→160. The runaway
+        # fuse still trips (≥136-class tails stay bounded).
+        cap_env = os.environ.get("OCTOS_TURN_MAX_ITERATIONS", "").strip()
+        cap_base = int(cap_env) if cap_env else 100
+        os.environ["OCTOS_TURN_MAX_ITERATIONS"] = str(
+            max(cap_base, 40 * max_batch))
+        if max_batch > 1:
+            log(f"[flow] sibling batching ON: {len(node_batches)} batch(es) "
+                f"for {len(atomic_nodes)} nodes, max batch {max_batch}, "
+                f"turn cap {os.environ['OCTOS_TURN_MAX_ITERATIONS']}")
         max_iter = int(os.environ.get("OCTOS_MAX_ITERATIONS", "500"))
         node_timeout = int(os.environ.get("OCTOS_NODE_TIMEOUT", "1200"))
-        # Wall-clock budget for the whole generation flow. If we exceed it,
-        # stop starting new turns and go straight to postflight — a partial
-        # template that exits cleanly scores better than a SIGTERM mid-turn
-        # (round 21 died that way and produced zero executed tests).
-        # 2026-09-21: 2700→5400 — the platform window is ~90 min (a full
-        # run incl. grading took ~50 min without any container kill).
-        budget = int(os.environ.get("OCTOS_TIME_BUDGET", "5400"))
-        # The budget is only checked BETWEEN turns, so one slow turn can
-        # legally eat it all (2026-09-20 ticketbooking: REQ-1.1 streamed
-        # 2667s of reasoning on a 2700s budget and starved four nodes —
-        # the idle timeout never fires while events keep flowing). These
-        # three knobs make the spend fair: every turn gets a hard wall
-        # clock, the final verification pass keeps a tail slice, and a new
-        # node is not started when the tail is all that's left.
-        node_wall = int(os.environ.get(
-            "OCTOS_NODE_WALL", str(int(budget * 0.45))))
+        # Wall-clock budget for the whole generation flow. 2026-09-21:
+        # default switched to 0 (UNLIMITED) by operator decision — long
+        # tasks need far more than the old ~90-minute window. The original
+        # rationale (exit cleanly before the platform's SIGTERM, round 21)
+        # is now covered per-turn instead: the iteration cap, green-stop
+        # fuse, doom guard and idle timeout bound every turn, so a run
+        # without a total budget still makes bounded, observable progress.
+        # A positive OCTOS_TIME_BUDGET restores the finite-budget path
+        # (node skipping, final-tail reservation) verbatim.
+        budget = int(os.environ.get("OCTOS_TIME_BUDGET", "0"))
+        # Per-turn hard wall. Decoupled from the budget (it used to be
+        # budget*0.45): standalone default 3600s per single node/batch-1,
+        # scaled by batch size at the call sites. It exists to bound a
+        # turn that stays inside its iteration cap but crawls (100 slow
+        # iterations × 60s stalls ≈ 100 min); a wall-cut turn lands on
+        # disk and recovers through the rehearsal/repair loop.
+        node_wall = int(os.environ.get("OCTOS_NODE_WALL", "3600"))
         final_reserve = int(os.environ.get(
-            "OCTOS_FINAL_RESERVE", str(max(300, budget // 9))))
+            "OCTOS_FINAL_RESERVE", str(max(300, budget // 9)) if budget else 0))
         node_floor = int(os.environ.get("OCTOS_NODE_FLOOR", "300"))
         t_run_start = time.time()
         # Smoke tests must NEVER use the grading port: round 21 was SIGTERMed
@@ -1981,7 +2141,21 @@ def main() -> int:
             scaffold.prewarm_deps(output_dir, log)
 
         def remaining() -> float:
+            # No budget (0) ⇒ unlimited: the node-skip gate, tail
+            # reservation and time_up() all become inert; every turn's own
+            # wall/cap bounds the run instead.
+            if budget <= 0:
+                return math.inf
             return budget - (time.time() - t_run_start)
+
+        def turn_wall(nodes_in_turn: int = 1, *, reserve: int | None = None) -> int:
+            """Per-turn hard wall: node_wall × batch size, bounded by a
+            finite budget's remaining tail (unlimited ⇒ the scaled wall)."""
+            scaled = node_wall * max(1, nodes_in_turn)
+            if budget > 0:
+                keep = final_reserve if reserve is None else reserve
+                return max(120, min(scaled, int(remaining() - keep)))
+            return max(120, scaled)
 
         def time_up() -> bool:
             return remaining() <= 0
@@ -2066,7 +2240,7 @@ def main() -> int:
                 else:
                     sk_prompt = APP_SKELETON_PROMPT.format(
                         port=args.web_port, smoke=smoke_port) + tests_prompt
-                sk_wall = max(120, min(node_wall, int(remaining() - final_reserve)))
+                sk_wall = turn_wall(1)
                 skeleton_ok, skeleton_text = driver.run(
                     sk_prompt, min(node_timeout, sk_wall), sk_wall)
                 log(f"[flow] skeleton turn attempt {sk_attempt} "
@@ -2148,64 +2322,76 @@ def main() -> int:
             if codegen:
                 codegen.start()
             failed: list[str] = []
-            for idx, node in enumerate(atomic_nodes, 1):
-                node_id = str(node.get("id"))
-                # Stricter than time_up(): don't START a node when only the
-                # final-verification tail is left — a node turn that would
-                # eat the reserve leaves the run unverified (2026-09-20:
-                # four nodes starved this way).
-                if remaining() < final_reserve + node_floor:
-                    log(f"[flow] time budget exhausted; skipping {node_id} "
-                        f"and remaining nodes")
-                    events.mark_implementation_started(node_id)
-                    events.mark_implementation_failed(node_id, "skipped: time budget")
-                    failed.append(node_id)
+            for idx, batch in enumerate(node_batches, 1):
+                # Finite-budget degrade: trim the batch tail while the
+                # remaining tail cannot fit it (an unlimited budget never
+                # trims). Trimmed nodes take the legacy skip bookkeeping.
+                while batch and remaining() < final_reserve + node_floor * len(batch):
+                    trimmed = batch.pop()
+                    tid = str(trimmed.get("id"))
+                    log(f"[flow] time budget exhausted; trimming {tid} from batch")
+                    events.mark_implementation_started(tid)
+                    events.mark_implementation_failed(tid, "skipped: time budget")
+                    failed.append(tid)
+                if not batch:
                     continue
-                events.mark_design_started(node_id)
-                events.mark_design_done(node_id, "design folded into octos implementation prompt")
-                events.mark_implementation_started(node_id)
-                log(f"[flow] node {idx}/{len(atomic_nodes)} {node_id} starting")
+                batch_ids = [str(n.get("id")) for n in batch]
+                focus_id = " + ".join(batch_ids)
+                for nid in batch_ids:
+                    events.mark_design_started(nid)
+                    events.mark_design_done(nid, "design folded into octos implementation prompt")
+                    events.mark_implementation_started(nid)
+                log(f"[flow] batch {idx}/{len(node_batches)} {focus_id} starting")
                 t0 = time.time()
                 if plan_on:
-                    plan_statuses[node_id] = "active"
+                    for nid in batch_ids:
+                        plan_statuses[nid] = "active"
                     hs0 = dict(driver.envelope.get("host_signals") or {}) \
                         if driver.envelope else {}
                     hs0["scaffolded_by_host"] = scaffolded
                     driver.set_envelope(
                         phase="node", task=plan_task,
                         atomic_nodes=atomic_nodes, statuses=plan_statuses,
-                        focus=node_id, ports=plan_ports, spec_map=spec_map,
+                        focus=focus_id, ports=plan_ports, spec_map=spec_map,
                         host_signals=hs0 or None)
+                    node_spec = "\n\n".join(describe_node(n) for n in batch)
                     node_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
-                        node_id=node_id, node_spec=describe_node(node),
+                        node_id=focus_id, node_spec=node_spec,
                         port=args.web_port, smoke=smoke_port) + spec_run_cmd
+                    if len(batch) > 1:
+                        node_prompt += BATCH_DIRECTIVE.format(
+                            count=len(batch),
+                            specs="\n".join(
+                                f"- {nid}: " + (", ".join(spec_map.get(nid) or [])
+                                                or "(no staged spec)")
+                                for nid in batch_ids))
                 else:
+                    node_spec = "\n\n".join(describe_node(n) for n in batch)
                     node_prompt = NODE_PROMPT_TEMPLATE.format(
                         port=args.web_port, smoke=smoke_port,
-                        node_spec=describe_node(node)) + tests_prompt_slim
+                        node_spec=node_spec) + tests_prompt_slim
                 if codegen_on and not scaffold.schema_path(output_dir).exists():
                     node_prompt += SCHEMA_DIRECTIVE
                 if template_ready:
                     _ensure_dev_server(output_dir, smoke_port,
                                        spec_ports_extra, log)
-                wall = max(120, min(node_wall, int(remaining() - final_reserve)))
+                wall = turn_wall(len(batch))
                 ok, text = driver.run(node_prompt, min(node_timeout, wall), wall)
-                log(f"[flow] node {node_id} {'ok' if ok else 'FAILED'} "
+                log(f"[flow] batch {focus_id} {'ok' if ok else 'FAILED'} "
                     f"in {time.time()-t0:.0f}s: {text[-300:]!r}")
                 if not ok:
-                    # Hard-wall/orphan cuts can leave a node 90% done on disk
-                    # (tok-ticket-3: REQ-1 died at the 3600s wall and was
-                    # failed un-gated while register was nearly complete).
-                    # Gate + rehearse whatever landed instead of failing
-                    # fast; repair turns run in a fresh session.
-                    log(f"[flow] node {node_id} failed; gating + rehearsing "
-                        "what landed on disk")
-                    events.mark_implementation_failed(
-                        node_id, "turn ended failed: " + text[-200:])
-                    failed.append(node_id)
+                    # Hard-wall/orphan cuts can leave a batch 90% done on
+                    # disk. Gate + rehearse whatever landed instead of
+                    # failing fast; repair turns run in a fresh session.
+                    log(f"[flow] batch {focus_id} failed; gating + "
+                        "rehearsing what landed on disk")
+                    for nid in batch_ids:
+                        events.mark_implementation_failed(
+                            nid, "turn ended failed: " + text[-200:])
+                        failed.append(nid)
                 if ok and not project_files_changed(output_dir, t0):
                     # Lazy turn: protocol ok, zero disk progress.
-                    log(f"[gate] {node_id}: turn ok but no project "
+                    log(f"[gate] {focus_id}: turn ok but no project "
                         "file changed; nudging to implement")
                     nudged = False
                     for ng in range(1, 3):
@@ -2215,17 +2401,18 @@ def main() -> int:
                         driver.run(NODE_NUDGE_PROMPT, 420, 420)
                         if project_files_changed(output_dir, ng_t0):
                             nudged = True
-                            log(f"[gate] {node_id}: nudge {ng} produced "
+                            log(f"[gate] {focus_id}: nudge {ng} produced "
                                 "file changes")
                             break
                     if not nudged and not project_files_changed(output_dir, t0):
-                        events.mark_implementation_failed(
-                            node_id, "turn made no file changes")
-                        failed.append(node_id)
+                        for nid in batch_ids:
+                            events.mark_implementation_failed(
+                                nid, "turn made no file changes")
+                            failed.append(nid)
                         continue
                 syn = js_syntax_errors(output_dir)
                 if syn:
-                    log(f"[gate] {node_id}: {len(syn)} JS syntax "
+                    log(f"[gate] {focus_id}: {len(syn)} JS syntax "
                         f"error(s): {syn[:3]}")
                     for rg_attempt in range(1, 3):
                         if time_up():
@@ -2233,40 +2420,42 @@ def main() -> int:
                         driver.run(syntax_repair_prompt(syn), 420, 420)
                         syn = js_syntax_errors(output_dir)
                         if not syn:
-                            log(f"[gate] {node_id} syntax repaired "
+                            log(f"[gate] {focus_id} syntax repaired "
                                 f"(repair turn {rg_attempt})")
                             break
                 if syn:
-                    events.mark_implementation_failed(
-                        node_id, "JS syntax errors: " + "; ".join(syn[:2]))
-                    failed.append(node_id)
+                    for nid in batch_ids:
+                        events.mark_implementation_failed(
+                            nid, "JS syntax errors: " + "; ".join(syn[:2]))
+                        failed.append(nid)
                     continue
-                events.mark_implementation_done(node_id, text[-500:] or None)
-                runtime.git.commit(f"{node_id} (implement): {node.get('name', '')}")
+                for nid in batch_ids:
+                    events.mark_implementation_done(nid, text[-500:] or None)
+                runtime.git.commit(
+                    f"{focus_id} (implement): "
+                    + "; ".join(str(n.get("name", "")) for n in batch))
                 if codegen:
                     written = codegen.sync()
                     if written:
                         scaffolded = sorted(set(scaffolded) | set(written))
                         log(f"[codegen] host compiled {written}")
                 if plan_on and not time_up():
-                    # A-flip: the HOST verifies the node (build + boot +
-                    # route probes + extra ports) instead of asking the
-                    # model to smoke-test itself. Red → ≤2 repair turns
-                    # on the digest; still red → the node stays blocked
-                    # in the plan (events above stay as recorded).
+                    # A-flip: the HOST verifies whatever landed (build +
+                    # boot + route probes + extra ports) — once per batch.
+                    # Red → ≤2 repair turns on the digest; still red → the
+                    # batch stays blocked in the plan.
                     r_err, r_report = rehearse_node(
                         output_dir, smoke_port, probe_list,
                         spec_ports_extra)
                     report_vrows = r_report.get("validation_probes") or []
-                    log(f"[plan] node {node_id} rehearsal "
+                    log(f"[plan] batch {focus_id} rehearsal "
                         f"{'GREEN' if r_err is None else 'RED'}: "
                         f"{(r_err or 'ok').splitlines()[0][:200]}")
                     if r_err is not None:
                         for fix_attempt in (1, 2):
                             if time_up():
                                 break
-                            r_wall = max(120, min(
-                                node_wall, int(remaining() - final_reserve)))
+                            r_wall = turn_wall(len(batch))
                             driver.run(REHEARSAL_REPAIR_PROMPT.format(
                                 error=r_err[-1200:],
                                 port=args.web_port, smoke=smoke_port),
@@ -2275,18 +2464,21 @@ def main() -> int:
                                 output_dir, smoke_port, probe_list,
                                 spec_ports_extra)
                             report_vrows = r_report.get("validation_probes") or []
-                            log(f"[plan] node {node_id} repair "
+                            log(f"[plan] batch {focus_id} repair "
                                 f"{fix_attempt}: "
                                 f"{'GREEN' if r_err is None else 'RED'}")
                             if r_err is None:
                                 break
-                    plan_statuses[node_id] = (
-                        "done" if r_err is None else "blocked")
-                    if r_err is None and node_id in failed:
+                    batch_state = "done" if r_err is None else "blocked"
+                    for nid in batch_ids:
+                        plan_statuses[nid] = batch_state
+                    if r_err is None:
                         # Wall-cut turn whose code actually rehearsal-greened.
-                        failed.remove(node_id)
-                        events.mark_implementation_done(
-                            node_id, "recovered via host rehearsal")
+                        for nid in batch_ids:
+                            if nid in failed:
+                                failed.remove(nid)
+                                events.mark_implementation_done(
+                                    nid, "recovered via host rehearsal")
                     # validation_probes lives on HostSignals (next to
                     # rehearsal), not inside RehearsalReport.
                     r_report.pop("validation_probes", None)
@@ -2302,7 +2494,7 @@ def main() -> int:
                     driver.set_envelope(
                         phase="node", task=plan_task,
                         atomic_nodes=atomic_nodes,
-                        statuses=plan_statuses, focus=node_id,
+                        statuses=plan_statuses, focus=focus_id,
                         ports=plan_ports, spec_map=spec_map,
                         host_signals=hs)
 
@@ -2376,7 +2568,7 @@ def main() -> int:
                     log("[flow] final verification turn starting (slim, "
                         f"{len(probe_list)} route probe(s))")
                     t0 = time.time()
-                    f_wall = max(120, min(node_wall, int(remaining())))
+                    f_wall = turn_wall(1, reserve=0)
                     ok, text = driver.run(
                         final_prompt, min(node_timeout, f_wall), f_wall)
                     log(f"[flow] final check {'ok' if ok else 'FAILED'} "
@@ -2406,7 +2598,7 @@ def main() -> int:
             else:
                 log("[flow] final verification turn starting")
                 t0 = time.time()
-                f_wall = max(120, min(node_wall, int(remaining())))
+                f_wall = turn_wall(1, reserve=0)
                 ok, text = driver.run(
                     FINAL_CHECK_PROMPT.format(port=args.web_port,
                                               smoke=smoke_port) + tests_prompt_slim,

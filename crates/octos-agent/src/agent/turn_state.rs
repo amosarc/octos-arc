@@ -24,7 +24,14 @@ pub(crate) struct LoopTurnState {
     /// is genuinely $0 so far" from "no model in this turn had catalog
     /// pricing" — emission hides the cost line in the latter case.
     priced_usage: bool,
+    /// Green-stop (loop_detect): iteration at which the force-stop fuse
+    /// was armed. `None` while unarmed.
+    green_stop_armed_at: Option<u32>,
 }
+
+/// Iterations the model gets to write its final summary after the
+/// green-stop in-band notice before the turn is force-stopped.
+pub(crate) const GREEN_STOP_GRACE_ITERATIONS: u32 = 2;
 
 impl LoopTurnState {
     pub(crate) fn new(started_at: Instant) -> Self {
@@ -34,7 +41,24 @@ impl LoopTurnState {
             total_usage: TokenUsage::default(),
             turn_spend_usd: 0.0,
             priced_usage: false,
+            green_stop_armed_at: None,
         }
+    }
+
+    /// Arm the green-stop fuse (loop_detect): the same staged spec went
+    /// green twice with no source edit in between. Idempotent — the first
+    /// arm wins so a second signal cannot extend the fuse.
+    pub(crate) fn arm_green_stop(&mut self, at_iteration: u32) {
+        if self.green_stop_armed_at.is_none() {
+            self.green_stop_armed_at = Some(at_iteration);
+        }
+    }
+
+    /// True once the green-stop grace has elapsed: the turn should end
+    /// with a terminal summary instead of issuing another LLM call.
+    pub(crate) fn green_stop_due(&self) -> bool {
+        matches!(self.green_stop_armed_at, Some(at)
+            if self.iteration >= at.saturating_add(GREEN_STOP_GRACE_ITERATIONS))
     }
 
     pub(crate) fn iteration(&self) -> u32 {

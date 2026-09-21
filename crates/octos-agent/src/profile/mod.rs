@@ -555,7 +555,9 @@ mod tests {
     #[test]
     fn coding_profile_narrows_registry_to_core_coding_loop() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let mut tools = ToolRegistry::with_builtins(tmp.path());
+        // Full spec array: this test asserts the profile ALLOW LIST, which is
+        // orthogonal to the spec-slim presentation (SPEC_SLIM_EXCLUDED).
+        let mut tools = ToolRegistry::with_builtins(tmp.path()).with_spec_slim(false);
         // Bundled-skill / plugin tools are plain registry entries that
         // register BEFORE the profile narrowing runs in the chat/acp
         // bootstrap — the allow list must apply to them exactly as it

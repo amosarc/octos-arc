@@ -9,6 +9,7 @@ so the agent never blocks unattended.
 from __future__ import annotations
 
 import json
+import os
 import queue
 import subprocess
 import threading
@@ -26,6 +27,7 @@ class OctosStdioSession:
     def __init__(self, octos_bin: str, cwd: Path, env: dict, data_dir: Path,
                  on_event: Callable[[str, dict], None] | None = None) -> None:
         self.cwd = str(cwd)
+        self.data_dir = Path(data_dir)
         self.on_event = on_event or (lambda method, params: None)
         cmd = [octos_bin, "serve", "--stdio", "--solo", "--data-dir", str(data_dir)]
         if env.get("OCTOS_DANGER_FULL_ACCESS") == "1":
@@ -133,6 +135,7 @@ class OctosStdioSession:
         self.profile_id = res.get("profile_id") if isinstance(res, dict) else None
         if not self.profile_id:
             raise OctosProtocolError(f"profile/local/create gave no profile_id: {res}")
+        self._inject_iteration_cap()
         api_type = "anthropic" if provider == "anthropic" else "openai"
         route: dict = {"api_type": api_type}
         if base_url:
@@ -148,6 +151,55 @@ class OctosStdioSession:
                 "route": route,
             },
         }, want_response=True, timeout=timeout)
+
+    def _inject_iteration_cap(self) -> None:
+        """Bound every turn of this session to OCTOS_TURN_MAX_ITERATIONS.
+
+        serve 的 OUP 回合按 Interactive 意图归类: profile 没有显式
+        gateway.max_iterations 时内核不设回合上限 (自治通道的 50 次兜底
+        只覆盖非 OUP lane), 实测单节点 turn 冲到 114-136 次迭代 /
+        872K 累计 token (2026-09-21 keep 模拟 run1/run2)。显式 profile
+        上限对 Interactive 同样生效 (turn_policy), 所以直接落盘改写
+        注册表 JSON。
+
+        默认 100 的依据: keep 两轮共 20 个 turn 的自然迭代需求分布
+        [1..136], 超过 60 的有 4 个(20%)——60 会截断正常收敛中的回合
+        (run3 实测: 被截节点要靠 repair 轮补救, 反而更贵); 超过 100 的
+        只有 114/136 两个极端失控样本。100 = 失控尾部保险丝, 不误伤
+        自然收敛。
+
+        时序必须在 create 之后、llm/upsert 之前: upsert 是"从磁盘读
+        profile → 合并 LLM 选择 → save_with_merge → 代数守护重建运行时"
+        (#2164), 编辑搭这班车进入重建后的运行时; upsert 之后再改会被
+        已缓存的运行时遮蔽。
+        """
+        raw = os.environ.get("OCTOS_TURN_MAX_ITERATIONS", "").strip() or "100"
+        try:
+            cap = int(raw)
+        except ValueError:
+            cap = 100
+        if cap <= 0:
+            self._stderr_lines.append(
+                f"[stdio] OCTOS_TURN_MAX_ITERATIONS={raw} <= 0: turns uncapped")
+            return
+        registry = self.data_dir / "profiles" / f"{self.profile_id}.json"
+        try:
+            profile = json.loads(registry.read_text(encoding="utf-8"))
+            gateway = profile.setdefault("config", {}).setdefault("gateway", {})
+            if gateway.get("max_iterations") in (None, cap):
+                gateway["max_iterations"] = cap
+                tmp = registry.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(profile, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+                os.replace(tmp, registry)
+        except (OSError, ValueError) as exc:
+            # 注册表布局漂移或 IO 失败: 不让整个提交挂掉, 退化为无上限
+            # (与旧行为一致), 但把原因留在 stderr 里。
+            self._stderr_lines.append(
+                f"[stdio] iteration-cap injection skipped ({exc}): turns uncapped")
+            return
+        self._stderr_lines.append(
+            f"[stdio] per-turn iteration cap injected: {cap} ({registry.name})")
 
     def open(self, timeout: float = 120.0) -> None:
         params = {"session_id": self.session_id, "cwd": self.cwd}

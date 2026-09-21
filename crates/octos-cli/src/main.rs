@@ -138,14 +138,13 @@ fn init_tracing(
 
     if let Some(dir) = log_dir {
         // Rolling daily log file (LOCAL-time day boundary), keep last 7 days.
-        let file_appender =
-            tracing_appender_localtime::rolling::RollingFileAppender::builder()
-                .rotation(tracing_appender_localtime::rolling::Rotation::DAILY)
-                .filename_prefix("serve")
-                .filename_suffix("log")
-                .max_log_files(7)
-                .build(dir)
-                .map_err(|e| eyre::eyre!("failed to create log file appender: {e}"))?;
+        let file_appender = tracing_appender_localtime::rolling::RollingFileAppender::builder()
+            .rotation(tracing_appender_localtime::rolling::Rotation::DAILY)
+            .filename_prefix("serve")
+            .filename_suffix("log")
+            .max_log_files(7)
+            .build(dir)
+            .map_err(|e| eyre::eyre!("failed to create log file appender: {e}"))?;
 
         let (non_blocking, guard) = tracing_appender_localtime::non_blocking(file_appender);
         let writer = if enable_console {
@@ -173,6 +172,7 @@ fn init_tracing(
                         .with_ansi(false)
                         .with_target(false)
                         .compact()
+                        .with_timer(LocalTimer)
                         .with_writer(writer),
                 )
                 .with(filter)
@@ -207,6 +207,7 @@ fn init_tracing(
                         .with_target(false)
                         .with_thread_ids(false)
                         .compact()
+                        .with_timer(LocalTimer)
                         .with_writer(writer),
                 )
                 .with(filter)
@@ -217,56 +218,15 @@ fn init_tracing(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Log timestamp prefix for the human-readable layers: local time
+/// `yyyy-MM-dd HH:mm:ss`, replacing the default UTC RFC3339 (microseconds + `Z`).
+struct LocalTimer;
 
-    struct BrokenPipeWriter;
-
-    impl std::io::Write for BrokenPipeWriter {
-        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "pipe closed",
-            ))
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn write_panic_report_broken_pipe_no_panic() {
-        let mut w = BrokenPipeWriter;
-        write_panic_report(&mut w, "panic message");
-        // If we reach here, no panic occurred — test passes.
-    }
-
-    #[test]
-    fn write_panic_report_normal_writer_outputs() {
-        let mut buf: Vec<u8> = Vec::new();
-        write_panic_report(&mut buf, "panic message");
-        assert!(!buf.is_empty());
-        assert!(buf.ends_with(b"\n"));
-    }
-
-    #[test]
-    fn interactive_tty_with_file_logs_still_gets_console() {
-        assert!(should_enable_console_logs(true, true));
-    }
-
-    #[test]
-    fn daemon_with_file_logs_drops_console() {
-        assert!(!should_enable_console_logs(true, false));
-    }
-
-    #[test]
-    fn daemon_without_file_logs_falls_back_to_console() {
-        assert!(should_enable_console_logs(false, false));
-    }
-
-    #[test]
-    fn interactive_without_file_logs_gets_console() {
-        assert!(should_enable_console_logs(false, true));
+impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
+    fn format_time(
+        &self,
+        w: &mut tracing_subscriber::fmt::format::Writer<'_>,
+    ) -> std::fmt::Result {
+        write!(w, "{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
     }
 }

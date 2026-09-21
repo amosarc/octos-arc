@@ -916,7 +916,10 @@ fn productive_message_rejects_user_approval_denial_even_when_long() {
         "x".repeat(160),
         crate::tools::USER_APPROVAL_DENIED_SUFFIX
     );
-    assert!(denial.len() >= 128, "fixture must exceed the 128-byte bound");
+    assert!(
+        denial.len() >= 128,
+        "fixture must exceed the 128-byte bound"
+    );
     assert!(!is_productive_tool_message(&denial));
 }
 
@@ -1963,6 +1966,69 @@ async fn run_conversation_response(responses: Vec<ChatResponse>) -> Result<Conve
     )
     .await;
     agent.process_message("go", &[], vec![]).await
+}
+
+// ---------- green-stop wiring (loop_detect × conversation loop) ----------
+
+#[tokio::test]
+async fn green_stop_fuse_ends_turn_after_identical_double_green() {
+    // The model runs the host's staged spec, green; runs the SAME command
+    // again, green (no source edit between) → the loop arms the green-stop
+    // fuse with an in-band notice. The model disobeys by running OTHER
+    // commands (not the identical call, so the doom guard stays out of it);
+    // after the grace iterations the turn must end with the green-stop
+    // terminal message instead of issuing further LLM calls.
+    let dir = tempfile::tempdir().unwrap();
+    let spec_call = ToolCall {
+        id: "call_spec".into(),
+        name: "shell".into(),
+        arguments: serde_json::json!({
+            "command": "npx playwright test .arc/acceptance/REQ-1.spec.ts --workers=1"
+        }),
+        metadata: None,
+    };
+    let green_output = "Running 1 test using 1 worker\n\n  ✓ REQ-1\n\n  1 passed (5.6s)";
+    let curl = |n: u32| ToolCall {
+        id: format!("call_curl_{n}").into(),
+        name: "shell".into(),
+        arguments: serde_json::json!({ "command": format!("curl -s http://127.0.0.1:3100/{n}") }),
+        metadata: None,
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRegistry::new();
+    tools.register(StaticResultTool::new("shell", green_output, true, calls.clone()));
+    let scripted: Vec<ChatResponse> = std::iter::once(tool_use(vec![spec_call.clone()], 10, 20))
+        .chain(std::iter::once(tool_use(vec![spec_call], 10, 20)))
+        .chain((1..=8).map(|n| tool_use(vec![curl(n)], 10, 20)))
+        .collect();
+    let provider = Arc::new(ScriptedProvider::new(scripted));
+    let agent = boot_agent(
+        "green-stop-wiring",
+        dir.path(),
+        provider.clone(),
+        tools,
+        AgentConfig {
+            max_iterations: 50,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let result = agent
+        .process_message("run the spec", &[], vec![])
+        .await
+        .expect("green-stopped turn still completes Ok");
+
+    assert!(
+        result.content.contains("[green stop]"),
+        "terminal content should be the green-stop message: {}",
+        result.content
+    );
+    // 2 spec calls + exactly 2 grace curl calls consumed; the remaining 6
+    // scripted responses prove the fuse stopped the turn early (the
+    // 50-iteration cap would have eaten all of them).
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 4);
+    assert_eq!(provider.remaining(), 6);
 }
 
 #[tokio::test]

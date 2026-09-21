@@ -211,6 +211,9 @@ impl Agent {
             self.llm.model_id(),
             messages,
             &context_log_tool_names,
+            Some(prompt_fingerprint.redacted_manifest()),
+            self.take_compaction_event()
+                .map(|event| serde_json::to_value(event).unwrap_or(serde_json::Value::Null)),
         );
 
         // #1712: after a truncated tool call (the turn hit the output cap

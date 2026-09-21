@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-use std::sync::RwLock;
 use chrono::Local;
 use octos_core::SessionKey;
 use octos_core::ui_protocol::{
@@ -7,6 +5,8 @@ use octos_core::ui_protocol::{
     ApprovalRespondParams, ApprovalRespondResult, RpcError, TurnId, methods, rpc_error_codes,
 };
 use serde_json::json;
+use std::collections::HashMap;
+use std::sync::RwLock;
 
 #[derive(Debug)]
 struct ApprovalEntry {

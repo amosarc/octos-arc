@@ -592,6 +592,10 @@ pub struct Agent {
     /// provider's actual prompt accounting; shrinks the window-derived
     /// compaction budget in `trim_to_context_window`. See [`TokenCalibration`].
     pub(super) token_calibration: TokenCalibration,
+    /// Compaction pass performed during message prep for the CURRENT model
+    /// call, recorded by the compaction paths and consumed (taken) by the
+    /// request-log row in `llm_call`. See [`CompactionEvent`].
+    last_compaction_event: std::sync::Mutex<Option<compaction::CompactionEvent>>,
 }
 
 impl Agent {
@@ -643,6 +647,7 @@ impl Agent {
             arc_plan: RwLock::new(None),
             arc_plan_tail_count: std::sync::atomic::AtomicU8::new(0),
             token_calibration: TokenCalibration::new(),
+            last_compaction_event: std::sync::Mutex::new(None),
         }
     }
 
@@ -693,6 +698,7 @@ impl Agent {
             arc_plan: RwLock::new(None),
             arc_plan_tail_count: std::sync::atomic::AtomicU8::new(0),
             token_calibration: TokenCalibration::new(),
+            last_compaction_event: std::sync::Mutex::new(None),
         }
     }
 
@@ -1474,7 +1480,9 @@ mod profile_integration_tests {
                 .expect("episode store"),
         );
         let provider: Arc<dyn LlmProvider> = Arc::new(crate::test_support::InertProvider);
-        let tools = ToolRegistry::with_builtins(cwd);
+        // Full spec array: this test reasons about profile narrowing, not
+        // the spec-slim presentation.
+        let tools = ToolRegistry::with_builtins(cwd).with_spec_slim(false);
         Agent::new(AgentId::new("default"), provider, tools, memory)
     }
 
@@ -1489,7 +1497,8 @@ mod profile_integration_tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(crate::test_support::InertProvider);
 
         let profile = ProfileDefinition::builtin(name).expect("builtin profile");
-        let mut tools = ToolRegistry::with_builtins(cwd);
+        // Full spec array: profile-narrowing test, orthogonal to spec-slim.
+        let mut tools = ToolRegistry::with_builtins(cwd).with_spec_slim(false);
         profile.apply_to_registry(&mut tools);
 
         Agent::new(AgentId::new(name), provider, tools, memory).with_profile(Arc::new(profile))

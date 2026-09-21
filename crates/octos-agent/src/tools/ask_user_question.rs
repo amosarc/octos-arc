@@ -239,13 +239,9 @@ impl Tool for AskUserQuestionTool {
     }
 
     fn description(&self) -> &str {
-        "Ask the user a structured multiple-choice question mid-turn and block on \
-         the answer. Carry 1-4 questions, each with a short `header` (kept to <=12 \
-         chars — a longer header is truncated, not rejected), a `question`, 2-4 \
-         `options` (each `label` + `description`), and a `multi_select` flag. The \
-         user is always also offered a free-text \"Other\". Use this instead of \
-         guessing when a bounded choice would resolve an ambiguity (which \
-         framework, which file, opt-in to a cleanup)."
+        "Ask the user 1-4 multiple-choice questions mid-turn; blocks on the answers. \
+         Free-text \"Other\" is always offered. Use instead of guessing when a bounded \
+         choice resolves an ambiguity."
     }
 
     fn tags(&self) -> &[&str] {
@@ -274,18 +270,17 @@ impl Tool for AskUserQuestionTool {
                     "type": "array",
                     "minItems": MIN_QUESTIONS,
                     "maxItems": MAX_QUESTIONS,
-                    "description": "1-4 multiple-choice questions to ask the user.",
                     "items": {
                         "type": "object",
                         "properties": {
                             "header": {
                                 "type": "string",
                                 "maxLength": MAX_HEADER_CHARS,
-                                "description": "Short label for the question (kept to <=12 chars; a longer header is truncated server-side, not rejected)."
+                                "description": "Short label (<=12 chars)"
                             },
                             "question": {
                                 "type": "string",
-                                "description": "The question text."
+                                "description": "Question text"
                             },
                             "options": {
                                 "type": "array",
@@ -302,7 +297,7 @@ impl Tool for AskUserQuestionTool {
                             },
                             "multi_select": {
                                 "type": "boolean",
-                                "description": "When true the user may select more than one option."
+                                "description": "User may select multiple options"
                             }
                         },
                         "required": ["header", "question", "options"]

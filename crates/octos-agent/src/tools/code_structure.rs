@@ -38,7 +38,7 @@ impl Tool for CodeStructureTool {
     }
 
     fn description(&self) -> &str {
-        "Analyze code structure: extract functions, structs/classes, imports, and constants from a source file using AST parsing. Supports Rust, Python, JavaScript, TypeScript."
+        "AST extract of functions, structs/classes, imports, constants from a source file (Rust/Python/JS/TS)."
     }
 
     fn tags(&self) -> &[&str] {

@@ -743,7 +743,7 @@ impl Tool for WriteStdinTool {
     }
 
     fn description(&self) -> &str {
-        "Write characters to a running exec_command session and return recent captured output."
+        "Write characters to a running session and return recent output."
     }
 
     fn tags(&self) -> &[&str] {
@@ -1263,7 +1263,7 @@ impl Tool for SpawnAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Start a Codex-compatible subagent. When Octos' native spawn tool is registered, this forwards to it and returns the supervised agent handle."
+        "Start a supervised subagent and return its handle."
     }
 
     fn tags(&self) -> &[&str] {
@@ -1306,12 +1306,11 @@ impl Tool for SpawnAgentTool {
                 "reasoning_effort": {"type": "string"},
                 "task": {"type": "string"},
                 "label": {"type": "string"},
-                "role": {"type": "string"},
                 "mode": {"type": "string", "enum": ["background", "sync"]},
                 "allowed_tools": {"type": "array", "items": {"type": "string"}},
                 "role": {
                     "type": "string",
-                    "description": "Optional backend-owned role template that resolves to a tool budget + sandbox + model preference + prompt prefix. When set, the resolved template seeds the spawn payload; inline `allowed_tools` still wins.",
+                    "description": "Optional role template: seeds a tool budget + sandbox + model preference + prompt prefix. Inline `allowed_tools` wins.",
                     "enum": role_names,
                 }
             }
@@ -1923,7 +1922,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Run a one-shot shell command and return stdout/stderr. Non-PTY, non-interactive. Codex-compatible alias of exec_command / shell with a stripped-down schema (`cmd`, optional `timeout_ms`)."
+        "Run a one-shot shell command and return stdout/stderr. Non-PTY, non-interactive."
     }
 
     fn tags(&self) -> &[&str] {
@@ -2774,7 +2773,7 @@ impl Tool for ViewImageTool {
     }
 
     fn description(&self) -> &str {
-        "Inspect a local image file (PNG / JPEG / GIF / WEBP / BMP / SVG). Returns format, MIME type, and byte length so the host UI can render a preview."
+        "Inspect a local image file: returns format, MIME type, byte length for host-side preview."
     }
 
     fn tags(&self) -> &[&str] {

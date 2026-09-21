@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::{Local};
+use chrono::Local;
 use octos_core::Message;
 use octos_llm::{ChatConfig, LlmProvider};
 use tokio::task::JoinHandle;

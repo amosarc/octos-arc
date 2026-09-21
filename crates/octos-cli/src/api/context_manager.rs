@@ -639,7 +639,9 @@ pub(crate) fn persist_context_manager_snapshot(
             .and_then(|name| name.to_str())
             .unwrap_or("context-ledger.json"),
         std::process::id(),
-        chrono::Local::now().timestamp_nanos_opt().unwrap_or_default()
+        chrono::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
     );
     let tmp_path = parent.join(tmp_name);
     let bytes = serde_json::to_vec_pretty(&manager.snapshot())
@@ -714,7 +716,9 @@ fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
             .and_then(|name| name.to_str())
             .unwrap_or("tool-output.txt"),
         std::process::id(),
-        chrono::Local::now().timestamp_nanos_opt().unwrap_or_default()
+        chrono::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
     );
     let tmp_path = parent.join(tmp_name);
     std::fs::write(&tmp_path, bytes).map_err(|err| {

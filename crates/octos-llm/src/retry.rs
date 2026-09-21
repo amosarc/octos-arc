@@ -291,8 +291,7 @@ impl RetryProvider {
     /// generic `max_delay`, because the provider TOLD us the window length;
     /// see [`RetryConfig::max_rate_limit_delay`].
     fn rate_limit_delay(&self, error: &eyre::Report) -> Option<Duration> {
-        let clamp =
-            |delay: Duration| delay.min(self.config.max_rate_limit_delay);
+        let clamp = |delay: Duration| delay.min(self.config.max_rate_limit_delay);
 
         // Typed path: walk the cause chain for `LlmError`, same as
         // [`Self::should_failover`]. A `RateLimited` kind with an explicit

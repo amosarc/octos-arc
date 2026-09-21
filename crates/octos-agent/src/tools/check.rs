@@ -646,10 +646,9 @@ impl Tool for CheckTool {
     }
 
     fn description(&self) -> &str {
-        "Run the project's cheap static check and return compact diagnostics (file:line: level: message). \
-         Detects the project type from marker files: Cargo.toml -> `cargo check`, tsconfig.json -> `tsc --noEmit`, \
-         go.mod -> `go vet ./...`. Reports at most 50 diagnostics and counts the rest. \
-         Use after edits to catch compile/type errors early, before running the full test suite."
+        "Run the project's cheap static check (Cargo.toml → `cargo check`, tsconfig.json → \
+         `tsc --noEmit`, go.mod → `go vet`), returning compact file:line diagnostics — \
+         at most 50, the rest counted. Use after edits to catch compile/type errors early."
     }
 
     fn tags(&self) -> &[&str] {
@@ -662,7 +661,7 @@ impl Tool for CheckTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Optional directory (relative to the workspace root) to scope the check; defaults to the workspace root"
+                    "description": "Directory to scope the check (defaults to workspace root)"
                 }
             },
             "required": []

@@ -89,23 +89,9 @@ impl Tool for ApplyPatchTool {
     }
 
     fn description(&self) -> &str {
-        "Apply a multi-file patch in the Codex envelope format. Supports adding, \
-         deleting, updating, and moving/renaming files in ONE atomic call — the \
-         entire patch is validated before any file is written. Update hunks are \
-         unified-diff bodies (' ' context, '-' remove, '+' add) under '@@' \
-         markers; '@@ <text>' anchors the search at that context line. Example:\n\
-         *** Begin Patch\n\
-         *** Add File: docs/hello.txt\n\
-         +Hello world\n\
-         *** Update File: src/app.py\n\
-         *** Move to: src/main.py\n\
-         @@ def greet():\n\
-         -    print(\"Hi\")\n\
-         +    print(\"Hello, world!\")\n\
-         *** Delete File: obsolete.txt\n\
-         *** End Patch\n\
-         Paths must be workspace-relative. Also accepts {path, diff} to apply a \
-         single-file unified diff."
+        "Apply a multi-file Codex patch atomically: add/delete/update/move files in ONE call, \
+         validated before any write. Also accepts {path, diff} for a single-file unified \
+         diff. Paths are workspace-relative."
     }
 
     fn tags(&self) -> &[&str] {
@@ -125,11 +111,11 @@ impl Tool for ApplyPatchTool {
             "properties": {
                 "patch": {
                     "type": "string",
-                    "description": "Codex patch envelope: '*** Begin Patch', then one or more '*** Add File: <path>' / '*** Delete File: <path>' / '*** Update File: <path>' sections (Update may be followed by '*** Move to: <path>' and unified-diff hunks under '@@' markers), then '*** End Patch'. Paths must be workspace-relative."
+                    "description": "Codex envelope: '*** Begin Patch', one or more '*** Add/Update/Delete File: <path>' sections (Update may add '*** Move to:' and '@@' hunks), '*** End Patch'. Workspace-relative paths."
                 },
                 "path": {
                     "type": "string",
-                    "description": "Single file path when applying a plain unified diff instead of an envelope"
+                    "description": "Single file path when applying a plain unified diff"
                 },
                 "diff": {
                     "type": "string",
@@ -1207,10 +1193,12 @@ mod tests {
         assert_eq!(tool.concurrency_class(), ConcurrencyClass::Exclusive);
         assert_eq!(tool.name(), "apply_patch");
         assert!(tool.tags().contains(&"fs"));
-        // The spec description must teach the envelope by example.
-        assert!(tool.description().contains("*** Begin Patch"));
-        assert!(tool.description().contains("*** End Patch"));
-        assert!(tool.description().contains("*** Move to:"));
+        // The spec must teach the envelope: the grammar now lives in the
+        // `patch` schema note (the description stays one line).
+        let schema_text = serde_json::to_string(&tool.input_schema()).unwrap_or_default();
+        assert!(schema_text.contains("*** Begin Patch"));
+        assert!(schema_text.contains("*** End Patch"));
+        assert!(schema_text.contains("*** Move to:"));
     }
 
     // -- Envelope parsing --------------------------------------------------
