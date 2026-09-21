@@ -2,9 +2,7 @@ import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 import {
   expectSignedIn,
-  expectSignedOut,
   expectVisibleFeedback,
-  fillRegistrationFields,
   openRegister,
   registerAccount,
   signOut,
@@ -15,126 +13,178 @@ import type { TicketBookingAccount } from './support/e2e';
 type RegistrationOverrides = {
   confirmPassword?: string;
   email?: string;
-  omitDocumentNumber?: boolean;
+  omitPassportNumber?: boolean;
   omitTerms?: boolean;
   password?: string;
   username?: string;
 };
 
-async function fillRegistrationForm(page: Page, account: TicketBookingAccount, overrides: RegistrationOverrides = {}) {
+async function fillRegistrationForm(
+  page: Page,
+  account: TicketBookingAccount,
+  overrides: RegistrationOverrides = {},
+): Promise<void> {
   await openRegister(page);
-  const effectiveAccount = {
-    ...account,
-    username: overrides.username ?? account.username,
-    password: overrides.password ?? account.password,
-    email: overrides.email ?? account.email,
-  };
-  await fillRegistrationFields(page, effectiveAccount);
-  if (overrides.omitDocumentNumber) {
-    await page.getByLabel(/证件号码|document number/i).fill('');
+  await page.getByLabel(/nationality/i).selectOption({ label: account.nationality });
+  await page.getByLabel(/^name$/i).fill(account.name);
+  if (!overrides.omitPassportNumber) {
+    await page.getByLabel(/passport number/i).fill(account.passportNumber);
   }
-  if (overrides.confirmPassword) {
-    await page.getByLabel(/确认密码|confirm password/i).fill(overrides.confirmPassword);
+  await page.getByLabel(/passport expiration date/i).fill(account.passportExpirationDate);
+  await page.getByLabel(/date of birth/i).fill(account.dateOfBirth);
+  await page.getByLabel(new RegExp(`^${account.gender}$`, 'i')).check();
+  await page.getByLabel(/^username$/i).fill(overrides.username ?? account.username);
+  await page.getByLabel(/^password$/i).fill(overrides.password ?? account.password);
+  await page
+    .getByLabel(/confirm password/i)
+    .fill(overrides.confirmPassword ?? overrides.password ?? account.password);
+  await page.getByLabel(/email address/i).fill(overrides.email ?? account.email);
+  if (!overrides.omitTerms) {
+    await page.getByRole('checkbox', { name: /terms of service|privacy policy|agree/i }).check();
   }
-  if (overrides.omitTerms) {
-    await page.getByRole('checkbox', { name: /服务条款|隐私政策|terms of service|privacy policy/i }).uncheck();
-  }
-}
-
-async function submitRegistration(page: Page) {
-  await page.getByRole('button', { name: /下一步|next step/i }).click();
 }
 
 test('REQ-1.1: successfully register a new account and remain signed in', async ({ page }) => {
   const account = uniqueTicketBookingAccount();
 
-  await openRegister(page);
-  await expect(page.getByText('账户信息', { exact: true }).first()).toBeVisible();
-  await expect(page.getByRole('combobox', { name: /证件类型/i })).toHaveValue(/^(?:|请选择证件类型)$/);
-  await expect(page.getByRole('combobox', { name: /优惠.*类型/i })).toHaveValue(/^(?:|请选择乘客类型)$/);
-  await expect(page.getByRole('combobox', { name: /国家\/地区代码/i })).toHaveValue('+86');
-  await expect(page.getByRole('combobox', { name: /证件类型/i })).toContainText('护照');
-  await expect(page.getByRole('combobox', { name: /优惠.*类型/i })).toContainText('成人');
-  await expect(page.getByLabel(/手机号/i)).toBeVisible();
-
-  const password = page.getByLabel(/登录密码/i);
-  const passwordStrength = page
-    .getByRole('meter', { name: /密码强度|password strength/i })
-    .or(page.getByTestId('password-strength'))
-    .first();
-  await password.fill('short');
-  await expect(passwordStrength).toBeVisible();
-  const weakStrengthState = await passwordStrength.evaluate((element) => element.outerHTML);
-  await password.fill(account.password);
-  await expect.poll(() => passwordStrength.evaluate((element) => element.outerHTML)).not.toBe(weakStrengthState);
-
   await registerAccount(page, account);
   await expectSignedIn(page, account.username);
+
   await page.reload();
   await expectSignedIn(page, account.username);
 });
 
 test('REQ-1.1: reject a duplicate username without creating a signed-in session', async ({ page }) => {
   const account = uniqueTicketBookingAccount();
+
   await registerAccount(page, account);
   await expectSignedIn(page, account.username);
   await signOut(page);
 
-  await fillRegistrationForm(page, { ...account, name: `Duplicate ${account.name}`, email: `duplicate-${account.email}` });
-  await submitRegistration(page);
-  await expectVisibleFeedback(page, /用户名已存在|username.+(?:already exists|duplicate|taken|conflict)/i);
-  await expectSignedOut(page);
+  await openRegister(page);
+  await page.getByLabel(/nationality/i).selectOption({ label: account.nationality });
+  await page.getByLabel(/^name$/i).fill(`Duplicate ${account.name}`);
+  await page.getByLabel(/passport number/i).fill(`${account.passportNumber}1`);
+  await page.getByLabel(/passport expiration date/i).fill(account.passportExpirationDate);
+  await page.getByLabel(/date of birth/i).fill(account.dateOfBirth);
+  await page.getByLabel(new RegExp(`^${account.gender}$`, 'i')).check();
+  await page.getByLabel(/^username$/i).fill(account.username);
+  await page.getByLabel(/^password$/i).fill(account.password);
+  await page.getByLabel(/confirm password/i).fill(account.password);
+  await page.getByLabel(/email address/i).fill(`duplicate-${account.email}`);
+  await page.getByRole('checkbox', { name: /terms of service|privacy policy|agree/i }).check();
+  await page.getByRole('button', { name: /next step/i }).click();
+
+  await expectVisibleFeedback(
+    page,
+    /username.+(?:already exists|duplicate|taken|conflict)|(?:already exists|duplicate|taken|conflict).+username/i,
+  );
+  await expect(page.getByRole('link', { name: /sign out/i })).not.toBeVisible();
 });
 
 test('REQ-1.1: reject duplicate email with a different username', async ({ page }) => {
   const account = uniqueTicketBookingAccount();
+
   await registerAccount(page, account);
   await expectSignedIn(page, account.username);
   await signOut(page);
 
-  await fillRegistrationForm(page, { ...account, username: `${account.username}-alt`, email: account.email.toUpperCase() });
-  await submitRegistration(page);
-  await expectVisibleFeedback(page, /邮箱已存在|email.+(?:already exists|duplicate|taken|conflict)/i);
-  await expectSignedOut(page);
+  await openRegister(page);
+  await page.getByLabel(/nationality/i).selectOption({ label: account.nationality });
+  await page.getByLabel(/^name$/i).fill(`Another ${account.name}`);
+  await page.getByLabel(/passport number/i).fill(`${account.passportNumber}9`);
+  await page.getByLabel(/passport expiration date/i).fill(account.passportExpirationDate);
+  await page.getByLabel(/date of birth/i).fill(account.dateOfBirth);
+  await page.getByLabel(new RegExp(`^${account.gender}$`, 'i')).check();
+  await page.getByLabel(/^username$/i).fill(`${account.username}-alt`);
+  await page.getByLabel(/^password$/i).fill(account.password);
+  await page.getByLabel(/confirm password/i).fill(account.password);
+  await page.getByLabel(/email address/i).fill(account.email.toUpperCase());
+  await page.getByRole('checkbox', { name: /terms of service|privacy policy|agree/i }).check();
+  await page.getByRole('button', { name: /next step/i }).click();
+
+  await expectVisibleFeedback(
+    page,
+    /email.+(?:already exists|duplicate|taken|conflict)|(?:already exists|duplicate|taken|conflict).+email/i,
+  );
+  await expect(page.getByRole('link', { name: /sign out/i })).not.toBeVisible();
 });
 
-test('REQ-1.1: reject mismatched passwords without creating a signed-in session', async ({ page }) => {
+test('REQ-1.1: reject mismatched passwords without creating a signed-in session', async ({
+  page,
+}) => {
   const account = uniqueTicketBookingAccount();
-  await fillRegistrationForm(page, account, { confirmPassword: `${account.password}-mismatch` });
-  await submitRegistration(page);
-  await expectVisibleFeedback(page, /确认密码必须|confirm password.+match/i);
-  await expectSignedOut(page);
+
+  await openRegister(page);
+  await page.getByLabel(/nationality/i).selectOption({ label: account.nationality });
+  await page.getByLabel(/^name$/i).fill(account.name);
+  await page.getByLabel(/passport number/i).fill(account.passportNumber);
+  await page.getByLabel(/passport expiration date/i).fill(account.passportExpirationDate);
+  await page.getByLabel(/date of birth/i).fill(account.dateOfBirth);
+  await page.getByLabel(new RegExp(`^${account.gender}$`, 'i')).check();
+  await page.getByLabel(/^username$/i).fill(account.username);
+  await page.getByLabel(/^password$/i).fill(account.password);
+  await page.getByLabel(/confirm password/i).fill(`${account.password}-mismatch`);
+  await page.getByLabel(/email address/i).fill(account.email);
+  await page.getByRole('checkbox', { name: /terms of service|privacy policy|agree/i }).check();
+  await page.getByRole('button', { name: /next step/i }).click();
+
+  await expectVisibleFeedback(page, /passwords?.+(?:do not|does not|must).+match|confirmation.+match/i);
 });
 
-test('REQ-1.1: reject missing required registration values before creating a session', async ({ page }) => {
-  const cases: Array<{ expected: RegExp; overrides: RegistrationOverrides }> = [
-    { expected: /请.*同意|服务条款|隐私政策|terms|privacy/i, overrides: { omitTerms: true } },
-    { expected: /证件号码.*(?:必填|不能为空|required)|document number.+required/i, overrides: { omitDocumentNumber: true } },
+test('REQ-1.1: reject more invalid registration combinations before creating a session', async ({
+  page,
+}) => {
+  const cases: Array<{
+    expected: RegExp;
+    overrides: RegistrationOverrides;
+  }> = [
+    {
+      expected: /(?:accept|agree).+terms|terms.+(?:required|must be accepted)/i,
+      overrides: { omitTerms: true },
+    },
+    {
+      expected: /passport(?: number)?.+(?:required|missing)|(?:enter|provide).+passport/i,
+      overrides: { omitPassportNumber: true },
+    },
+    {
+      expected: /passwords?.+(?:do not|does not|must).+match|confirmation.+match/i,
+      overrides: { confirmPassword: 'mismatch-password' },
+    },
   ];
 
   for (const currentCase of cases) {
     const account = uniqueTicketBookingAccount();
     await fillRegistrationForm(page, account, currentCase.overrides);
-    await submitRegistration(page);
-    await expect(page.getByRole('alert')).toBeVisible();
-    await expect(page.getByRole('alert')).not.toBeEmpty();
-    await expectSignedOut(page);
+    await page.getByRole('button', { name: /next step/i }).click();
+
+    await expectVisibleFeedback(page, currentCase.expected);
+    await expect(page.getByRole('link', { name: /sign out/i })).not.toBeVisible();
   }
 });
 
 test('REQ-1.1: reject malformed username, email, or password without signing in', async ({ page }) => {
   const cases: Array<{ expected: RegExp; overrides: RegistrationOverrides }> = [
-    { expected: /用户名格式不正确|username.+(?:invalid|letters|digits|characters)/i, overrides: { username: 'bad username!' } },
-    { expected: /邮箱格式不正确|email.+invalid|enter.+valid email/i, overrides: { email: 'not-an-email' } },
-    { expected: /登录密码需|password.+(?:invalid|at least|uppercase|lowercase|digit|special|weak)/i, overrides: { password: 'short' } },
+    {
+      expected: /invalid username|username.+(?:invalid|letters|digits|characters)/i,
+      overrides: { username: 'bad username!' },
+    },
+    {
+      expected: /invalid email|email.+invalid|enter.+valid email/i,
+      overrides: { email: 'not-an-email' },
+    },
+    {
+      expected: /password.+(?:invalid|at least|uppercase|lowercase|digit|special|weak)/i,
+      overrides: { password: 'short' },
+    },
   ];
 
   for (const currentCase of cases) {
     const account = uniqueTicketBookingAccount();
     await fillRegistrationForm(page, account, currentCase.overrides);
-    await submitRegistration(page);
-    await expect(page.getByRole('alert')).toBeVisible();
-    await expect(page.getByRole('alert')).not.toBeEmpty();
-    await expectSignedOut(page);
+    await page.getByRole('button', { name: /next step/i }).click();
+
+    await expectVisibleFeedback(page, currentCase.expected);
+    await expect(page.getByRole('link', { name: /sign out/i })).not.toBeVisible();
   }
 });

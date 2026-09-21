@@ -1,7 +1,6 @@
 import { expect, test } from '@playwright/test';
 import {
   expectSignedIn,
-  expectSignedOut,
   expectVisibleFeedback,
   readVisibleFeedback,
   registerAccount,
@@ -41,17 +40,15 @@ test('REQ-1.2: reject wrong password and incomplete credentials with the same ge
   await signOut(page);
 
   await signIn(page, account.username, 'incorrect-password');
-  const genericCredentialError = /无效凭据|登录失败|账号或密码错误|凭据错误|invalid credentials|login failed|sign-in failed|incorrect (?:username|email|credentials|password)|wrong (?:username|email|credentials|password)/i;
+  const genericCredentialError = /invalid credentials|login failed|sign-in failed|incorrect (?:username|email|credentials|password)|wrong (?:username|email|credentials|password)/i;
   await expectVisibleFeedback(page, genericCredentialError);
   const wrongPasswordMessage = await readVisibleFeedback(page, genericCredentialError);
-  await expectSignedOut(page);
-  await expect(page.getByRole('link', { name: /退出登录|sign out/i })).not.toBeVisible();
+  await expect(page.getByRole('link', { name: /sign out/i })).not.toBeVisible();
 
   await signIn(page, account.username, '');
   await expectVisibleFeedback(page, genericCredentialError);
   await expect.poll(() => readVisibleFeedback(page, genericCredentialError)).toBe(wrongPasswordMessage);
-  await expectSignedOut(page);
-  await expect(page.getByRole('link', { name: /退出登录|sign out/i })).not.toBeVisible();
+  await expect(page.getByRole('link', { name: /sign out/i })).not.toBeVisible();
 });
 
 test('REQ-1.2: reject an unknown account and stay logged out', async ({ page }) => {
@@ -62,14 +59,40 @@ test('REQ-1.2: reject an unknown account and stay logged out', async ({ page }) 
   await signOut(page);
 
   await signIn(page, account.username, 'incorrect-password');
-  const genericCredentialError = /无效凭据|登录失败|账号或密码错误|凭据错误|invalid credentials|login failed|sign-in failed|incorrect (?:username|email|credentials|password)|wrong (?:username|email|credentials|password)/i;
+  const genericCredentialError = /invalid credentials|login failed|sign-in failed|incorrect (?:username|email|credentials|password)|wrong (?:username|email|credentials|password)/i;
   await expectVisibleFeedback(page, genericCredentialError);
   const wrongPasswordMessage = await readVisibleFeedback(page, genericCredentialError);
 
   await signIn(page, unknownAccount, account.password);
   await expectVisibleFeedback(page, genericCredentialError);
   await expect.poll(() => readVisibleFeedback(page, genericCredentialError)).toBe(wrongPasswordMessage);
-  await expectSignedOut(page);
-  await expect(page.getByText(/账号不存在|用户不存在|not found|unknown account|does not exist/i)).toHaveCount(0);
-  await expect(page.getByRole('link', { name: /退出登录|sign out/i })).not.toBeVisible();
+  await expect(page.getByText(/not found|unknown account|does not exist/i)).toHaveCount(0);
+  await expect(page.getByRole('link', { name: /sign out/i })).not.toBeVisible();
+});
+
+test('REQ-1.2: trim whitespace around the account identifier when signing in', async ({
+  page,
+}) => {
+  const account = uniqueTicketBookingAccount();
+
+  await registerAccount(page, account);
+  await signOut(page);
+
+  await signIn(page, `  ${account.email}  `, account.password);
+  await expectSignedIn(page, account.username);
+  await page.reload();
+  await expectSignedIn(page, account.username);
+});
+
+test('REQ-1.2: trim whitespace around both username and email identifiers', async ({ page }) => {
+  const account = uniqueTicketBookingAccount();
+
+  await registerAccount(page, account);
+  await signOut(page);
+
+  for (const identifier of [account.username, account.email]) {
+    await signIn(page, `  ${identifier}  `, account.password);
+    await expectSignedIn(page, account.username);
+    await signOut(page);
+  }
 });
