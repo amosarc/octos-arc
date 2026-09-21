@@ -133,6 +133,31 @@ check("wall finite budget clamps",
 check("wall floor 120",
       turn_wall_like(5400, 3600, 610.0, 600, 2) == 120)
 
+
+# --- build_spec_run_cmd (run6 fixes: per-batch filter + verification rules) ---
+cmd = main.build_spec_run_cmd("/path/to/cli.js", ["A.spec.ts", "B.spec.ts"])
+check("spec cmd: files appended as filters",
+      cmd.rstrip().endswith("--reporter=line A.spec.ts B.spec.ts"), cmd[-80:])
+check("spec cmd: green-stop marker (.arc/acceptance) present",
+      ".arc/acceptance/playwright.config.ts" in cmd)
+check("spec cmd: git rollback banned",
+      "git checkout/reset/restore" in cmd)
+check("spec cmd: custom harness banned",
+      "never write your own Playwright" in cmd)
+
+cmd_full = main.build_spec_run_cmd("/path/to/cli.js")
+check("spec cmd: no filter → full suite (final verification)",
+      cmd_full.rstrip().endswith("--reporter=line") and "spec.ts" not in cmd_full)
+
+cmd_fallback = main.build_spec_run_cmd(None, ["A.spec.ts"])
+check("spec cmd: npx fallback carries filter",
+      cmd_fallback.rstrip().endswith("--reporter=line A.spec.ts")
+      and "npx --yes @playwright/test" in cmd_fallback)
+
+check("spec cmd: empty file entries dropped",
+      main.build_spec_run_cmd("/c", ["", "A.spec.ts"]).count("spec.ts") == 1)
+
+print()
 print()
 if FAILURES:
     print(f"{len(FAILURES)} FAILED: {FAILURES}")

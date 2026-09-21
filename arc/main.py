@@ -1561,15 +1561,53 @@ requirements (a skipped node scores zero for every test behind it).\
 
 BATCH_DIRECTIVE = """\
 BATCH MODE: this turn implements the {count} focus nodes IN THE LISTED \
-ORDER, one at a time. After finishing each node, immediately verify it by \
-running ONLY that node's staged spec (SPEC RUN command + the file path(s) \
-below); a red spec means fix that node before moving on. The turn is \
-complete when EVERY focus node's spec is green — then write a short \
-per-node summary and finish. Do not re-run an earlier node's spec after \
-later edits unless you changed code it covers.\
+ORDER, one at a time. The SPEC RUN command is pre-filtered to this \
+batch's specs — run it verbatim after finishing each node; a red spec \
+means fix that node before moving on. The turn is complete when the \
+SPEC RUN is fully green (all {count} nodes covered) — then write a short \
+per-node summary and finish.\
 Per-node staged specs:
 {specs}
 """
+
+VERIFICATION_RULES = (
+    "\nVERIFICATION RULES: the SPEC RUN command is the ONLY sanctioned way "
+    "to verify — never write your own Playwright/Puppeteer/chromium script "
+    "and never spawn a browser directly. NEVER revert project files with "
+    "git checkout/reset/restore — the repo is host-managed for "
+    "traceability; when a check fails, fix forward with edits.\n")
+
+
+def build_spec_run_cmd(cli_path: str | None,
+                       spec_files: list[str] | None = None) -> str:
+    """SPEC RUN command with an optional per-batch file filter.
+
+    run6 taught the cost of an unfiltered command: the model ran the FULL
+    staged suite 160 times, treated every future-node red as its own
+    failure (fix → build → revert → re-run thrash; 32 git-checkout
+    rollbacks), and the suite could never be purely green so green-stop
+    never armed. Filtering to the batch's own spec files makes each run
+    10-15× faster, kills the red noise, and a pure green becomes the
+    natural end-of-batch signal. Files are passed as basenames —
+    Playwright treats CLI args as path filters and the basenames are
+    unique under the staged testDir. An empty/no list (final
+    verification) runs the whole suite, which is correct there.
+    """
+    files = " ".join(f for f in (spec_files or []) if f)
+    tail = f" {files}" if files else ""
+    if cli_path:
+        return (
+            f"{VERIFICATION_RULES}"
+            "SPEC RUN (host-provided, deps preinstalled — use verbatim "
+            "from the workspace root):\n"
+            f"node {cli_path} test --config "
+            f".arc/acceptance/playwright.config.ts --reporter=line{tail}\n")
+    return (
+        f"{VERIFICATION_RULES}"
+        "SPEC RUN (host-provided fallback — use verbatim from the "
+        "workspace root):\n"
+        f"npx --yes @playwright/test test --config "
+        f".arc/acceptance/playwright.config.ts --reporter=line{tail}\n")
 
 # plan §4: schema-first directive for the first node turn (host template
 # present). The model declares data; the host compiles schema.json →
@@ -2061,22 +2099,13 @@ def main() -> int:
         toolchain_cli = None
         if os.environ.get("OCTOS_ARC_PREWARM", "1") != "0":
             toolchain_cli = _ensure_host_toolchain(log)
-        if toolchain_cli is not None:
-            spec_run_cmd = (
-                "\nSPEC RUN (host-provided, deps preinstalled — use verbatim "
-                "from the workspace root):\n"
-                f"node {toolchain_cli} test --config "
-                ".arc/acceptance/playwright.config.ts --reporter=line\n")
-        else:
-            # The node prompt promises a verbatim SPEC RUN command; an empty
-            # string broke that contract (2026-09-20: the model then hunted
-            # for a Playwright install and burned 330s on tool timeouts).
-            # Mirror the Tier-2 degradation path instead.
-            spec_run_cmd = (
-                "\nSPEC RUN (host-provided fallback — use verbatim from the "
-                "workspace root):\n"
-                "npx --yes @playwright/test test --config "
-                ".arc/acceptance/playwright.config.ts --reporter=line\n")
+        # Full-suite variant (final verification); the node loop builds a
+        # per-batch filtered command via build_spec_run_cmd. An empty string
+        # broke the verbatim-command contract once (2026-09-20: the model
+        # hunted for a Playwright install and burned 330s) — never let it
+        # be empty.
+        spec_run_cmd = build_spec_run_cmd(
+            str(toolchain_cli) if toolchain_cli is not None else None)
         if plan_on and tests_dir:
             stage_dir = plan_envelope.stage_specs(tests_dir, output_dir)
             log(f"[plan] staged acceptance specs at {stage_dir}")
@@ -2355,9 +2384,16 @@ def main() -> int:
                         focus=focus_id, ports=plan_ports, spec_map=spec_map,
                         host_signals=hs0 or None)
                     node_spec = "\n\n".join(describe_node(n) for n in batch)
+                    batch_specs = sorted(
+                        {f for nid in batch_ids
+                         for f in (spec_map.get(nid) or [])})
                     node_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
                         node_id=focus_id, node_spec=node_spec,
-                        port=args.web_port, smoke=smoke_port) + spec_run_cmd
+                        port=args.web_port, smoke=smoke_port) \
+                        + build_spec_run_cmd(
+                            str(toolchain_cli)
+                            if toolchain_cli is not None else None,
+                            batch_specs)
                     if len(batch) > 1:
                         node_prompt += BATCH_DIRECTIVE.format(
                             count=len(batch),
