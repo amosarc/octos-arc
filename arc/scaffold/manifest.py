@@ -22,7 +22,7 @@ SCHEMA_JS_REL = "backend/src/database/schema.js"
 CODEGEN_STATE_REL = ".arc/host-codegen.json"
 
 # 就绪(宿主模板已落盘)与完整(可跳过 skeleton 轮)判定键——原 main.py 硬编码。
-READY_KEYS = ("frontend", "backend/src/app.js")
+READY_KEYS = ("frontend", "frontend/src/app/App.jsx", "backend/src/app.js")
 COMPLETE_KEYS = READY_KEYS + (
     "backend/src/lib/auth.js",
     "backend/src/database/engine.js",
@@ -48,11 +48,17 @@ SCAFFOLD_FILES: dict[str, tuple[str, str]] = {
     "frontend/package.json": (json.dumps(frontend.FRONTEND_PACKAGE_JSON, indent=2) + "\n", "host"),
     "frontend/index.html": (frontend.FRONTEND_INDEX_HTML, "host"),
     "frontend/src/main.jsx": (frontend.FRONTEND_MAIN_JSX, "host"),
+    "frontend/src/app/App.jsx": (frontend.FRONTEND_APP_JSX, "host"),
+    "frontend/src/app/store.jsx": (frontend.FRONTEND_STORE_JSX, "host"),
+    "frontend/src/app/api.js": (frontend.FRONTEND_API_JS, "host"),
+    "frontend/src/app/styles.css": (frontend.FRONTEND_STYLES_CSS, "host"),
     "frontend/.npmrc": (NPMRC, "host"),
     ".npmrc": (NPMRC, "host"),
 }
 # 模型独占文件:宿主不落盘,清单内仅登记路径供 prompt/契约引用。
-MODEL_FILES = (SCHEMA_JSON_REL,)
+# frontend/src/features/ 是模型的 UI 扩展面(每需求域一个自包含文件,
+# 目录由模型的第一个 feature 文件创建)。
+MODEL_FILES = (SCHEMA_JSON_REL, "frontend/src/features/")
 
 # HOST_STACK_RULES(plan_envelope 文字契约)必须逐一点名的路径拼写。
 # 拼写按契约原文(backend 相对路径),防漂移测试逐条断言覆盖。
@@ -69,4 +75,10 @@ RULES_MUST_NAME = (
     "backend/data/schema.json",
     "backend/data/db.json",
     "frontend/dist",
+    "frontend/src/main.jsx",
+    "frontend/src/app/App.jsx",
+    "frontend/src/app/store.jsx",
+    "frontend/src/app/api.js",
+    "frontend/src/app/styles.css",
+    "frontend/src/features",
 )

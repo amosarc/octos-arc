@@ -39,6 +39,18 @@ all/dup/insert/remove/save + scrypt hash/verify), src/database/engine.js \
 (schema-driven CRUD factory), src/lib/auth.js (register/login/logout/me \
 + sessions). Dependencies are PREINSTALLED — never run npm install, \
 never add npm packages.
+FRONTEND LAYOUT (isolation contract): every requirement's UI lives in \
+its OWN self-contained file frontend/src/features/<name>.jsx (default \
+export; the component, its local state/hooks, and its scoped styles all \
+in that one file). frontend/src/app/App.jsx is the ASSEMBLY layer only — \
+per feature add one import and one mount; the FIRST requirement may lay \
+out the page structure there, after that never put business logic in it. \
+Shared entities go through frontend/src/app/store.jsx \
+(useResource('<entity>')) — never duplicate shared state inside \
+features. NEVER edit another requirement's feature file; keep \
+frontend/src/main.jsx, frontend/src/app/api.js and \
+frontend/src/app/styles.css as-is (colocate feature styles with the \
+feature, or reuse the global classes).
 SCHEMA-DRIVEN BACKEND: to add data, write backend/data/schema.json = \
 {"entities":[{"name":"users","auth":true,"label":"用户名","fields":[...]}]}; \
 field keys: name, label (used in error messages), type \
@@ -55,8 +67,10 @@ existence), /api/auth/logout, /api/me (session restore; sessions \
 survive server restart). Endpoints that are NOT plain CRUD (search / \
 booking flows) go in src/routes/index.js using store + lib helpers. \
 Seed concrete demo records verbatim from the requirement into \
-backend/data/db.json ({"collections":{"<entity>":[...]}}) — the store \
-persists atomically on every mutation.
+backend/data/db.json ({"collections":{"<entity>":[...]}}) — db.json is \
+the SEED: runtime state goes to db.run.json and every server restart \
+resets to the seed, so edit db.json to change demo data and restart \
+(sh .arc/host/restart-server.sh) to clear runtime state.
 SERVER-SIDE VALIDATION (generic discipline, every task): the backend \
 re-validates ALL input and never trusts the client. Enforce the \
 contract's required/length/format/uniqueness rules EXACTLY, boundaries \

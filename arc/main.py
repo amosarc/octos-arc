@@ -602,11 +602,15 @@ def _ensure_host_toolchain(log) -> Path | None:
 
 def _run_staged_playwright(output_dir: Path, smoke_port: int,
                            tests_dir: Path | None,
-                           extra_ports: list | None = None) -> tuple | None:
+                           extra_ports: list | None = None,
+                           spec_files: list[str] | None = None) -> tuple | None:
     """Tier-2 (OCTOS_ARC_HOST_GRADE=1, default off): run the staged
     Playwright suite against the smoke port. Returns (passed, failed), or
     None when the environment cannot run it (no npx/browsers) — callers
-    treat None as "not attempted", never as a verdict."""
+    treat None as "not attempted", never as a verdict.
+    spec_files: optional basename filter — run only those staged specs
+    (the post-batch regression passes the COMPLETED nodes' specs; the
+    full-suite form stays for final verification)."""
     if tests_dir is None or not tests_dir.is_dir():
         return None
     import urllib.request
@@ -629,6 +633,8 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
     if lg_cli.is_file():
         cmd = [shutil.which("node") or "node", str(lg_cli),
                "test", "--reporter=json"]
+        if spec_files:
+            cmd.extend(f for f in spec_files if f)
         # The config imports '@playwright/test' — resolution walks up from
         # run_dir, so link the local-grader tree in.
         try:
@@ -638,10 +644,25 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
             pass
     else:
         cmd = ["npx", "--yes", "@playwright/test", "test", "--reporter=json"]
+        if spec_files:
+            cmd.extend(f for f in spec_files if f)
     # Boot the app on the smoke port for the duration of the run; specs
     # derive their origin from E2E_BASE_URL (default hardcodes 3301) —
     # set it explicitly, and dual-listen spec base ports as a fallback.
     _stop_dev_server(smoke_port)
+    # Always start from the SEED: a leftover db.run.json (our own previous
+    # regression/Tier-2 pass archived/pinned notes) would shift every
+    # state-dependent test's precondition between runs — run11's eval
+    # timeouts were exactly this. Deleting it makes each staged run
+    # (regression, Tier-2 first pass, rerun-after-fix) start identically,
+    # which is also what makes the guardrail's first-vs-rerun comparison
+    # fair.
+    run_db = output_dir / "backend" / "data" / "db.run.json"
+    if run_db.exists():
+        try:
+            run_db.unlink()
+        except OSError:
+            pass
     backend = output_dir / "backend"
     env = plan_envelope.rehearsal_boot_env(os.environ, smoke_port,
                                            extra_ports or [])
@@ -1278,6 +1299,11 @@ class OctosDriver:
             # examples/core-mod: proof that a patched core build is live on
             # the runner; log() dual-writes so it lands in the report capture.
             log(f"[core-mod] {params.get('line', '')}")
+        if method == "message/reasoning_delta":
+            # run11: a reasoning-tier provider streamed 387K reasoning
+            # deltas — 90% of an 80MB trace for content the host never
+            # renders. Keep the frame stream to tool/turn/message traffic.
+            return
         try:
             with self.events_log.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps({"method": method, "params": params},
@@ -1618,12 +1644,14 @@ write code first.\
 HOST_SKELETON_PROMPT = """\
 Create the application skeleton for this task. Fixed infrastructure \
 already exists (backend: package.json/.npmrc + src/{app.js,index.js,lib/*,\
-database/*,routes/*}, frontend: package.json + index.html + src/main.jsx) \
-— do NOT rewrite them. Create ONLY what is missing: backend/data/\
-schema.json per the HOST CONTRACT (the host compiles it and mounts CRUD + \
-auth), backend/data/db.json seed records, and the frontend pages. \
-JavaScript/JSX only; dependencies are preinstalled — never run npm \
-install. Do not commit; the harness handles git.\
+database/*,routes/*}, frontend: package.json + index.html + src/main.jsx \
++ src/app/{App.jsx,store.jsx,api.js,styles.css}) — do NOT rewrite them. \
+Create ONLY what is missing: backend/data/schema.json per the HOST \
+CONTRACT (the host compiles it and mounts CRUD + auth), backend/data/\
+db.json seed records, and the first frontend feature file under \
+frontend/src/features/ (wire it in src/app/App.jsx per the FRONTEND \
+LAYOUT contract). JavaScript/JSX only; dependencies are preinstalled — \
+never run npm install. Do not commit; the harness handles git.\
 PORT DISCIPLINE: run any dev/test server ONLY on port {smoke}; NEVER \
 bind port {port} (the grader watches it — binding it kills the whole \
 run). Stop every server you started when done.\
@@ -1646,10 +1674,19 @@ your own server. After editing backend/src run \
 after editing frontend run `npm run build --prefix frontend` — the \
 running server serves the fresh dist immediately, no restart needed.\
 OPERATION BUDGET: land this node in at most ~40 tool operations. Plan \
-silently, read each file at most once, write whole files in one edit, \
-then verify once; re-reading files you just wrote, micro-edits, and \
-repeat builds burn the shared wall clock and starve the remaining \
-requirements (a skipped node scores zero for every test behind it).\
+silently, read each file at most once, write each NEW feature file \
+whole in one edit and make surgical edits elsewhere, then verify once; \
+re-reading files you just wrote, micro-edits, and repeat builds burn \
+the shared wall clock and starve the remaining requirements (a skipped \
+node scores zero for every test behind it).
+ISOLATION: put this node's UI in frontend/src/features/<node-or-domain>\
+.jsx (whole new file) and wire it in frontend/src/app/App.jsx with one \
+import + one mount. Do NOT edit other features' files, and do NOT \
+rewrite shared app files — a regression in an already-green feature \
+costs its tests.
+REGRESSION SCOPE: when re-checking earlier work, run ONLY the specs of \
+the features you touched this turn — the batch-filtered SPEC RUN below \
+is exactly that scope; anything wider wastes minutes per run.\
 
 {node_spec}"""
 
@@ -1855,12 +1892,14 @@ Rules:
 - Dependencies are preinstalled (backend express included); do not add \
 new npm dependencies and never run npm install. The backend generic \
 layer (auth/validate/store/engine, see HOST CONTRACT) is host-owned — \
-extend via src/routes/index.js, backend/data/schema.json, and the \
-frontend.
+extend via src/routes/index.js, backend/data/schema.json, and one \
+self-contained frontend/src/features/<name>.jsx per requirement (wired \
+in src/app/App.jsx; shared state via src/app/store.jsx).
 - Keep the architecture intact: `npm run build` in frontend/ and \
 `npm run start` in backend/ MUST keep working.
 - Operation budget: land this node in at most ~40 tool operations — \
-read each file at most once, write whole files in one edit, verify \
+read each file at most once, write each NEW feature file whole in one \
+edit and make surgical edits elsewhere, verify \
 once. Re-reading what you just wrote or repeated builds starve the \
 remaining requirements.
 
@@ -2040,6 +2079,19 @@ terminates the run if it sees a server there while you are still working. \
 Write the fix now — do not just describe it.\
 """
 
+SPEC_REGRESSION_REPAIR_PROMPT = """\
+A full staged regression run just found previously-green tests that are \
+now RED after recent changes (ground truth, Playwright vs the running \
+app on port {smoke}):
+{failed}
+
+Fix ONLY what these failures cover. Do NOT rewrite working features, do \
+NOT edit other requirements' files under frontend/src/features/, and do \
+NOT revert project files with git — fix forward with surgical edits. \
+Reproduce with the SPEC RUN command below (pre-filtered to the failing \
+specs), then finish the turn.\
+{spec_cmd}"""
+
 
 # ---------------------------------------------------------------- main flow
 
@@ -2186,7 +2238,12 @@ def main() -> int:
                 f"for {len(atomic_nodes)} nodes, max batch {max_batch}, "
                 f"turn cap {os.environ['OCTOS_TURN_MAX_ITERATIONS']}")
         max_iter = int(os.environ.get("OCTOS_MAX_ITERATIONS", "500"))
-        node_timeout = int(os.environ.get("OCTOS_NODE_TIMEOUT", "1200"))
+        # Idle budget (resets on EVERY protocol event, so a slow-but-
+        # streaming turn is never cut): tightened 1200→600 after
+        # tb-trace-001, where dead-gateway turns sat silent for 20 minutes
+        # before the idle cut — twice the worst observed provider TTFB
+        # (~218s median lane) is still generous.
+        node_timeout = int(os.environ.get("OCTOS_NODE_TIMEOUT", "600"))
         # Wall-clock budget for the whole generation flow. 2026-09-21:
         # default switched to 0 (UNLIMITED) by operator decision — long
         # tasks need far more than the old ~90-minute window. The original
@@ -2360,6 +2417,10 @@ def main() -> int:
         plan_task = str(tree.get("name") or "task")
         plan_statuses: dict[str, str] = {
             str(n.get("id")): "pending" for n in atomic_nodes}
+        # Staged specs of every node whose batch rehearsal-greened so far —
+        # the post-batch regression's blast radius (NEVER the full suite:
+        # unimplemented nodes' specs are legitimately red mid-run).
+        completed_specs: list[str] = []
         if plan_on:
             driver.set_envelope(
                 phase="node" if template_ready else "skeleton",
@@ -2543,6 +2604,16 @@ def main() -> int:
                 if template_ready:
                     _ensure_dev_server(output_dir, smoke_port,
                                        spec_ports_extra, log)
+                # Batch guardrail checkpoint: a cut turn's half-finished
+                # files used to linger (and even get committed) for the
+                # next batch to build on. On a failed batch that cannot be
+                # repaired, the tree rolls back here instead.
+                try:
+                    pre_batch_head = runtime.git.run(
+                        ["rev-parse", "HEAD"]).stdout.strip()
+                except Exception:
+                    pre_batch_head = None
+                batch_turn_ok = True
                 if driver.auth_exhausted:
                     # Gateway burned its credential budget (tb-trace-001:
                     # 55% of wall clock陪跑 auth failures). Stop paying
@@ -2558,6 +2629,7 @@ def main() -> int:
                 else:
                     wall = turn_wall(len(batch))
                     ok, text = driver.run(node_prompt, min(node_timeout, wall), wall)
+                batch_turn_ok = ok
                 log(f"[flow] batch {focus_id} {'ok' if ok else 'FAILED'} "
                     f"in {time.time()-t0:.0f}s: {text[-300:]!r}")
                 if not ok:
@@ -2609,6 +2681,16 @@ def main() -> int:
                         events.mark_implementation_failed(
                             nid, "JS syntax errors: " + "; ".join(syn[:2]))
                         failed.append(nid)
+                    if pre_batch_head:
+                        # Broken-syntax files must not bleed into the next
+                        # batch's baseline.
+                        try:
+                            runtime.git.run(["reset", "--hard", pre_batch_head])
+                            log(f"[plan] batch {focus_id}: unrepaired "
+                                "syntax gate; rolled back to "
+                                f"{pre_batch_head[:8]}")
+                        except Exception as exc:
+                            log(f"[plan] syntax-gate rollback failed: {exc}")
                     continue
                 for nid in batch_ids:
                     events.mark_implementation_done(nid, text[-500:] or None)
@@ -2651,15 +2733,93 @@ def main() -> int:
                             if r_err is None:
                                 break
                     batch_state = "done" if r_err is None else "blocked"
+                    if (r_err is not None and not batch_turn_ok
+                            and pre_batch_head):
+                        # Failed (cut) turn whose half-finished state could
+                        # not even be repaired to a green rehearsal: ship
+                        # it back to the pre-batch baseline instead of
+                        # letting the next batch build on broken ground.
+                        # (A green rehearsal still recovers the cut batch —
+                        # wall-cut turns are often 90% done on disk.)
+                        try:
+                            runtime.git.run(
+                                ["reset", "--hard", pre_batch_head])
+                            log(f"[plan] batch {focus_id}: cut turn + red "
+                                f"rehearsal; rolled back to "
+                                f"{pre_batch_head[:8]}")
+                        except Exception as exc:
+                            log(f"[plan] batch rollback failed: {exc}")
                     for nid in batch_ids:
                         plan_statuses[nid] = batch_state
                     if r_err is None:
                         # Wall-cut turn whose code actually rehearsal-greened.
+                        completed_specs.extend(
+                            f for nid in batch_ids
+                            for f in (spec_map.get(nid) or []))
+                        completed_specs = sorted(set(completed_specs))
                         for nid in batch_ids:
                             if nid in failed:
                                 failed.remove(nid)
                                 events.mark_implementation_done(
                                     nid, "recovered via host rehearsal")
+                    if (r_err is None and tests_dir and pre_batch_head
+                            and not time_up()
+                            and os.environ.get("OCTOS_ARC_HOST_GRADE",
+                                               "1") != "0"):
+                        # Post-batch incremental regression (run8: 12 of 18
+                        # failures were later batches breaking earlier,
+                        # already-green features through shared files).
+                        # Tiered blast radius: only a batch that touched
+                        # SHARED files (app assembly/store/api, main.jsx,
+                        # backend/src) pays for a staged regression of the
+                        # COMPLETED nodes' specs — a features-only batch is
+                        # isolated by construction.
+                        try:
+                            changed = runtime.git.run([
+                                "diff", "--name-only", pre_batch_head,
+                                "HEAD"]).stdout.split()
+                        except Exception:
+                            changed = []
+                        # Whitelist of SHARED SOURCE paths — anything else
+                        # (run artifacts like local-grader/, test-results/,
+                        # .arc, .octos, data) is noise, not blast radius.
+                        shared = [
+                            p for p in changed if p and (
+                                (p.startswith("frontend/src/")
+                                 and not p.startswith(
+                                     "frontend/src/features/"))
+                                or p.startswith("backend/src/")
+                                or p in ("frontend/index.html",
+                                         "frontend/package.json",
+                                         "backend/package.json"))]
+                        if shared and completed_specs:
+                            log(f"[plan] batch {focus_id} touched shared "
+                                f"files ({', '.join(shared[:3])}); "
+                                f"regression over {len(completed_specs)} "
+                                "completed spec(s)")
+                            g_run = _run_staged_playwright(
+                                output_dir, smoke_port, tests_dir,
+                                spec_ports_extra,
+                                spec_files=completed_specs)
+                            if g_run and g_run[1] > 0:
+                                log(f"[plan] regression RED: {g_run[0]}p/"
+                                    f"{g_run[1]}f — repairing while the "
+                                    "context is hot")
+                                r_wall = turn_wall(len(batch))
+                                driver.run(
+                                    SPEC_REGRESSION_REPAIR_PROMPT.format(
+                                        failed=", ".join(g_run[2] or []),
+                                        smoke=smoke_port,
+                                        spec_cmd=build_spec_run_cmd(
+                                            str(toolchain_cli)
+                                            if toolchain_cli is not None
+                                            else None,
+                                            final_spec_files(
+                                                g_run, output_dir))),
+                                    min(node_timeout, r_wall), r_wall)
+                            elif g_run:
+                                log(f"[plan] regression green: "
+                                    f"{g_run[0]}p/{g_run[1]}f")
                     # validation_probes lives on HostSignals (next to
                     # rehearsal), not inside RehearsalReport.
                     r_report.pop("validation_probes", None)
@@ -2755,6 +2915,15 @@ def main() -> int:
                                        spec_ports_extra, log)
                     log("[flow] final verification turn starting (slim, "
                         f"{len(probe_list)} route probe(s))")
+                    # Guardrail checkpoint: if the fix turn ends up making
+                    # things WORSE (run8: a wall-cut mid-edit main.jsx took
+                    # Tier-2 from 17p to 15p), roll the tree back here and
+                    # ship the pre-fix state instead.
+                    try:
+                        pre_fix_head = runtime.git.run(
+                            ["rev-parse", "HEAD"]).stdout.strip()
+                    except Exception:
+                        pre_fix_head = None
                     t0 = time.time()
                     f_wall = turn_wall(1, reserve=0)
                     ok, text = driver.run(
@@ -2776,7 +2945,28 @@ def main() -> int:
                         hs["spec_run_rerun"] = {"passed": r_ok,
                                                 "failed": r_fail,
                                                 "digest": r_digest}
-                        if r_fail > 0:
+                        if (r_ok < tier2_run[0] and pre_fix_head):
+                            # The fix turn left the tree WORSE than before
+                            # (cut mid-edit / regressions). Ship the pre-fix
+                            # state: reset tracked files to the checkpoint;
+                            # untracked strays are harmless (nothing imports
+                            # them once App/entry files are back to the
+                            # pre-fix versions).
+                            try:
+                                runtime.git.run(
+                                    ["reset", "--hard", pre_fix_head])
+                                log(f"[plan] fix turn made it worse "
+                                    f"({r_ok}p < {tier2_run[0]}p); rolled "
+                                    f"back to {pre_fix_head[:8]}")
+                                hs["spec_run_rerun"]["rolled_back_to"] = \
+                                    pre_fix_head[:8]
+                            except Exception as exc:
+                                log(f"[plan] rollback failed: {exc}")
+                            ok = False
+                            text = (f"final fix turn degraded the suite "
+                                    f"({r_ok}p after vs {tier2_run[0]}p "
+                                    f"before); shipped pre-fix state")
+                        elif r_fail > 0:
                             ok = False
                             text = (f"Tier-2 still red after fix turn "
                                     f"({r_fail} failed): {r_digest}")
@@ -2846,6 +3036,19 @@ def main() -> int:
             elif not final_skipped:
                 events.mark_test_failed(node_id, "final verification did not pass")
         runtime.git.commit("chore: final verification pass")
+        # run11 root cause of the 5 eval timeouts: our own Tier-2 pass left
+        # db.run.json holding archived/pinned state, and the platform's eval
+        # `npm start` reuses that file instead of reseeding — every
+        # state-changing test then times out waiting for a precondition
+        # that no longer holds. Hand over a pristine seed start.
+        run_db = output_dir / "backend" / "data" / "db.run.json"
+        if run_db.exists():
+            try:
+                run_db.unlink()
+                log("[postflight] removed backend/data/db.run.json — "
+                    "eval will boot from the seed")
+            except OSError as exc:
+                log(f"[postflight] could not remove db.run.json: {exc}")
 
         if failed:
             events.mark_run_completed(f"completed with {len(failed)} failed node(s): {', '.join(failed)}")

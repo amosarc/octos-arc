@@ -209,8 +209,37 @@ class ManifestConsistencyTests(unittest.TestCase):
                          "backend/src/database/schema.js"} <= backend_js)
         frontend_files = {rel for rel in sc.SCAFFOLD_FILES
                           if rel.startswith("frontend/")}
-        self.assertTrue({"frontend/package.json", "frontend/src/main.jsx"}
-                        <= frontend_files)
+        self.assertTrue({"frontend/package.json", "frontend/src/main.jsx",
+                         "frontend/src/app/App.jsx",
+                         "frontend/src/app/store.jsx",
+                         "frontend/src/app/api.js",
+                         "frontend/src/app/styles.css"} <= frontend_files)
+
+    def test_frontend_modular_contract_pieces_exist(self):
+        # run8 教训:单文件 main.jsx 叠改造成 12 个回归失败。模块化契约的
+        # 关键件必须在模板与文字契约两侧同时成立。
+        app_jsx = sc.SCAFFOLD_FILES["frontend/src/app/App.jsx"][0]
+        self.assertIn("ASSEMBLY LAYER", app_jsx)
+        main_jsx = sc.SCAFFOLD_FILES["frontend/src/main.jsx"][0]
+        self.assertIn("./app/App.jsx", main_jsx)
+        self.assertNotIn("function App", main_jsx,
+                         "main.jsx must stay a thin bootstrap, not carry App")
+        store_jsx = sc.SCAFFOLD_FILES["frontend/src/app/store.jsx"][0]
+        self.assertIn("useResource", store_jsx)
+        rules = pe.HOST_STACK_RULES
+        self.assertIn("frontend/src/features", rules)
+        self.assertIn("NEVER edit another requirement's feature file", rules)
+
+    def test_store_seed_runtime_split(self):
+        # 种子/运行时双文件:db.json 是模型种子,db.run.json 是运行态,
+        # 重启回种子(gitops 忽略 run 文件)。
+        store_js = sc.SCAFFOLD_FILES["backend/src/database/store.js"][0]
+        self.assertIn("db.run.json", store_js)
+        self.assertIn("copyFileSync", store_js)
+        from arcbench_agent_runtime.gitops import GitClient  # noqa: local check
+        import inspect
+        self.assertIn("backend/data/db.run.json",
+                      inspect.getsource(GitClient.ensure_arc_gitignore))
 
 
 class TemplateSmokeTests(unittest.TestCase):

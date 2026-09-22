@@ -1,0 +1,24 @@
+/* Global base styles. Add feature-scoped styles inside each feature file
+   (a <style> block or a colocated .css import), not here. */
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color: #1f2933;
+  background: #f8f9fa;
+}
+.app { max-width: 960px; margin: 0 auto; padding: 16px; }
+.row { display: flex; gap: 8px; align-items: center; }
+.column { display: flex; flex-direction: column; gap: 8px; }
+.card { background: #fff; border: 1px solid #e0e6eb; border-radius: 8px; padding: 12px; }
+.button {
+  border: 1px solid #cbd2d9; background: #fff; border-radius: 6px;
+  padding: 6px 12px; cursor: pointer; font-size: 14px;
+}
+.button:hover { background: #f0f4f8; }
+.input, .textarea {
+  border: 1px solid #cbd2d9; border-radius: 6px;
+  padding: 6px 10px; font-size: 14px; font-family: inherit;
+}
+.muted { color: #616e7c; }
+.error-text { color: #c0392b; }

@@ -112,6 +112,23 @@ class OctosEventsStreamTests(unittest.TestCase):
             )
             driver._log_event("turn/started", {})  # must not raise
 
+    def test_log_event_skips_reasoning_deltas(self):
+        # run11: reasoning-tier providers stream ~90% of all frames as
+        # message/reasoning_delta (80MB trace) — they stay out of the
+        # host contract stream.
+        with TemporaryDirectory() as td:
+            events_log = Path(td) / ".arc" / "octos-events.jsonl"
+            driver = main.OctosDriver(
+                octos_bin="/nonexistent/octos", cwd=Path(td), env={},
+                data_dir=Path(td) / "state", max_iterations=1,
+                events_log=events_log,
+            )
+            driver._log_event("message/reasoning_delta", {"text": "think" * 100})
+            driver._log_event("message/delta", {"text": "hi"})
+            lines = events_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0])["method"], "message/delta")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

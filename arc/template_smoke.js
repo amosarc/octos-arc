@@ -34,9 +34,11 @@ const ok = (name, cond) => { if (!cond) { console.error('FAIL ' + name); process
     const reg = await call('POST', '/api/auth/register', { username: 'tb-user-1', email: 'User@Example.com', password: 'Valid-password-123!', confirmPassword: 'Valid-password-123!', idType: '护照', idNumber: 'P123456', ptype: '成人', agree: true });
     ok('register-201', reg.status === 201 && reg.json.user && !('password' in reg.json.user) && !('confirmPassword' in reg.json.user));
     ok('register-sets-session-cookie', cookie.includes('arc_session='));
-    const fs = require('fs'); const db = JSON.parse(fs.readFileSync('data/db.json', 'utf8'));
+    const fs = require('fs'); const db = JSON.parse(fs.readFileSync('data/db.run.json', 'utf8'));
+    const seed = JSON.parse(fs.readFileSync('data/db.json', 'utf8'));
     ok('register-persists-hash', db.collections.users[0].password.includes(':') && db.collections.users[0].password.length < 200 && !db.collections.users[0].password.includes('Valid-password'));
     ok('register-persists-session', db.collections.sessions.length === 1);
+    ok('seed-file-untouched-by-runtime', !((seed.collections || {}).users || []).length, 'db.json must stay the pristine seed');
     ok('register-dup-username', (await p('POST', '/api/auth/register', { username: 'tb-user-1', email: 'other@x.com', password: 'Valid-password-123!', confirmPassword: 'Valid-password-123!', idType: '护照', idNumber: 'P2', ptype: '成人', agree: true })).json.errors.some((e) => /duplicate/.test(e.msg)));
     ok('register-bad-password', (await call('POST', '/api/auth/register', { username: 'u2', email: 'u2@x.com', password: 'short', confirmPassword: 'short', idType: '护照', idNumber: 'P3', ptype: '成人', agree: true })).json.errors.some((e) => /invalid password/.test(e.msg)));
     ok('register-mismatch', (await call('POST', '/api/auth/register', { username: 'u3', email: 'u3@x.com', password: 'Valid-password-123!', confirmPassword: 'nope', idType: '护照', idNumber: 'P4', ptype: '成人', agree: true })).json.errors.some((e) => /match/.test(e.msg)));
