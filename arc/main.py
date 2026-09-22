@@ -6,8 +6,11 @@ The ARC-Bench platform invokes this as:
     python main.py <requirement_path> [--output-dir DIR] [--web-port N]
 
 It drives the Octos agent (Rust binary) to compile a requirement tree into a
-runnable web application, and reports progress through the ARC-Bench runtime
-contract: .arc/runner-events.jsonl + .arc/traceability/*.json + git commits.
+runnable web application, and reports through the ARC-Bench runtime contract
+(host-computes-everything: the agent only appends raw artifacts, the host
+aggregates/renders): .arc/runner-events.jsonl + .arc/traceability/*.json +
+.arc/octos-events.jsonl (raw per-turn protocol frames) + .arc/debug.log +
+git commits.
 
 Configuration is via environment variables:
     OPENAI_API_KEY / OPENAI_BASE_URL / MODEL   (OpenAI-compatible endpoint)
@@ -49,17 +52,56 @@ import plan_envelope  # noqa: E402
 import scaffold  # noqa: E402  (宿主脚手架包:模板/清单/schema 编译唯一公开面)
 
 
+_DEBUG_LOG_PATH: Path | None = None
+_DEBUG_LOG_LOCK = threading.Lock()
+
+
+def trace_artifact_paths(paths) -> tuple[Path, Path]:
+    """Platform-contract trace artifacts (host-computes-everything): the raw
+    protocol-frame stream and the host debug log live beside runner-events
+    .jsonl, so they follow whatever path the platform injects through
+    ARCBENCH_RUNNER_EVENTS_PATH rather than a hard-coded .arc/."""
+    arc_dir = paths.runner_events_path.parent
+    return arc_dir / "octos-events.jsonl", arc_dir / "debug.log"
+
+
+def set_debug_log_path(path: Path | None) -> None:
+    global _DEBUG_LOG_PATH
+    _DEBUG_LOG_PATH = path
+    if path is not None:
+        # Same guarantee the SDK's append_jsonl gives runner-events: the
+        # contract dir exists before the first append.
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+
+
 def log(msg: str) -> None:
-    """Progress lines go to BOTH stdout and stderr.
+    """Progress lines go to BOTH stdout and stderr, plus .arc/debug.log.
 
     The platform's stdout capture gets truncated on long runs (we lost the
     [flow] lines of an entire failed run that way); the runner stores agent
     stderr as a separate field, so mirroring there keeps our diagnostics
     retrievable. Stderr content does not affect the verdict (exit code and
-    SDK events do).
+    SDK events do). The third copy mirrors agent-arc-based's runtime
+    interaction: the host tails .arc/debug.log for its logs panel — one
+    more raw artifact the agent appends and the host renders. Only lines
+    after runtime init land there (the probe phase predates the contract
+    paths, same as the reference project).
     """
     print(msg, flush=True)
     print(msg, file=sys.stderr, flush=True)
+    path = _DEBUG_LOG_PATH
+    if path is None:
+        return
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    try:
+        with _DEBUG_LOG_LOCK, path.open("a", encoding="utf-8") as fh:
+            for line in str(msg).splitlines() or [""]:
+                fh.write(f"[{stamp}] {line}\n")
+    except OSError:
+        pass
 
 
 def _postflight_structure_check(output_dir: Path, web_port: int = 3000) -> None:
@@ -1083,6 +1125,17 @@ def build_octos_env(config_dir: Path) -> dict:
     # rate on both axes; operator-provided values still win (setdefault).
     env.setdefault("OCTOS_CONVERGENCE_LLM_CALLS", "40")
     env.setdefault("OCTOS_CONVERGENCE_SECS", "600")
+    # Hard-refuse hand-rolled inline browser verifiers (kernel bash guard,
+    # escape hatch `# octos:allow-browser`). run6/run7: the model wrote
+    # `node -e` chromium scripts 87/78 times despite the prompt ban — the
+    # third documented case of soft constraints not binding flash-tier
+    # models. The sanctioned verifier is the SPEC RUN command.
+    env.setdefault("OCTOS_DENY_BROWSER_SCRIPTS", "1")
+    # Refuse FULL-SUITE acceptance runs (no .spec.ts filter): keep-25-run7
+    # had 7 hand-assembled full runs ×~111s that could never go green while
+    # sibling nodes were unimplemented. The host's Tier-2 chain owns
+    # full-suite verification; escape hatch `# octos:allow-full-suite`.
+    env.setdefault("OCTOS_DENY_FULL_SPEC_RUN", "1")
     # Compaction threshold: octos derives it as context_window × 7/10. agnes
     # (512k window, 64k max output) used to fall back to the 128k unknown-
     # model default → an 89.6k threshold that re-trimmed long turns nowhere
@@ -1181,6 +1234,20 @@ class OctosDriver:
         self.data_dir = data_dir
         self.max_iterations = max_iterations
         self.events_log = events_log
+        # Auth-failure ledger across turns: once the gateway has failed
+        # credentials often enough, further LLM turns are skipped and the
+        # host rehearsal/verification chain takes over (it judges disk
+        # state without the LLM). 0 disables the limit.
+        self.auth_failures = 0
+        self.auth_fail_limit = int(os.environ.get("OCTOS_AUTH_FAIL_LIMIT", "6") or 0)
+        # The frame stream must never break a turn: open("a") does not
+        # create parent dirs, so make sure the contract dir exists up front
+        # (runner-events.jsonl normally creates it first, this covers the
+        # degenerate ordering).
+        try:
+            events_log.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
         self._session = None
         # planctl: kernel capability gate (octos --version >= 2.0.3) and
         # the current plan envelope. Every prompt passes through run() —
@@ -1189,6 +1256,10 @@ class OctosDriver:
         self.plan_capable = False
         self.envelope: dict | None = None
         self._plan_seq = 0
+
+    @property
+    def auth_exhausted(self) -> bool:
+        return self.auth_fail_limit > 0 and self.auth_failures >= self.auth_fail_limit
 
     def set_envelope(self, *, phase: str, task: str, atomic_nodes: list,
                      statuses: dict, focus: str | None, ports: dict,
@@ -1313,6 +1384,19 @@ class OctosDriver:
 
 
     @staticmethod
+    def _auth_failure(text: str) -> bool:
+        """Credential-shaped failures (vs connection-shaped): 401/403/
+        authentication. Round 22/23 taught us the platform-injected key can
+        rotate and RECOVER mid-run, so these stay retryable — but on a
+        shorter backoff, and counted toward OCTOS_AUTH_FAIL_LIMIT so a
+        gateway that stays broken stops burning the shared wall clock
+        (tb-trace-001: 55% of wall time陪跑 auth/connection failures)."""
+        lowered = text.lower()
+        return any(k in lowered for k in (
+            "403", "authentication failed", "401", "unauthorized",
+            "无效的令牌"))
+
+    @staticmethod
     def _transient(text: str) -> bool:
         lowered = text.lower()
         return any(k in lowered for k in (
@@ -1351,7 +1435,12 @@ class OctosDriver:
                 break
             if ok or not self._transient(text):
                 break
-            wait = 30 * (attempt - 1)
+            auth = self._auth_failure(text)
+            if auth:
+                self.auth_failures += 1
+            # Auth failures retry on half the backoff: they resolve by key
+            # rotation on the gateway side, not by load draining.
+            wait = (15 if auth else 30) * (attempt - 1)
             print(f"[driver] transient error, retry {attempt}/{attempts} "
                   f"after {wait}s: {text[:200]}", flush=True)
             if cancel is not None:
@@ -1359,6 +1448,11 @@ class OctosDriver:
             else:
                 time.sleep(wait)
             if cancel is not None and cancel.is_set():
+                break
+            if self.auth_exhausted:
+                print(f"[driver] auth failure limit reached "
+                      f"({self.auth_failures}>= {self.auth_fail_limit}); "
+                      "giving up LLM retries", flush=True)
                 break
             if self._orphaned_turn(text):
                 # Orphaned kernel turn: killing the session also kills it.
@@ -1608,6 +1702,39 @@ def build_spec_run_cmd(cli_path: str | None,
         "workspace root):\n"
         f"npx --yes @playwright/test test --config "
         f".arc/acceptance/playwright.config.ts --reporter=line{tail}\n")
+
+
+def final_spec_files(tier2_run, output_dir: Path) -> list[str] | None:
+    """Spec files the final-verification turn should be allowed to run.
+
+    With Tier-2 red titles: only the staged specs that DECLARE those tests
+    (title grep — the host computes this, the model just runs the command).
+    Fallbacks (no titles matched / Tier-2 unavailable): every staged spec
+    file, so the command is never the unfiltered full-suite form the kernel
+    guard refuses and never empty (the 2026-09-20 verbatim-command lesson).
+    Full-suite verification itself stays the host's job (Tier-2 rerun).
+    """
+    stage = output_dir / ".arc" / "acceptance"
+    try:
+        all_specs = sorted(p.name for p in stage.glob("*.spec.ts"))
+    except OSError:
+        return None
+    if not all_specs:
+        return None
+    titles = []
+    if tier2_run and tier2_run[1] > 0:
+        titles = [str(t) for t in (tier2_run[2] or []) if t]
+    if not titles:
+        return all_specs
+    hits: list[str] = []
+    for name in all_specs:
+        try:
+            text = (stage / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if any(t in text for t in titles):
+            hits.append(name)
+    return hits or all_specs
 
 # plan §4: schema-first directive for the first node turn (host template
 # present). The model declares data; the host compiles schema.json →
@@ -2003,6 +2130,9 @@ def main() -> int:
 
     runtime = AgentRuntime.from_env(project_dir=str(output_dir))
     events = runtime.events
+    # 追踪契约第三件: .arc/debug.log(与 octos-events.jsonl 同目录,
+    # 跟随平台注入的 RuntimePaths)。
+    set_debug_log_path(trace_artifact_paths(runtime.paths)[1])
     events.mark_run_started("octos bundle started")
 
     try:
@@ -2099,13 +2229,10 @@ def main() -> int:
         toolchain_cli = None
         if os.environ.get("OCTOS_ARC_PREWARM", "1") != "0":
             toolchain_cli = _ensure_host_toolchain(log)
-        # Full-suite variant (final verification); the node loop builds a
-        # per-batch filtered command via build_spec_run_cmd. An empty string
-        # broke the verbatim-command contract once (2026-09-20: the model
-        # hunted for a Playwright install and burned 330s) — never let it
-        # be empty.
-        spec_run_cmd = build_spec_run_cmd(
-            str(toolchain_cli) if toolchain_cli is not None else None)
+        # (The final-verification SPEC RUN command is built at the final
+        # check, filtered to the Tier-2 red tests' own spec files — see
+        # final_spec_files; the unfiltered full-suite form is the host's
+        # Tier-2 job and the kernel guard refuses it.)
         if plan_on and tests_dir:
             stage_dir = plan_envelope.stage_specs(tests_dir, output_dir)
             log(f"[plan] staged acceptance specs at {stage_dir}")
@@ -2188,12 +2315,17 @@ def main() -> int:
 
         def time_up() -> bool:
             return remaining() <= 0
-        # 日志统一落 workspace 根下可见的 octos-logs/(与 backend/ 同级):
-        # 二进制状态与上下文日志(llm.jsonl)、driver 事件流、宿主
-        # dev-server 日志都收敛于此;不用 .octos 这类隐藏目录。
+        # 日志分两层: 平台契约 .arc/ 承载宿主可消费的追踪(协议帧流
+        # octos-events.jsonl、debug.log, 与 agent-arc-based 的 runtime
+        # 交互方式对齐——agent 只追加原始数据, 聚合渲染全在宿主侧);
+        # octos-logs/ 继续收自留调试件(二进制状态、dev-server 日志),
+        # 与 backend/ 同级可见, 不用 .octos 这类隐藏目录。
         logs_dir = output_dir / "octos-logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         _ignore_logs_in_workspace_git(output_dir)
+        # 追踪契约路径跟随 RuntimePaths(平台注入 ARCBENCH_RUNNER_EVENTS_PATH
+        # 时事件流跟着走), 与 runner-events.jsonl 同目录。
+        events_log_path, _ = trace_artifact_paths(runtime.paths)
         data_dir = logs_dir / "state"
         data_dir.mkdir(parents=True, exist_ok=True)
         config_dir = Path(tempfile.mkdtemp(prefix="octos-config-"))
@@ -2220,7 +2352,7 @@ def main() -> int:
         watchdog.start()
         driver = OctosDriver(
             octos_bin, output_dir, env, data_dir, max_iter,
-            events_log=logs_dir / "octos-events.jsonl",
+            events_log=events_log_path,
         )
         driver.plan_capable = plan_on
         plan_ports = {"grade": args.web_port, "smoke": smoke_port,
@@ -2411,8 +2543,21 @@ def main() -> int:
                 if template_ready:
                     _ensure_dev_server(output_dir, smoke_port,
                                        spec_ports_extra, log)
-                wall = turn_wall(len(batch))
-                ok, text = driver.run(node_prompt, min(node_timeout, wall), wall)
+                if driver.auth_exhausted:
+                    # Gateway burned its credential budget (tb-trace-001:
+                    # 55% of wall clock陪跑 auth failures). Stop paying
+                    # for LLM turns; the rehearsal branch below already
+                    # verifies what is on disk and the final-verification
+                    # chain grades without the LLM.
+                    log(f"[flow] batch {focus_id} skipped: auth failure "
+                        f"limit reached ({driver.auth_failures}); "
+                        "rehearsing disk state instead")
+                    ok, text = False, (
+                        f"skipped: auth failure limit "
+                        f"({driver.auth_failures})")
+                else:
+                    wall = turn_wall(len(batch))
+                    ok, text = driver.run(node_prompt, min(node_timeout, wall), wall)
                 log(f"[flow] batch {focus_id} {'ok' if ok else 'FAILED'} "
                     f"in {time.time()-t0:.0f}s: {text[-300:]!r}")
                 if not ok:
@@ -2598,7 +2743,14 @@ def main() -> int:
                             f"{tier2_run[0]} staged specs PASS on port "
                             f"{smoke_port}. Do not re-run suites; spot-check "
                             "one chain if you must, then end the turn.")
-                    final_prompt += spec_run_cmd
+                    # Filtered to the red tests' own specs (or all staged
+                    # files as fallback): the final turn never needs the
+                    # unfiltered full-suite form — Tier-2 owns that, and
+                    # the kernel guard refuses it anyway.
+                    final_prompt += build_spec_run_cmd(
+                        str(toolchain_cli)
+                        if toolchain_cli is not None else None,
+                        final_spec_files(tier2_run, output_dir))
                     _ensure_dev_server(output_dir, smoke_port,
                                        spec_ports_extra, log)
                     log("[flow] final verification turn starting (slim, "

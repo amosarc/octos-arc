@@ -978,6 +978,78 @@ impl Tool for ShellTool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn browser_script_heuristic_matches_inline_node_verifiers() {
+        // The ARC-observed shape: inline node -e bootstrap of a browser.
+        assert!(command_looks_like_browser_script(
+            r#"node -e "const { chromium } = require('/x/node_modules/playwright'); chromium.launch();""#
+        ));
+        assert!(command_looks_like_browser_script(
+            r#"NODE -E 'const p=require("puppeteer");'"#
+        ));
+    }
+
+    #[test]
+    fn browser_script_heuristic_lets_sanctioned_commands_through() {
+        // The host SPEC RUN: file argument, not an inline -e payload.
+        assert!(!command_looks_like_browser_script(
+            "node /x/@playwright/test/cli.js test --config .arc/acceptance/playwright.config.ts --reporter=line A.spec.ts"
+        ));
+        // npx fallback and plain non-node commands.
+        assert!(!command_looks_like_browser_script(
+            "npx --yes @playwright/test test --config cfg"
+        ));
+        assert!(!command_looks_like_browser_script("node server.js"));
+        assert!(!command_looks_like_browser_script("echo chromium"));
+    }
+
+    #[test]
+    fn browser_escape_hatch_authorizes_explicitly() {
+        let cmd = "node -e 'chromium.launch()' # octos:allow-browser";
+        assert!(command_allows_browser_explicitly(cmd));
+        assert!(!command_allows_browser_explicitly("node -e 'chromium.launch()'"));
+    }
+
+    #[test]
+    fn full_spec_run_heuristic_matches_unfiltered_acceptance_runs() {
+        // keep-25-run7 observed shape: cli.js against the acceptance config
+        // with no spec file argument.
+        assert!(command_looks_like_full_spec_run(
+            "node /workspace/submission/local-grader/node_modules/@playwright/test/cli.js test --config .arc/acceptance/playwright.config.ts --reporter=line 2>&1"
+        ));
+        // npx fallback spelling against the acceptance config.
+        assert!(command_looks_like_full_spec_run(
+            "npx --yes @playwright/test test --config .arc/acceptance/playwright.config.ts --reporter=line"
+        ));
+    }
+
+    #[test]
+    fn full_spec_run_heuristic_lets_filtered_and_unrelated_commands_through() {
+        // Filtered batch runs carry spec file arguments.
+        assert!(!command_looks_like_full_spec_run(
+            "node /x/@playwright/test/cli.js test --config .arc/acceptance/playwright.config.ts --reporter=line REQ-1.1.spec.ts REQ-1.2.spec.ts"
+        ));
+        // Playwright outside the acceptance config is not the host's suite.
+        assert!(!command_looks_like_full_spec_run(
+            "npx playwright test --config my-own.config.ts"
+        ));
+        // Inspecting the acceptance directory is not a test invocation.
+        assert!(!command_looks_like_full_spec_run(
+            "ls -la .arc/acceptance/ && cat .arc/acceptance/playwright.config.ts"
+        ));
+    }
+
+    #[test]
+    fn full_suite_escape_hatch_authorizes_explicitly() {
+        let cmd = "node /x/cli.js test --config .arc/acceptance/playwright.config.ts # octos:allow-full-suite";
+        assert!(command_allows_full_suite_explicitly(cmd));
+        assert!(!command_allows_full_suite_explicitly(
+            "node /x/cli.js test --config .arc/acceptance/playwright.config.ts"
+        ));
+    }
+
+    use super::*;
+
     /// Runaway guard for the "poll until the background task reaches state X"
     /// loops below. NOT a latency assertion: each loop breaks the instant the
     /// supervisor reports a terminal status, so a generous ceiling costs a passing
@@ -1242,6 +1314,115 @@ mod tests {
 // ---------------------------------------------------------------------------
 // #28b — bash file-writes knob helpers.
 // ---------------------------------------------------------------------------
+
+/// ARC guard (2026-09-22): inline node scripts that bootstrap a browser
+/// stack. The ARC flow's sanctioned verifier is the host-provided SPEC RUN
+/// command; the model nonetheless hand-rolled `node -e` chromium scripts
+/// 78-87 times per run (identical arguments, pure queue/tool waste, and
+/// the prompt-level ban was ignored — the third documented case of soft
+/// constraints not binding flash-tier models). Gate is an env knob the
+/// embedding host sets (`OCTOS_DENY_BROWSER_SCRIPTS=1`); default off keeps
+/// vanilla octos unchanged.
+pub(crate) fn browser_script_denial_enabled() -> bool {
+    static ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var("OCTOS_DENY_BROWSER_SCRIPTS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    });
+    *ENABLED
+}
+
+/// Escape hatch mirroring [`command_allows_write_explicitly`]: a trailing
+/// `# octos:allow-browser` comment explicitly authorizes a browser-shaped
+/// inline script under the guard.
+pub(crate) fn command_allows_browser_explicitly(command: &str) -> bool {
+    command
+        .lines()
+        .last()
+        .is_some_and(|last| last.contains("# octos:allow-browser"))
+}
+
+/// Heuristic: an INLINE node script (`node -e` / `--eval` / heredoc) whose
+/// payload references a browser stack (playwright / chromium / puppeteer).
+/// The sanctioned SPEC RUN (`node <cli.js> test --config …`) and
+/// `npx playwright …` do not match — they are not inline `-e` payloads.
+/// False positives escape via `# octos:allow-browser`.
+pub(crate) fn command_looks_like_browser_script(command: &str) -> bool {
+    let lowered = command.to_ascii_lowercase();
+    let inline_node = lowered.contains("node -e")
+        || lowered.contains("node --eval")
+        || lowered.contains("node <<");
+    let browser_stack = lowered.contains("playwright")
+        || lowered.contains("chromium")
+        || lowered.contains("puppeteer");
+    inline_node && browser_stack
+}
+
+/// ARC guard (2026-09-22): a full-suite SPEC RUN — a playwright test against
+/// the host's acceptance config that names NO spec file. keep-25-run7: the
+/// model hand-assembled the unfiltered command 7 times (~111s each) even
+/// though the host prompt only sanctions filtered runs; a full suite can
+/// never go green while other nodes are unimplemented, inviting churn.
+/// Gate is an env knob the embedding host sets (`OCTOS_DENY_FULL_SPEC_RUN=1`);
+/// default off keeps vanilla octos unchanged.
+pub(crate) fn full_spec_run_denial_enabled() -> bool {
+    static ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var("OCTOS_DENY_FULL_SPEC_RUN")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    });
+    *ENABLED
+}
+
+/// Escape hatch: a trailing `# octos:allow-full-suite` comment explicitly
+/// authorizes a full-suite run under the guard.
+pub(crate) fn command_allows_full_suite_explicitly(command: &str) -> bool {
+    command
+        .lines()
+        .last()
+        .is_some_and(|last| last.contains("# octos:allow-full-suite"))
+}
+
+/// Guard verdict + refusal text shared by every bash-ish tool entrypoint:
+/// `None` lets the command through, `Some(refusal)` blocks it before spawn.
+pub(crate) fn full_spec_run_guard(command: &str) -> Option<String> {
+    if !full_spec_run_denial_enabled()
+        || command_allows_full_suite_explicitly(command)
+        || !command_looks_like_full_spec_run(command)
+    {
+        return None;
+    }
+    Some(
+        "Command refused: full-suite acceptance runs are disabled for this workspace. \
+         Append the spec file arguments for the nodes you are working on (e.g. \
+         `... --reporter=line REQ-1.1.spec.ts REQ-1.2.spec.ts`) so the run stays \
+         scoped to this batch; full-suite verification is the host's job. If this \
+         refusal is a false positive, append the comment `# octos:allow-full-suite` \
+         to the command line to run it explicitly. Command: "
+            .to_owned()
+            + command,
+    )
+}
+
+/// Heuristic: a playwright/cli.js test invocation pointed at the host's
+/// `.arc/acceptance` config that names no `.spec.ts` file argument — i.e.
+/// it would run the WHOLE staged suite. Filtered runs (with spec file
+/// arguments) pass; non-acceptance playwright usage is untouched.
+pub(crate) fn command_looks_like_full_spec_run(command: &str) -> bool {
+    let lowered = command.to_ascii_lowercase();
+    // `node <path>/cli.js test …` and `npx --yes @playwright/test test …`
+    // are the two sanctioned spellings; both end in a bare `test` token
+    // before the flags.
+    let test_invocation = lowered.contains("cli.js test")
+        || lowered.contains("playwright test")
+        || lowered.contains("playwright/test test");
+    if !(test_invocation && lowered.contains(".arc/acceptance")) {
+        return false;
+    }
+    !command
+        .split_whitespace()
+        .any(|token| token.ends_with(".spec.ts"))
+}
 
 /// #28b — escape hatch: a trailing `# octos:allow-write` comment on the
 /// command line explicitly authorizes a write-shaped command under `deny`.

@@ -45,7 +45,12 @@ WEB_APP_PORT = int(os.environ.get("ARCBENCH_WEB_PORT", "3000"))
 WEB_APP_BASE_URL = f"http://127.0.0.1:{WEB_APP_PORT}"
 
 APP_READY_TIMEOUT_SECONDS = 120
-AGENT_RUN_TIMEOUT_SECONDS = 6 * 60 * 60
+# Operator-tunable via the ARCBENCH_AGENT_TIMEOUT env (seconds). The old
+# hard 6h ceiling silently cut a no-budget 21-batch bookstack run at batch
+# 14 (2026-09-22); long tasks need headroom, so the default stays 6h but
+# the sim .env raises it.
+AGENT_RUN_TIMEOUT_SECONDS = int(
+    os.environ.get("ARCBENCH_AGENT_TIMEOUT", "") or 6 * 60 * 60)
 
 DEBUG_LOG_PATH = WORKSPACE / "execution.debug.log"
 _DEBUG_LOCK = threading.Lock()

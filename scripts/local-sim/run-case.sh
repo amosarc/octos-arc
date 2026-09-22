@@ -24,11 +24,20 @@ fi
 
 echo "== 模拟提交: $RUN_NAME (requirements=$REQUIREMENTS)"
 rm -rf "$WORKSPACE"
-exec python3 "$SIM/local_submit.py" run \
+status=0
+python3 "$SIM/local_submit.py" run \
   --competition "$(basename "$(dirname "$REQUIREMENTS")")" \
   --task "$(basename "$REQUIREMENTS")" \
   --agent "$ARC/octos-arc-bundle.zip" \
   --requirements-dir "$REQUIREMENTS" \
   --tests-dir "$TESTS" \
   --workspace "$WORKSPACE" \
-  --env-file "$SIM/.env"
+  --env-file "$SIM/.env" || status=$?
+
+# 宿主侧消费 .arc/ 追踪工件(只读摘要, 不影响判定/退出码)。
+if [ -d "$WORKSPACE/template/.arc" ]; then
+  echo
+  echo "== trace summary"
+  python3 "$ARC/scripts/local-sim/trace-summary.py" "$WORKSPACE" || true
+fi
+exit $status

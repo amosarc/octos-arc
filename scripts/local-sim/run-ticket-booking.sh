@@ -23,10 +23,19 @@ ARCBENCH_LOCAL_PLATFORM=linux/amd64 ./build-image.sh
 
 echo "== 模拟提交: $RUN_NAME"
 rm -rf "$WORKSPACE"
-exec python3 "$SIM/local_submit.py" run \
+status=0
+python3 "$SIM/local_submit.py" run \
   --competition ticket-booking --task ticket-booking \
   --agent "$ARC/octos-arc-bundle.zip" \
   --requirements-dir "$ARC/arc/tasks/ticket-booking--ticket-booking" \
   --tests-dir "$ARC/arc/public-tests/ticket-booking--ticket-booking" \
   --workspace "$WORKSPACE" \
-  --env-file "$SIM/.env"
+  --env-file "$SIM/.env" || status=$?
+
+# 宿主侧消费 .arc/ 追踪工件(只读摘要, 不影响判定/退出码)。
+if [ -d "$WORKSPACE/template/.arc" ]; then
+  echo
+  echo "== trace summary"
+  python3 "$ARC/scripts/local-sim/trace-summary.py" "$WORKSPACE" || true
+fi
+exit $status

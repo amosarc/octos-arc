@@ -76,6 +76,10 @@ pub struct GreenStopSignal {
     pub command: String,
     /// Tests passed in the (identical) green runs.
     pub passed: u32,
+    /// Distinct spec files that went green in this turn when the signal
+    /// fired: 1 for the identical-double-green pair, >= 2 for the
+    /// batch-green criterion (`OCTOS_GREEN_STOP_SPEC_COUNT`).
+    pub specs: usize,
 }
 
 /// Per-turn green-stop tracking. A source edit (write_file / edit_file /
@@ -84,10 +88,18 @@ pub struct GreenStopSignal {
 /// a redundant re-check, so it re-arms instead of firing. Shell commands
 /// (npm run build, restart-server, curl) do NOT reset: dist/重启 are
 /// derived state, idempotent without a source edit.
+///
+/// Two firing criteria (keep-25-run7 trace: 205 filtered spec runs, 0 armed
+/// — the model greens REQ-A then REQ-B once each and never re-runs either,
+/// so the double-green pair never forms while the turn keeps iterating):
+/// 1. identical double green (original, still the batch=1 debounce);
+/// 2. batch green: >= `OCTOS_GREEN_STOP_SPEC_COUNT` (default 2) distinct
+///    spec files green in this turn with no source edit since the last one.
 #[derive(Debug, Default)]
 struct GreenStopState {
     last_green: Option<(u64, u32)>,
     source_edit_since_green: bool,
+    green_specs: std::collections::HashSet<String>,
     pending: Option<GreenStopSignal>,
 }
 
@@ -118,6 +130,10 @@ pub struct LoopDetector {
     /// fabricated final or an abort before its next read can observe progress.
     pending_peer_polling: Option<String>,
     green: GreenStopState,
+    /// Batch-green criterion: distinct green spec files needed to arm the
+    /// green stop. 0 disables the batch criterion (identical double green
+    /// still applies).
+    green_spec_count_threshold: usize,
 }
 
 impl LoopDetector {
@@ -138,6 +154,11 @@ impl LoopDetector {
             pending_file_churn: None,
             pending_peer_polling: None,
             green: GreenStopState::default(),
+            green_spec_count_threshold: std::env::var("OCTOS_GREEN_STOP_SPEC_COUNT")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .map(|value| value.min(64))
+                .unwrap_or(2),
         }
     }
 
@@ -197,6 +218,9 @@ impl LoopDetector {
     pub fn record_green_stop(&mut self, tool_name: &str, args: &serde_json::Value, result: &str) {
         if mutation_path(tool_name, args).is_some() {
             self.green.source_edit_since_green = true;
+            // The code under test changed: every earlier green verified the
+            // OLD code, so the batch-green accumulation must restart.
+            self.green.green_specs.clear();
             return;
         }
         let Some(command) = args
@@ -214,7 +238,7 @@ impl LoopDetector {
             return;
         };
         let mut hasher = DefaultHasher::new();
-        command.hash(&mut hasher);
+        normalize_spec_command(command).hash(&mut hasher);
         let signature = hasher.finish();
         match self.green.last_green {
             Some((prior_signature, prior_passed))
@@ -225,11 +249,30 @@ impl LoopDetector {
                 self.green.pending = Some(GreenStopSignal {
                     command: command.chars().take(160).collect(),
                     passed,
+                    specs: 1,
                 });
                 self.green.last_green = None;
                 self.green.source_edit_since_green = false;
+                self.green.green_specs.clear();
             }
             _ => {
+                for spec in spec_files_in(command) {
+                    self.green.green_specs.insert(spec);
+                }
+                if self.green_spec_count_threshold > 0
+                    && self.green.green_specs.len() >= self.green_spec_count_threshold
+                    && !self.green.source_edit_since_green
+                {
+                    self.green.pending = Some(GreenStopSignal {
+                        command: command.chars().take(160).collect(),
+                        passed,
+                        specs: self.green.green_specs.len(),
+                    });
+                    self.green.last_green = None;
+                    self.green.source_edit_since_green = false;
+                    self.green.green_specs.clear();
+                    return;
+                }
                 self.green.last_green = Some((signature, passed));
                 self.green.source_edit_since_green = false;
             }
@@ -410,6 +453,38 @@ fn mutation_path(tool_name: &str, args: &serde_json::Value) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// Normalize a spec-run command for green-stop pair matching: collapse
+/// whitespace runs and strip trailing redirection/pipe noise (`2>&1`,
+/// `>/dev/null`, `2>/dev/null`). run7: the model alternated the SAME spec
+/// run with and without a `2>&1` suffix — byte-different commands never
+/// paired, so the fuse never armed despite clean double greens.
+fn normalize_spec_command(command: &str) -> String {
+    let mut normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    loop {
+        let before = normalized.clone();
+        for suffix in ["2>&1", ">/dev/null", "2>/dev/null"] {
+            if let Some(stripped) = normalized.strip_suffix(suffix) {
+                normalized = stripped.trim_end().to_string();
+            }
+        }
+        if normalized == before {
+            break;
+        }
+    }
+    normalized
+}
+
+/// Spec file arguments named on the command line (whitespace tokens ending
+/// in `.spec.ts`, path kept as written). The host's filtered SPEC RUN
+/// command appends the batch's spec files, so this recovers which specs a
+/// green run verified for the batch-green criterion.
+fn spec_files_in(command: &str) -> impl Iterator<Item = String> + '_ {
+    command
+        .split_whitespace()
+        .filter(|token| token.ends_with(".spec.ts"))
+        .map(str::to_owned)
+}
+
 /// Extract the passed-test count from a Playwright summary, `Some` only for
 /// an unambiguously green run: at least one `N passed` line and no
 /// `failed` / `flaky` / `did not run` / `interrupted` line anywhere in the
@@ -517,6 +592,20 @@ mod tests {
     }
 
     #[test]
+    fn suffix_noise_does_not_break_green_pairing() {
+        // run7: the model alternated the same spec run with/without `2>&1`.
+        let mut d = LoopDetector::new(10);
+        let cmd = json!({ "command": format!("{SPEC_CMD} 2>&1") });
+        d.record_green_stop("shell", &cmd, GREEN_OUT);
+        let cmd_plain = json!({ "command": SPEC_CMD });
+        d.record_green_stop("shell", &cmd_plain, GREEN_OUT);
+        assert!(
+            d.take_green_stop_signal().is_some(),
+            "2>&1 suffix must not break the pair signature"
+        );
+    }
+
+    #[test]
     fn non_spec_commands_are_ignored() {
         let mut d = LoopDetector::new(10);
         for _ in 0..3 {
@@ -527,6 +616,84 @@ mod tests {
             );
         }
         assert!(d.take_green_stop_signal().is_none());
+    }
+
+    #[test]
+    fn batch_green_two_distinct_specs_arms_signal() {
+        // run7 pattern: the model greens REQ-A once, greens REQ-B once, and
+        // keeps iterating — the identical pair never forms.
+        let mut d = LoopDetector::new(10);
+        let cmd_a = "node cli.js test --config .arc/acceptance/playwright.config.ts REQ-1.1.spec.ts";
+        let cmd_b = "node cli.js test --config .arc/acceptance/playwright.config.ts REQ-1.2.spec.ts";
+        record_spec(&mut d, cmd_a, GREEN_OUT);
+        assert!(d.take_green_stop_signal().is_none(), "one spec green only");
+        record_spec(&mut d, cmd_b, GREEN_OUT);
+        let signal = d
+            .take_green_stop_signal()
+            .expect("batch of two distinct greens fires");
+        assert_eq!(signal.specs, 2);
+        // fires once; state cleared
+        assert!(d.take_green_stop_signal().is_none());
+    }
+
+    #[test]
+    fn batch_green_resets_on_source_edit() {
+        let mut d = LoopDetector::new(10);
+        let cmd_a = "npx playwright test .arc/acceptance/REQ-1.1.spec.ts";
+        let cmd_b = "npx playwright test .arc/acceptance/REQ-1.2.spec.ts";
+        record_spec(&mut d, cmd_a, GREEN_OUT);
+        d.record_green_stop(
+            "edit_file",
+            &json!({ "path": "frontend/src/main.jsx", "old": "a", "new": "b" }),
+            "ok",
+        );
+        // The edit invalidated the first green; a single green after it
+        // must not fire even though two specs have gone green this turn.
+        record_spec(&mut d, cmd_b, GREEN_OUT);
+        assert!(
+            d.take_green_stop_signal().is_none(),
+            "green after an edit verifies NEW code"
+        );
+        // Both specs green again with no edit in between now fires.
+        record_spec(&mut d, cmd_a, GREEN_OUT);
+        record_spec(&mut d, cmd_b, GREEN_OUT);
+        let signal = d.take_green_stop_signal().expect("fresh pair of greens fires");
+        assert_eq!(signal.specs, 2);
+    }
+
+    #[test]
+    fn batch_green_threshold_zero_disables_batch_criterion() {
+        let mut d = LoopDetector::new(10);
+        d.green_spec_count_threshold = 0;
+        let cmd_a = "npx playwright test .arc/acceptance/REQ-1.1.spec.ts";
+        let cmd_b = "npx playwright test .arc/acceptance/REQ-1.2.spec.ts";
+        record_spec(&mut d, cmd_a, GREEN_OUT);
+        record_spec(&mut d, cmd_b, GREEN_OUT);
+        assert!(
+            d.take_green_stop_signal().is_none(),
+            "threshold 0 keeps only the identical-double-green criterion"
+        );
+        // The classic criterion still works with the batch one disabled.
+        record_spec(&mut d, cmd_a, GREEN_OUT);
+        record_spec(&mut d, cmd_a, GREEN_OUT);
+        let signal = d.take_green_stop_signal().expect("double green still fires");
+        assert_eq!(signal.specs, 1);
+    }
+
+    #[test]
+    fn same_spec_twice_via_batch_path_does_not_double_count() {
+        // One spec repeated via different command spellings must count once.
+        let mut d = LoopDetector::new(10);
+        record_spec(&mut d, "npx playwright test .arc/acceptance/REQ-1.1.spec.ts", GREEN_OUT);
+        record_spec(
+            &mut d,
+            "npx playwright test .arc/acceptance/REQ-1.1.spec.ts --workers=2",
+            GREEN_OUT,
+        );
+        assert!(
+            d.take_green_stop_signal().is_none(),
+            "distinct spec count stays at 1"
+        );
     }
 
     fn detector_with_churn_threshold(threshold: usize) -> LoopDetector {

@@ -467,6 +467,25 @@ impl ExecCommandTool {
             .timeout_secs
             .unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS)
             .clamp(1, MAX_EXEC_TIMEOUT_SECS);
+        // ARC guard: refuse hand-rolled inline browser verifiers when the
+        // embedding host enabled the knob — the sanctioned verifier is the
+        // host's SPEC RUN command. Refusal happens BEFORE any spawn.
+        if super::shell::browser_script_denial_enabled()
+            && !super::shell::command_allows_browser_explicitly(&command)
+            && super::shell::command_looks_like_browser_script(&command)
+        {
+            return Ok(ToolResult {
+                output: "Command refused: inline browser automation is disabled for this \
+                         workspace. Verify with the host-provided SPEC RUN command verbatim \
+                         instead of hand-rolling a chromium script. If this refusal is a \
+                         false positive, append the comment `# octos:allow-browser` to the \
+                         command line to run it explicitly. Command: "
+                    .to_owned()
+                    + &command,
+                success: false,
+                ..Default::default()
+            });
+        }
         // #28d — deny knob on the CODING bash path: same heuristic judge
         // and escape hatch as ShellTool (single shared implementation in
         // `super::shell`), loaded at construction. A refusal happens BEFORE
@@ -483,6 +502,16 @@ impl ExecCommandTool {
                          explicitly. Command: "
                     .to_owned()
                     + &command,
+                success: false,
+                ..Default::default()
+            });
+        }
+        // ARC guard: full-suite acceptance runs (no spec file arguments)
+        // burn ~2 minutes each and can never go green while sibling nodes
+        // are unimplemented; the host verifies the full suite itself.
+        if let Some(refusal) = super::shell::full_spec_run_guard(&command) {
+            return Ok(ToolResult {
+                output: refusal,
                 success: false,
                 ..Default::default()
             });
@@ -2001,6 +2030,25 @@ impl Tool for BashTool {
             .unwrap_or(DEFAULT_BASH_TIMEOUT_SECS)
             .clamp(1, MAX_BASH_TIMEOUT_SECS);
 
+        // ARC guard: refuse hand-rolled inline browser verifiers when the
+        // embedding host enabled the knob — the sanctioned verifier is the
+        // host's SPEC RUN command. Refusal happens BEFORE any spawn.
+        if super::shell::browser_script_denial_enabled()
+            && !super::shell::command_allows_browser_explicitly(&command)
+            && super::shell::command_looks_like_browser_script(&command)
+        {
+            return Ok(ToolResult {
+                output: "Command refused: inline browser automation is disabled for this \
+                         workspace. Verify with the host-provided SPEC RUN command verbatim \
+                         instead of hand-rolling a chromium script. If this refusal is a \
+                         false positive, append the comment `# octos:allow-browser` to the \
+                         command line to run it explicitly. Command: "
+                    .to_owned()
+                    + &command,
+                success: false,
+                ..Default::default()
+            });
+        }
         // #28d — deny knob on the CODING bash path: same heuristic judge
         // and escape hatch as ShellTool (single shared implementation in
         // `super::shell`), loaded at construction. A refusal happens BEFORE
@@ -2017,6 +2065,16 @@ impl Tool for BashTool {
                          explicitly. Command: "
                     .to_owned()
                     + &command,
+                success: false,
+                ..Default::default()
+            });
+        }
+        // ARC guard: full-suite acceptance runs (no spec file arguments)
+        // burn ~2 minutes each and can never go green while sibling nodes
+        // are unimplemented; the host verifies the full suite itself.
+        if let Some(refusal) = super::shell::full_spec_run_guard(&command) {
+            return Ok(ToolResult {
+                output: refusal,
                 success: false,
                 ..Default::default()
             });

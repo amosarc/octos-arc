@@ -1760,22 +1760,42 @@ impl Agent {
                             // per node).
                             if let Some(signal) = loop_detector.take_green_stop_signal() {
                                 turn.arm_green_stop(turn.iteration());
+                                let reason = if signal.specs >= 2 {
+                                    format!(
+                                        "all {} spec files in this batch passed with no source \
+                                         edits since the last green",
+                                        signal.specs
+                                    )
+                                } else {
+                                    "passed identically twice with no source edits".to_string()
+                                };
                                 self.reporter().report(ProgressEvent::LlmStatus {
                                     message: format!(
-                                        "Green stop armed: '{}' passed {} identically \
-                                         twice with no source edits",
-                                        signal.command, signal.passed
+                                        "Green stop armed: '{}' {} ({})",
+                                        signal.command, reason, signal.passed
                                     ),
                                     iteration,
                                 });
                                 messages.push(Message::user(format!(
-                                    "[green stop] The staged acceptance spec just passed \
-                                     IDENTICALLY twice ({} tests) and you changed no source \
-                                     file between the runs — this requirement is verified \
+                                    "[green stop] {} — this requirement is verified \
                                      DONE. Do NOT run any more commands, tests or builds. \
                                      Use your next response to write the final summary of \
                                      what was implemented, then finish.",
-                                    signal.passed
+                                    if signal.specs >= 2 {
+                                        format!(
+                                            "Every spec file in this batch ({} specs, {} \
+                                             tests) just passed and you changed no source \
+                                             file since the last green run",
+                                            signal.specs, signal.passed
+                                        )
+                                    } else {
+                                        format!(
+                                            "The staged acceptance spec just passed \
+                                             IDENTICALLY twice ({} tests) and you changed no \
+                                             source file between the runs",
+                                            signal.passed
+                                        )
+                                    }
                                 )));
                             }
 
