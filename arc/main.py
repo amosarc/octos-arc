@@ -2421,6 +2421,10 @@ def main() -> int:
         # the post-batch regression's blast radius (NEVER the full suite:
         # unimplemented nodes' specs are legitimately red mid-run).
         completed_specs: list[str] = []
+        # The plan path fills this per batch (staged specs of its nodes);
+        # the legacy non-plan path leaves it empty, which skips the
+        # spec-first lazy gate below.
+        batch_specs: list[str] = []
         if plan_on:
             driver.set_envelope(
                 phase="node" if template_ready else "skeleton",
@@ -2643,26 +2647,47 @@ def main() -> int:
                             nid, "turn ended failed: " + text[-200:])
                         failed.append(nid)
                 if ok and not project_files_changed(output_dir, t0):
-                    # Lazy turn: protocol ok, zero disk progress.
-                    log(f"[gate] {focus_id}: turn ok but no project "
-                        "file changed; nudging to implement")
-                    nudged = False
-                    for ng in range(1, 3):
-                        if time_up():
-                            break
-                        ng_t0 = time.time()
-                        driver.run(NODE_NUDGE_PROMPT, 420, 420)
-                        if project_files_changed(output_dir, ng_t0):
-                            nudged = True
-                            log(f"[gate] {focus_id}: nudge {ng} produced "
-                                "file changes")
-                            break
-                    if not nudged and not project_files_changed(output_dir, t0):
-                        for nid in batch_ids:
-                            events.mark_implementation_failed(
-                                nid, "turn made no file changes")
-                            failed.append(nid)
-                        continue
+                    # Lazy turn: protocol ok, zero disk progress. Spec
+                    # FIRST: run13 showed 4/19 "lazy" turns were actually
+                    # verification-only completions — the requirement was
+                    # already implemented by an earlier batch's overflow
+                    # and the turn's single tool was the batch SPEC RUN
+                    # going green. Files-changed is the wrong judge; the
+                    # specs are the contract (host-computes: we run the
+                    # batch's staged specs ourselves, green = done, red =
+                    # genuinely lazy → nudge).
+                    if tests_dir and batch_specs:
+                        v_run = _run_staged_playwright(
+                            output_dir, smoke_port, tests_dir,
+                            spec_ports_extra, spec_files=batch_specs)
+                        if v_run and v_run[1] == 0 and v_run[0] > 0:
+                            log(f"[gate] {focus_id}: no file change but "
+                                f"batch specs green ({v_run[0]}p) — "
+                                "verification-only turn, accepting")
+                        else:
+                            v_run = None
+                    else:
+                        v_run = None
+                    if v_run is None:
+                        log(f"[gate] {focus_id}: turn ok but no project "
+                            "file changed; nudging to implement")
+                        nudged = False
+                        for ng in range(1, 3):
+                            if time_up():
+                                break
+                            ng_t0 = time.time()
+                            driver.run(NODE_NUDGE_PROMPT, 420, 420)
+                            if project_files_changed(output_dir, ng_t0):
+                                nudged = True
+                                log(f"[gate] {focus_id}: nudge {ng} "
+                                    "produced file changes")
+                                break
+                        if not nudged and not project_files_changed(output_dir, t0):
+                            for nid in batch_ids:
+                                events.mark_implementation_failed(
+                                    nid, "turn made no file changes")
+                                failed.append(nid)
+                            continue
                 syn = js_syntax_errors(output_dir)
                 if syn:
                     log(f"[gate] {focus_id}: {len(syn)} JS syntax "
