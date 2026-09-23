@@ -76,9 +76,10 @@ tsconfig.tsbuildinfo
 # ARC bench run output (generated web apps, acceptance reports, context logs)
 /arc-output/
 
-# ARC submission packaging artifacts: the packed bundle zip and the prebuilt
-# kernel binary dropped into arc/bin/ for pack.sh (Linux x86_64 release output
-# must replace the local build before packaging — never commit the binary).
-/octos-arc-bundle.zip
+# ARC submission packaging artifacts: the prebuilt kernel binary dropped
+# into arc/bin/ for pack.sh (Linux x86_64 release output must replace the
+# local build before packaging — never commit the binary). The packed
+# octos-arc-bundle.zip IS committed on milestones (linux x86_64, platform-
+# ready; each rebuild is a new 15MB blob, so commit deliberately).
 /arc/bin/octos
 /octos-arc-linux-x86.zip
