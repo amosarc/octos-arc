@@ -2780,21 +2780,25 @@ def main() -> int:
                                 "HEAD"]).stdout.split()
                         except Exception:
                             changed = []
-                        # Whitelist of SHARED SOURCE paths — anything else
-                        # (run artifacts like local-grader/, test-results/,
-                        # .arc, .octos, data) is noise, not blast radius.
-                        shared = [
+                        # ANY source change pays for the regression over
+                        # the completed set — run12 taught that a
+                        # "features-only" batch is NOT low risk: the model
+                        # funnels every requirement into ONE big feature
+                        # file, so a features/ edit IS a shared-component
+                        # edit (a NoteCard restructure there broke 12 specs
+                        # that only the 35-minute final turn caught). Only
+                        # run artifacts (local-grader/, test-results/,
+                        # .arc, .octos, data, dist) stay exempt.
+                        source_changed = [
                             p for p in changed if p and (
-                                (p.startswith("frontend/src/")
-                                 and not p.startswith(
-                                     "frontend/src/features/"))
+                                p.startswith("frontend/src/")
                                 or p.startswith("backend/src/")
                                 or p in ("frontend/index.html",
                                          "frontend/package.json",
                                          "backend/package.json"))]
-                        if shared and completed_specs:
-                            log(f"[plan] batch {focus_id} touched shared "
-                                f"files ({', '.join(shared[:3])}); "
+                        if source_changed and completed_specs:
+                            log(f"[plan] batch {focus_id} changed source "
+                                f"({', '.join(source_changed[:3])}); "
                                 f"regression over {len(completed_specs)} "
                                 "completed spec(s)")
                             g_run = _run_staged_playwright(
