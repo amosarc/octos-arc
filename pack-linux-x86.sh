@@ -20,6 +20,10 @@ find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 find . -name '*.pyc' -delete
 rm -rf arc-output local-grader/node_modules local-grader/run \
        local-grader/test-results .env octos-arc-bundle.zip
+# arc/template/ 是 pack.sh「打包即物化」留在仓库的可浏览副本，随 cp -R
+# 进了暂存区；scaffold 只写不删，先清空再生成（与 pack.sh 同一语义），
+# 否则 copytree 撞上已存在的 template/frontend 直接 FileExistsError。
+rm -rf template
 cat > run-ticket.sh <<'EOF'
 #!/bin/sh
 # 用法: OCTOS_MODEL=<model> OPENAI_API_KEY=<key> OPENAI_BASE_URL=<url> ./run-ticket.sh <task-dir> [输出目录]
@@ -98,6 +102,11 @@ port in `ARC_EXTRA_PORTS`.
 EOF
 cd "$STAGE/octos-arc-linux-x86"
 rm -f "$ROOT/octos-arc-linux-x86.zip"
+# 先 import 后清理（同 pack.sh 的坑注释）：上面的 python 生成步骤会重新
+# 产生 __pycache__/pyc，收尾统一扫掉，否则 pyc 回流进包。
+find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+find . -name '*.pyc' -delete
+find . -name .DS_Store -delete
 zip -qr "$ROOT/octos-arc-linux-x86.zip" .
 echo "打包完成: $ROOT/octos-arc-linux-x86.zip"
 shasum -a 256 "$ROOT/octos-arc-linux-x86.zip"

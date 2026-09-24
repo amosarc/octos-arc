@@ -19,6 +19,8 @@ import re
 import shutil
 from pathlib import Path
 
+import fixture_manifest
+
 RULESET = "arc_web_v1"
 SPEC_STAGE_SUBDIR = ".arc/acceptance"
 WIPE_GLOBS = ("*.spec.ts", "support")
@@ -65,12 +67,20 @@ unique field as identifier: username or email, trimmed, email \
 case-insensitive, uniform failure message that never reveals account \
 existence), /api/auth/logout, /api/me (session restore; sessions \
 survive server restart). Endpoints that are NOT plain CRUD (search / \
-booking flows) go in src/routes/index.js using store + lib helpers. \
-Seed concrete demo records verbatim from the requirement into \
-backend/data/db.json ({"collections":{"<entity>":[...]}}) — db.json is \
-the SEED: runtime state goes to db.run.json and every server restart \
-resets to the seed, so edit db.json to change demo data and restart \
-(sh .arc/host/restart-server.sh) to clear runtime state.
+booking flows) go in src/routes/index.js using store + lib helpers.
+FIXTURE CONTRACT (graded, not demo data): the requirement's `data:` \
+section and every scenario GIVEN line are the graded seed contract — \
+the host has already compiled them into backend/data/db.json. Names \
+may carry a unique suffix, but roles, ownership, visibility, and \
+relationships must match VERBATIM; NEVER delete or rename seeded rows \
+or collections, and extend schema.json so every seeded field is \
+exposed. Scenarios that MODIFY data each need their OWN fresh \
+preconfigured instance (never share one mutable fixture across \
+scenarios). Files/commits are the single source of truth: branches \
+store head references only, NEVER duplicate whole file trees per \
+branch or fork. db.json is the SEED: runtime state goes to db.run.json \
+and every server restart resets to the seed (sh .arc/host/\
+restart-server.sh); db.run.json must NEVER ship.
 SERVER-SIDE VALIDATION (generic discipline, every task): the backend \
 re-validates ALL input and never trusts the client. Enforce the \
 contract's required/length/format/uniqueness rules EXACTLY, boundaries \
@@ -121,6 +131,31 @@ def build_validation_probes(routes: list) -> list[dict]:
         if len(probes) >= 8:
             break
     return probes
+
+
+def build_fixture_probes(logins: list[dict], collections: list[str]) -> list[dict]:
+    """夹具探针(宿主 0-token 验证,复用 rehearsal-repair 回路)。
+
+    - login: POST /api/auth/login(宿主固定 auth 路由)期待 200;
+      400/401 = 种子账号或统一密码约定被破坏,404 = auth 实体未声明。
+    - entity: GET /api/<name> 期待 200 且非空;空 = 宿主种子行被删/集合被
+      改名,404 = schema.json 未暴露该实体。users(auth 实体)没有引擎
+      GET 路由,由 login 探针代管。判定语义在 _probe_routes_on 落地。
+    """
+    probes: list[dict] = []
+    for login in (logins or [])[:2]:
+        probes.append({
+            "method": "POST", "path": "/api/auth/login", "kind": "login",
+            "user": str(login.get("username") or ""),
+            "body": json.dumps({
+                "username": login.get("username"),
+                "password": fixture_manifest.FIXTURE_PASSWORD})})
+    for name in (collections or []):
+        if name == "users" or len(probes) >= 8:
+            continue
+        probes.append({"method": "GET", "path": f"/api/{name}",
+                       "kind": "entity", "entity": name})
+    return probes[:8]
 
 
 def split_validation(description: str) -> tuple[str, str]:
@@ -223,13 +258,39 @@ def build_envelope(
     spec_map: dict[str, list[str]],
     extra_rules: str | None = None,
     host_signals: dict | None = None,
+    fixture_given: dict[str, list[str]] | None = None,
+    seeded_nodes: set[str] | frozenset[str] | None = None,
 ) -> dict:
-    """Build one envelope dict (snake_case, mirrors planctl::Envelope)."""
+    """Build one envelope dict (snake_case, mirrors planctl::Envelope).
+
+    fixture_given/seeded_nodes 挂接夹具契约:前者把每节点场景 GIVEN
+    (评分前置态)以 FOCUS validation 前缀的形式结构化下发——宿主已播种
+    的节点给"verify addressable"指针,未播种的给逐字清单(模型手工补种)。
+    step 额外附 preconditions 数组(当前内核 unknown-field 忽略,前向兼容)。
+    """
+    seeded = seeded_nodes or frozenset()
     steps = []
     for node in atomic_nodes:
         nid = str(node.get("id", ""))
         desc = str(node.get("description") or node.get("name") or "")
         validation, _notes = split_validation(desc)
+        given = (fixture_given or {}).get(nid) or []
+        if given:
+            if nid in seeded:
+                head = ("GIVEN fixtures (host-seeded into backend/data/"
+                        "db.json — verify each is addressable on the "
+                        "RUNNING app: the object opens, values match "
+                        "verbatim):")
+            else:
+                head = ("GIVEN (graded fixtures — the graders assert these "
+                        "exact pre-states; seed them into backend/data/"
+                        "db.json before this scenario):")
+            bullets = "".join(
+                f"\n  - {g[:200]}" for g in given[:8])
+            merged = head + bullets
+            if validation:
+                merged += "\n" + validation
+            validation = merged[:3000]
         targets = {"files": [], "routes": [], "spec_files": spec_map.get(nid, [])}
         steps.append({
             "id": nid,
@@ -237,10 +298,22 @@ def build_envelope(
             # PLAN 清单短摘要;完整契约走 validation(FOCUS 段逐字渲染)。
             "input": (validation or nid)[:200],
             "validation": validation[:3000] or None,
+            "preconditions": [g[:200] for g in given[:12]] or None,
             "targets": targets,
             "expected_output": f"Playwright specs for {nid} pass",
             "status": statuses.get(nid, "pending"),
         })
+    # steps 上限 40(内核 MAX_PLAN_STEPS):节点更多的任务(github 47 个)截尾
+    # 时必须保住 focus 所在步,否则 wire 校验(focus 精确匹配 step id)会
+    # 丢弃整个 envelope——用 focus 步顶替最后一个槽位。
+    trimmed = steps[:40]
+    if focus is not None:
+        fid = str(focus)
+        if fid not in {s["id"] for s in trimmed}:
+            fstep = next((s for s in steps if s["id"] == fid), None)
+            if fstep is not None:
+                trimmed = (trimmed[:-1] + [fstep] if len(trimmed) >= 40
+                           else trimmed + [fstep])
     envelope = {
         "v": 1,
         "seq": seq,
@@ -256,7 +329,7 @@ def build_envelope(
             "smoke": int(ports.get("smoke", 0)),
             "extra": [int(p) for p in ports.get("extra", [])],
         },
-        "steps": steps[:40],
+        "steps": trimmed,
         "focus": focus,
         "host_signals": host_signals,
     }

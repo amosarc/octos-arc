@@ -48,6 +48,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from arcbench_agent_runtime import AgentRuntime  # noqa: E402
+import fixture_manifest  # noqa: E402  (夹具契约提取/宿主种子编译)
 import plan_envelope  # noqa: E402
 import scaffold  # noqa: E402  (宿主脚手架包:模板/清单/schema 编译唯一公开面)
 
@@ -102,6 +103,28 @@ def log(msg: str) -> None:
                 fh.write(f"[{stamp}] {line}\n")
     except OSError:
         pass
+
+
+def _handover_pristine_seed(output_dir: Path) -> None:
+    """交付前最后动作:删掉运行态 db.run.json,评测从种子启动(run11 根因)。
+
+    必须是 postflight 的最后一步(任何删后再启动的服务器都会让 run 文件
+    回流),且异常路径同样覆盖;删不掉要大声报错——幂等双删 + 硬断言。
+    """
+    run_db = output_dir / "backend" / "data" / "db.run.json"
+    for _ in range(2):
+        if not run_db.exists():
+            return
+        try:
+            run_db.unlink()
+            log("[postflight] removed backend/data/db.run.json — "
+                "eval will boot from the seed")
+        except OSError as exc:
+            log(f"[postflight] could not remove db.run.json: {exc}")
+            break
+    if run_db.exists():
+        log("[postflight] ERROR: backend/data/db.run.json still present "
+            "at handover — eval may boot from stale runtime state")
 
 
 def _postflight_structure_check(output_dir: Path, web_port: int = 3000) -> None:
@@ -240,7 +263,8 @@ def _port_watchdog(web_port: int, output_dir: Path,
 def _rehearse_startup(output_dir: Path, smoke_port: int, *,
                       probes: list | None = None,
                       extra_ports: list | None = None,
-                      report: dict | None = None) -> str | None:
+                      report: dict | None = None,
+                      fixture_probes: list | None = None) -> str | None:
     """Run the grading sequence ourselves, on the smoke port.
 
     planctl extension: with a `report` dict the rehearsal becomes a node
@@ -328,7 +352,7 @@ def _rehearse_startup(output_dir: Path, smoke_port: int, *,
                             report["boot_ok"] = True
                             route_err = _probe_routes_on(
                                 smoke_port, probes or [], extra_ports or [],
-                                report)
+                                report, fixture_probes=fixture_probes)
                             return route_err
                     except OSError:
                         time.sleep(1)
@@ -350,12 +374,15 @@ def _rehearse_startup(output_dir: Path, smoke_port: int, *,
 
 
 def _probe_routes_on(smoke_port: int, probes: list, extra_ports: list,
-                     report: dict) -> str | None:
+                     report: dict,
+                     fixture_probes: list | None = None) -> str | None:
     """Hit every probe route on the live smoke server (stdlib only).
 
     Records `{method, path, status}` rows in the report. Red only on
     infrastructure facts (connection failure or 5xx); 4xx is a recorded
     fact, not a host failure — business assertions belong to Playwright.
+    fixture_probes 例外:它们验证的是宿主自己的种子承诺(登录可达、实体
+    行未被删),语义明确,400/401/404/空列表同样是 RED。
     Returns an error string for the repair turn, or None when green.
     """
     import urllib.request
@@ -367,7 +394,8 @@ def _probe_routes_on(smoke_port: int, probes: list, extra_ports: list,
         path = str(probe.get("path", "/"))
         req = urllib.request.Request(
             f"http://127.0.0.1:{smoke_port}{path}",
-            data=b"{}" if method in ("POST", "PUT", "PATCH") else None,
+            data=(probe.get("body", "{}").encode()
+                  if method in ("POST", "PUT", "PATCH") else None),
             headers={"Content-Type": "application/json"},
             method=method,
         )
@@ -418,6 +446,82 @@ def _probe_routes_on(smoke_port: int, probes: list, extra_ports: list,
             problems.append(f"validation probe {vp['path']} "
                             f"({vp['variant']}) -> HTTP {status}")
     report["validation_probes"] = vrows
+
+    # 夹具探针:验证宿主种子在模型实现后的 app 上仍然成立(0-token 验证,
+    # RED 直接进 rehearsal-repair 回路)。语义见 build_fixture_probes。
+    for fp in (fixture_probes or [])[:8]:
+        method = str(fp.get("method", "GET")).upper()
+        path = str(fp.get("path", "/"))
+        body = None
+        if method in ("POST", "PUT", "PATCH") and fp.get("body"):
+            body = str(fp["body"]).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{smoke_port}{path}",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method=method,
+        )
+        status, resp_body = 0, b""
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status = resp.status
+                resp_body = resp.read(1 << 20)
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            try:
+                resp_body = exc.read(1 << 20)
+            except Exception:  # noqa: BLE001
+                resp_body = b""
+        except Exception as exc:  # noqa: BLE001 — connection refused etc.
+            rows.append({"method": method, "path": path, "status": 0})
+            problems.append(f"fixture probe {method} {path} -> {exc}")
+            continue
+        rows.append({"method": method, "path": path, "status": status})
+        kind = str(fp.get("kind") or "")
+        if kind == "login":
+            user = fp.get("user") or "?"
+            if status == 200:
+                pass
+            elif status in (400, 401):
+                problems.append(
+                    f"fixture login rejected for seeded account "
+                    f"{user!r} (HTTP {status} on {path}) — auth must "
+                    "verify host-seeded accounts (password convention "
+                    f"{fixture_manifest.FIXTURE_PASSWORD!r})")
+            elif status == 404:
+                problems.append(
+                    f"fixture login route {path} missing (HTTP 404) — "
+                    "schema.json must declare an auth entity so the "
+                    "host auth layer mounts")
+            else:
+                problems.append(f"fixture login {path} -> HTTP {status}")
+        elif kind == "entity":
+            name = fp.get("entity") or path
+            listed: list | None = None
+            try:
+                parsed = json.loads(resp_body.decode("utf-8", "replace"))
+                if isinstance(parsed, list):
+                    listed = parsed
+                elif isinstance(parsed, dict):
+                    for key in ("items", "data", "rows"):
+                        if isinstance(parsed.get(key), list):
+                            listed = parsed[key]
+                            break
+            except Exception:  # noqa: BLE001 — 非 JSON 响应按未知处理
+                listed = None
+            if status == 404:
+                problems.append(
+                    f"seeded entity {name!r} has no GET route "
+                    f"({path} -> 404) — schema.json must expose entity "
+                    f"{name!r}; keep host-seeded collections")
+            elif status == 200 and listed is not None and not listed:
+                problems.append(
+                    f"seeded entity {name!r} lists EMPTY at {path} — "
+                    "host-seeded fixture rows were deleted or the "
+                    "collection was renamed; restore them in backend/"
+                    "data/db.json")
+            elif status >= 500:
+                problems.append(f"fixture entity {path} -> HTTP {status}")
 
     if problems:
         return "; ".join(problems)[:1200]
@@ -737,11 +841,14 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
 
 
 def rehearse_node(output_dir: Path, smoke_port: int, probes: list,
-                  extra_ports: list) -> tuple[str | None, dict]:
+                  extra_ports: list,
+                  fixture_probes: list | None = None
+                  ) -> tuple[str | None, dict]:
     """Node-turn boundary rehearsal (A-flip) → (err, RehearsalReport)."""
     report = {"build_ok": False, "boot_ok": False, "routes": [], "digest": ""}
     err = _rehearse_startup(output_dir, smoke_port, probes=probes,
-                            extra_ports=extra_ports, report=report)
+                            extra_ports=extra_ports, report=report,
+                            fixture_probes=fixture_probes)
     report["digest"] = (err or "")[-600:]
     return err, report
 
@@ -908,7 +1015,9 @@ def group_siblings(tree: dict, max_batch: int) -> list[list[dict]]:
     return batches
 
 
-def describe_node(node: dict) -> str:
+def describe_node(node: dict,
+                  seeded_scenarios: set[str] | frozenset | None = None
+                  ) -> str:
     lines = [f"ID: {node.get('id')}", f"Name: {node.get('name', '')}"]
     if node.get("description"):
         lines.append(f"Description: {node['description']}")
@@ -917,9 +1026,19 @@ def describe_node(node: dict) -> str:
         lines.append("Scenarios:")
         for sc in scenarios:
             lines.append(f"  - {sc.get('name', 'scenario')}")
+            key = f"{node.get('id')}::{sc.get('name', 'scenario')}"
+            seeded = bool(seeded_scenarios) and key in seeded_scenarios
             for step in sc.get("steps") or []:
                 if isinstance(step, dict):
-                    kw = step.get("keyword", "")
+                    kw = str(step.get("keyword", ""))
+                    if seeded and kw.upper() == "GIVEN":
+                        # 宿主已按该 GIVEN 编译种子落盘 db.json——提示词
+                        # 收敛为一行指针,值以 FOCUS 段/db.json 为准(省 token)。
+                        lines.append(
+                            "      GIVEN fixtures seeded by host into "
+                            "backend/data/db.json — verify addressable on "
+                            "the running app")
+                        continue
                     lines.append(f"      {kw} {step.get('content', '')}")
     deps = node.get("dependencies") or []
     if deps:
@@ -1284,7 +1403,10 @@ class OctosDriver:
 
     def set_envelope(self, *, phase: str, task: str, atomic_nodes: list,
                      statuses: dict, focus: str | None, ports: dict,
-                     spec_map: dict, host_signals: dict | None = None) -> None:
+                     spec_map: dict, host_signals: dict | None = None,
+                     extra_rules: str | None = None,
+                     fixture_given: dict | None = None,
+                     seeded_nodes: set | frozenset | None = None) -> None:
         """(Re)build the plan envelope; the next run() wraps it."""
         if not self.plan_capable:
             return
@@ -1292,7 +1414,16 @@ class OctosDriver:
         self.envelope = plan_envelope.build_envelope(
             seq=self._plan_seq, phase=phase, task=task,
             atomic_nodes=atomic_nodes, statuses=statuses, focus=focus,
-            ports=ports, spec_map=spec_map, host_signals=host_signals)
+            ports=ports, spec_map=spec_map, host_signals=host_signals,
+            extra_rules=extra_rules, fixture_given=fixture_given,
+            seeded_nodes=seeded_nodes)
+        # 防御(内核 wire.rs:174-178 精确匹配 step id):复合/越界 focus
+        # 会让内核丢弃整个 envelope(PLAN/FOCUS/validation 全不装)。
+        if self.envelope["focus"] is not None:
+            ids = {s["id"] for s in self.envelope["steps"]}
+            assert self.envelope["focus"] in ids, (
+                f"focus {self.envelope['focus']!r} matches no step id; "
+                "the kernel would drop the whole envelope")
 
     def _log_event(self, method: str, params: dict) -> None:
         if method == "core/marker":
@@ -1602,6 +1733,12 @@ Canada, Australia (round 31/32: the registration tests select the option \
 labeled "Vietnam"; without it every registration test times out). A gender \
 control is exactly two radio inputs labeled "Male" and "Female". Text \
 fields must accept ISO date strings like "2035-12-31".
+- FIXTURE CONTRACT POINTER: the SEED DATA rule above covers visible \
+example values; the full fixture contract (role accounts, ownership and \
+permission relationships, per-scenario pre-states, E2E_* items) is \
+compiled in your CONTRACT section and backend/data/db.json — seed or \
+preserve it exactly; demo-quality substitutes for named fixtures score \
+zero.
 - TEXT ONLY: every string you need exists as plain text in the requirement \
 YAML/files. Reference images are illustrative only — NEVER attempt OCR, \
 ASCII rendering, or any other image text extraction, and never try to \
@@ -1643,14 +1780,21 @@ write code first.\
 # non-plan-capable kernels (OCTOS_ASSUME_ARC_PLAN=0 baselines).
 HOST_SKELETON_PROMPT = """\
 Create the application skeleton for this task. Fixed infrastructure \
-already exists (backend: package.json/.npmrc + src/{app.js,index.js,lib/*,\
-database/*,routes/*}, frontend: package.json + index.html + src/main.jsx \
-+ src/app/{App.jsx,store.jsx,api.js,styles.css}) — do NOT rewrite them. \
+already exists (backend: package.json/.npmrc + src/{{app.js,index.js,lib/*,\
+database/*,routes/*}}, frontend: package.json + index.html + src/main.jsx \
++ src/app/{{App.jsx,store.jsx,api.js,styles.css}}) — do NOT rewrite them. \
 Create ONLY what is missing: backend/data/schema.json per the HOST \
-CONTRACT (the host compiles it and mounts CRUD + auth), backend/data/\
-db.json seed records, and the first frontend feature file under \
-frontend/src/features/ (wire it in src/app/App.jsx per the FRONTEND \
-LAYOUT contract). JavaScript/JSX only; dependencies are preinstalled — \
+CONTRACT (a host-written starter covering the seeded collections may \
+already exist — EXTEND it, keep every entity name and seeded row; the \
+host compiles it and mounts CRUD + auth), the fixture records the FIXTURE \
+CONTRACT lists as still unseeded into backend/data/db.json (the host \
+already compiled every machine-readable data:/GIVEN fixture into it — \
+NEVER delete or rename those rows), and the first frontend feature file \
+under frontend/src/features/ (wire it in src/app/App.jsx per the FRONTEND \
+LAYOUT contract). Do NOT read requirements/requirements.yaml wholesale to \
+recover seed data — the fixture contract is fully carried by your \
+CONTRACT/FOCUS/GIVEN sections and the seeded db.json. \
+JavaScript/JSX only; dependencies are preinstalled — \
 never run npm install. Do not commit; the harness handles git.\
 PORT DISCIPLINE: run any dev/test server ONLY on port {smoke}; NEVER \
 bind port {port} (the grader watches it — binding it kills the whole \
@@ -1663,7 +1807,10 @@ system prompt applies exactly; the focus section lists this node's \
 acceptance signals and action chains. Extend the existing app, never \
 rewrite working files. Do not commit.\
 Definition of done for this node: every action chain under FOCUS walks \
-through on the RUNNING app; red means fix, not report. All spec \
+through on the RUNNING app; every GIVEN fixture named under FOCUS or the \
+node text is addressable on the RUNNING app (the account signs in, the \
+object opens, cell/field values match verbatim); red means fix, not \
+report. All spec \
 dependencies are preinstalled by the host — to run the staged specs use \
 the SPEC RUN command below verbatim; NEVER npm install anything and \
 never invoke bare `npx playwright`.\
@@ -1784,9 +1931,10 @@ name/label/type(string|number|boolean|password)/required/unique/min/max/\
 pattern/enum/match/format(email|username|password)/message, per the HOST \
 CONTRACT. CRUD at /api/<entity> and auth (register/login/logout/me) then \
 exist automatically — build the UI on them; write ONLY task-specific \
-endpoints (search/booking flows) in src/routes/index.js. Seed concrete \
-demo records into backend/data/db.json. Dependencies are preinstalled — \
-never run npm install.\
+endpoints (search/booking flows) in src/routes/index.js. Extend \
+backend/data/db.json only with fixture records still missing from the \
+FIXTURE CONTRACT — never delete or rename host-seeded rows. \
+Dependencies are preinstalled — never run npm install.\
 """ % {"schema_json": scaffold.SCHEMA_JSON_REL}
 
 HOST_FINAL_CHECK_PROMPT = """\
@@ -1854,7 +2002,11 @@ here. Hash passwords with Node's built-in crypto (scrypt). The backend \
 reads the PORT environment \
 variable (default {port}), serves the built frontend from frontend/dist/ at \
 http://localhost:{port}/ and exposes JSON APIs under /api/.
-- Seed the JSON store with realistic demo data at startup if it is empty.
+- Seed the JSON store with every fixture record the requirement names: \
+its `data:` section and each scenario's GIVEN line are the graded seed \
+contract (roles/ownership/visibility/relationships verbatim; one fresh \
+preconfigured instance per data-modifying scenario; unlisted values get a \
+broad standard set). Demo-quality substitutes score zero.
 
 """ + UI_CONTRACT_PROMPT + """
 Verification steps the runner will perform later — make sure they ALL pass:
@@ -1917,8 +2069,9 @@ You ended your last turn before creating any files. Stop analyzing. In \
 your very next actions, CREATE the project files with your file-writing \
 tools: frontend/package.json (with the build script), the frontend page \
 sources, backend/package.json (with the start script), and the backend \
-server including the JSON store and seed data required by the requirement \
-document. Do not describe the plan — write the files now.\
+server including the JSON store seeded with the requirement's fixture \
+contract (data: section + every scenario GIVEN line, verbatim). Do not \
+describe the plan — write the files now.\
 """
 
 ACCEPTANCE_TESTS_PROMPT = """\
@@ -2193,6 +2346,10 @@ def main() -> int:
         atomic_nodes = flatten_atomic(tree)
         if not atomic_nodes:
             raise ValueError("no ATOMIC requirement nodes found")
+        # 夹具契约提取(ROOT data: 段 / 场景 GIVEN / "Seed data supplies" 句 /
+        # E2E_* 环境项)——宿主尽算:先结构化,再编译种子、注入 envelope、
+        # 生成 0-token 探针。github 2 分根因:这些契约此前全链无人消费。
+        fixture_data = fixture_manifest.extract(tree)
 
         tests_dir = locate_acceptance_tests(tree, Path(__file__).resolve().parent)
         if tests_dir:
@@ -2353,6 +2510,70 @@ def main() -> int:
         if template_ready and os.environ.get("OCTOS_ARC_PREWARM", "1") != "0":
             scaffold.prewarm_deps(output_dir, log)
 
+        # ---- 夹具契约:宿主种子编译落盘 + 派生注入量(确定性,字节稳定) ----
+        # 可机械解析的评分种子(sheet 型 GIVEN→cells / graph 型角色→实体行)
+        # 直接写 backend/data/db.json,skeleton 轮模型只补语义关系;解析不了
+        # 的条目进 uncovered 报告降级为 FOCUS GIVEN 清单。模型已写过种子
+        # (非空 collections)绝不覆盖(重跑安全)。
+        fixture_compiled: dict | None = None
+        try:
+            fixture_compiled = fixture_manifest.materialize(
+                output_dir, fixture_data)
+        except Exception as exc:  # noqa: BLE001 — 种子失败不阻断主流程
+            log(f"[fixture] seed materialization failed: {exc}")
+        if fixture_compiled is None:
+            log("[fixture] db.json already carries seed rows; "
+                "host seeding skipped")
+        elif fixture_compiled["db"]:
+            try:
+                arc_dir = output_dir / ".arc"
+                arc_dir.mkdir(parents=True, exist_ok=True)
+                (arc_dir / "fixture-manifest.json").write_text(
+                    json.dumps({
+                        "manifest": fixture_data,
+                        "compiled": {
+                            "kind": fixture_compiled["kind"],
+                            "collections": {k: len(v) for k, v in
+                                            fixture_compiled["db"].items()},
+                            "covered": fixture_compiled["covered"],
+                            "uncovered": fixture_compiled["uncovered"]}},
+                        ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8")
+            except OSError as exc:
+                log(f"[fixture] manifest write failed: {exc}")
+            log(f"[fixture] host seed kind={fixture_compiled['kind']} "
+                f"rows={ {k: len(v) for k, v in fixture_compiled['db'].items()} } "
+                f"covered_nodes={len(fixture_compiled['covered'])} "
+                f"uncovered={len(fixture_compiled['uncovered'])}")
+        else:
+            log("[fixture] no machine-compilable fixtures; contract rides "
+                "in FOCUS GIVEN lists")
+        # extra_rules 全局契约:确定性渲染(静态 manifest → 每轮字节相同,
+        # 缓存律),经稳定 CONTRACT 段常驻;节点 GIVEN 走 FOCUS validation 前缀。
+        fixture_rules = fixture_manifest.render_extra_rules(
+            fixture_data,
+            {"uncovered": len((fixture_compiled or {}).get("uncovered")
+                              or ()),
+             "kind": (fixture_compiled or {}).get("kind") or "none"})
+        fixture_given = {
+            nid: info["given"]
+            for nid, info in fixture_data["nodes"].items() if info["given"]}
+        fixture_seeded_nodes = frozenset(
+            (fixture_compiled or {}).get("covered") or ())
+        fixture_seeded_scenarios = frozenset(
+            f"{nid}::{sname}"
+            for nid, snames in ((fixture_compiled or {}).get("covered")
+                                or {}).items()
+            for sname in snames)
+
+        def fixture_probe_list() -> list[dict]:
+            """夹具探针(登录可达 + 已播种实体存在);无宿主种子则空。"""
+            if not fixture_compiled or not fixture_compiled["db"]:
+                return []
+            return plan_envelope.build_fixture_probes(
+                fixture_compiled["logins"],
+                list(fixture_compiled["db"].keys()))
+
         def remaining() -> float:
             # No budget (0) ⇒ unlimited: the node-skip gate, tail
             # reservation and time_up() all become inert; every turn's own
@@ -2433,7 +2654,10 @@ def main() -> int:
                 spec_map=spec_map,
                 host_signals={"rehearsal": None,
                               "scaffolded_by_host": scaffolded,
-                              "spec_run": None} if scaffolded else None)
+                              "spec_run": None} if scaffolded else None,
+                extra_rules=fixture_rules,
+                fixture_given=fixture_given,
+                seeded_nodes=fixture_seeded_nodes)
 
         try:
             # Step 0: orient in the starter project + shared foundations.
@@ -2562,7 +2786,12 @@ def main() -> int:
                 if not batch:
                     continue
                 batch_ids = [str(n.get("id")) for n in batch]
-                focus_id = " + ".join(batch_ids)
+                # P0(wire.rs 精确匹配 step id):"id1 + id2" 复合串会让内核
+                # drop 整个 envelope——默认 batch=2 时几乎每个节点 turn 的
+                # PLAN/FOCUS/validation 都装不上(github 2 分根因之一)。
+                # 批次锚定首节点;其余成员 status 已逐个 active,完整契约
+                # 仍由节点提示词正文(node_spec)携带。
+                focus_id = batch_ids[0]
                 for nid in batch_ids:
                     events.mark_design_started(nid)
                     events.mark_design_done(nid, "design folded into octos implementation prompt")
@@ -2579,8 +2808,13 @@ def main() -> int:
                         phase="node", task=plan_task,
                         atomic_nodes=atomic_nodes, statuses=plan_statuses,
                         focus=focus_id, ports=plan_ports, spec_map=spec_map,
-                        host_signals=hs0 or None)
-                    node_spec = "\n\n".join(describe_node(n) for n in batch)
+                        host_signals=hs0 or None,
+                        extra_rules=fixture_rules,
+                        fixture_given=fixture_given,
+                        seeded_nodes=fixture_seeded_nodes)
+                    node_spec = "\n\n".join(
+                        describe_node(n, fixture_seeded_scenarios)
+                        for n in batch)
                     batch_specs = sorted(
                         {f for nid in batch_ids
                          for f in (spec_map.get(nid) or [])})
@@ -2599,7 +2833,9 @@ def main() -> int:
                                                 or "(no staged spec)")
                                 for nid in batch_ids))
                 else:
-                    node_spec = "\n\n".join(describe_node(n) for n in batch)
+                    node_spec = "\n\n".join(
+                        describe_node(n, fixture_seeded_scenarios)
+                        for n in batch)
                     node_prompt = NODE_PROMPT_TEMPLATE.format(
                         port=args.web_port, smoke=smoke_port,
                         node_spec=node_spec) + tests_prompt_slim
@@ -2734,7 +2970,7 @@ def main() -> int:
                     # batch stays blocked in the plan.
                     r_err, r_report = rehearse_node(
                         output_dir, smoke_port, probe_list,
-                        spec_ports_extra)
+                        spec_ports_extra, fixture_probe_list())
                     report_vrows = r_report.get("validation_probes") or []
                     log(f"[plan] batch {focus_id} rehearsal "
                         f"{'GREEN' if r_err is None else 'RED'}: "
@@ -2750,7 +2986,7 @@ def main() -> int:
                                 min(node_timeout, r_wall), r_wall)
                             r_err, r_report = rehearse_node(
                                 output_dir, smoke_port, probe_list,
-                                spec_ports_extra)
+                                spec_ports_extra, fixture_probe_list())
                             report_vrows = r_report.get("validation_probes") or []
                             log(f"[plan] batch {focus_id} repair "
                                 f"{fix_attempt}: "
@@ -2866,7 +3102,10 @@ def main() -> int:
                         atomic_nodes=atomic_nodes,
                         statuses=plan_statuses, focus=focus_id,
                         ports=plan_ports, spec_map=spec_map,
-                        host_signals=hs)
+                        host_signals=hs,
+                        extra_rules=fixture_rules,
+                        fixture_given=fixture_given,
+                        seeded_nodes=fixture_seeded_nodes)
 
             if codegen:
                 codegen.stop()
@@ -2884,7 +3123,8 @@ def main() -> int:
                 # host cannot (assertion semantics).
                 log("[plan] final host verification (Tier-1 probes)")
                 f_err, f_report = rehearse_node(
-                    output_dir, smoke_port, probe_list, spec_ports_extra)
+                    output_dir, smoke_port, probe_list, spec_ports_extra,
+                    fixture_probe_list())
                 log(f"[plan] final rehearsal {'GREEN' if f_err is None else 'RED'}")
                 f_report.pop("validation_probes", None)
                 hs = {"rehearsal": f_report}
@@ -2903,7 +3143,10 @@ def main() -> int:
                 driver.set_envelope(
                     phase="final", task=plan_task, atomic_nodes=atomic_nodes,
                     statuses=plan_statuses, focus=None, ports=plan_ports,
-                    spec_map=spec_map, host_signals=hs)
+                    spec_map=spec_map, host_signals=hs,
+                    extra_rules=fixture_rules,
+                    fixture_given=fixture_given,
+                    seeded_nodes=fixture_seeded_nodes)
                 if f_err is None and tier2_run is not None and tier2_run[1] == 0 and tier2_run[0] > 0:
                     ok, text = True, ("host spec run all green "
                                       f"({tier2_run[0]} passed); final LLM turn skipped")
@@ -3065,19 +3308,6 @@ def main() -> int:
             elif not final_skipped:
                 events.mark_test_failed(node_id, "final verification did not pass")
         runtime.git.commit("chore: final verification pass")
-        # run11 root cause of the 5 eval timeouts: our own Tier-2 pass left
-        # db.run.json holding archived/pinned state, and the platform's eval
-        # `npm start` reuses that file instead of reseeding — every
-        # state-changing test then times out waiting for a precondition
-        # that no longer holds. Hand over a pristine seed start.
-        run_db = output_dir / "backend" / "data" / "db.run.json"
-        if run_db.exists():
-            try:
-                run_db.unlink()
-                log("[postflight] removed backend/data/db.run.json — "
-                    "eval will boot from the seed")
-            except OSError as exc:
-                log(f"[postflight] could not remove db.run.json: {exc}")
 
         if failed:
             events.mark_run_completed(f"completed with {len(failed)} failed node(s): {', '.join(failed)}")
@@ -3090,12 +3320,18 @@ def main() -> int:
         if artifacts_dir:
             try:
                 Path(artifacts_dir).mkdir(parents=True, exist_ok=True)
-                (Path(artifacts_dir) / "preview-ready.json").write_text(
+                (artifacts_dir / "preview-ready.json").write_text(
                     json.dumps({"ready": True, "reason": "octos bundle completed"}) + "\n",
                     encoding="utf-8",
                 )
             except OSError:
                 pass
+        # run11 root cause of the 5 eval timeouts: our own Tier-2 pass left
+        # db.run.json holding archived/pinned state, and the platform's eval
+        # `npm start` reuses that file instead of reseeding. Hand over a
+        # pristine seed start — as the LAST action (anything booting the
+        # server after this would recreate the run file).
+        _handover_pristine_seed(output_dir)
         return 0
     except Exception as exc:  # platform judges by events, not exit code
         # 平台只看退出码与 SDK 事件；traceback 必须同时落在 stdout/stderr
@@ -3104,6 +3340,7 @@ def main() -> int:
         traceback.print_exc()
         _postflight_structure_check(output_dir, args.web_port)
         _free_web_port(args.web_port)
+        _handover_pristine_seed(output_dir)
         events.mark_run_failed(str(exc)[:1000])
         return 0
 

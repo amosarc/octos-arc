@@ -102,9 +102,11 @@ templates:
       - Playwright
 EOF
 
-# 运行时必需：main.py 顶层 import(plan_envelope/scaffold/arcbench_agent_runtime)
-# + 惰性 import(octos_stdio) + 验收测试(public-tests) + 内核(bin/) + 初始模板(template/)
-cp main.py plan_envelope.py octos_stdio.py requirements.txt "$PKG/"
+# 运行时必需：main.py 顶层 import(plan_envelope/fixture_manifest/scaffold/
+# arcbench_agent_runtime) + 惰性 import(octos_stdio) + 验收测试(public-tests)
+# + 内核(bin/) + 初始模板(template/)
+# (fixture_manifest.py:夹具契约提取/宿主种子编译——main.py 顶层依赖,漏打即启动崩)
+cp main.py plan_envelope.py fixture_manifest.py octos_stdio.py requirements.txt "$PKG/"
 cp -R arcbench_agent_runtime public-tests scaffold bin "$PKG/"
 # Tier-2 评测链物料：只带清单文件，node_modules 由容器内
 # _ensure_host_toolchain 幂等安装落地（2026-09-20 漏打导致安装 ENOENT、
