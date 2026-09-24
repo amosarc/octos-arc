@@ -16,6 +16,9 @@ else
   (cd "$ARC/scripts/local-sim" && docker build --platform linux/amd64 \
     -t arcbench-runner:local-base .)
 fi
+# 模拟器上游(2026-09-23 4e62690)把基础镜像引用改成了
+# gyataro/arcbench-runner:local-base;双名指向同一镜像,新旧版本模拟器都兼容。
+docker tag arcbench-runner:local-base gyataro/arcbench-runner:local-base 2>/dev/null || true
 
 echo "== 构建 local wrapper 镜像"
 cd "$SIM"
