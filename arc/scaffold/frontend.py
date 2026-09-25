@@ -225,3 +225,45 @@ body {
 .muted { color: #616e7c; }
 .error-text { color: #c0392b; }
 """
+
+# B2(run-002 复盘):各批次自造网格状态模型、反复重写同一共享文件是
+# 回归震荡的根源。宿主以只读 README 给出规范内核模式——选中模型/
+# aria 契约/Escape/Enter 语义/公式栏回显——feature 实现一律建立在该
+# 模式之上。README 属宿主契约(角色 host),模型禁改。
+FEATURES_README = """\
+# frontend/src/features — feature implementation notes
+
+Each requirement domain lives in its own self-contained file here
+(<name>.jsx, default export). This README is HOST-OWNED (read-only).
+
+## Grid editor kernel pattern (spreadsheet-like tasks)
+
+Build every grid feature on ONE shared selection+editing state model,
+created in the FIRST grid feature file and imported by later features
+(never re-implemented, never rewritten):
+
+```jsx
+// useGrid: single source of truth for selection + editing
+// anchor + focus cells define the rectangular selection
+const [grid, setGrid] = useState({
+  anchor: 'A1', focus: 'A1', editing: null, // editing: {coord, draft}
+});
+// aria contract (graded): each cell renders
+//   role="gridcell" aria-label={coord}
+//   aria-selected={inRectangle(coord, anchor, focus) ? 'true' : 'false'}
+// commit:  Enter or click on another cell applies editing.draft
+// cancel:  Escape restores the original value, formula bar shows it
+// formula bar: value = editing ? draft : (formulaOf(selected) ?? valueOf(selected))
+```
+
+Rules the graders assert verbatim (see your INTERACTION SEMANTICS section):
+- Escape cancels an uncommitted edit; Enter commits.
+- aria-selected must be maintained on EVERY gridcell, true inside the
+  current rectangle, false outside.
+- One visible error element per failure, exact message strings from the
+  requirement.
+
+Keep feature files additive: a later requirement EXTENDS the state model
+(import it) instead of forking it — the post-batch regression runs every
+completed feature's specs against your changes.
+"""

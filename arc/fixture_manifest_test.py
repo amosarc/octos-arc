@@ -37,6 +37,196 @@ def _workbook_cells(compiled: dict, marker: str) -> dict:
     return {}
 
 
+def _hackathon_tree(task: str) -> dict:
+    import yaml as _yaml
+    return _yaml.safe_load(
+        (_TASKS / task / "requirements.yaml").read_text(encoding="utf-8"))
+
+
+class HackathonSheetCompileTests(unittest.TestCase):
+    """hackathon--sheet:同工作簿名 → 单一规范种子(Q3 Sales),冲突态进
+    arrange。这些断言就是验收 spec 断言的种子数据源——这里丢一格,
+    spec 与实现同时失真。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.manifest = fx.extract(_hackathon_tree("hackathon--sheet"))
+        cls.compiled = fx.compile_seed(cls.manifest)
+
+    def test_kind_and_single_canonical_workbook(self):
+        self.assertEqual(self.compiled["kind"], "sheet")
+        wbs = self.compiled["db"]["workbooks"]
+        self.assertEqual(len(wbs), 1, "canonical seed must be ONE workbook")
+        self.assertEqual(wbs[0]["name"], "Q3 Sales")
+
+    def test_canonical_sheet1_dataset(self):
+        s1 = next(s for s in self.compiled["db"]["workbooks"][0]
+                  ["state"]["sheets"] if s["name"] == "Sheet1")
+        c = s1["cells"]
+        self.assertEqual(c.get("A1"), {"v": "Region"})
+        self.assertEqual(c.get("B1"), {"v": "Sales"})
+        self.assertEqual(c.get("C1"), {"v": "Status"})
+        self.assertEqual(c.get("A2"), {"v": "East"})
+        self.assertEqual(c.get("B2"), {"v": 1200})
+        self.assertEqual(c.get("C2"), {"v": "Open"})
+        self.assertEqual(c.get("A3"), {"v": "North"})
+        self.assertEqual(c.get("B3"), {"v": 800})
+        self.assertEqual(c.get("C3"), {"v": "Closed"})
+        self.assertEqual(c.get("A4"), {"v": "South"})
+        self.assertEqual(c.get("B4"), {"v": 700})
+        self.assertEqual(c.get("C4"), {"v": "Open"})
+
+    def test_canonical_sheet2_rows(self):
+        sheets = self.compiled["db"]["workbooks"][0]["state"]["sheets"]
+        s2 = next((s for s in sheets if s["name"] == "Sheet2"), None)
+        self.assertIsNotNone(s2, "REQ-2 需要 Sheet2 存在")
+        self.assertEqual(s2["cells"].get("A1"), {"v": "East"})
+        self.assertEqual(s2["cells"].get("B1"), {"v": 1200})
+        self.assertEqual(s2["cells"].get("A2"), {"v": "North"})
+        self.assertEqual(s2["cells"].get("B2"), {"v": 800})
+
+    def test_conflicting_states_arrange_not_seeded(self):
+        # REQ-3 的 A1:B2=Item/Qty、REQ-4 的 A1=2 与 A1=Region 冲突:
+        # 不进种子,由测试经 UI 布置。
+        blob = json.dumps(self.compiled["db"], ensure_ascii=False)
+        self.assertNotIn("Item", blob)
+        self.assertNotIn('"f": "=A1+B1"', blob)
+        for nid in ("REQ-3-1-1", "REQ-4-1-1"):
+            self.assertIn(nid, self.compiled["arrange"])
+        for nid in ("REQ-1-1-1", "REQ-2-1-1", "REQ-5-3-1"):
+            self.assertIn(nid, self.compiled["covered"])
+
+    def test_extra_rules_canonical_without_suffix_noise(self):
+        stats = {"kind": self.compiled["kind"],
+                 "uncovered": len(self.compiled["uncovered"]),
+                 "arrange": len(self.compiled["arrange"]),
+                 "seeded": len(self.compiled["db"].get("users", [])),
+                 "canonical": True}
+        text = fx.render_extra_rules(self.manifest, stats)
+        self.assertLessEqual(len(text), 2400)
+        self.assertIn("CANONICAL and FINAL", text)
+        self.assertNotIn("unique suffix", text)
+        self.assertNotIn(fx.FIXTURE_PASSWORD, text)
+
+
+class HackathonGithubCompileTests(unittest.TestCase):
+    """hackathon--github:裸 Q3 不再误判 sheet;逐字种子账号入 seed。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.manifest = fx.extract(_hackathon_tree("hackathon--github"))
+        cls.compiled = fx.compile_seed(cls.manifest)
+
+    def test_kind_is_graph_despite_quarter_tokens(self):
+        self.assertEqual(self.compiled["kind"], "graph")
+
+    def test_verbatim_seed_account(self):
+        users = self.compiled["db"]["users"]
+        alice = next((u for u in users
+                      if u["username"] == "alice-dev"), None)
+        self.assertIsNotNone(alice, "alice-dev must be seeded verbatim")
+        self.assertEqual(alice["email"], "alice.dev@example.test")
+        # 密码 scrypt 落库;明文只进 logins(登录探针用)
+        import hashlib
+        salt, digest = alice["password"].split(":")
+        again = hashlib.scrypt(b"Valid-password-123!", salt=salt.encode(),
+                               dklen=32, n=16384, r=8, p=1,
+                               maxmem=64 * 1024 * 1024)
+        self.assertEqual(again.hex(), digest)
+        self.assertIn("alice-dev", [l["username"] for l in self.compiled["logins"]])
+
+    def test_seed_entities_present(self):
+        ents = self.compiled["db"]
+        self.assertIn("Acme Demo", [o["name"] for o in ents["organizations"]])
+        self.assertIn("acme-docs", [r["name"] for r in ents["repositories"]])
+        self.assertIn("frontend-team", [t["name"] for t in ents["teams"]])
+        self.assertIn("bob-reviewer",
+                      [m["username"] for m in ents["members"]])
+
+    def test_repo附属种子_分支issue_pr_标签里程碑(self):
+        ents = self.compiled["db"]
+        self.assertIn("main", [b["name"] for b in ents["branches"]])
+        self.assertIn("feature-search", [b["name"] for b in ents["branches"]])
+        self.assertIn("Improve onboarding",
+                      [i["title"] for i in ents["issues"]])
+        self.assertIn("Fix search", [p["title"] for p in ents["pulls"]])
+        self.assertIn("bug", [l["name"] for l in ents["labels"]])
+        self.assertIn("Q3 launch",
+                      [m["title"] for m in ents["milestones"]])
+
+    def test_starter_schema_covers_req456_entities(self):
+        names = {e["name"] for e in self.compiled["schema"]["entities"]}
+        self.assertTrue({"branches", "issues", "pulls", "labels",
+                         "milestones", "comments"} <= names)
+
+
+class InteractionContractTests(unittest.TestCase):
+    """B1(run-002 剩余 2 红复盘):Escape/Enter 键位语义与逐字文案
+    必须以独立小节进 FOCUS 头部,不再埋在 4000 字 validation 中部。"""
+
+    def test_sheet_edit_node_gets_keyboard_semantics(self):
+        tree = _hackathon_tree("hackathon--sheet")
+        target: dict = {}
+
+        def walk(n):
+            if str(n.get("id")) == "REQ-3-1-1":
+                target.update(n)
+            for c in n.get("children") or []:
+                walk(c)
+
+        walk(tree)
+        rules = pe.extract_interaction_contract(
+            str(target.get("description") or ""))
+        joined = "\n".join(rules)
+        self.assertIn("Escape cancels", joined)
+        self.assertIn("Enter", joined)
+
+    def test_error_messages_rank_before_control_names(self):
+        rules = pe.extract_interaction_contract(
+            'Clicking "Save" shows "Worksheet name cannot be empty" then '
+            'the "Rename workbook" button stays.')
+        self.assertTrue(rules[0].endswith('cannot be empty" (copy exactly)'))
+
+    def test_envelope_validation_leads_with_interaction_section(self):
+        nodes = [{"id": "REQ-3", "type": "ATOMIC", "name": "n",
+                  "description": 'Pressing Escape cancels; the dialog '
+                  '"Sort range" opens. Error "Invalid input." shown.'}]
+        env = pe.build_envelope(
+            seq=1, phase="node", task="t", atomic_nodes=nodes,
+            statuses={}, focus="REQ-3",
+            ports={"grade": 1, "smoke": 2, "extra": []}, spec_map={})
+        v = env["steps"][0]["validation"] or ""
+        self.assertTrue(v.startswith("INTERACTION SEMANTICS"))
+        self.assertIn("Escape cancels", v)
+        self.assertIn("Invalid input.", v)
+
+
+class SpecReqPrefixTests(unittest.TestCase):
+    def test_dash_and_dot_ids(self):
+        self.assertEqual(pe.spec_req_prefix(
+            "REQ-1-1-1-add-worksheet.spec.ts"), "REQ-1-1-1")
+        self.assertEqual(pe.spec_req_prefix(
+            "REQ-1.1-user-registration.spec.ts"), "REQ-1.1")
+        self.assertIsNone(pe.spec_req_prefix("helpers.spec.ts"))
+
+    def test_hackathon_spec_map_exact(self):
+        tree = _hackathon_tree("hackathon--sheet")
+        atomic = []
+        def walk(n):
+            if str(n.get("type", "")).upper() == "ATOMIC":
+                atomic.append(n)
+            for ch in n.get("children") or []:
+                walk(ch)
+        walk(tree)
+        tests_dir = _TASKS.parent / "public-tests" / "hackathon--sheet"
+        if not tests_dir.is_dir():
+            return
+        mapping = pe.spec_to_node_map(tests_dir, atomic)
+        self.assertIn("REQ-1-1-1", mapping)
+        self.assertIn("REQ-5-3-1", mapping)
+        self.assertTrue(all(v for v in mapping.values()))
+
+
 class ExtractTests(unittest.TestCase):
     def test_github_global_and_e2e(self):
         m = fx.extract(_tree("github"))
@@ -120,8 +310,18 @@ class SheetCompileTests(unittest.TestCase):
         blob = json.dumps(self.compiled["db"], ensure_ascii=False)
         # 撤销类场景("user has just committed...")不可编译 → 不自编
         self.assertNotIn("just committed", blob)
-        self.assertTrue(self.compiled["uncovered"],
-                        "uncovered report must be non-empty for sheet")
+        # 新解析器已覆盖旧 sheet 题全部带坐标场景(uncovered 空);报告
+        # 机制本身用合成用例锁定:有坐标语境但句式不可解析 → 必须报告。
+        synthetic = {"global": [], "e2e_envs": [], "nodes": {
+            "REQ-9-9-9": {"given": [
+                "The worksheet holds A1 B2 C3 D4 E5 in unknown fashion."],
+                "scenarios": [{"name": "mystery", "given": [
+                    "The worksheet holds A1 B2 C3 D4 E5 in unknown "
+                    "fashion."]}], "seed_sentences": []}}}
+        c2 = fx.compile_seed(synthetic)
+        self.assertTrue(c2["uncovered"])
+        self.assertEqual(c2["uncovered"][0]["node"], "REQ-9-9-9")
+        self.assertFalse(c2["db"])
 
     def test_workbooks_are_independent_instances(self):
         names = [wb["name"] for wb in self.compiled["db"]["workbooks"]]
@@ -244,7 +444,9 @@ class EnvelopeInjectionTests(unittest.TestCase):
             ports={"grade": 1, "smoke": 2, "extra": []}, spec_map={})
         ids = {s["id"] for s in env["steps"]}
         self.assertIn("REQ-45", ids)
-        self.assertLessEqual(len(env["steps"]), 40)
+        # 上限已放宽到内核 MAX_STEPS=64:47 节点级任务全量入列,不再截尾。
+        self.assertEqual(len(env["steps"]), 45)
+        self.assertLessEqual(len(env["steps"]), 64)
 
     def test_extra_rules_passthrough(self):
         env = self._env(extra_rules="FIXTURE CONTRACT: x" * 10)

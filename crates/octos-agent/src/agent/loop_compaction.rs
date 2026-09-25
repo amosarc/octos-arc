@@ -246,9 +246,12 @@ mod tests {
         assert!(
             truncated_tool
                 .content
-                .contains("[... truncated for brevity]")
+                .contains("[... middle truncated for brevity ...]")
         );
-        assert!(truncated_tool.content.len() <= 830);
+        // head(800) + infix + tail(200): still bounded, and far below the
+        // 5,000-char source output.
+        assert!(truncated_tool.content.len() <= 1_100);
+        assert!(truncated_tool.content.len() < 5_000);
     }
 
     #[tokio::test]
@@ -345,7 +348,7 @@ mod tests {
         assert!(
             messages[assistant_idx + 1]
                 .content
-                .contains("[... truncated for brevity]"),
+                .contains("[... middle truncated for brevity ...]"),
             "recent oversized tool output should be budgeted deterministically"
         );
 

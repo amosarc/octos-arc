@@ -44,7 +44,10 @@ never add npm packages.
 FRONTEND LAYOUT (isolation contract): every requirement's UI lives in \
 its OWN self-contained file frontend/src/features/<name>.jsx (default \
 export; the component, its local state/hooks, and its scoped styles all \
-in that one file). frontend/src/app/App.jsx is the ASSEMBLY layer only — \
+in that one file). frontend/src/features/README.md (host-owned) carries \
+the GRID EDITOR KERNEL PATTERN — grid-like tasks must build on ONE \
+shared selection/editing state model per the README instead of \
+re-implementing it per feature. frontend/src/app/App.jsx is the ASSEMBLY layer only — \
 per feature add one import and one mount; the FIRST requirement may lay \
 out the page structure there, after that never put business logic in it. \
 Shared entities go through frontend/src/app/store.jsx \
@@ -93,6 +96,106 @@ path."""
 
 # 契约前缀双语表(中文全角冒号 / 英文冒号,英文大小写不敏感)
 _VALIDATION_PREFIXES = ("Validation 契约：", "Validation contract:")
+
+# 与内核 planctl 上限保持一致(mod.rs MAX_VALIDATION_CHARS / MAX_STEPS)。
+MAX_VALIDATION_LOCAL = 4000
+MAX_STEPS_LOCAL = 64
+
+
+def _trim_sentence(text: str, budget: int) -> str:
+    """Sentence-boundary preferred truncation; a hard cut is the last
+    resort but never mid-token for the trailing data (grades read the
+    tail of GIVEN bullets)."""
+    if len(text) <= budget:
+        return text
+    head = text[:budget]
+    cut = head.rfind(". ")
+    if cut > budget // 2:
+        return head[:cut + 1]
+    return head.rstrip() + "…"
+
+
+# ── 微行为契约抽取(逐字交互语义,直指剩余失分点)─────────────────────
+#
+# run-002 复盘:剩余 2 红(Escape 取消、验证报错逐字文案)的契约埋在
+# 4000 字 validation 段中部,模型读到即忘。此处从节点描述确定性抽取
+# "键位/逐字文案"级微行为,以独立小节插在 FOCUS 头部——每批 3-6 行、
+# 字节稳定、纯文本规则。
+_INTERACTION_RULES: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"Pressing Escape|press Escape|Escape cancels", re.I),
+     "Escape cancels an uncommitted cell edit (grid value unchanged, "
+     "formula bar shows the original value)"),
+    (re.compile(r"Pressing Enter|Enter or clicking", re.I),
+     "Enter (or clicking another cell) commits an edit"),
+    (re.compile(r"Ctrl\+Z|Ctrl\+Y|keyboard shortcut", re.I),
+     "Keyboard shortcuts Ctrl+Z / Ctrl+Y drive Undo / Redo alongside the "
+     "toolbar buttons"),
+    (re.compile(r"case-insensitive", re.I),
+     "Formula function names are case-insensitive"),
+    (re.compile(r"exactly one visible error|EXACTLY ONE", re.I),
+     "Render EXACTLY ONE visible error element per failure (no per-field "
+     "+ form-level duplication)"),
+    (re.compile(r"as the user types|without.{0,40}(Enter|submit)", re.I),
+     "Live filtering applies as the user types (no Enter/submit needed)"),
+    (re.compile(r"aria-selected", re.I),
+     "Maintain aria-selected=true/false on every gridcell per the current "
+     "selection"),
+]
+_VERBATIM_QUOTED_RE = re.compile(
+    r'"([A-Z][^"]{6,80})"', re.MULTILINE)
+
+
+def extract_interaction_contract(description: str, limit: int = 8) -> list[str]:
+    """节点描述 → 逐字交互语义清单(确定性,≤limit 条)。
+
+    两类来源:①模板规则(Escape/Enter/aria-selected 等键位与状态语义);
+    ②双引号逐字文案(错误消息/按钮名,首字母大写的英文串)。
+    """
+    out: list[str] = []
+    for regex, rule in _INTERACTION_RULES:
+        if regex.search(description):
+            out.append(rule)
+        if len(out) >= limit:
+            return out
+    # 逐字文案:错误消息(句号/感叹号结尾)排序在前——它们是最容易
+    # 被改写的失分点;去重保序。
+    verbatim: list[str] = []
+    for m in _VERBATIM_QUOTED_RE.finditer(description):
+        quoted = m.group(1).strip()
+        if quoted and quoted not in verbatim:
+            verbatim.append(quoted)
+    is_message = lambda s: s.endswith((".", "!", "?", ":")) or s.startswith(("Please", "Invalid", "Error"))
+    verbatim.sort(key=lambda s: not is_message(s))
+    for quoted in verbatim:
+        if len(out) >= limit:
+            break
+        out.append(f'VERBATIM string: "{quoted}" (copy exactly)')
+    return out
+
+
+def _merge_given(head: str, given: list[str], validation: str) -> str:
+    """GIVEN 子弹 + validation 合成 FOCUS validation 字段。
+
+    优先级:GIVEN 子弹(评分种子数据常在句尾,硬截断=丢分)整条优先;
+    超预算时先挤压 validation 段(保底 400 字符,句子边界截断)——文件夹
+    级细节由 shared_contract 兜底,这里丢的只是重复叙述。
+    """
+    bullets = given[:12]
+    blines = "".join(f"\n  - {g}" for g in bullets)
+    budget = MAX_VALIDATION_LOCAL - len(head) - 1
+    if len(blines) + len(validation or "") <= budget:
+        out = head + blines
+        if validation:
+            out += "\n" + validation
+        return out[:MAX_VALIDATION_LOCAL]
+    v_text = _trim_sentence(validation or "", max(400, budget - len(blines)))
+    fixed = len(head) + 1 + len(v_text)
+    per = max(160, (MAX_VALIDATION_LOCAL - fixed) // len(bullets))
+    merged = head + "".join(
+        f"\n  - {_trim_sentence(g, per)}" for g in bullets)
+    if v_text:
+        merged += "\n" + v_text
+    return merged[:MAX_VALIDATION_LOCAL]
 
 
 def rehearsal_boot_env(base_env: dict, smoke_port: int, extra_ports: list) -> dict:
@@ -144,12 +247,13 @@ def build_fixture_probes(logins: list[dict], collections: list[str]) -> list[dic
     """
     probes: list[dict] = []
     for login in (logins or [])[:2]:
+        password = str(login.get("password") or fixture_manifest.FIXTURE_PASSWORD)
         probes.append({
             "method": "POST", "path": "/api/auth/login", "kind": "login",
             "user": str(login.get("username") or ""),
             "body": json.dumps({
                 "username": login.get("username"),
-                "password": fixture_manifest.FIXTURE_PASSWORD})})
+                "password": password})})
     for name in (collections or []):
         if name == "users" or len(probes) >= 8:
             continue
@@ -179,11 +283,13 @@ def split_validation(description: str) -> tuple[str, str]:
 
 # ── spec → 节点映射 ────────────────────────────────────────────────────
 
-_REQ_ID_RE = re.compile(r"^(REQ-\d+(?:\.\d+)*)")
+# 点分(REQ-1.1,ticket 系)与连笔(REQ-1-1-1,hackathon 系)ID 都接受。
+_REQ_ID_RE = re.compile(r"^(REQ-\d+(?:[.-]\d+)*)")
 
 
 def spec_req_prefix(basename: str) -> str | None:
-    """`REQ-1.1-user-registration.spec.ts` → `REQ-1.1`."""
+    """`REQ-1.1-user-registration.spec.ts` → `REQ-1.1`;
+    `REQ-1-1-1-add-worksheet.spec.ts` → `REQ-1-1-1`."""
     m = _REQ_ID_RE.match(basename)
     return m.group(1) if m else None
 
@@ -246,6 +352,45 @@ def spec_to_node_map(tests_dir: Path, atomic_nodes: list[dict]) -> dict[str, lis
 # ── envelope 构建 ─────────────────────────────────────────────────────
 
 
+# ── shared_contract(文件夹级需求契约)────────────────────────────────
+
+_SHARED_CONTRACT_BUDGET = 12000  # 内核 MAX_SHARED_CONTRACT_CHARS
+
+
+def build_shared_contract(tree: dict, budget: int = _SHARED_CONTRACT_BUDGET,
+                          ) -> str | None:
+    """非原子(文件夹)节点描述 → 稳定 CONTRACT 段文本。
+
+    这些描述承载跨节点的共享 UI 契约(ARIA 角色/可访问名/持久化纪律),
+    此前从未进入模型上下文(hackathon--sheet 的 grid 契约、hackathon
+    --github 的 24.5KB 权限契约全链丢失)。确定性渲染、字节稳定,超预算
+    时按文件夹均匀做句子边界截断。
+    """
+    parts: list[str] = []
+
+    def walk(node: dict) -> None:
+        if str(node.get("type", "")).upper() != "ATOMIC":
+            desc = str(node.get("description") or "").strip()
+            if desc:
+                parts.append(f"[{node.get('id')}] {desc}")
+        for child in node.get("children") or []:
+            if isinstance(child, dict):
+                walk(child)
+
+    walk(tree)
+    if not parts:
+        return None
+    text = "\n\n".join(parts)
+    if len(text) <= budget:
+        return text
+    soft = 1500
+    trimmed = [_trim_sentence(p, soft) for p in parts]
+    if sum(len(p) for p in trimmed) <= budget:
+        return "\n\n".join(trimmed)
+    per = max(300, budget // len(parts))
+    return "\n\n".join(_trim_sentence(p, per) for p in parts)
+
+
 def build_envelope(
     *,
     seq: int,
@@ -260,6 +405,9 @@ def build_envelope(
     host_signals: dict | None = None,
     fixture_given: dict[str, list[str]] | None = None,
     seeded_nodes: set[str] | frozenset[str] | None = None,
+    shared_contract: str | None = None,
+    specs_staged: bool = False,
+    arrange_nodes: set[str] | frozenset[str] | None = None,
 ) -> dict:
     """Build one envelope dict (snake_case, mirrors planctl::Envelope).
 
@@ -269,11 +417,19 @@ def build_envelope(
     step 额外附 preconditions 数组(当前内核 unknown-field 忽略,前向兼容)。
     """
     seeded = seeded_nodes or frozenset()
+    arranged = arrange_nodes or frozenset()
     steps = []
     for node in atomic_nodes:
         nid = str(node.get("id", ""))
         desc = str(node.get("description") or node.get("name") or "")
         validation, _notes = split_validation(desc)
+        micro = extract_interaction_contract(desc)
+        if micro:
+            validation = (
+                "INTERACTION SEMANTICS (graded verbatim):\n  - "
+                + "\n  - ".join(micro)
+                + ("\n" + validation if validation else "")
+            )
         given = (fixture_given or {}).get(nid) or []
         if given:
             if nid in seeded:
@@ -281,38 +437,39 @@ def build_envelope(
                         "db.json — verify each is addressable on the "
                         "RUNNING app: the object opens, values match "
                         "verbatim):")
+            elif nid in arranged:
+                head = ("GIVEN pre-states CONFLICT with the canonical seed "
+                        "and are NOT seeded — the grader arranges them "
+                        "through the UI before the scenario; accept them "
+                        "like any other edit, never hand-seed them:")
             else:
                 head = ("GIVEN (graded fixtures — the graders assert these "
                         "exact pre-states; seed them into backend/data/"
                         "db.json before this scenario):")
-            bullets = "".join(
-                f"\n  - {g[:200]}" for g in given[:8])
-            merged = head + bullets
-            if validation:
-                merged += "\n" + validation
-            validation = merged[:3000]
+            merged = _merge_given(head, given, validation)
+            validation = merged[:MAX_VALIDATION_LOCAL]
         targets = {"files": [], "routes": [], "spec_files": spec_map.get(nid, [])}
         steps.append({
             "id": nid,
             "action": "modify",
             # PLAN 清单短摘要;完整契约走 validation(FOCUS 段逐字渲染)。
             "input": (validation or nid)[:200],
-            "validation": validation[:3000] or None,
-            "preconditions": [g[:200] for g in given[:12]] or None,
+            "validation": validation[:MAX_VALIDATION_LOCAL] or None,
+            "preconditions": [g[:300] for g in given[:12]] or None,
             "targets": targets,
             "expected_output": f"Playwright specs for {nid} pass",
             "status": statuses.get(nid, "pending"),
         })
-    # steps 上限 40(内核 MAX_PLAN_STEPS):节点更多的任务(github 47 个)截尾
-    # 时必须保住 focus 所在步,否则 wire 校验(focus 精确匹配 step id)会
-    # 丢弃整个 envelope——用 focus 步顶替最后一个槽位。
-    trimmed = steps[:40]
+    # steps 上限对齐内核 MAX_STEPS=64:47 节点的 hackathon 任务全量入列,
+    # 不再截尾;focus 顶替逻辑保留作最后一道守卫(wire 校验 focus 精确
+    # 匹配 step id,失配即丢整个 envelope)。
+    trimmed = steps[:MAX_STEPS_LOCAL]
     if focus is not None:
         fid = str(focus)
         if fid not in {s["id"] for s in trimmed}:
             fstep = next((s for s in steps if s["id"] == fid), None)
             if fstep is not None:
-                trimmed = (trimmed[:-1] + [fstep] if len(trimmed) >= 40
+                trimmed = (trimmed[:-1] + [fstep] if len(trimmed) >= MAX_STEPS_LOCAL
                            else trimmed + [fstep])
     envelope = {
         "v": 1,
@@ -321,6 +478,9 @@ def build_envelope(
         "stack": "web_react_express",
         "task": task[:500],
         "spec_dir": SPEC_STAGE_SUBDIR,
+        "specs_staged": bool(specs_staged),
+        "shared_contract": (shared_contract[:12000]
+                            if shared_contract else None),
         "rules": RULESET,
         "rules_text": HOST_STACK_RULES,
         "extra_rules": (extra_rules[:2400] if extra_rules else None),

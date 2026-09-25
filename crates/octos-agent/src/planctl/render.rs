@@ -72,13 +72,26 @@ pub fn render_stable_segment(state: &PlanState) -> String {
         body.push('\n');
     }
     body.push_str(&ports_line(&env.ports));
-    // F2: spec_dir is ALREADY the full relative path (default
-    // ".arc/acceptance") — concatenating the default again produced the
-    // bogus ".arc/acceptance/.arc/acceptance/" pointer.
-    body.push_str(&format!(
-        "Acceptance specs are staged read-only at {}/ — never edit, copy, or delete them.\n",
-        env.spec_dir
-    ));
+    if let Some(shared) = &env.shared_contract {
+        body.push_str(
+            "== SHARED REQUIREMENTS == (folder-level contracts; apply to \
+every node)\n",
+        );
+        body.push_str(shared);
+        body.push('\n');
+    }
+    // The pointer only ships when the host actually staged specs —
+    // requirements-only tasks must not see a phantom directory.
+    if env.specs_staged {
+        // F2: spec_dir is ALREADY the full relative path (default
+        // ".arc/acceptance") — concatenating the default again produced the
+        // bogus ".arc/acceptance/.arc/acceptance/" pointer.
+        body.push_str(&format!(
+            "Acceptance specs are staged read-only at {}/ — never edit, \
+copy, or delete them.\n",
+            env.spec_dir
+        ));
+    }
     wrap(&body)
 }
 
@@ -522,6 +535,7 @@ mod tests {
         env.seq = 7;
         env.phase = PlanPhase::Node;
         env.task = "火车票预订演示系统".into();
+        env.specs_staged = true;
         env.ports = PortContract {
             grade: 3000,
             smoke: 3001,
@@ -591,6 +605,23 @@ mod tests {
         );
         assert!(!sa.contains("== FOCUS"));
         assert!(!sa.contains("== HOST REPORT"));
+    }
+
+    /// Requirements-only tasks: no staged specs, no pointer; the
+    /// folder-level contract rides the stable segment verbatim.
+    #[test]
+    fn stable_segment_gates_spec_pointer_and_renders_shared_contract() {
+        let mut state = base_state();
+        state.envelope.specs_staged = false;
+        state.envelope.shared_contract =
+            Some("[-REQ-1] grid accessible name is Worksheet grid".into());
+        let body = render_stable_segment(&state);
+        assert!(!body.contains(".arc/acceptance"), "phantom pointer: {body}");
+        assert!(body.contains("== SHARED REQUIREMENTS =="));
+        assert!(body.contains("Worksheet grid"));
+        // Byte-stability is unaffected by which optional sections shipped.
+        let again = render_stable_segment(&state);
+        assert_eq!(body, again);
     }
 
     #[test]

@@ -97,10 +97,15 @@ pub const MAX_TASK_CHARS: usize = 500;
 pub const MAX_STEP_TEXT_CHARS: usize = 600;
 /// Host-supplied ruleset text (grading-stack facts), ≤6000 chars.
 pub const MAX_RULESET_TEXT_CHARS: usize = 6000;
-/// Per-step Validation contract text (from requirements.yaml), ≤3000 chars.
-pub const MAX_VALIDATION_CHARS: usize = 3000;
+/// Per-step Validation contract text (from requirements.yaml), ≤4000 chars.
+pub const MAX_VALIDATION_CHARS: usize = 4000;
 pub const MAX_EXTRA_RULES_CHARS: usize = 2400;
-pub const MAX_STEPS: usize = 40;
+/// Task-shared contract text (non-atomic folder descriptions folded by
+/// the host), ≤12000 chars — rides the stable CONTRACT segment.
+pub const MAX_SHARED_CONTRACT_CHARS: usize = 12000;
+/// 47-node hackathon tasks need headroom over the old 40; the host
+/// keeps focus-step substitution as the last-resort guard.
+pub const MAX_STEPS: usize = 64;
 pub const MAX_HOST_SIGNAL_TEXT_CHARS: usize = 600;
 
 /// Short constant appended to a marked turn whose envelope failed to
@@ -358,6 +363,16 @@ pub struct Envelope {
     pub task: String,
     /// Staged spec dir relative to the workspace root.
     pub spec_dir: String,
+    /// Whether the host actually staged acceptance specs at `spec_dir`.
+    /// Gates the staged-specs pointer line so requirements-only tasks
+    /// never see a phantom pointer.
+    #[serde(default)]
+    pub specs_staged: bool,
+    /// Task-shared contract: non-atomic (folder) requirement
+    /// descriptions, host-folded to [`MAX_SHARED_CONTRACT_CHARS`].
+    /// Rendered in the stable CONTRACT segment; byte-stable per run.
+    #[serde(default)]
+    pub shared_contract: Option<String>,
     /// Free-form ruleset label (observability only; not validated
     /// against a kernel-side list — the kernel ships no rulesets).
     pub rules: Option<String>,
@@ -384,6 +399,8 @@ impl Default for Envelope {
             stack: PlanStack::WebReactExpress,
             task: String::new(),
             spec_dir: SPEC_DIR_REL_DEFAULT.to_string(),
+            specs_staged: false,
+            shared_contract: None,
             rules: None,
             rules_text: None,
             extra_rules: None,

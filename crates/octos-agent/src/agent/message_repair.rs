@@ -523,12 +523,17 @@ pub(crate) fn truncate_old_tool_results(messages: &mut [Message]) -> bool {
     let mut changed = false;
     for msg in messages[..boundary].iter_mut() {
         if msg.role == MessageRole::Tool && msg.content.len() > MAX_OLD_TOOL_RESULT_CHARS {
-            let truncated: String = msg
-                .content
-                .chars()
-                .take(MAX_OLD_TOOL_RESULT_CHARS)
-                .collect();
-            msg.content = format!("{truncated}\n\n[... truncated for brevity]");
+            // Round-trip window discipline: keep head + tail instead of a
+            // blind head cut — spilled artifact pointers and "Exit code:"
+            // suffixes live in the tail and must survive the cut.
+            let head: String = msg.content.chars().take(MAX_OLD_TOOL_RESULT_CHARS).collect();
+            let tail: String = {
+                let t: Vec<char> = msg.content.chars().rev().take(200).collect();
+                t.into_iter().rev().collect()
+            };
+            msg.content = format!(
+                "{head}\n[... middle truncated for brevity ...]\n{tail}"
+            );
             changed = true;
         }
     }

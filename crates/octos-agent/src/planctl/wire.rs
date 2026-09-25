@@ -25,7 +25,8 @@
 
 use super::{
     Envelope, HOST_PARSE_NOTICE, MARKER, MAX_EXTRA_RULES_CHARS, MAX_RULESET_TEXT_CHARS,
-    MAX_STEP_TEXT_CHARS, MAX_STEPS, MAX_TASK_CHARS, MAX_VALIDATION_CHARS, WIRE_MAX_BYTES,
+    MAX_SHARED_CONTRACT_CHARS, MAX_STEP_TEXT_CHARS, MAX_STEPS, MAX_TASK_CHARS, MAX_VALIDATION_CHARS,
+    WIRE_MAX_BYTES,
     feature_enabled,
 };
 
@@ -137,6 +138,13 @@ pub fn validate_envelope(env: &Envelope) -> Result<(), String> {
     if let Some(extra) = &env.extra_rules {
         if extra.chars().count() > MAX_EXTRA_RULES_CHARS {
             return Err(format!("extra_rules exceeds {MAX_EXTRA_RULES_CHARS} chars"));
+        }
+    }
+    if let Some(shared) = &env.shared_contract {
+        if shared.chars().count() > MAX_SHARED_CONTRACT_CHARS {
+            return Err(format!(
+                "shared_contract exceeds {MAX_SHARED_CONTRACT_CHARS} chars"
+            ));
         }
     }
     if env.steps.len() > MAX_STEPS {

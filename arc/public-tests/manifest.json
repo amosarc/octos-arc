@@ -3,5 +3,7 @@
  "smoke--counter": "ARC Counter Smoke Test",
  "smoke--dice": "ARC Dice Smoke Test",
  "smoke-evolution--counter": "ARC Counter Evolution Smoke Test",
- "smoke-evolution--dice": "ARC Dice Evolution Smoke Test"
+ "smoke-evolution--dice": "ARC Dice Evolution Smoke Test",
+ "hackathon--sheet": "Core Requirements for an Online Spreadsheet Data Workspace",
+ "hackathon--github": "GitHub Collaboration Platform Core Requirements"
 }

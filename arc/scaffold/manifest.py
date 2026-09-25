@@ -54,11 +54,13 @@ SCAFFOLD_FILES: dict[str, tuple[str, str]] = {
     "frontend/src/app/styles.css": (frontend.FRONTEND_STYLES_CSS, "host"),
     "frontend/.npmrc": (NPMRC, "host"),
     ".npmrc": (NPMRC, "host"),
+    # B2:网格编辑器内核模式契约(只读参考,模型在此目录落 feature 文件)
+    "frontend/src/features/README.md": (frontend.FEATURES_README, "host"),
 }
 # 模型独占文件:宿主不落盘,清单内仅登记路径供 prompt/契约引用。
-# frontend/src/features/ 是模型的 UI 扩展面(每需求域一个自包含文件,
-# 目录由模型的第一个 feature 文件创建)。
-MODEL_FILES = (SCHEMA_JSON_REL, "frontend/src/features/")
+# frontend/src/features/ 是模型的 UI 扩展面(每需求域一个自包含文件);
+# 宿主只落 README.md 契约(B2 网格内核模式),.jsx/.js 一律归模型。
+MODEL_FILES = (SCHEMA_JSON_REL, "frontend/src/features/*.jsx")
 
 # HOST_STACK_RULES(plan_envelope 文字契约)必须逐一点名的路径拼写。
 # 拼写按契约原文(backend 相对路径),防漂移测试逐条断言覆盖。

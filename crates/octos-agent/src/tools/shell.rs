@@ -26,6 +26,70 @@ use crate::tools::policy::BashFileWrites;
 /// carry a real tool id, so this only fires off the hot path.
 static SHELL_BG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Artifact offload threshold: outputs above this many BYTES spill to
+/// disk. 8KB keeps routine command echo (ls, git status, curl one-liners)
+/// inline while catching the build/test/run spew that dominates replay
+/// cost.
+const ARTIFACT_SPILL_BYTES: usize = 8 * 1024;
+/// Inline head/tail sizes for a spilled output (bytes).
+const ARTIFACT_HEAD_BYTES: usize = 2048;
+const ARTIFACT_TAIL_BYTES: usize = 1024;
+
+fn artifact_offload_enabled() -> bool {
+    match std::env::var("OCTOS_TOOL_ARTIFACT") {
+        Ok(v) => v != "0",
+        Err(_) => true,
+    }
+}
+
+/// Offload a large shell output to `<workspace>/.octos/artifacts/` and
+/// return the compact head+tail+pointer replacement. `None` = keep the
+/// text inline (below threshold, feature off, or the workspace is not
+/// writable — failure NEVER blocks the command result).
+fn artifact_offload(workspace: &Path, text: &str) -> Option<String> {
+    if text.len() <= ARTIFACT_SPILL_BYTES {
+        return None;
+    }
+    let seq = SHELL_BG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let dir = workspace.join(".octos").join("artifacts");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("shell-{stamp}-{seq}.log"));
+    std::fs::write(&path, text).ok()?;
+    // Find a UTF-8 boundary at/after the head offset (the text is valid
+    // UTF-8; slicing near the boundary then trimming a partial char is
+    // enough — floor to a char boundary for both cuts).
+    let head = floor_char_boundary(text, ARTIFACT_HEAD_BYTES);
+    let tail_from = ceil_char_boundary(text, text.len().saturating_sub(ARTIFACT_TAIL_BYTES));
+    Some(format!(
+        "{}\n... [{} bytes spilled to {} — re-read with a file tool if you need the middle] ...\n{}\n(artifact: {})",
+        &text[..head],
+        text.len(),
+        path.display(),
+        &text[tail_from..],
+        path.display(),
+    ))
+}
+
+fn floor_char_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_char_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 /// Tool for executing shell commands.
 pub struct ShellTool {
     /// Timeout for command execution.
@@ -866,8 +930,20 @@ impl Tool for ShellTool {
                     &result_text,
                 );
 
-                // Truncate if too long (reserve space for exit code suffix)
+                // Truncate if too long (reserve space for exit code suffix).
+                // Artifact-offload first (OCTOS_TOOL_ARTIFACT, default ON):
+                // >8KB outputs land in <workspace>/.octos/artifacts/ and the
+                // history keeps head+tail+pointer — bash output was 83% of
+                // history bytes on the ARC sheet run, the single largest
+                // replay-cost driver.
                 let exit_suffix = format!("\n\nExit code: {exit_code}");
+                if artifact_offload_enabled() {
+                    if let Some(spill) =
+                        artifact_offload(effective_cwd, &result_text)
+                    {
+                        result_text = spill;
+                    }
+                }
                 const MAX_OUTPUT: usize = 50000;
                 octos_core::truncate_utf8(
                     &mut result_text,
@@ -977,6 +1053,51 @@ impl Tool for ShellTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifact_offload_spills_large_output_with_pointer() {
+        let tmp = std::env::temp_dir().join(format!(
+            "octos-artifact-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let big = format!("{}\n", "x".repeat(20 * 1024));
+        let spilled = artifact_offload(&tmp, &big)
+            .expect("output above 8KB must spill");
+        assert!(spilled.contains("spilled to"));
+        assert!(spilled.contains(".octos/artifacts"));
+        assert!(spilled.len() < big.len() / 2);
+        // Artifact file actually landed and holds the full text.
+        let dir = tmp.join(".octos").join("artifacts");
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(files.len(), 1);
+        let f = files.remove(0).unwrap().path();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), big);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn artifact_offload_keeps_small_output_inline() {
+        let tmp = std::env::temp_dir().join(format!(
+            "octos-artifact-test-small-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert!(artifact_offload(&tmp, "short output").is_none());
+        assert!(!tmp.join(".octos").exists());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn char_boundary_helpers_never_panic_on_multibyte() {
+        let s = "中文内容测试abc";
+        let h = floor_char_boundary(s, 4);
+        let t = ceil_char_boundary(s, s.len() - 4);
+        assert!(s.is_char_boundary(h));
+        assert!(s.is_char_boundary(t));
+        assert!(h <= 4);
+        assert!(t >= s.len() - 4);
+    }
 
     #[test]
     fn browser_script_heuristic_matches_inline_node_verifiers() {

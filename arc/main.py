@@ -726,6 +726,8 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
     shutil.copytree(tests_dir, run_dir / "tests", dirs_exist_ok=True)
     cfg = ("import { defineConfig } from '@playwright/test';\n"
            "export default defineConfig({ testDir: './tests',\n"
+           "  fullyParallel: false, workers: 1,\n"
+           "  retries: 0,\n"
            "  use: { baseURL: process.env.E2E_BASE_URL || "
            f"'http://127.0.0.1:{smoke_port}' }} }});\n")
     (run_dir / "playwright.config.ts").write_text(cfg, encoding="utf-8")
@@ -1406,7 +1408,10 @@ class OctosDriver:
                      spec_map: dict, host_signals: dict | None = None,
                      extra_rules: str | None = None,
                      fixture_given: dict | None = None,
-                     seeded_nodes: set | frozenset | None = None) -> None:
+                     seeded_nodes: set | frozenset | None = None,
+                     shared_contract: str | None = None,
+                     specs_staged: bool = False,
+                     arrange_nodes: set | frozenset | None = None) -> None:
         """(Re)build the plan envelope; the next run() wraps it."""
         if not self.plan_capable:
             return
@@ -1416,7 +1421,8 @@ class OctosDriver:
             atomic_nodes=atomic_nodes, statuses=statuses, focus=focus,
             ports=ports, spec_map=spec_map, host_signals=host_signals,
             extra_rules=extra_rules, fixture_given=fixture_given,
-            seeded_nodes=seeded_nodes)
+            seeded_nodes=seeded_nodes, shared_contract=shared_contract,
+            specs_staged=specs_staged, arrange_nodes=arrange_nodes)
         # 防御(内核 wire.rs:174-178 精确匹配 step id):复合/越界 focus
         # 会让内核丢弃整个 envelope(PLAN/FOCUS/validation 全不装)。
         if self.envelope["focus"] is not None:
@@ -1810,10 +1816,7 @@ Definition of done for this node: every action chain under FOCUS walks \
 through on the RUNNING app; every GIVEN fixture named under FOCUS or the \
 node text is addressable on the RUNNING app (the account signs in, the \
 object opens, cell/field values match verbatim); red means fix, not \
-report. All spec \
-dependencies are preinstalled by the host — to run the staged specs use \
-the SPEC RUN command below verbatim; NEVER npm install anything and \
-never invoke bare `npx playwright`.\
+report.\
 PORT DISCIPLINE: NEVER bind port {port}. The app is ALREADY RUNNING, \
 host-managed, on port {smoke} — verify by curl directly; do NOT start \
 your own server. After editing backend/src run \
@@ -1836,6 +1839,27 @@ the features you touched this turn — the batch-filtered SPEC RUN below \
 is exactly that scope; anything wider wastes minutes per run.\
 
 {node_spec}"""
+
+NO_STAGED_SPECS_NOTE = """\
+
+VERIFICATION (no staged specs): this task has NO acceptance specs on \
+disk — the graded tests are hidden and derived from the requirement \
+text. There is NO SPEC RUN command: never look for .arc/acceptance, \
+never write your own Playwright/Puppeteer/chromium script, and never \
+spawn a browser. Verify by walking the RUNNING app on port {smoke} \
+(curl the API, rebuild the frontend, re-check the FOCUS chains in the \
+rendered UI); the host rehearsal report lands in your next HOST REPORT.\
+"""
+
+BATCH_DIRECTIVE_NO_SPEC = """\
+
+BATCH MODE: this turn implements the {count} focus nodes IN THE LISTED \
+ORDER, one at a time. There are no staged specs for this task: after \
+each node, walk its FOCUS action chains on the RUNNING app (port \
+{smoke}) — a chain that does not walk through means fix that node \
+before moving on. The turn is complete when every node's chains walk \
+through — then write a short per-node summary and finish.\
+"""
 
 BATCH_DIRECTIVE = """\
 BATCH MODE: this turn implements the {count} focus nodes IN THE LISTED \
@@ -1949,17 +1973,16 @@ check. Fix what is wrong; do not rebuild what works. Do not commit.\
 """
 
 HOST_FINAL_CHECK_UI_PROMPT = """\
-The host verified build + boot + ports only — this task's specs assert \
+The host verified build + boot + ports only — the graded tests assert \
 UI behavior, which the host cannot check. YOU verify the UI: walk every \
-action chain in the ACCEPTANCE sections on the running app — sign-in \
-header after register/login (re-rendered immediately, not only after \
-reload), session across reload, exactly one visible error element per \
-failure, strict-mode unique echoes, verbatim option labels. Report one \
-line of evidence per chain; an empty "all good" without evidence is a \
-failed check. BUDGET: one walk per chain — verify each chain once, fix \
-only what is red, then end the turn; never re-run whole suites and \
-never re-verify chains that already passed. Fix what is broken; do not \
-rebuild what works. Do not commit.\
+action chain in the ACCEPTANCE sections on the running app — visible \
+feedback for every named control, exactly one visible error element per \
+failure, strict-mode unique echoes, verbatim labels and seeded values. \
+Report one line of evidence per chain; an empty "all good" without \
+evidence is a failed check. BUDGET: one walk per chain — verify each \
+chain once, fix only what is red, then end the turn; never re-run whole \
+suites and never re-verify chains that already passed. Fix what is \
+broken; do not rebuild what works. Do not commit.\
 """
 
 ACCEPTANCE_STAGED_NOTE = """\
@@ -2456,6 +2479,7 @@ def main() -> int:
             (stage_dir / "playwright.config.ts").write_text(
                 "import { defineConfig } from '@playwright/test';\n"
                 "export default defineConfig({ testDir: '.',\n"
+                "  fullyParallel: false, workers: 1,\n"
                 "  use: { baseURL: "
                 f"'http://127.0.0.1:{smoke_port}' }} }});\n",
                 encoding="utf-8")
@@ -2554,12 +2578,18 @@ def main() -> int:
             fixture_data,
             {"uncovered": len((fixture_compiled or {}).get("uncovered")
                               or ()),
+             "arrange": len((fixture_compiled or {}).get("arrange") or ()),
+             "seeded": len(((fixture_compiled or {}).get("db") or {})
+                           .get("users", [])),
+             "canonical": bool((fixture_compiled or {}).get("canonical")),
              "kind": (fixture_compiled or {}).get("kind") or "none"})
         fixture_given = {
             nid: info["given"]
             for nid, info in fixture_data["nodes"].items() if info["given"]}
         fixture_seeded_nodes = frozenset(
             (fixture_compiled or {}).get("covered") or ())
+        fixture_arranged_nodes = frozenset(
+            (fixture_compiled or {}).get("arrange") or ())
         fixture_seeded_scenarios = frozenset(
             f"{nid}::{sname}"
             for nid, snames in ((fixture_compiled or {}).get("covered")
@@ -2646,6 +2676,12 @@ def main() -> int:
         # the legacy non-plan path leaves it empty, which skips the
         # spec-first lazy gate below.
         batch_specs: list[str] = []
+        # 文件夹级需求契约(ARIA 角色/可访问名/持久化纪律的唯一定义处),
+        # 确定性渲染进稳定 CONTRACT 段;以及本轮是否真有 staged specs
+        # (决定 CONTRACT 指针行与提示词的 SPEC RUN 装置)。
+        shared_contract = plan_envelope.build_shared_contract(tree) \
+            if plan_on else None
+        specs_staged = bool(tests_dir)
         if plan_on:
             driver.set_envelope(
                 phase="node" if template_ready else "skeleton",
@@ -2657,7 +2693,10 @@ def main() -> int:
                               "spec_run": None} if scaffolded else None,
                 extra_rules=fixture_rules,
                 fixture_given=fixture_given,
-                seeded_nodes=fixture_seeded_nodes)
+                seeded_nodes=fixture_seeded_nodes,
+                shared_contract=shared_contract,
+                specs_staged=specs_staged,
+                arrange_nodes=fixture_arranged_nodes)
 
         try:
             # Step 0: orient in the starter project + shared foundations.
@@ -2684,9 +2723,10 @@ def main() -> int:
                     break
                 t0 = time.time()
                 if plan_on:
-                    sk_prompt = (HOST_SKELETON_PROMPT.format(
+                    sk_prompt = HOST_SKELETON_PROMPT.format(
                         port=args.web_port, smoke=smoke_port)
-                        + "\n" + ACCEPTANCE_STAGED_NOTE)
+                    if tests_dir:
+                        sk_prompt += "\n" + ACCEPTANCE_STAGED_NOTE
                 else:
                     sk_prompt = APP_SKELETON_PROMPT.format(
                         port=args.web_port, smoke=smoke_port) + tests_prompt
@@ -2773,6 +2813,18 @@ def main() -> int:
                 codegen.start()
             failed: list[str] = []
             for idx, batch in enumerate(node_batches, 1):
+                # A2 会话分段:每 SEGMENT_BATCHES 批重置 stdio 会话,切断
+                # O(n²) 历史重放(run-002 实测 1.35 亿 token 的主 driver)。
+                # 上下文经 planctl 磁盘重水合续命(envelope + repoMap 全量
+                # 重扫),丢失的对话细节由 HOST REPORT/REPO MAP 承接。
+                # env OCTOS_ARC_SEGMENT_BATCHES=0 关闭(回退单会话全程)。
+                segment_every = int(
+                    os.environ.get("OCTOS_ARC_SEGMENT_BATCHES", "5"))
+                if (idx > 1 and segment_every > 0
+                        and (idx - 1) % segment_every == 0):
+                    log(f"[flow] session segmentation: closing session "
+                        f"before batch {idx} (every {segment_every})")
+                    driver.close()
                 # Finite-budget degrade: trim the batch tail while the
                 # remaining tail cannot fit it (an unlimited budget never
                 # trims). Trimmed nodes take the legacy skip bookkeeping.
@@ -2811,27 +2863,44 @@ def main() -> int:
                         host_signals=hs0 or None,
                         extra_rules=fixture_rules,
                         fixture_given=fixture_given,
-                        seeded_nodes=fixture_seeded_nodes)
+                        seeded_nodes=fixture_seeded_nodes,
+                        shared_contract=shared_contract,
+                        specs_staged=specs_staged,
+                        arrange_nodes=fixture_arranged_nodes)
                     node_spec = "\n\n".join(
                         describe_node(n, fixture_seeded_scenarios)
                         for n in batch)
                     batch_specs = sorted(
                         {f for nid in batch_ids
                          for f in (spec_map.get(nid) or [])})
-                    node_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
-                        node_id=focus_id, node_spec=node_spec,
-                        port=args.web_port, smoke=smoke_port) \
-                        + build_spec_run_cmd(
-                            str(toolchain_cli)
-                            if toolchain_cli is not None else None,
-                            batch_specs)
+                    # 幻影 SPEC RUN 治理:只有本批真有 staged specs 才发
+                    # SPEC RUN 装置;requirements-only 任务(两道 hackathon
+                    # 题)改发"走查运行中应用"契约——指向从未落盘的
+                    # .arc/acceptance 只会制造不可达成的退出条件。
+                    if batch_specs:
+                        node_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
+                            node_id=focus_id, node_spec=node_spec,
+                            port=args.web_port, smoke=smoke_port) \
+                            + build_spec_run_cmd(
+                                str(toolchain_cli)
+                                if toolchain_cli is not None else None,
+                                batch_specs)
+                    else:
+                        node_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
+                            node_id=focus_id, node_spec=node_spec,
+                            port=args.web_port, smoke=smoke_port) \
+                            + NO_STAGED_SPECS_NOTE.format(smoke=smoke_port)
                     if len(batch) > 1:
-                        node_prompt += BATCH_DIRECTIVE.format(
-                            count=len(batch),
-                            specs="\n".join(
-                                f"- {nid}: " + (", ".join(spec_map.get(nid) or [])
-                                                or "(no staged spec)")
-                                for nid in batch_ids))
+                        node_prompt += (
+                            BATCH_DIRECTIVE.format(
+                                count=len(batch),
+                                specs="\n".join(
+                                    f"- {nid}: " + (", ".join(spec_map.get(nid) or [])
+                                                    or "(no staged spec)")
+                                    for nid in batch_ids))
+                            if batch_specs else
+                            BATCH_DIRECTIVE_NO_SPEC.format(
+                                count=len(batch), smoke=smoke_port))
                 else:
                     node_spec = "\n\n".join(
                         describe_node(n, fixture_seeded_scenarios)
@@ -3105,7 +3174,10 @@ def main() -> int:
                         host_signals=hs,
                         extra_rules=fixture_rules,
                         fixture_given=fixture_given,
-                        seeded_nodes=fixture_seeded_nodes)
+                        seeded_nodes=fixture_seeded_nodes,
+                        shared_contract=shared_contract,
+                        specs_staged=specs_staged,
+                        arrange_nodes=fixture_arranged_nodes)
 
             if codegen:
                 codegen.stop()
@@ -3146,7 +3218,10 @@ def main() -> int:
                     spec_map=spec_map, host_signals=hs,
                     extra_rules=fixture_rules,
                     fixture_given=fixture_given,
-                    seeded_nodes=fixture_seeded_nodes)
+                    seeded_nodes=fixture_seeded_nodes,
+                    shared_contract=shared_contract,
+                    specs_staged=specs_staged,
+                    arrange_nodes=fixture_arranged_nodes)
                 if f_err is None and tier2_run is not None and tier2_run[1] == 0 and tier2_run[0] > 0:
                     ok, text = True, ("host spec run all green "
                                       f"({tier2_run[0]} passed); final LLM turn skipped")
@@ -3178,11 +3253,17 @@ def main() -> int:
                     # Filtered to the red tests' own specs (or all staged
                     # files as fallback): the final turn never needs the
                     # unfiltered full-suite form — Tier-2 owns that, and
-                    # the kernel guard refuses it anyway.
-                    final_prompt += build_spec_run_cmd(
-                        str(toolchain_cli)
-                        if toolchain_cli is not None else None,
-                        final_spec_files(tier2_run, output_dir))
+                    # the kernel guard refuses it anyway. Requirements-only
+                    # tasks (no staged specs) get the walk-the-app contract
+                    # instead — never a phantom command.
+                    if tests_dir:
+                        final_prompt += build_spec_run_cmd(
+                            str(toolchain_cli)
+                            if toolchain_cli is not None else None,
+                            final_spec_files(tier2_run, output_dir))
+                    else:
+                        final_prompt += NO_STAGED_SPECS_NOTE.format(
+                            smoke=smoke_port)
                     _ensure_dev_server(output_dir, smoke_port,
                                        spec_ports_extra, log)
                     log("[flow] final verification turn starting (slim, "
