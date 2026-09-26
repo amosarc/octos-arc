@@ -1271,10 +1271,11 @@ def render_extra_rules(manifest: dict, stats: dict | None = None) -> str:
         "to the seed on every server restart.")
     parts.append(
         "Your own past turns and host state live under the .arc trace "
-        "area (event logs, node_states, debug logs) — they are NOT "
-        "context: do not read or mine them. What earlier turns did "
-        "arrives via the host's SEGMENT DIGEST / HOST REPORT; scratch "
-        "test scripts belong in /tmp, never inside .arc/acceptance.")
+        "area (event logs, node_states, debug logs) — the runtime REFUSES "
+        "reads of them (bash escape hatch: `# octos:allow-trace-read`). "
+        "What earlier turns did arrives via the host's SEGMENT DIGEST / "
+        "HOST REPORT; scratch test scripts belong in /tmp, never inside "
+        ".arc/acceptance.")
     text = " ".join(p for p in parts if p)
     return text[:_MAX_EXTRA_RULES]
 

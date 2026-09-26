@@ -3005,9 +3005,11 @@ def main() -> int:
                 if segment_digest_pending:
                     # P3:分段后首 turn 的正版记忆——逐节点完成笔记,
                     # 替代模型翻 .arc 考古(见 _segment_digest 注释)。
+                    # flag 不在此清:该 turn 若死于流错误/墙钟(hg-github-
+                    # 001 死过 3 个 turn),重试与后续批仍要拿到摘要;
+                    # 直到本批某个 turn 真正成功才在下方清掉。
                     node_prompt += _segment_digest(
                         node_done_notes, plan_statuses)
-                    segment_digest_pending = False
                 if codegen_on and not scaffold.schema_path(output_dir).exists():
                     node_prompt += SCHEMA_DIRECTIVE
                 if template_ready:
@@ -3041,6 +3043,10 @@ def main() -> int:
                 batch_turn_ok = ok
                 log(f"[flow] batch {focus_id} {'ok' if ok else 'FAILED'} "
                     f"in {time.time()-t0:.0f}s: {text[-300:]!r}")
+                if ok:
+                    # 摘要已随本 turn 进入会话上下文;失败的 turn 不清
+                    # flag,让下一个 prompt 继续携带(见注入点注释)。
+                    segment_digest_pending = False
                 if not ok:
                     # Hard-wall/orphan cuts can leave a batch 90% done on
                     # disk. Gate + rehearse whatever landed instead of

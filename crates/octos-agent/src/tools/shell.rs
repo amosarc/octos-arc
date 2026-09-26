@@ -1625,6 +1625,11 @@ pub(crate) fn command_looks_like_full_spec_run(command: &str) -> bool {
 /// `.arc/fixture-manifest.json`) stay readable. Gate is an env knob the
 /// embedding host sets (`OCTOS_DENY_TRACE_READ=1`); default off keeps
 /// vanilla octos unchanged.
+///
+/// ZONE semantics (not purely "read"): the bash form matches any command
+/// that NAMES a guarded path, so writes/removals (`rm .arc/traceability/…`)
+/// are refused too — intentional host-state protection; the escape hatch
+/// covers legitimate cases. File-tool forms only see their path argument.
 pub(crate) const TRACE_READ_DENIED: &[&str] = &[
     ".arc/octos-events.jsonl",
     ".arc/runner-events.jsonl",
@@ -1682,10 +1687,11 @@ pub(crate) fn command_references_trace_subset(command: &str) -> bool {
 pub(crate) fn trace_read_refusal(detail: &str) -> String {
     format!(
         "Refused: `{detail}` is a host trace artifact (agent history / host \
-         state under .arc) and is not agent-consumable. What previous \
-         sessions did arrives via the host's SEGMENT DIGEST / HOST REPORT; \
-         rely on those plus the running app and `git log` for state. If you \
-         genuinely need this file, run it through bash with a trailing \
+         state under .arc) and is not agent-consumable. Prior-session \
+         context arrives via the summaries your embedding host provides \
+         (segment digests / host reports, when present); rely on those plus \
+         the running app and `git log` for state. If you genuinely need \
+         this file, run it through bash with a trailing \
          `# octos:allow-trace-read` comment to acknowledge the escape hatch."
     )
 }
