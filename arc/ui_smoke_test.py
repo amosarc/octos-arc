@@ -218,5 +218,52 @@ class CmdTests(unittest.TestCase):
         self.assertIn("npx --yes @playwright/test", fallback)
 
 
+class GithubStyleTests(unittest.TestCase):
+    """hackathon--github 首测暴露的缺口:弯引号/密码候选/错误消息族。"""
+
+    def test_curly_quotes_extracted(self):
+        tree = _node("R", 'button named \u201cCreate an account\u201d and '
+                           'field \u201cUsername\u201d; value \u201c123456\u201d.')
+        vals = [e["value"] for e in ui_smoke.collect_contract_strings(tree)]
+        self.assertIn("Create an account", vals)
+        self.assertIn("Username", vals)
+        self.assertIn("123456", vals)  # 数字起始的逐字值也要保住
+
+    def test_straight_and_curly_not_duplicated(self):
+        tree = _node("R", 'a "Save" and a \u201cSave\u201d button')
+        entries = [e["value"] for e in ui_smoke.collect_contract_strings(tree)]
+        self.assertEqual(entries.count("Save"), 1)
+
+    def test_invalid_family_is_message_class(self):
+        tree = _node("R", 'shows "Username format is invalid" and '
+                           '"Password requirements are not satisfied" and '
+                           '"Account not found"')
+        entries = ui_smoke.collect_contract_strings(tree)
+        for e in entries:
+            if e["value"] in ("Username format is invalid",
+                              "Password requirements are not satisfied",
+                              "Account not found"):
+                self.assertTrue(e["message"], e["value"])
+
+    def test_fixture_auth_prefers_requirement_passwords(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            (out / "backend" / "data").mkdir(parents=True)
+            (out / "backend" / "data" / "db.json").write_text(json.dumps(
+                {"collections": {"users": [
+                    {"username": "alice-dev", "email": "a@x.test",
+                     "password": "salt:hex"}]}}), encoding="utf-8")
+            entries = [{"value": "Valid-password-123!", "kind": "exact",
+                        "message": False, "nodes": []},
+                       {"value": "not-a-pw", "kind": "exact",
+                        "message": False, "nodes": []}]
+            auth = ui_smoke.fixture_auth(out, entries)
+            self.assertEqual(auth["username"], "alice-dev")
+            # 需求密码形串排前,fixture 兜底;非密码形("not-a-pw",无数字)排除
+            self.assertEqual(auth["passwords"][0], "Valid-password-123!")
+            self.assertIn("Fixture-password-123!", auth["passwords"])
+            self.assertNotIn("not-a-pw", auth["passwords"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -2653,8 +2653,9 @@ def main() -> int:
             cli_hint = (str(toolchain_cli)
                         if toolchain_cli is not None else
                         "local-grader/node_modules/@playwright/test/cli.js")
-            ui_smoke.stage_ui_smoke(output_dir, ui_smoke_entries,
-                                    smoke_port, cli_hint)
+            ui_smoke.stage_ui_smoke(
+                output_dir, ui_smoke_entries, smoke_port, cli_hint,
+                auth=ui_smoke.fixture_auth(output_dir, ui_smoke_entries))
             ui_smoke_cmd = ui_smoke.build_ui_smoke_cmd(
                 str(toolchain_cli) if toolchain_cli is not None else None)
             log(f"[plan] UI contract smoke staged: "

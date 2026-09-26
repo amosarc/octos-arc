@@ -45,16 +45,21 @@ MAX_MESSAGE_STRINGS = 12
 # 契约串收集
 # ---------------------------------------------------------------------------
 
-# 双引号逐字串:首字母大写(过滤 "true"/"false"/".csv" 这类非控件文本),
-# 最短 3 字符(plan_envelope._VERBATIM_QUOTED_RE 的 6 字符下限会漏掉
-# "Save"/"Data"/"Sort"/"Undo"/"Redo"/"Apply" 这批高频契约词)。
-_QUOTED_RE = re.compile(r'"([A-Z][^"\n]{2,120})"')
+# 双引号逐字串:首字符大写字母或数字(过滤 "true"/"false"/".csv" 这类非
+# 控件文本,保留 "123456" 这类逐字值),最短 3 字符(plan_envelope 的 6
+# 字符下限会漏掉 "Save"/"Data"/"Sort"/"Undo"/"Redo"/"Apply" 高频契约词)。
+# 引号兼容直引号与弯引号:github 任务需求文本用 “ ”(U+201C/201D),
+# sheet 任务用 " —— 两族都要抽(hackathon--github 首测:弯引号 0 命中)。
+_QUOTED_RE = re.compile(
+    '["\u201c]([A-Z0-9][^"\u201c\u201d\n]{2,120})["\u201d]')
 _PLACEHOLDER_RE = re.compile(r"<[^<>]{1,60}>")
 # 错误消息启发:标点结尾,或祈使/拒绝句式。消息类串只在静态层查(展示
 # 时机在失败路径上,通用爬虫无法触发),爬虫只追控件类。
 _MESSAGE_HINT_RE = re.compile(
     r"[.!?:]$|^(Please|Invalid|Error|Could not|Cannot|Must)"
-    r"|\bmust\b|\bcannot\b|already exists|failed to|is required")
+    r"|\bmust\b|\bcannot\b|already exists|failed to|is required"
+    r"|is invalid|not satisfied|does not match|not found|not allowed"
+    r"|\bdenied\b|already a member|is incorrect")
 
 
 def _classify(quoted: str) -> dict | None:
@@ -183,11 +188,16 @@ anything in this directory; the host regenerates it.
 """
 
 
-def _contract_for_spec(entries: list) -> dict:
-    exact = [e["value"] for e in entries if e["kind"] == "exact" and not e["message"]]
+def _contract_for_spec(entries: list, auth: dict | None = None,
+                       crawler_cap: int = MAX_CONTRACT_STRINGS) -> dict:
+    # 静态扫描吃全量(便宜);爬虫有交互预算,控件串按文档序截断——前段
+    # (认证/基础链)优先,PR 深链由静态层兜底。
+    exact = [e["value"] for e in entries
+             if e["kind"] == "exact" and not e["message"]][:crawler_cap]
     anchors = [{"kind": e["kind"], "value": e["value"]}
-               for e in entries if e["kind"] in ("prefix", "suffix") and not e["message"]]
-    return {"exact": exact, "anchors": anchors}
+               for e in entries
+               if e["kind"] in ("prefix", "suffix") and not e["message"]][:crawler_cap]
+    return {"exact": exact, "anchors": anchors, "auth": auth}
 
 
 _SPEC_TEMPLATE_PATH = Path(__file__).resolve().parent / "ui_smoke_spec_template.ts"
@@ -197,10 +207,10 @@ def _spec_template() -> str:
     return _SPEC_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
-def generate_spec(entries: list) -> str:
+def generate_spec(entries: list, auth: dict | None = None) -> str:
     return _spec_template().replace(
         "__CONTRACT_JSON__",
-        json.dumps(_contract_for_spec(entries), ensure_ascii=False))
+        json.dumps(_contract_for_spec(entries, auth), ensure_ascii=False))
 
 
 def generate_config(smoke_port: int) -> str:
@@ -208,17 +218,49 @@ def generate_config(smoke_port: int) -> str:
 
 
 def stage_ui_smoke(output_dir: Path, entries: list, smoke_port: int,
-                   cli_hint: str) -> Path:
-    """(重新)落盘 .arc/ui-smoke/{spec,config,README,.gitignore}。幂等。"""
+                   cli_hint: str, auth: dict | None = None) -> Path:
+    """(重新)落盘 .arc/ui-smoke/{spec,config,README,.gitignore}。幂等。
+
+    auth: {"username","password"} 登录前奏用(夹具账号,fixture 链约定
+    的 FIXTURE_PASSWORD);无登录门的应用传 None。
+    """
     stage = Path(output_dir) / UI_SMOKE_SUBDIR
     stage.mkdir(parents=True, exist_ok=True)
-    (stage / "contract-smoke.spec.ts").write_text(generate_spec(entries), encoding="utf-8")
+    (stage / "contract-smoke.spec.ts").write_text(
+        generate_spec(entries, auth), encoding="utf-8")
     (stage / "playwright.config.ts").write_text(generate_config(smoke_port), encoding="utf-8")
     (stage / "README.md").write_text(_README.replace("__CLI__", cli_hint), encoding="utf-8")
     (stage / ".gitignore").write_text(_GITIGNORE, encoding="utf-8")
     for junk in ("test-results", ".playwright-report"):
         shutil.rmtree(stage / junk, ignore_errors=True)
     return stage
+
+
+def fixture_auth(output_dir: Path, entries: list | None = None) -> dict | None:
+    """db.json 首个种子账号 + 登录候选密码表。
+
+    候选序:①需求文本逐字引用的密码形串(hackathon--github 实测:种子
+    密码是 “Valid-password-123!”,不是 FIXTURE_PASSWORD——那次 run 的
+    播种用需求引号值);②fixture 链统一 FIXTURE_PASSWORD。爬虫逐个试,
+    密码形判定:长度≥8 且含字母数字。
+    """
+    try:
+        import fixture_manifest
+        db = json.loads((Path(output_dir) / "backend" / "data" / "db.json")
+                        .read_text(encoding="utf-8"))
+        users = (db.get("collections") or {}).get("users") or []
+        first = users[0]
+        candidates = [fixture_manifest.FIXTURE_PASSWORD]
+        for e in entries or []:
+            v = e["value"]
+            if (len(v) >= 8 and any(c.isdigit() for c in v)
+                    and any(c.isalpha() for c in v) and " " not in v
+                    and v not in candidates):
+                candidates.insert(0, v)
+        return {"username": str(first.get("username") or first.get("email") or ""),
+                "passwords": candidates[:4]}
+    except (OSError, ValueError, IndexError, KeyError, ImportError):
+        return None
 
 
 def build_ui_smoke_cmd(cli_path: str | None) -> str:

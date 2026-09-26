@@ -6,7 +6,7 @@ import { test } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const CONTRACT = __CONTRACT_JSON__ as { exact: string[]; anchors: { kind: string; value: string }[] };
+const CONTRACT = __CONTRACT_JSON__ as { exact: string[]; anchors: { kind: string; value: string }[]; auth: { username: string; passwords: string[] } | null };
 const OUT = path.join(__dirname, 'last-run.jsonl');
 // jsonl append per red: module state may reload between tests, so reds are
 // never buffered in memory — every red lands on disk the moment it fires.
@@ -148,6 +148,49 @@ test('contract crawler - openable, exact-named, closable, page stays alive', asy
       if (cov > bestCov) { bestCov = cov; bestIdx = i; }
     }
     await enterBest();
+  };
+  // Auth prelude: most contract strings of an auth-gated app live behind
+  // the sign-in — and the signed-OUT strings (registration, sign-in form)
+  // live only BEFORE it. Sweep 0 crawls signed-out; this prelude logs in
+  // once with the seeded fixture account (best effort); sweep 1 crawls the
+  // signed-in state.
+  const authPrelude = async () => {
+    if (!(CONTRACT.auth && CONTRACT.auth.username)) return;
+    // Sweep 0 may have left a modal/overlay open — dismiss before login.
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.mouse.click(5, 5).catch(() => {});
+    await gotoHome();
+    await page.waitForTimeout(300);
+    try {
+      // The sign-in form often sits behind a header "Sign in" button/modal.
+      let pw = page.locator('input[type="password"]').filter({ visible: true }).first();
+      if (!(await pw.count())) {
+        const opener = page.getByRole('button', { name: /^sign in$/i }).filter({ visible: true }).first();
+        if (await opener.count()) {
+          await opener.click({ timeout: 2000 });
+          await page.waitForTimeout(500);
+        }
+        pw = page.locator('input[type="password"]').filter({ visible: true }).first();
+      }
+      if (await pw.count()) {
+        const userBox = page.getByRole('textbox', { name: /user|email/i }).filter({ visible: true }).first();
+        const submit = page.locator('button[type="submit"], input[type="submit"]')
+          .filter({ visible: true }).last();
+        const named = page.getByRole('button', { name: /sign in|log ?in/i }).filter({ visible: true }).last();
+        const go = (await named.count()) ? named : submit;
+        // Try each seeded password candidate until one sticks (the failure
+        // banner disappears).
+        for (const candidate of CONTRACT.auth.passwords) {
+          if (await userBox.count()) await userBox.fill(CONTRACT.auth.username, { timeout: 2000 }).catch(() => {});
+          await pw.fill(candidate, { timeout: 2000 }).catch(() => {});
+          if (!(await go.count())) break;
+          await go.click({ timeout: 2000 }).catch(() => {});
+          await page.waitForTimeout(900);
+          const stillPw = page.locator('input[type="password"]').filter({ visible: true }).first();
+          if (!(await stillPw.count())) break;
+        }
+      }
+    } catch { /* best effort */ }
   };
   await enterRichestView();
 
@@ -366,9 +409,15 @@ test('contract crawler - openable, exact-named, closable, page stays alive', asy
   };
 
   const crawlStart = Date.now();
+  // Auth-gated apps: log in BEFORE the crawl — the signed-in state carries
+  // the overwhelming majority of contract strings and gets the clean first
+  // sweep. Signed-out-only strings (registration/reset forms) become known
+  // noise-reds; the static layer still covers them verbatim.
+  await authPrelude();
   for (let sweep = 0; sweep < 2; sweep++) {
   if (sweep > 0) { await enterBest(); }
-  while (queue.length && interactions < 75 && Date.now() - crawlStart < 150_000) {
+  while (queue.length && interactions < (sweep === 0 ? 45 : 75)
+         && Date.now() - crawlStart < 150_000) {
     const item = queue.shift() as QEntry;
     const key = item.kind + ':' + item.value;
     if (visited.has(key)) continue;
