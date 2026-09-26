@@ -255,6 +255,18 @@ impl ReadFileTool {
         let input: ReadFileInput =
             super::args::parse_tool_args(self.name(), &self.input_schema(), args)?;
 
+        // ARC guard: the host trace/debug subset under .arc is not
+        // agent-consumable (session-segment archaeology bait); sanctioned
+        // carriers are SEGMENT DIGEST / HOST REPORT. Off by default — the
+        // embedding host sets OCTOS_DENY_TRACE_READ=1.
+        if let Some(refusal) = super::shell::trace_read_guard_path(&input.path) {
+            return Ok(ToolResult {
+                output: refusal,
+                success: false,
+                ..Default::default()
+            });
+        }
+
         // M8.1 permission gate (stub): consult the typed permissions record
         // so the hook is in place before M8.3 wires real allow lists. Today
         // `ToolPermissions::default()` returns allow-all.
@@ -660,6 +672,23 @@ impl ReadFileTool {
             octos_core::truncate_utf8(&mut output, MAX_OUTPUT, "\n... (content truncated)");
         }
 
+        // Repeat-read steer: a repeat UNBOUNDED read of a large file the
+        // session already saw is the dominant token sink in long coding runs
+        // (ARC traces: one hot file re-read 100+ times). `peek` deliberately
+        // ignores mtime — the body is still served (an edit may have changed
+        // it, which is why the [FILE_UNCHANGED] stub above did not fire); the
+        // footer only points at the cheaper next call. Computed BEFORE the
+        // cache `put` below, or this read would match itself.
+        let repeat_full_read = start_line.is_none()
+            && end_line.is_none()
+            && input.limit.is_none()
+            && input.byte_offset.is_none()
+            && total_lines > 200
+            && ctx
+                .file_state_cache
+                .as_ref()
+                .is_some_and(|cache| cache.peek(&path).is_some());
+
         // M8.4: record this read in the file-state cache so a later read can
         // short-circuit to the `[FILE_UNCHANGED]` stub. Skip binary blobs —
         // we never want to serve an image/PDF body from the cache.
@@ -716,6 +745,16 @@ impl ReadFileTool {
                 content.len(),
                 tainted,
                 read_meta.transformed,
+            );
+        }
+
+        // Appended after truncation so it survives the cut (same contract as
+        // `truncation_recovery`).
+        let mut output = output;
+        if repeat_full_read {
+            output.push_str(
+                "\n[nudge] this file was already read this session — for a section pass \
+                 start_line/limit; to change it use edit_file directly.",
             );
         }
 
@@ -960,6 +999,89 @@ mod tests {
             second.output
         );
         assert!(second.output.contains("stable.txt"));
+    }
+
+    #[tokio::test]
+    async fn should_nudge_on_repeat_full_read_of_large_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let big: String = (0..300).map(|i| format!("line-{i}\n")).collect();
+        let file = dir.path().join("big.jsx");
+        std::fs::write(&file, &big).unwrap();
+        let tool = ReadFileTool::new(dir.path());
+        let cache = Arc::new(FileStateCache::new());
+        let ctx = ctx_with_cache(cache.clone());
+
+        let first = tool
+            .execute_with_context(&ctx, &serde_json::json!({"path": "big.jsx"}))
+            .await
+            .unwrap();
+        assert!(!first.output.contains("[nudge]"), "{}", first.output);
+
+        // Simulate the post-edit state: a PARTIAL cached view under the
+        // current mtime. A full re-read then bypasses the [FILE_UNCHANGED]
+        // stub (range mismatch) but must carry the nudge — and still serve
+        // the body, the nudge is advice, not a refusal.
+        let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let content = std::fs::read(&file).unwrap();
+        cache.put(CacheEntry::new(
+            dir.path().join("big.jsx"),
+            mtime,
+            FileStateCache::content_hash(&content),
+            content.len(),
+            true,
+            Some((1, 10)),
+        ));
+        let second = tool
+            .execute_with_context(&ctx, &serde_json::json!({"path": "big.jsx"}))
+            .await
+            .unwrap();
+        assert!(second.success);
+        assert!(second.output.contains("line-299"), "{}", second.output);
+        assert!(second.output.contains("[nudge]"), "{}", second.output);
+    }
+
+    #[tokio::test]
+    async fn should_not_nudge_on_ranged_or_small_rereads() {
+        let dir = tempfile::tempdir().unwrap();
+        let big: String = (0..300).map(|i| format!("line-{i}\n")).collect();
+        std::fs::write(dir.path().join("big.jsx"), &big).unwrap();
+        std::fs::write(dir.path().join("small.txt"), "tiny\n").unwrap();
+        let tool = ReadFileTool::new(dir.path());
+        let cache = Arc::new(FileStateCache::new());
+        let ctx = ctx_with_cache(cache.clone());
+
+        // First read primes the cache with a full view; the ranged re-read
+        // (different range, so no stub) must not carry a nudge.
+        tool.execute_with_context(&ctx, &serde_json::json!({"path": "big.jsx"}))
+            .await
+            .unwrap();
+        let ranged = tool
+            .execute_with_context(
+                &ctx,
+                &serde_json::json!({"path": "big.jsx", "start_line": 5, "end_line": 9}),
+            )
+            .await
+            .unwrap();
+        assert!(!ranged.output.contains("[nudge]"), "{}", ranged.output);
+
+        // Small files never nudge, even on a repeat full read (a partial
+        // entry is injected to dodge the [FILE_UNCHANGED] stub).
+        let small = dir.path().join("small.txt");
+        let mtime = std::fs::metadata(&small).unwrap().modified().unwrap();
+        let content = std::fs::read(&small).unwrap();
+        cache.put(CacheEntry::new(
+            small.clone(),
+            mtime,
+            FileStateCache::content_hash(&content),
+            content.len(),
+            true,
+            Some((1, 1)),
+        ));
+        let repeat_small = tool
+            .execute_with_context(&ctx, &serde_json::json!({"path": "small.txt"}))
+            .await
+            .unwrap();
+        assert!(!repeat_small.output.contains("[nudge]"), "{}", repeat_small.output);
     }
 
     // -----------------------------------------------------------------------

@@ -2715,6 +2715,30 @@ impl ContextManager {
         let mut repaired_item_ids = Vec::new();
         let mut synthetic_item_ids = Vec::new();
         let mut truncated_item_ids = Vec::new();
+        // Stale-read folding: ARC traces show a single hot file re-read
+        // 100+ times per run; every older full-text copy then rides along
+        // in the replayed history at full cost. Collapse every projection
+        // of the same (path, view) EXCEPT the latest read to a one-line
+        // stub. Ledger items are untouched — this alters only what the
+        // model sees. Providers with true prompt-cache reuse pay a prefix
+        // break here; ARC's lane has no cache semantics, and the fold is
+        // disabled via OCTOS_FOLD_STALE_READS=0 when that trade is wrong.
+        let fold_latest: HashMap<(String, String), String> = if fold_stale_reads_enabled() {
+            let mut latest = HashMap::new();
+            for item in &self.items {
+                if let TranscriptItemKind::AssistantToolCall {
+                    call_id, name, arguments,
+                } = &item.kind
+                {
+                    if let Some(key) = read_fold_key(name, arguments) {
+                        latest.insert(key, call_id.clone());
+                    }
+                }
+            }
+            latest
+        } else {
+            HashMap::new()
+        };
         // Tool outputs are consumed by TRANSCRIPT ITEM ID, not by
         // tool_call_id: index-based provider ids (kimi `functions.foo:0`,
         // vllm `call_0`) legitimately repeat across turns, so a call must
@@ -2766,6 +2790,7 @@ impl ContextManager {
                     let mut source_item_ids = Vec::new();
                     let mut call_ids = Vec::new();
                     let mut calls = Vec::new();
+                    let mut call_fold_keys: HashMap<String, (String, String)> = HashMap::new();
 
                     while let Some(item) = self.items.get(index) {
                         let TranscriptItemKind::AssistantToolCall {
@@ -2778,6 +2803,9 @@ impl ContextManager {
                         };
                         source_item_ids.push(item.id.clone());
                         call_ids.push(call_id.clone());
+                        if let Some(key) = read_fold_key(name, arguments) {
+                            call_fold_keys.insert(call_id.clone(), key);
+                        }
                         calls.push(ToolCall {
                             id: call_id.clone(),
                             name: name.clone(),
@@ -2842,15 +2870,36 @@ impl ContextManager {
                             })
                         {
                             consumed_tool_outputs.insert(tool_item_id.clone());
-                            let mut msg =
-                                message(MessageRole::Tool, envelope.model_visible_content.clone());
+                            // Stale-read fold: when a later read of the same
+                            // (path, view) exists in the ledger, this older
+                            // copy projects as a stub instead of full text.
+                            let folded = call_fold_keys
+                                .get(&call_id)
+                                .filter(|key| {
+                                    fold_latest
+                                        .get(key)
+                                        .is_some_and(|latest| latest != &call_id)
+                                })
+                                .map(|(path, view)| {
+                                    format!(
+                                        "[STALE READ] {path} ({view}) read earlier in this \
+                                         session — superseded by the latest read of the same \
+                                         view below. ({} bytes elided)",
+                                        envelope.original_bytes
+                                    )
+                                });
+                            let is_folded = folded.is_some();
+                            let mut msg = message(
+                                MessageRole::Tool,
+                                folded.unwrap_or_else(|| envelope.model_visible_content.clone()),
+                            );
                             msg.tool_call_id = Some(call_id.clone());
                             entries.push(PromptMessageEntry::tool_output(
                                 msg,
                                 tool_item_id.clone(),
                                 call_id.clone(),
                             ));
-                            if envelope.truncation_reason.is_some() {
+                            if is_folded || envelope.truncation_reason.is_some() {
                                 truncated_item_ids.push(tool_item_id);
                             }
                         } else {
@@ -3350,6 +3399,43 @@ impl ContextManager {
 }
 
 type CompactionCandidate = (String, TranscriptItem, Vec<TranscriptItem>, usize);
+
+/// Whether stale read_file results fold to stubs in the projection.
+/// Default on; `OCTOS_FOLD_STALE_READS=0` disables.
+fn fold_stale_reads_enabled() -> bool {
+    fold_stale_reads_enabled_from(std::env::var("OCTOS_FOLD_STALE_READS").ok().as_deref())
+}
+
+fn fold_stale_reads_enabled_from(value: Option<&str>) -> bool {
+    value != Some("0")
+}
+
+/// Fold key for a read_file call: `(normalized path, view)`. The path drops
+/// a leading `./`; the view distinguishes full reads from ranged ones so
+/// folding never collapses a window the model has not re-read. Parameter
+/// defaults mirror read_file's schema (`offset` aliases `start_line`;
+/// `limit` is a count from `start_line`, not an end line).
+fn read_fold_key(name: &str, arguments: &serde_json::Value) -> Option<(String, String)> {
+    if name != "read_file" {
+        return None;
+    }
+    let raw_path = arguments.get("path")?.as_str()?;
+    let path = raw_path.strip_prefix("./").unwrap_or(raw_path).to_string();
+    let bound = |key: &str| arguments.get(key).and_then(|v| v.as_u64());
+    let start = bound("start_line").or_else(|| bound("offset"));
+    let end = match (bound("end_line"), bound("limit")) {
+        (Some(e), _) => Some(e),
+        (None, Some(count)) => start.map(|s| s + count.saturating_sub(1)),
+        (None, None) => None,
+    };
+    let view = match (start, end) {
+        (None, None) => "full".to_string(),
+        (Some(s), Some(e)) => format!("lines {s}-{e}"),
+        (Some(s), None) => format!("lines {s}-"),
+        (None, Some(e)) => format!("lines 1-{e}"),
+    };
+    Some((path, view))
+}
 
 fn fit_summary_to_compaction_budget(
     summary: &str,
@@ -4422,6 +4508,93 @@ mod tests {
             frame.report.truncated_item_ids.contains(&tool_item_id),
             "context-pressure truncation should report the affected tool output item"
         );
+    }
+
+    fn read_call(call_id: &str, path: &str, extra: Value) -> Message {
+        let mut arguments = json!({ "path": path });
+        if let (Some(obj), Some(extra_obj)) = (arguments.as_object_mut(), extra.as_object()) {
+            for (key, value) in extra_obj {
+                obj.insert(key.clone(), value.clone());
+            }
+        }
+        let mut message = Message::assistant("");
+        message.tool_calls = Some(vec![ToolCall {
+            id: call_id.to_owned(),
+            name: "read_file".to_owned(),
+            arguments,
+            metadata: None,
+        }]);
+        message
+    }
+
+    fn tool_row<'a>(frame: &'a PromptFrame, call_id: &str) -> &'a str {
+        frame
+            .messages
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some(call_id))
+            .map(|message| message.content.as_str())
+            .unwrap_or_else(|| panic!("tool row for {call_id} missing"))
+    }
+
+    #[test]
+    fn for_prompt_folds_stale_full_reads_to_stub_keeping_latest() {
+        let mut manager = ContextManager::new("s", None);
+        manager.record_message(&Message::user("go"));
+        manager.record_message(&read_call("call_r1", "src/App.jsx", json!({})));
+        manager.record_tool_output("call_r1", "read_file", &"OLD FULL TEXT ".repeat(80));
+        manager.record_message(&Message::assistant("again"));
+        // "./" prefix must normalize to the same fold key as the bare path.
+        manager.record_message(&read_call("call_r2", "./src/App.jsx", json!({})));
+        manager.record_tool_output("call_r2", "read_file", "NEW FULL TEXT");
+
+        let frame = manager.for_prompt(&PromptBuildPolicy::default());
+        let old = tool_row(&frame, "call_r1");
+        assert!(old.starts_with("[STALE READ] src/App.jsx (full)"), "{old}");
+        assert!(old.contains("bytes elided"), "{old}");
+        assert_eq!(tool_row(&frame, "call_r2"), "NEW FULL TEXT");
+        assert_eq!(frame.report.truncated_item_ids.len(), 1);
+    }
+
+    #[test]
+    fn for_prompt_keeps_distinct_read_views_unfolded() {
+        let mut manager = ContextManager::new("s", None);
+        manager.record_message(&Message::user("go"));
+        manager.record_message(&read_call("call_r1", "a.js", json!({ "start_line": 10, "end_line": 20 })));
+        manager.record_tool_output("call_r1", "read_file", "RANGED VIEW");
+        manager.record_message(&read_call("call_r2", "a.js", json!({})));
+        manager.record_tool_output("call_r2", "read_file", "FULL VIEW");
+
+        let frame = manager.for_prompt(&PromptBuildPolicy::default());
+        assert_eq!(tool_row(&frame, "call_r1"), "RANGED VIEW");
+        assert_eq!(tool_row(&frame, "call_r2"), "FULL VIEW");
+        assert!(frame.report.truncated_item_ids.is_empty());
+    }
+
+    #[test]
+    fn for_prompt_folds_equivalent_ranged_views() {
+        // limit:N from start_line and an explicit end_line spanning the same
+        // window are the SAME view — the earlier copy folds.
+        let mut manager = ContextManager::new("s", None);
+        manager.record_message(&Message::user("go"));
+        manager.record_message(&read_call("call_r1", "a.js", json!({ "start_line": 10, "limit": 11 })));
+        manager.record_tool_output("call_r1", "read_file", "VIA LIMIT");
+        manager.record_message(&read_call("call_r2", "a.js", json!({ "start_line": 10, "end_line": 20 })));
+        manager.record_tool_output("call_r2", "read_file", "VIA END");
+
+        let frame = manager.for_prompt(&PromptBuildPolicy::default());
+        let old = tool_row(&frame, "call_r1");
+        assert!(old.contains("(lines 10-20)"), "{old}");
+        assert_eq!(tool_row(&frame, "call_r2"), "VIA END");
+    }
+
+    #[test]
+    fn stale_read_folding_env_parsing() {
+        // The crate forbids unsafe code, so the env read itself is not
+        // exercised in tests; the parse rule is.
+        assert!(!fold_stale_reads_enabled_from(Some("0")));
+        assert!(fold_stale_reads_enabled_from(Some("1")));
+        assert!(fold_stale_reads_enabled_from(Some("off-but-not-zero")));
+        assert!(fold_stale_reads_enabled_from(None));
     }
 
     #[test]

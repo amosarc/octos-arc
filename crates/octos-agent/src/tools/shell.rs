@@ -27,27 +27,39 @@ use crate::tools::policy::BashFileWrites;
 static SHELL_BG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Artifact offload threshold: outputs above this many BYTES spill to
-/// disk. 8KB keeps routine command echo (ls, git status, curl one-liners)
-/// inline while catching the build/test/run spew that dominates replay
-/// cost.
-const ARTIFACT_SPILL_BYTES: usize = 8 * 1024;
+/// disk. 3KB keeps routine command echo (ls, git status, curl one-liners)
+/// inline while catching test-runner/build spew early — ARC replay traces
+/// showed multi-KB test logs riding along in history at full replay cost
+/// under the old 8KB line.
+const ARTIFACT_SPILL_BYTES: usize = 3 * 1024;
 /// Inline head/tail sizes for a spilled output (bytes).
 const ARTIFACT_HEAD_BYTES: usize = 2048;
 const ARTIFACT_TAIL_BYTES: usize = 1024;
 
-fn artifact_offload_enabled() -> bool {
+pub(crate) fn artifact_offload_enabled() -> bool {
     match std::env::var("OCTOS_TOOL_ARTIFACT") {
         Ok(v) => v != "0",
         Err(_) => true,
     }
 }
 
+/// Spill threshold with `OCTOS_TOOL_ARTIFACT_BYTES` numeric override
+/// (invalid values fall back to the default — a typo must not silently
+/// disable offloading).
+fn artifact_spill_bytes() -> usize {
+    std::env::var("OCTOS_TOOL_ARTIFACT_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|bytes| *bytes > 0)
+        .unwrap_or(ARTIFACT_SPILL_BYTES)
+}
+
 /// Offload a large shell output to `<workspace>/.octos/artifacts/` and
 /// return the compact head+tail+pointer replacement. `None` = keep the
 /// text inline (below threshold, feature off, or the workspace is not
 /// writable — failure NEVER blocks the command result).
-fn artifact_offload(workspace: &Path, text: &str) -> Option<String> {
-    if text.len() <= ARTIFACT_SPILL_BYTES {
+pub(crate) fn artifact_offload(workspace: &Path, text: &str) -> Option<String> {
+    if text.len() <= artifact_spill_bytes() {
         return None;
     }
     let seq = SHELL_BG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1055,6 +1067,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn trace_subset_path_matching_is_precise() {
+        // Denied: exact files, subpaths, absolute spellings, ./ prefixes.
+        for p in [
+            ".arc/octos-events.jsonl",
+            "./.arc/octos-events.jsonl",
+            "/workspace/template/.arc/runner-events.jsonl",
+            ".arc/traceability/node_states.json",
+            "/w/.arc/traceability/requirements.json",
+            ".arc/host-plan/state.v1.json",
+            ".arc/debug.log",
+        ] {
+            assert!(path_in_trace_subset(p), "must deny: {p}");
+        }
+        // Allowed: the operating-contract surface of .arc stays readable.
+        for p in [
+            ".arc/acceptance/REQ-1-1-1-register.spec.ts",
+            ".arc/acceptance/support/e2e.ts",
+            ".arc/host/restart-server.sh",
+            ".arc/fixture-manifest.json",
+            ".arc",
+            "backend/data/db.json",
+            "src/arc/trace.rs",
+        ] {
+            assert!(!path_in_trace_subset(p), "must allow: {p}");
+        }
+        // Glob patterns naming the subset are caught by the same matcher.
+        assert!(path_in_trace_subset("**/.arc/octos-events.jsonl"));
+        assert!(path_in_trace_subset(".arc/traceability/**"));
+    }
+
+    #[test]
+    fn trace_guard_command_mechanics() {
+        // Pure heuristics (enabled flag is process-global, mirroring the
+        // browser/full-suite guards' test convention).
+        assert!(command_references_trace_subset(
+            "tail -30 .arc/octos-events.jsonl"
+        ));
+        assert!(command_references_trace_subset(
+            "grep -rn node_states .arc/traceability/"
+        ));
+        assert!(command_references_trace_subset(
+            "python3 -c \"import json; d=json.load(open('.arc/host-plan/state.v1.json'))\""
+        ));
+        assert!(!command_references_trace_subset(
+            "cat .arc/acceptance/REQ-1.spec.ts"
+        ));
+        assert!(!command_references_trace_subset("ls .arc/host"));
+        // Escape hatch lives on the last line only.
+        assert!(command_allows_trace_read_explicitly(
+            "cat .arc/debug.log # octos:allow-trace-read"
+        ));
+        assert!(!command_allows_trace_read_explicitly(
+            "# octos:allow-trace-read\ncat .arc/debug.log"
+        ));
+    }
+
+    #[test]
     fn artifact_offload_spills_large_output_with_pointer() {
         let tmp = std::env::temp_dir().join(format!(
             "octos-artifact-test-{}",
@@ -1543,6 +1612,102 @@ pub(crate) fn command_looks_like_full_spec_run(command: &str) -> bool {
     !command
         .split_whitespace()
         .any(|token| token.ends_with(".spec.ts"))
+}
+
+/// ARC guard (2026-09-25, hg-github-001): the host trace/debug subset under
+/// `.arc/` is archaeology bait — the model mined its own
+/// `octos-events.jsonl` / `node_states.json` / `debug.log` every session
+/// segment (~10-15 calls × 4 segments, zero edits in the worst turn) to
+/// reconstruct what previous sessions had done. The sanctioned carriers of
+/// that context are the host's SEGMENT DIGEST / HOST REPORT. Run-level
+/// traceability is consumed host-side, so agent-side read-blocking loses
+/// nothing. Contract-relevant paths (`.arc/acceptance/`, `.arc/host/`,
+/// `.arc/fixture-manifest.json`) stay readable. Gate is an env knob the
+/// embedding host sets (`OCTOS_DENY_TRACE_READ=1`); default off keeps
+/// vanilla octos unchanged.
+pub(crate) const TRACE_READ_DENIED: &[&str] = &[
+    ".arc/octos-events.jsonl",
+    ".arc/runner-events.jsonl",
+    ".arc/debug.log",
+    ".arc/stdout.log",
+    ".arc/stderr.log",
+    ".arc/traceability/",
+    ".arc/host-plan/",
+];
+
+pub(crate) fn trace_read_denial_enabled() -> bool {
+    static ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var("OCTOS_DENY_TRACE_READ")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    });
+    *ENABLED
+}
+
+/// Escape hatch: a trailing `# octos:allow-trace-read` comment explicitly
+/// authorizes a trace-referencing command under the guard.
+pub(crate) fn command_allows_trace_read_explicitly(command: &str) -> bool {
+    command
+        .lines()
+        .last()
+        .is_some_and(|last| last.contains("# octos:allow-trace-read"))
+}
+
+/// Does this PATH (tool argument or bash operand) land in the trace subset?
+/// Matches the exact marker file, anything under a marker directory, and
+/// absolute spellings that END with or CONTAIN a marker directory
+/// (`/workspace/template/.arc/traceability/node_states.json`).
+pub(crate) fn path_in_trace_subset(path: &str) -> bool {
+    let mut p = path.trim().replace('\\', "/");
+    while let Some(stripped) = p.strip_prefix("./") {
+        p = stripped.to_string();
+    }
+    TRACE_READ_DENIED.iter().any(|marker| {
+        let m = marker.trim_end_matches('/');
+        p == *m
+            || p.starts_with(&format!("{m}/"))
+            || p.ends_with(&format!("/{m}"))
+            || p.contains(&format!("/{m}/"))
+    })
+}
+
+/// Heuristic: the command text NAMES a trace-subset path (cat/grep/tail/
+/// python-open on `.arc/octos-events.jsonl` etc. all match via the path
+/// marker appearing anywhere in the command).
+pub(crate) fn command_references_trace_subset(command: &str) -> bool {
+    TRACE_READ_DENIED.iter().any(|marker| command.contains(marker))
+}
+
+/// Shared refusal text pointing the model at the sanctioned carriers.
+pub(crate) fn trace_read_refusal(detail: &str) -> String {
+    format!(
+        "Refused: `{detail}` is a host trace artifact (agent history / host \
+         state under .arc) and is not agent-consumable. What previous \
+         sessions did arrives via the host's SEGMENT DIGEST / HOST REPORT; \
+         rely on those plus the running app and `git log` for state. If you \
+         genuinely need this file, run it through bash with a trailing \
+         `# octos:allow-trace-read` comment to acknowledge the escape hatch."
+    )
+}
+
+/// Bash-command form of the guard: `None` lets the command through.
+pub(crate) fn trace_read_guard_command(command: &str) -> Option<String> {
+    if !trace_read_denial_enabled()
+        || command_allows_trace_read_explicitly(command)
+        || !command_references_trace_subset(command)
+    {
+        return None;
+    }
+    Some(trace_read_refusal(command))
+}
+
+/// Path-argument form for file tools (read_file / grep / glob / list_dir):
+/// `None` lets the read through.
+pub(crate) fn trace_read_guard_path(path: &str) -> Option<String> {
+    if !trace_read_denial_enabled() || !path_in_trace_subset(path) {
+        return None;
+    }
+    Some(trace_read_refusal(path))
 }
 
 /// #28b — escape hatch: a trailing `# octos:allow-write` comment on the

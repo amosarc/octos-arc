@@ -365,11 +365,13 @@ pub(crate) fn edited_hunk_preview_lines(
         out
     };
     let mut preview = render(window_start, window_end);
-    if preview.len() > HUNK_PREVIEW_MAX_CHARS {
+    if preview.chars().count() > HUNK_PREVIEW_MAX_CHARS {
         preview = render(region_start_line, region_end_line);
     }
-    if preview.len() > HUNK_PREVIEW_MAX_CHARS {
-        preview.truncate(HUNK_PREVIEW_MAX_CHARS);
+    if preview.chars().count() > HUNK_PREVIEW_MAX_CHARS {
+        // Char-boundary truncation: byte slicing at a fixed cap lands mid-way
+        // through a multibyte char on CJK content and panics `String::truncate`.
+        preview = preview.chars().take(HUNK_PREVIEW_MAX_CHARS).collect();
         preview.push_str("\n…[hunk truncated]");
     }
     preview.push_str(&format!(
@@ -424,6 +426,24 @@ mod tests {
     use super::*;
 
     use crate::tools::test_fixture::escape_ctx;
+
+    /// Regression (hg-github-001): the hunk preview cap used to truncate by
+    /// BYTES; on CJK content the cut landed mid-multibyte-char and
+    /// `String::truncate` panicked AFTER the edit was already written — the
+    /// tool then reported an internal error for an edit that had succeeded.
+    #[test]
+    fn hunk_preview_truncation_is_char_safe_on_cjk() {
+        // Each line is ~10 chars but 20+ bytes, so the 2048-char cap cuts
+        // inside the rendered window no matter which line span is chosen.
+        let cjk = "密码与账户菜单说明行".repeat(4);
+        let line = format!("{cjk}│尾部");
+        let new_content = vec![line.clone(); 600].join("\n");
+        let (preview, range) = edited_hunk_preview_lines(&new_content, 1, 600);
+        assert!(range.is_some(), "range must still be reported");
+        assert!(preview.chars().count() <= HUNK_PREVIEW_MAX_CHARS + 128);
+        assert!(preview.contains("[hunk truncated]"), "marker must survive");
+        // Valid UTF-8 by construction (String), and no panic is the assertion.
+    }
 
     #[tokio::test]
     async fn test_edit_file_basic_replacement() {
