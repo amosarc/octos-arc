@@ -80,6 +80,16 @@ impl Tool for ListDirTool {
     ) -> Result<ToolResult> {
         let input: Input = super::args::parse_tool_args(self.name(), &self.input_schema(), args)?;
 
+        // ARC guard: host trace/debug subset under .arc is not
+        // agent-consumable (OCTOS_DENY_TRACE_READ; see shell.rs).
+        if let Some(refusal) = super::shell::trace_read_guard_path(&input.path) {
+            return Ok(ToolResult {
+                output: refusal,
+                success: false,
+                ..Default::default()
+            });
+        }
+
         // Interim mitigation (#1378, superseded by #1377): `up/<base64>/<name>`
         // is an opaque upload handle, not a browsable directory. When the input
         // targets that namespace and doesn't resolve to a real listable entry,

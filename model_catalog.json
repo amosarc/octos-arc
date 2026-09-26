@@ -159,6 +159,25 @@
       ]
     },
     {
+      "provider": "deepseek/deepseek-v4-flash-vision-exp",
+      "type": "fast",
+      "stability": 1.0,
+      "tool_avg_ms": 0,
+      "p95_ms": 0,
+      "score": 0.0,
+      "ds_output": 0,
+      "cost_in": 0.14,
+      "cost_out": 0.28,
+      "context_window": 1048576,
+      "max_output": 384000,
+      "endpoints": [
+        {
+          "id": "deepseek",
+          "label": "Official API"
+        }
+      ]
+    },
+    {
       "provider": "deepseek/deepseek-v4-pro",
       "type": "strong",
       "stability": 1.0,
@@ -529,7 +548,7 @@
       "type": "strong",
       "cost_in": 1.0,
       "cost_out": 4.0,
-      "context_window": 1000000,
+      "context_window": 1048576,
       "max_output": 131072,
       "stability": 1.0,
       "tool_avg_ms": 0,
@@ -542,7 +561,20 @@
       "type": "fast",
       "cost_in": 0.15,
       "cost_out": 0.5,
-      "context_window": 1000000,
+      "context_window": 1048576,
+      "max_output": 131072,
+      "stability": 1.0,
+      "tool_avg_ms": 0,
+      "p95_ms": 0,
+      "score": 0.0,
+      "ds_output": 0
+    },
+    {
+      "provider": "zai/glm-5.3-flashx",
+      "type": "fast",
+      "cost_in": 0.15,
+      "cost_out": 0.5,
+      "context_window": 1048576,
       "max_output": 131072,
       "stability": 1.0,
       "tool_avg_ms": 0,

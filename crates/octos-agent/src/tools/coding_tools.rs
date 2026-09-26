@@ -516,6 +516,17 @@ impl ExecCommandTool {
                 ..Default::default()
             });
         }
+        // ARC guard: the host trace/debug subset under .arc is archaeology
+        // bait (hg-github-001: session-segment turns spent mining the
+        // model's own event log instead of editing). Refusal happens BEFORE
+        // any spawn; contract paths (.arc/acceptance, .arc/host) pass.
+        if let Some(refusal) = super::shell::trace_read_guard_command(&command) {
+            return Ok(ToolResult {
+                output: refusal,
+                success: false,
+                ..Default::default()
+            });
+        }
         // #28c-r1 — receipt snapshot root: a leading literal `cd X &&`
         // prefix (the coding-session idiom) makes X the root; otherwise the
         // session workdir. Prevents the false `files_changed: 0` on writes
@@ -611,6 +622,18 @@ impl ExecCommandTool {
                 let hint =
                     sandbox_denial_hint(!self.sandbox.is_noop(), output.status.success(), &text);
                 let max = input.max_output_tokens.unwrap_or(MAX_CAPTURE_BYTES);
+                // Artifact-offload (plan-token 迭代2, shared with ShellTool):
+                // >8KB outputs land in <workspace>/.octos/artifacts/ and the
+                // history keeps head+tail+pointer. The coding bash path is
+                // the one ARC actually drives — without this hook only the
+                // legacy ShellTool spilled.
+                if super::shell::artifact_offload_enabled() {
+                    if let Some(spill) =
+                        super::shell::artifact_offload(&cwd, &text)
+                    {
+                        text = spill;
+                    }
+                }
                 let mut out = truncate_output(text, max);
                 if let Some(hint) = hint {
                     out.push_str(hint);
@@ -2073,6 +2096,15 @@ impl Tool for BashTool {
         // burn ~2 minutes each and can never go green while sibling nodes
         // are unimplemented; the host verifies the full suite itself.
         if let Some(refusal) = super::shell::full_spec_run_guard(&command) {
+            return Ok(ToolResult {
+                output: refusal,
+                success: false,
+                ..Default::default()
+            });
+        }
+        // ARC guard: trace/debug subset under .arc is not agent-consumable
+        // (see the sync path's comment for the run evidence).
+        if let Some(refusal) = super::shell::trace_read_guard_command(&command) {
             return Ok(ToolResult {
                 output: refusal,
                 success: false,

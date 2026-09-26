@@ -205,6 +205,18 @@ impl Tool for GrepTool {
         let input: GrepInput =
             super::args::parse_tool_args(self.name(), &self.input_schema(), args)?;
 
+        // ARC guard: grepping inside the host trace/debug subset is the same
+        // archaeology bait as reading it (OCTOS_DENY_TRACE_READ; shell.rs).
+        if let Some(path) = input.path.as_deref() {
+            if let Some(refusal) = super::shell::trace_read_guard_path(path) {
+                return Ok(ToolResult {
+                    output: refusal,
+                    success: false,
+                    ..Default::default()
+                });
+            }
+        }
+
         // Reject file_pattern with absolute paths or traversal.
         if let Some(ref fp) = input.file_pattern {
             if fp.starts_with('/') || fp.contains("..") {

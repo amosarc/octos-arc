@@ -143,11 +143,16 @@ pub fn context_window_tokens(model_id: &str) -> u32 {
     // ids `k3` / `kimi-for-coding*`, which don't contain `kimi-k3` — match them
     // too so the `ctx N%` gauge shows K3's real ~1M window, not the 128K default.
     let m = model_id.to_lowercase();
+    // deepseek-v4 (incl. -flash / -flash-vision-exp) and the glm-5.3 family
+    // (incl. glm-5.3-flash) are 1M-context; the broader "glm" fallback below
+    // is 128k, which would derive an ~90k trim line and re-trim turns nowhere
+    // near capacity (the agnes-3.0 incident class).
     if m.contains("deepseek-v4")
         || m.contains("minimax-m3")
         || m.contains("kimi-k3")
         || m == "k3"
         || m.starts_with("kimi-for-coding")
+        || m.contains("glm-5.3")
     {
         return 1_048_576;
     }
@@ -183,6 +188,10 @@ pub fn max_output_tokens(model_id: &str) -> u32 {
     } else if m.contains("minimax-m3") || m.contains("kimi-k3") {
         // kimi-k3 default max completion is 131072 (settable up to 1M);
         // must win over the broader "kimi" branch below.
+        131_072
+    } else if m.contains("glm-5.3") {
+        // glm-5.3 / glm-5.3-flash native max completion (catalog value);
+        // must win over the broader "glm" branch's 128k.
         131_072
     } else if m.contains("kimi") || m.contains("qwen") || m.contains("gemini") {
         65_535
@@ -348,6 +357,21 @@ mod tests {
         );
         // Guard: a substring `k3` in an unrelated model is NOT the coding plan.
         assert_eq!(context_window_tokens("mock-k3000"), 128_000);
+    }
+
+    #[test]
+    fn should_use_1m_context_for_glm_5_3_when_not_in_catalog() {
+        // glm-5.3 / glm-5.3-flash are absent from the unit-test catalog
+        // fixtures, so this exercises the hardcoded fallbacks: 1M window
+        // (not the broader "glm" 128k that derives a ~90k trim line) and
+        // the family's native 131072 max completion.
+        assert_eq!(context_window_tokens("glm-5.3-flash"), 1_000_000);
+        assert_eq!(context_window_tokens("glm-5.3"), 1_000_000);
+        assert_eq!(context_window_tokens("zai/glm-5.3-flash"), 1_000_000);
+        assert_eq!(max_output_tokens("glm-5.3-flash"), 131_072);
+        // deepseek-v4 vision variant rides the deepseek-v4 branch.
+        assert_eq!(context_window_tokens("deepseek-v4-flash-vision-exp"), 1_048_576);
+        assert_eq!(max_output_tokens("deepseek-v4-flash-vision-exp"), 384_000);
     }
 
     #[test]

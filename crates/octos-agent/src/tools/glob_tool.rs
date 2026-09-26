@@ -146,6 +146,16 @@ impl Tool for GlobTool {
         let input: GlobInput =
             super::args::parse_tool_args(self.name(), &self.input_schema(), args)?;
 
+        // ARC guard: globbing into the host trace/debug subset is the same
+        // archaeology bait as reading it (OCTOS_DENY_TRACE_READ; shell.rs).
+        if let Some(refusal) = super::shell::trace_read_guard_path(&input.pattern) {
+            return Ok(ToolResult {
+                output: refusal,
+                success: false,
+                ..Default::default()
+            });
+        }
+
         let pattern = input.pattern.clone();
         let limit = input.limit;
         let filesystem_scope = self.filesystem_scope;

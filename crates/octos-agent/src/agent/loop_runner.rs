@@ -1109,7 +1109,14 @@ impl Agent {
                     // providers ignore `context_management` via
                     // `skip_serializing_if`. Built BEFORE the checkpoint so the
                     // reflection request derives from the exact action config.
-                    let call_config = config.clone();
+                    // Thinking tiering: the first N iterations keep the
+                    // profile's reasoning (design moments), later execution
+                    // iterations get Disabled (see `tier_call_config`).
+                    let call_config = tier_call_config(
+                        config.clone(),
+                        iteration,
+                        false,
+                        thinking_first_iterations());
 
                     // A convergence threshold is a soft checkpoint, never a
                     // terminal budget. Run one private, tools-disabled LLM
@@ -1152,6 +1159,16 @@ impl Agent {
                         // thinking config invalidates the message cache.
                         let mut checkpoint_config = call_config.clone();
                         checkpoint_config.tool_choice = octos_llm::ToolChoice::None;
+                        // Thinking tiering: reflection is a routine meta
+                        // check, not a design moment — disable reasoning
+                        // whenever the policy is armed (it caps reflection
+                        // spend AND makes the ≤1024 output cap below apply).
+                        if thinking_first_iterations() > 0
+                            && checkpoint_config.reasoning_effort.is_none()
+                        {
+                            checkpoint_config.reasoning_effort = Some(
+                                octos_llm::ReasoningEffort::Disabled);
+                        }
                         if checkpoint_config.reasoning_effort.is_none() {
                             checkpoint_config.max_tokens = Some(
                                 checkpoint_config
@@ -2303,7 +2320,13 @@ impl Agent {
                 let total_usage = turn.total_usage().clone();
 
                 // M8.5 tier 2: decorate the config with the Anthropic header.
-                let call_config = config.clone();
+                // Thinking tiering mirrors the session loop (first N
+                // iterations keep profile reasoning; execution turns off).
+                let call_config = tier_call_config(
+                    config.clone(),
+                    iteration,
+                    false,
+                    thinking_first_iterations());
                 let (mut response, _streamed, attributed_cost) = match self
                     .call_llm_with_hooks(
                         &messages,
@@ -3801,6 +3824,45 @@ fn build_chat_config(config: &crate::AgentConfig, local_provider: bool) -> ChatC
     }
     c.reasoning_effort = config.reasoning_effort;
     c
+}
+
+/// ARC thinking tiering (2026-09-26, hg-github-001 data): routine
+/// iterations OFF, design moments ON. With `first_iterations = N`, the
+/// first N iterations of every turn keep the profile's reasoning setting
+/// (the batch-planning "design moments"), while later execution
+/// iterations — and every reflection checkpoint — get
+/// `ReasoningEffort::Disabled`. On deepseek-v4 (EffortAndThinkingToggle)
+/// and glm-5.3 (ThinkingToggle) lanes that emits
+/// `{"thinking":{"type":"disabled"}}` — the arc-bench gateway honours it.
+/// Observed motivation: 16% of calls carried >2K-token reasoning bursts
+/// yet burned 62% of LLM wall clock; the bursts cluster at planning
+/// moments, which stay ON. `n = 0` disables the policy (vanilla octos).
+/// `thinking` sits outside `messages`, so the OpenAI-compatible prefix
+/// cache is unaffected. An explicitly configured `reasoning_effort`
+/// always wins (only `None` is tiered).
+pub(crate) fn tier_call_config(
+    mut cfg: ChatConfig,
+    iteration: u32,
+    routine: bool,
+    first_iterations: u32,
+) -> ChatConfig {
+    if first_iterations == 0 {
+        return cfg;
+    }
+    if (routine || iteration > first_iterations) && cfg.reasoning_effort.is_none() {
+        cfg.reasoning_effort = Some(octos_llm::ReasoningEffort::Disabled);
+    }
+    cfg
+}
+
+/// Env form of `first_iterations` (`OCTOS_THINKING_FIRST_ITERATIONS`,
+/// default 0 = off). Read per call so tests/embedders can flip it without
+/// rebuilds; the value is cheap to parse.
+pub(crate) fn thinking_first_iterations() -> u32 {
+    std::env::var("OCTOS_THINKING_FIRST_ITERATIONS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
