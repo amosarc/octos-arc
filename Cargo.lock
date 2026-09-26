@@ -1936,7 +1936,7 @@ dependencies = [
 
 [[package]]
 name = "octos-agent"
-version = "2.0.3-rc.11"
+version = "2.0.5-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1982,7 +1982,7 @@ dependencies = [
 
 [[package]]
 name = "octos-arc"
-version = "2.0.3-rc.11"
+version = "2.0.5-rc.1"
 dependencies = [
  "chrono",
  "clap",
@@ -1999,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "octos-bus"
-version = "2.0.3-rc.11"
+version = "2.0.5-rc.1"
 dependencies = [
  "base64",
  "chrono",
@@ -2017,7 +2017,7 @@ dependencies = [
 
 [[package]]
 name = "octos-cli"
-version = "2.0.3-rc.11"
+version = "2.0.5-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2055,7 +2055,7 @@ dependencies = [
 
 [[package]]
 name = "octos-core"
-version = "2.0.3-rc.11"
+version = "2.0.5-rc.1"
 dependencies = [
  "chrono",
  "eyre",
@@ -2069,7 +2069,7 @@ dependencies = [
 
 [[package]]
 name = "octos-llm"
-version = "2.0.3-rc.11"
+version = "2.0.5-rc.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -2090,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "octos-memory"
-version = "2.0.3-rc.11"
+version = "2.0.5-rc.1"
 dependencies = [
  "bincode",
  "chrono",

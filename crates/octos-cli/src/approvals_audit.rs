@@ -14,7 +14,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local};
 use octos_core::ui_protocol::ApprovalDecidedEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -318,6 +318,7 @@ mod tests {
     use octos_core::SessionKey;
     use octos_core::ui_protocol::{ApprovalDecision, ApprovalId, TurnId};
     use std::sync::atomic::{AtomicI64, Ordering};
+    use chrono::Utc;
 
     struct FixedClock {
         millis: AtomicI64,

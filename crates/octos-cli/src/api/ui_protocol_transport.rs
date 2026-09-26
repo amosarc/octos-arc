@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local};
 use octos_agent::{
     Agent, BackgroundResultKind, BackgroundResultPayload, PromptContextManager, PromptContextPhase,
     PromptContextReport, PromptContextRequest, ToolApprovalDecision, ToolApprovalRequest,

@@ -6,7 +6,7 @@
 //! - Google Gemini
 //! - DeepSeek / Z.AI / Moonshot coding-plan families
 
-mod config;
+pub mod config;
 pub mod context;
 mod context_override;
 pub mod embedding;

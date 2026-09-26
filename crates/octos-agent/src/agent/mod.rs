@@ -134,10 +134,10 @@ pub struct AgentConfig {
 
 /// Default time-to-first-token grace for streaming LLM calls (180s).
 pub const DEFAULT_LLM_FIRST_TOKEN_GRACE_SECS: u64 = 180;
-/// Default inter-chunk idle timeout for streaming LLM calls (90s).
-pub const DEFAULT_LLM_STREAM_IDLE_SECS: u64 = 90;
-/// Default overall wall-clock cap for a single streaming LLM call (1200s / 20m).
-pub const DEFAULT_LLM_CALL_MAX_SECS: u64 = 1200;
+/// Default inter-chunk idle timeout for streaming LLM calls (600s).
+pub const DEFAULT_LLM_STREAM_IDLE_SECS: u64 = 600;
+/// Default overall wall-clock cap for a single streaming LLM call (1800s / 30m).
+pub const DEFAULT_LLM_CALL_MAX_SECS: u64 = 1800;
 
 /// Pure clamp behind the `env_secs_*` readers: apply `[min, 86_400]` to a
 /// parsed value, or fall back to `default_secs` when the var was absent or
