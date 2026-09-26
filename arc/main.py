@@ -19,7 +19,11 @@ Configuration is via environment variables:
     OCTOS_BIN       (path to the octos binary; default: ./bin/octos then PATH)
     OCTOS_MAX_ITERATIONS (default 500)
     OCTOS_NODE_TIMEOUT   (idle seconds per requirement node, default 1200)
-    OCTOS_TIME_BUDGET    (wall-clock seconds for the whole flow, default 5400)
+    OCTOS_TIME_BUDGET    (wall-clock seconds for the whole flow, default 0
+                          = unlimited, except when ARCBENCH_AGENT_TIMEOUT /
+                          AGENT_RUN_TIMEOUT_SECONDS is visible in the env —
+                          then timeout − 3600 so the flow lands itself
+                          before the outer runner kill)
     OCTOS_NODE_WALL      (hard wall clock per turn, default 45% of budget)
     OCTOS_FINAL_RESERVE  (tail slice kept for final verification, default
                           max(300, budget//9))
@@ -125,6 +129,64 @@ def _handover_pristine_seed(output_dir: Path) -> None:
     if run_db.exists():
         log("[postflight] ERROR: backend/data/db.run.json still present "
             "at handover — eval may boot from stale runtime state")
+
+
+def _prune_acceptance_junk(output_dir: Path, tests_dir: Path | None,
+                           log=print) -> list[str]:
+    """终验前清扫 .arc/acceptance/ 里 staged 清单之外的残留。
+
+    hg-github-001:模型调试期往"只读" staged 区写了 _dbg.spec.ts /
+    _req34/_req41/_req422 且残留到最后——终验全量 SPEC RUN 会把幻影
+    测试吃进信号。eval 不受影响(评测跑 /workspace/tests 副本),这里
+    保的是 in-flow 终验的纯净。白名单 = tests_dir 的 spec 文件名 +
+    support/node_modules/playwright.config.ts。
+    """
+    if tests_dir is None or not tests_dir.is_dir():
+        return []
+    stage = output_dir / ".arc" / "acceptance"
+    if not stage.is_dir():
+        return []
+    keep = ({p.name for p in tests_dir.glob("*.spec.ts")}
+            | {"support", "node_modules", "playwright.config.ts"})
+    removed: list[str] = []
+    for p in sorted(stage.iterdir()):
+        if p.name in keep:
+            continue
+        was_dir = p.is_dir()
+        if was_dir:
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            p.unlink(missing_ok=True)
+        removed.append(p.name + ("/" if was_dir else ""))
+    if removed:
+        log(f"[postflight] pruned acceptance junk: {', '.join(removed)}")
+    return removed
+
+
+def _segment_digest(node_done_notes: dict[str, str],
+                    plan_statuses: dict[str, str]) -> str:
+    """分段后首 turn 注入的"上段做了什么"正版答案(≤2000 字符)。
+
+    hg-github-001:分段后模型翻自己的事件日志/重读已读文件来重建
+    记忆(turn7: 74 工具里 32 个 .arc 考古 + 30 个重读,0 编辑;跨段
+    重复 4 次)。HOST REPORT 不承载逐节点结论,这里把宿主已知的最短
+    事实(节点→完成留言尾)喂进去,配合追踪区关读护栏切断考古路径。
+    """
+    lines = [
+        "",
+        "SEGMENT DIGEST (host record of EARLIER sessions — do NOT "
+        "re-derive context from .arc; this list is authoritative):"]
+    done = [(nid, note) for nid, note in node_done_notes.items()
+            if plan_statuses.get(nid, "done") != "blocked"]
+    for nid, note in reversed(done):  # 最近的在前,超限裁老的
+        entry = f"- {nid}: {' '.join(note.split())[:150] or 'done'}"
+        lines.append(entry)
+    while len("\n".join(lines)) > 1900 and len(lines) > 3:
+        lines.pop()
+    lines.append(
+        "backend/data/db.json seeds match the requirement text (the host "
+        "verified them) — build on them, do not re-audit.")
+    return "\n".join(lines)[:2000]
 
 
 def _postflight_structure_check(output_dir: Path, web_port: int = 3000) -> None:
@@ -1220,8 +1282,7 @@ def build_octos_env(config_dir: Path) -> dict:
         "model": model,
         "sandbox": {"allow_network": True},
         "memory": {"refresh": {"enabled": False}},
-        # Rounds 24-28: deepseek-v4 turns ended "ok" with EMPTY content and
-        # zero tool calls. Root cause (octos source): when ChatConfig.
+        #  Root cause (octos source): when ChatConfig.
         # max_tokens is unset, octos sends no max_tokens for deepseek-family
         # models, so the provider's tiny default (4096) applies — the
         # reasoning model spends the whole budget on reasoning_content and
@@ -1229,7 +1290,7 @@ def build_octos_env(config_dir: Path) -> dict:
         # gateway.max_output_tokens feeds AgentConfig.chat_max_tokens.
         # 32768 proved insufficient headroom in round 34 (six consecutive
         # ~150s turns of pure reasoning, empty content); raised to 65536.
-        "gateway": {"max_output_tokens": 65536},
+        "gateway": {"max_output_tokens": 131072},
     }
     if provider not in ("openai", "deepseek", "anthropic") and base_url:
         config["base_url"] = base_url
@@ -1245,10 +1306,12 @@ def build_octos_env(config_dir: Path) -> dict:
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     env["OCTOS_CONFIG_DIR"] = str(config_dir)
-    # The platform's model proxies do not support SSE streaming (the official
-    # octos-runner sets this too) — without it octos dies with
-    # "failed to send streaming request to OpenAI".
-    env.setdefault("OCTOS_DISABLE_STREAMING", "1")
+    # 600s keeps genuine long thinks alive while the
+    # 1200s overall call cap still bounds a dead connection. NOTE the old
+    # OCTOS_DISABLE_STREAMING=1 here was dead — no kernel consumer exists;
+    # streaming works fine on the arc-bench gateway and is now kept.
+    env.setdefault("OCTOS_LLM_STREAM_IDLE_SECS", "600")
+    env.setdefault("OCTOS_LLM_FIRST_TOKEN_GRACE_SECS", "480")
     # Run 50d049b049bd (2026-09-11): inside the ARC runner container the
     # default Workspace-Write sandbox could not exec node/npm ("Permission
     # denied"), so the model spent 813s / 3.8M tokens simulating tests it
@@ -1278,6 +1341,13 @@ def build_octos_env(config_dir: Path) -> dict:
     # sibling nodes were unimplemented. The host's Tier-2 chain owns
     # full-suite verification; escape hatch `# octos:allow-full-suite`.
     env.setdefault("OCTOS_DENY_FULL_SPEC_RUN", "1")
+    # Refuse reads of the host trace/debug subset under .arc (own event log,
+    # node_states, debug/stdout/stderr, host-plan): hg-github-001 spent its
+    # session-segment turns mining those files to reconstruct prior sessions
+    # instead of editing. Sanctioned carriers are SEGMENT DIGEST / HOST
+    # REPORT; .arc/acceptance + .arc/host + fixture-manifest stay readable;
+    # escape hatch `# octos:allow-trace-read`.
+    env.setdefault("OCTOS_DENY_TRACE_READ", "1")
     # Compaction threshold: octos derives it as context_window × 7/10. agnes
     # (512k window, 64k max output) used to fall back to the 128k unknown-
     # model default → an 89.6k threshold that re-trimmed long turns nowhere
@@ -2433,6 +2503,27 @@ def main() -> int:
         # without a total budget still makes bounded, observable progress.
         # A positive OCTOS_TIME_BUDGET restores the finite-budget path
         # (node skipping, final-tail reservation) verbatim.
+        #
+        # Soft-landing default (hg-github-001 lesson, 2026-09-25): with no
+        # explicit budget the only stop is the OUTER runner kill (12h in
+        # the sim) — being killed mid-flight skips postflight entirely and
+        # db.run.json ships, so eval boots from stale runtime state (the
+        # run11 root cause). When the outer timeout is visible in the
+        # environment, derive the budget as timeout − 3600 (1h margin for
+        # final verification + postflight + eval boot) so the flow lands
+        # itself.
+        if "OCTOS_TIME_BUDGET" not in os.environ:
+            outer_timeout = os.environ.get("ARCBENCH_AGENT_TIMEOUT") or \
+                os.environ.get("AGENT_RUN_TIMEOUT_SECONDS")
+            if outer_timeout:
+                try:
+                    os.environ["OCTOS_TIME_BUDGET"] = str(
+                        max(0, int(outer_timeout) - 3600))
+                    log("[flow] soft-landing budget derived from outer "
+                        f"timeout {outer_timeout}s: "
+                        f"{os.environ['OCTOS_TIME_BUDGET']}s")
+                except ValueError:
+                    pass
         budget = int(os.environ.get("OCTOS_TIME_BUDGET", "0"))
         # Per-turn hard wall. Decoupled from the budget (it used to be
         # budget*0.45): standalone default 3600s per single node/batch-1,
@@ -2812,6 +2903,8 @@ def main() -> int:
             if codegen:
                 codegen.start()
             failed: list[str] = []
+            node_done_notes: dict[str, str] = {}
+            segment_digest_pending = False
             for idx, batch in enumerate(node_batches, 1):
                 # A2 会话分段:每 SEGMENT_BATCHES 批重置 stdio 会话,切断
                 # O(n²) 历史重放(run-002 实测 1.35 亿 token 的主 driver)。
@@ -2825,6 +2918,7 @@ def main() -> int:
                     log(f"[flow] session segmentation: closing session "
                         f"before batch {idx} (every {segment_every})")
                     driver.close()
+                    segment_digest_pending = True
                 # Finite-budget degrade: trim the batch tail while the
                 # remaining tail cannot fit it (an unlimited budget never
                 # trims). Trimmed nodes take the legacy skip bookkeeping.
@@ -2908,6 +3002,12 @@ def main() -> int:
                     node_prompt = NODE_PROMPT_TEMPLATE.format(
                         port=args.web_port, smoke=smoke_port,
                         node_spec=node_spec) + tests_prompt_slim
+                if segment_digest_pending:
+                    # P3:分段后首 turn 的正版记忆——逐节点完成笔记,
+                    # 替代模型翻 .arc 考古(见 _segment_digest 注释)。
+                    node_prompt += _segment_digest(
+                        node_done_notes, plan_statuses)
+                    segment_digest_pending = False
                 if codegen_on and not scaffold.schema_path(output_dir).exists():
                     node_prompt += SCHEMA_DIRECTIVE
                 if template_ready:
@@ -3024,6 +3124,7 @@ def main() -> int:
                     continue
                 for nid in batch_ids:
                     events.mark_implementation_done(nid, text[-500:] or None)
+                    node_done_notes[nid] = (text or "")[-160:]
                 runtime.git.commit(
                     f"{focus_id} (implement): "
                     + "; ".join(str(n.get("name", "")) for n in batch))
@@ -3092,6 +3193,7 @@ def main() -> int:
                                 failed.remove(nid)
                                 events.mark_implementation_done(
                                     nid, "recovered via host rehearsal")
+                                node_done_notes[nid] = "recovered via host rehearsal"
                     if (r_err is None and tests_dir and pre_batch_head
                             and not time_up()
                             and os.environ.get("OCTOS_ARC_HOST_GRADE",
@@ -3222,6 +3324,7 @@ def main() -> int:
                     shared_contract=shared_contract,
                     specs_staged=specs_staged,
                     arrange_nodes=fixture_arranged_nodes)
+                _prune_acceptance_junk(output_dir, tests_dir, log)
                 if f_err is None and tier2_run is not None and tier2_run[1] == 0 and tier2_run[0] > 0:
                     ok, text = True, ("host spec run all green "
                                       f"({tier2_run[0]} passed); final LLM turn skipped")

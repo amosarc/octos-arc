@@ -158,6 +158,67 @@ class HackathonGithubCompileTests(unittest.TestCase):
         names = {e["name"] for e in self.compiled["schema"]["entities"]}
         self.assertTrue({"branches", "issues", "pulls", "labels",
                          "milestones", "comments"} <= names)
+        self.assertIn("commits", names,
+                      "commits 实体必须入 schema(REQ-4-2 历史/对比页)")
+
+    def test_repo_visibility_and_org_attachment(self):
+        """属性级保真(hg-github-001):private 修饰语落库、逐字仓库挂逐字 org。"""
+        ents = self.compiled["db"]
+        repos = {r["name"]: r for r in ents["repositories"]}
+        self.assertEqual(repos["acme-docs"]["visibility"], "public")
+        self.assertEqual(repos["secret-research"]["visibility"], "private",
+                         "需求原文 private repository `secret-research`")
+        self.assertEqual(repos["acme-docs"]["orgName"], "Acme Demo")
+        self.assertEqual(repos["secret-research"]["orgName"], "Acme Demo")
+        self.assertNotIn("fixture-org",
+                         [o["name"] for o in ents["organizations"]],
+                         "有逐字 org 时不再落合成 fixture-org")
+
+    def test_owner_membership_role(self):
+        members = self.compiled["db"]["members"]
+        owner = next((m for m in members
+                      if m["username"] == "alice-dev"), None)
+        self.assertIsNotNone(owner, "owner `alice-dev` 须成为组织成员")
+        self.assertEqual(owner["role"], "owner")
+
+    def test_issue_attributes_labels_description_closed_companion(self):
+        issues = {i["title"]: i for i in self.compiled["db"]["issues"]}
+        main = issues["Improve onboarding"]
+        self.assertEqual(main["labels"], "bug, documentation")
+        self.assertEqual(main["description"],
+                         "Describe the onboarding improvement.")
+        self.assertEqual(main["author"], "alice-dev")
+        closed = issues.get("Legacy welcome text")
+        self.assertIsNotNone(closed, "closed 伴随 issue 须入种子")
+        self.assertEqual(closed["status"], "closed")
+
+    def test_pull_states_authors_reviewers_and_comment(self):
+        pulls = {p["title"]: p for p in self.compiled["db"]["pulls"]}
+        self.assertEqual(pulls["Improve onboarding"]["status"], "open")
+        self.assertEqual(pulls["Fix search"]["status"], "closed",
+                         "one Open PR ... one Closed PR → 列表序首开次闭")
+        self.assertEqual(pulls["Improve onboarding"]["author"], "alice-dev",
+                         "created by `alice` 前缀解析到逐字账号")
+        self.assertEqual(pulls["Improve onboarding"]["reviewers"],
+                         "bob-reviewer")
+        comments = self.compiled["db"]["comments"]
+        self.assertTrue(any(c["parentType"] == "pull" for c in comments),
+                        "PR discussion comment 种子(REQ-6-3-1)")
+        self.assertTrue(any(c["parentType"] == "issue" for c in comments),
+                        "issue comment 种子(REQ-5-1-2)")
+
+    def test_commits_seeded_not_dropped(self):
+        commits = self.compiled["db"]["commits"]
+        self.assertIn("Document search flow", [c["message"] for c in commits])
+        self.assertEqual(commits[0]["repoName"], "acme-docs")
+
+    def test_no_synthetic_fixture_users_with_literal_accounts(self):
+        """门控:需求已给逐字账号矩阵时,fixture-* 合成号是需求外实体。"""
+        users = [u["username"] for u in self.compiled["db"]["users"]]
+        for synth in ("fixture-write", "fixture-maintain",
+                      "fixture-admin", "fixture-reviewer"):
+            self.assertNotIn(synth, users)
+        self.assertEqual(users, ["alice-dev"])
 
 
 class InteractionContractTests(unittest.TestCase):
