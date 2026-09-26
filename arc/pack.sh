@@ -110,7 +110,7 @@ EOF
 # 或 ARCBENCH_TESTS_DIR 优先生效;两者皆缺的任务走 no-staged-specs 的
 # "走查运行中应用"契约(main.py locate_acceptance_tests 的包内回落分支
 # 因此休眠)。仓库内 arc/public-tests 仅供本地 sim 的 --tests-dir 使用。
-cp main.py plan_envelope.py fixture_manifest.py octos_stdio.py requirements.txt "$PKG/"
+cp main.py plan_envelope.py fixture_manifest.py ui_smoke.py ui_smoke_spec_template.ts octos_stdio.py requirements.txt "$PKG/"
 cp -R arcbench_agent_runtime scaffold bin "$PKG/"
 # Tier-2 评测链物料：只带清单文件，node_modules 由容器内
 # _ensure_host_toolchain 幂等安装落地（2026-09-20 漏打导致安装 ENOENT、

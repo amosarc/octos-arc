@@ -262,6 +262,16 @@ Rules the graders assert verbatim (see your INTERACTION SEMANTICS section):
   current rectangle, false outside.
 - One visible error element per failure, exact message strings from the
   requirement.
+- DIALOG CONTRACT: every dialog closes on Escape AND on cancel/overlay
+  click, and its confirm button carries the requirement's EXACT name
+  ("Delete", not "Delete worksheet"). An undismissable overlay blocks
+  every later grader step; a misnamed confirm is never found.
+- SELECTION CONTRACT: Shift-click EXTENDS the selection — the plain
+  click handler must not collapse it (guard with e.shiftKey); sort /
+  filter / validation / pivot ranges all read the selection anchor, so
+  one collapsing handler breaks five requirement families.
+- Downloaded/exported files are byte-exact: no UTF-8 BOM, exact CSV
+  quoting.
 
 Keep feature files additive: a later requirement EXTENDS the state model
 (import it) instead of forking it — the post-batch regression runs every

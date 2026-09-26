@@ -1194,6 +1194,35 @@ mod tests {
     }
 
     #[test]
+    fn ui_smoke_run_command_shape_passes_every_guard() {
+        // The host-authored UI contract smoke (arc/ui_smoke.py) stages its
+        // suite at .arc/ui-smoke/ and sanctions an agent-side invocation of
+        // the same shape as SPEC RUN. All three ARC guards must let it
+        // through: not an inline node payload, not the .arc/acceptance
+        // config, not a trace-subset path. Inline self-rolled browser
+        // scripts stay refused (hackathon--sheet: the model had no browser
+        // verification channel at all and shipped 6 defect classes).
+        let cmd = "node /w/local-grader/node_modules/@playwright/test/cli.js \
+                   test --config .arc/ui-smoke/playwright.config.ts";
+        assert!(!command_looks_like_browser_script(cmd));
+        assert!(!command_looks_like_full_spec_run(cmd));
+        assert!(!command_references_trace_subset(cmd));
+        let npx = "npx --yes @playwright/test test --config .arc/ui-smoke/playwright.config.ts";
+        assert!(!command_looks_like_browser_script(npx));
+        assert!(!command_looks_like_full_spec_run(npx));
+        assert!(!command_references_trace_subset(npx));
+        // And the refusal side stays intact: inline self-rolled browser
+        // scripts still match, and .arc/ui-smoke is not on the trace-deny
+        // list (the smoke suite + its report stay agent-readable).
+        assert!(command_looks_like_browser_script(
+            "node -e \"const {chromium} = require('playwright')\""
+        ));
+        assert!(!TRACE_READ_DENIED
+            .iter()
+            .any(|m| m.contains("ui-smoke")));
+    }
+
+    #[test]
     fn browser_escape_hatch_authorizes_explicitly() {
         let cmd = "node -e 'chromium.launch()' # octos:allow-browser";
         assert!(command_allows_browser_explicitly(cmd));

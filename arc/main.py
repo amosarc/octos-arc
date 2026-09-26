@@ -55,6 +55,7 @@ from arcbench_agent_runtime import AgentRuntime  # noqa: E402
 import fixture_manifest  # noqa: E402  (夹具契约提取/宿主种子编译)
 import plan_envelope  # noqa: E402
 import scaffold  # noqa: E402  (宿主脚手架包:模板/清单/schema 编译唯一公开面)
+import ui_smoke  # noqa: E402  (requirements-only 任务的宿主 UI 契约冒烟)
 
 
 _DEBUG_LOG_PATH: Path | None = None
@@ -1916,9 +1917,16 @@ VERIFICATION (no staged specs): this task has NO acceptance specs on \
 disk — the graded tests are hidden and derived from the requirement \
 text. There is NO SPEC RUN command: never look for .arc/acceptance, \
 never write your own Playwright/Puppeteer/chromium script, and never \
-spawn a browser. Verify by walking the RUNNING app on port {smoke} \
-(curl the API, rebuild the frontend, re-check the FOCUS chains in the \
-rendered UI); the host rehearsal report lands in your next HOST REPORT.\
+spawn a browser of your own. The host runs a UI CONTRACT SMOKE suite \
+(headless browser, host-authored assertions over the quoted contract \
+strings) and stages it read-only at .arc/ui-smoke/ — run the sanctioned \
+UI SMOKE RUN command below whenever you want a browser-level self-check \
+against the dev server as-is; reds are host-authored contract failures \
+(exact accessible names, openable chains, closable dialogs, selection \
+semantics, BOM-free exports) — fix the app, then rerun. Between turns, \
+also verify by walking the RUNNING app on port {smoke} (curl the API, \
+rebuild the frontend); the host rehearsal report lands in your next \
+HOST REPORT.\
 """
 
 BATCH_DIRECTIVE_NO_SPEC = """\
@@ -2043,17 +2051,59 @@ check. Fix what is wrong; do not rebuild what works. Do not commit.\
 """
 
 HOST_FINAL_CHECK_UI_PROMPT = """\
-The host verified build + boot + ports only — the graded tests assert \
-UI behavior, which the host cannot check. YOU verify the UI: walk every \
-action chain in the ACCEPTANCE sections on the running app — visible \
-feedback for every named control, exactly one visible error element per \
-failure, strict-mode unique echoes, verbatim labels and seeded values. \
-Report one line of evidence per chain; an empty "all good" without \
-evidence is a failed check. BUDGET: one walk per chain — verify each \
-chain once, fix only what is red, then end the turn; never re-run whole \
+The host verified build + boot + ports, plus the UI CONTRACT SMOKE \
+browser suite where available — semantic behavior (correct values, \
+ordering, formatting) is still yours to verify. Walk the action chains \
+in the ACCEPTANCE sections on the running app — visible feedback for \
+every named control, exactly one visible error element per failure, \
+strict-mode unique echoes, verbatim labels and seeded values. Report \
+one line of evidence per chain; an empty "all good" without evidence \
+is a failed check. BUDGET: one walk per chain — verify each chain \
+once, fix only what is red, then end the turn; never re-run whole \
 suites and never re-verify chains that already passed. Fix what is \
 broken; do not rebuild what works. Do not commit.\
 """
+
+UI_SMOKE_REPAIR_PROMPT = """\
+HOST UI SMOKE RED — the host ran its browser contract suite against \
+your app (port {smoke}) and these checks FAILED. Each item is a \
+host-authored contract assertion, not a suggestion. Fix the app code \
+(paths under frontend/src), rebuild with `npm run build` in frontend/, \
+restart via `sh .arc/host/restart-server.sh {smoke}`, then rerun the \
+UI SMOKE RUN command to confirm green. Do not touch passing flows.
+
+Red items (probe | contract string | what the browser found):
+{reds}
+
+Fix directions by probe: affordance = no visible control carries the \
+exact string — implement the chain or surface the control (hidden \
+<select> options do NOT count: render visible radios/buttons); \
+exact-name = a dialog button contains the contract string only as a \
+substring — rename it to the EXACT accessible name; escape-close = \
+the dialog must close on Escape (and overlay/cancel), an \
+undismissable overlay blocks every later grader step; shift-select = \
+click + Shift-click must keep BOTH cells aria-selected="true" — never \
+collapse the selection in the click handler; page-alive = an \
+interaction left the page unclickable (stuck overlay); download = \
+exported file is empty or starts with a UTF-8 BOM — strip it.\
+"""
+
+def _ui_smoke_red_lines(ui_run: dict, limit: int = 12) -> str:
+    """红项 → 提示词用的一行一证据清单(去重、限长)。"""
+    seen: set = set()
+    lines: list[str] = []
+    for r in ui_run.get("reds") or []:
+        key = (r.get("probe"), r.get("string"))
+        if key in seen:
+            continue
+        seen.add(key)
+        nodes = ",".join(r.get("nodes") or []) or "-"
+        detail = str(r.get("detail") or "").split(" — ")[0][:110]
+        lines.append(f"- [{r.get('probe')}] \"{r.get('string')}\" "
+                     f"({nodes}): {detail}")
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines)
 
 ACCEPTANCE_STAGED_NOTE = """\
 The official Playwright specs are staged READ-ONLY at .arc/acceptance/ \
@@ -2589,6 +2639,26 @@ def main() -> int:
             spec_ports_extra = sorted(
                 {p for p in spec_base_ports(tests_dir)
                  if p not in (args.web_port, smoke_port)})
+        # UI 契约冒烟(hackathon--sheet 3 分根因的修复通道):requirements-only
+        # 任务(无 staged specs)的宿主验证原本止步 HTTP 层,而模型被禁止
+        # 跑浏览器——六类 UI 契约缺陷全盲。宿主生成契约爬虫套件只读落盘
+        # .arc/ui-smoke/,并下发与 SPEC RUN 同构的被批准自检命令;批末做
+        # 静态轻检,final 跑完整爬虫+修复循环。内核三道 guard 对该命令
+        # 形状结构性放行(shell.rs ui_smoke_run_command_shape_passes_every_guard)。
+        ui_smoke_entries: list = []
+        ui_smoke_cmd = ""
+        if (plan_on and tests_dir is None
+                and os.environ.get("OCTOS_ARC_UI_SMOKE", "1") != "0"):
+            ui_smoke_entries = ui_smoke.collect_contract_strings(tree)
+            cli_hint = (str(toolchain_cli)
+                        if toolchain_cli is not None else
+                        "local-grader/node_modules/@playwright/test/cli.js")
+            ui_smoke.stage_ui_smoke(output_dir, ui_smoke_entries,
+                                    smoke_port, cli_hint)
+            ui_smoke_cmd = ui_smoke.build_ui_smoke_cmd(
+                str(toolchain_cli) if toolchain_cli is not None else None)
+            log(f"[plan] UI contract smoke staged: "
+                f"{len(ui_smoke_entries)} contract strings")
         # 宿主模板无条件落盘：平台在 agent 退出后强制检查 workspace 的
         # frontend/ 与 backend/，与 plan 能力、验收测试是否定位到均无关；
         # 落盘是确定性本地写文件，skeleton 轮只负责在模板之上补全。
@@ -2908,6 +2978,9 @@ def main() -> int:
             node_done_notes: dict[str, str] = {}
             segment_digest_pending = False
             for idx, batch in enumerate(node_batches, 1):
+                # 批末 UI 静态轻检的红串(建议性)——下一批节点 prompt 顶部
+                # 提醒,不阻断不翻状态;final 的完整爬虫才是权威判定。
+                ui_smoke_note = ""
                 # A2 会话分段:每 SEGMENT_BATCHES 批重置 stdio 会话,切断
                 # O(n²) 历史重放(run-002 实测 1.35 亿 token 的主 driver)。
                 # 上下文经 planctl 磁盘重水合续命(envelope + repoMap 全量
@@ -2985,7 +3058,8 @@ def main() -> int:
                         node_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
                             node_id=focus_id, node_spec=node_spec,
                             port=args.web_port, smoke=smoke_port) \
-                            + NO_STAGED_SPECS_NOTE.format(smoke=smoke_port)
+                            + NO_STAGED_SPECS_NOTE.format(smoke=smoke_port) \
+                            + ui_smoke_cmd
                     if len(batch) > 1:
                         node_prompt += (
                             BATCH_DIRECTIVE.format(
@@ -3012,6 +3086,8 @@ def main() -> int:
                     # 直到本批某个 turn 真正成功才在下方清掉。
                     node_prompt += _segment_digest(
                         node_done_notes, plan_statuses)
+                if ui_smoke_note:
+                    node_prompt += ui_smoke_note
                 if codegen_on and not scaffold.schema_path(output_dir).exists():
                     node_prompt += SCHEMA_DIRECTIVE
                 if template_ready:
@@ -3190,6 +3266,28 @@ def main() -> int:
                             log(f"[plan] batch rollback failed: {exc}")
                     for nid in batch_ids:
                         plan_statuses[nid] = batch_state
+                    # UI 契约静态轻检(秒级,读 frontend/dist 文件,不 boot):
+                    # 契约串逐字缺失=整条链没实现(sheet 实证的 Rename
+                    # workbook 类)。红串建议性提醒到下一批,权威判定在 final。
+                    if ui_smoke_entries:
+                        static = ui_smoke.scan_built_assets(
+                            output_dir / "frontend" / "dist",
+                            ui_smoke_entries)
+                        if static.get("attempted") and static["reds"]:
+                            miss = ", ".join(
+                                f'"{r["value"]}"({",".join(r["nodes"][:2])})'
+                                for r in static["reds"][:8])
+                            ui_smoke_note = (
+                                "\nUI SMOKE static scan (host, advisory): "
+                                f"{len(static['reds'])} contract string(s) "
+                                "absent from the built bundle — the whole "
+                                "chain is likely unimplemented: " + miss +
+                                ". Implement or surface them; the final "
+                                "browser crawl re-checks.\n")
+                            log(f"[plan] ui-smoke static: "
+                                f"{len(static['reds'])} missing")
+                        else:
+                            ui_smoke_note = ""
                     if r_err is None:
                         # Wall-cut turn whose code actually rehearsal-greened.
                         completed_specs.extend(
@@ -3322,6 +3420,46 @@ def main() -> int:
                         f"{tier2_run[0]}p/{tier2_run[1]}f"
                         if tier2_run else "[plan] Tier-2 unavailable; "
                                          "degrading to model final check")
+                # UI 契约冒烟权威判定(requirements-only 任务):从种子起跑
+                # 完整浏览器爬虫;红项=宿主 authored 契约失败,先走 ≤2 轮
+                # 修复循环,终态红项进 final prompt 作为 ground truth。
+                ui_run = None
+                if (ui_smoke_entries and f_err is None
+                        and not time_up()):
+                    ui_run = ui_smoke.run_smoke(
+                        output_dir, smoke_port, ui_smoke_entries,
+                        spec_ports_extra)
+                    if ui_run is not None:
+                        log(f"[plan] UI contract smoke: "
+                            f"{ui_run['passed']}p/{ui_run['failed']}f "
+                            f"({len(ui_run['reds'])} red item(s))")
+                        for fix_attempt in (1, 2):
+                            if not ui_run["reds"] or time_up():
+                                break
+                            r_wall = turn_wall(1)
+                            reds_txt = _ui_smoke_red_lines(ui_run, limit=12)
+                            driver.run(UI_SMOKE_REPAIR_PROMPT.format(
+                                reds=reds_txt, port=args.web_port,
+                                smoke=smoke_port),
+                                min(node_timeout, r_wall), r_wall)
+                            # 修复后必须重建前端再复检(爬虫对着 dist 跑)。
+                            _rehearse_startup(output_dir, smoke_port,
+                                              probes=[], extra_ports=[],
+                                              report={"build_ok": False,
+                                                      "boot_ok": False,
+                                                      "routes": [],
+                                                      "digest": ""},
+                                              fixture_probes=[])
+                            ui_run = ui_smoke.run_smoke(
+                                output_dir, smoke_port, ui_smoke_entries,
+                                spec_ports_extra)
+                            log(f"[plan] ui-smoke repair {fix_attempt}: "
+                                f"{ui_run['failed']}f"
+                                if ui_run else
+                                f"[plan] ui-smoke repair {fix_attempt}: n/a")
+                    else:
+                        log("[plan] UI contract smoke not attempted "
+                            "(toolchain/boot unavailable)")
                 driver.set_envelope(
                     phase="final", task=plan_task, atomic_nodes=atomic_nodes,
                     statuses=plan_statuses, focus=None, ports=plan_ports,
@@ -3333,7 +3471,11 @@ def main() -> int:
                     specs_staged=specs_staged,
                     arrange_nodes=fixture_arranged_nodes)
                 _prune_acceptance_junk(output_dir, tests_dir, log)
-                if f_err is None and tier2_run is not None and tier2_run[1] == 0 and tier2_run[0] > 0:
+                ui_green = (ui_run is not None and ui_run["failed"] == 0
+                            and ui_run["passed"] > 0)
+                if (f_err is None and tier2_run is not None
+                        and tier2_run[1] == 0 and tier2_run[0] > 0
+                        and (not ui_smoke_entries or ui_green)):
                     ok, text = True, ("host spec run all green "
                                       f"({tier2_run[0]} passed); final LLM turn skipped")
                     log("[plan] Tier-2 all green; skipping final LLM turn")
@@ -3361,6 +3503,25 @@ def main() -> int:
                             f"{tier2_run[0]} staged specs PASS on port "
                             f"{smoke_port}. Do not re-run suites; spot-check "
                             "one chain if you must, then end the turn.")
+                    if ui_run is not None and ui_run["reds"]:
+                        # UI 契约爬虫红项=宿主 authored ground truth:点名
+                        # 串+探针+证据,模型只修红项、不重建绿项。
+                        final_prompt += (
+                            "\nHOST UI SMOKE (ground truth, headless "
+                            f"browser vs this app on port {smoke_port}): "
+                            f"{ui_run['passed']} passed, {ui_run['failed']} "
+                            f"FAILED. Red items:\n"
+                            + _ui_smoke_red_lines(ui_run, limit=14)
+                            + "\nFix exactly these (exact accessible names, "
+                            "visible controls, Escape-closable dialogs, "
+                            "Shift-click keeps selection, BOM-free exports); "
+                            "rerun the UI SMOKE RUN command after fixing.")
+                    elif ui_green and not tests_dir:
+                        final_prompt += (
+                            "\nHOST UI SMOKE (ground truth): all browser "
+                            f"contract checks PASS ({ui_run['passed']}). "
+                            "Spot-check one semantic chain if you must, "
+                            "then end the turn.")
                     # Filtered to the red tests' own specs (or all staged
                     # files as fallback): the final turn never needs the
                     # unfiltered full-suite form — Tier-2 owns that, and

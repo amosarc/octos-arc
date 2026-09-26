@@ -92,7 +92,18 @@ page, shows exactly ONE visible error, and creates no records or \
 sessions. Empty, oversized, or wrong-type payloads must be rejected \
 (4xx) — a 5xx on any input is a bug. Before declaring done, walk the \
 FAILURE cases (empty/missing/oversized/duplicate), not just the happy \
-path."""
+path.
+
+UI CONTRACT HYGIENE (graded in a real browser by the host smoke and \
+the hidden tests): every quoted string in a requirement is a VISIBLE \
+control with that EXACT accessible name — substring variants \
+("Delete worksheet" vs the required "Delete") fail, and hidden \
+<select> options are not visible controls (render radios/buttons \
+instead); every dialog closes on Escape AND on cancel/overlay click — \
+an undismissable overlay blocks every later grader step; modifier \
+clicks keep selection (Shift-click extends the range — never collapse \
+it to the clicked cell in the click handler); downloads are \
+byte-exact: no UTF-8 BOM, exact CSV quoting."""
 
 # 契约前缀双语表(中文全角冒号 / 英文冒号,英文大小写不敏感)
 _VALIDATION_PREFIXES = ("Validation 契约：", "Validation contract:")
