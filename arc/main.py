@@ -2189,8 +2189,10 @@ def locate_acceptance_tests(tree: dict, bundle_dir: Path) -> Path | None:
     Order: ARCBENCH_TESTS_DIR env, the runner's /workspace/tests mount, then
     a public-tests/ folder shipped inside the bundle (one sub-folder per
     requirement id, picked by matching the requirement ROOT name recorded in
-    public-tests/manifest.json). The platform publishes these specs on every
-    task page, so shipping them is public information, not hidden test data.
+    public-tests/manifest.json). NOTE (2026-09-26): competition bundles ship
+    WITHOUT public-tests (pack.sh excludes it) — the platform mounts win, and
+    tasks with no visible tests use the walk-the-app contract; the bundle
+    fallback stays only for custom deployments that opt to carry specs.
     """
     candidates: list[Path] = []
     env_dir = os.environ.get("ARCBENCH_TESTS_DIR")

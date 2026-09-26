@@ -103,11 +103,15 @@ templates:
 EOF
 
 # 运行时必需：main.py 顶层 import(plan_envelope/fixture_manifest/scaffold/
-# arcbench_agent_runtime) + 惰性 import(octos_stdio) + 验收测试(public-tests)
-# + 内核(bin/) + 初始模板(template/)
+# arcbench_agent_runtime) + 惰性 import(octos_stdio) + 内核(bin/) + 初始
+# 模板(template/)
 # (fixture_manifest.py:夹具契约提取/宿主种子编译——main.py 顶层依赖,漏打即启动崩)
+# public-tests 不进包(2026-09-26 正式比赛决策):平台挂载 /workspace/tests
+# 或 ARCBENCH_TESTS_DIR 优先生效;两者皆缺的任务走 no-staged-specs 的
+# "走查运行中应用"契约(main.py locate_acceptance_tests 的包内回落分支
+# 因此休眠)。仓库内 arc/public-tests 仅供本地 sim 的 --tests-dir 使用。
 cp main.py plan_envelope.py fixture_manifest.py octos_stdio.py requirements.txt "$PKG/"
-cp -R arcbench_agent_runtime public-tests scaffold bin "$PKG/"
+cp -R arcbench_agent_runtime scaffold bin "$PKG/"
 # Tier-2 评测链物料：只带清单文件，node_modules 由容器内
 # _ensure_host_toolchain 幂等安装落地（2026-09-20 漏打导致安装 ENOENT、
 # 自验命令链整体降级）。
