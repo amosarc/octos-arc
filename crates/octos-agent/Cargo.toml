@@ -92,9 +92,10 @@ keyring = { workspace = true, features = ["windows-native"] }
 rustix = { workspace = true }
 
 [features]
-# `ast` is a default feature: the testgen pipeline (host-side test-case
-# generation) hard-depends on tree-sitter contract extraction, and a
-# no-ast build would silently lose the coding-agent's test capability.
+# `ast` is a default feature: the planctl repo-map/spec scan and the
+# `code_structure` tool hard-depend on tree-sitter, and a no-ast build
+# would silently lose the ARC plan's repo-map rendering plus symbol
+# navigation.
 ast = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-python", "dep:tree-sitter-javascript", "dep:tree-sitter-typescript", "dep:grep-searcher", "dep:grep-regex"]
 default = ["ast"]
 

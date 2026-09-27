@@ -2451,7 +2451,7 @@ const MAX_DELEGATE_TIMEOUT_MS: u64 = 3_600_000;
 ///
 /// `role` is resolved through the M14-C `RoleTemplate` registry when
 /// the name matches one of the canonical roles (`reviewer`,
-/// `implementer`, `test_worker`, `test_writer`, `explorer`); unknown role names are
+/// `implementer`, `test_worker`, `explorer`); unknown role names are
 /// rejected at the tool boundary so a typo (`"review"` vs `"reviewer"`)
 /// surfaces immediately instead of silently smuggling an unbounded
 /// prompt through.
@@ -2491,7 +2491,7 @@ impl Tool for DelegateAliasTool {
     }
 
     fn description(&self) -> &str {
-        "Spawn a supervised Codex-compatible subagent, wait for it to finish, and return the result + artifacts. One-call wrapper around `spawn_agent` + `wait_agent`. `role` resolves through the M14-C role template registry (reviewer / implementer / test_worker / test_writer / explorer)."
+        "Spawn a supervised Codex-compatible subagent, wait for it to finish, and return the result + artifacts. One-call wrapper around `spawn_agent` + `wait_agent`. `role` resolves through the M14-C role template registry (reviewer / implementer / test_worker / explorer)."
     }
 
     fn tags(&self) -> &[&str] {
@@ -2508,7 +2508,7 @@ impl Tool for DelegateAliasTool {
             "properties": {
                 "role": {
                     "type": "string",
-                    "description": "Subagent role: reviewer, implementer, test_worker, test_writer, or explorer"
+                    "description": "Subagent role: reviewer, implementer, test_worker, or explorer"
                 },
                 "task": {
                     "type": "string",

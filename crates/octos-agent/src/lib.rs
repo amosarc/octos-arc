@@ -23,7 +23,6 @@ pub mod loop_detect;
 pub mod mcp;
 pub mod mcp_auth;
 pub mod memory_segment;
-pub mod planctl;
 pub mod policy;
 pub mod profile;
 pub mod progress;
@@ -45,7 +44,6 @@ pub mod task_supervisor;
 #[cfg(test)]
 #[path = "test_support.rs"]
 pub(crate) mod test_support;
-pub mod testgen;
 pub mod tools;
 pub mod workspace_contract;
 pub mod workspace_policy;

@@ -294,7 +294,7 @@ pub struct BackgroundTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// Role label assigned at spawn — mirrors M14-C role templates
-    /// (`"reviewer"`, `"implementer"`, `"test_worker"`, `"test_writer"`, `"explorer"`).
+    /// (`"reviewer"`, `"implementer"`, `"test_worker"`, `"explorer"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     /// Bounded summary capsule mirroring ChildResultSummary.summary

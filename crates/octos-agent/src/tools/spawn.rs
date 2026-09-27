@@ -1584,8 +1584,7 @@ struct Input {
     role: Option<String>,
     /// Task-kind hint recorded on the child's background task. `"test"`
     /// maps to `TaskKind::Test` (test-writing / verification work);
-    /// anything else (default) stays `TaskKind::Code`. Setting
-    /// `role: "test_writer"` implies `"test"` when unset.
+    /// anything else (default) stays `TaskKind::Code`.
     #[serde(default)]
     kind: Option<String>,
     /// Optional structured workflow metadata from the session runtime.
@@ -1741,12 +1740,11 @@ fn apply_role_template(input: &mut Input) -> Result<Option<&'static RoleTemplate
 }
 
 /// Resolve the background task kind for this spawn: an explicit
-/// `kind: "test"` or the `test_writer` role maps to `TaskKind::Test`
-/// (activating the previously-dead variant so task/list and memory recall
-/// see test work as test work); everything else stays `TaskKind::Code`.
+/// `kind: "test"` maps to `TaskKind::Test` (activating the
+/// previously-dead variant so task/list and memory recall see test work
+/// as test work); everything else stays `TaskKind::Code`.
 fn is_test_task_spawn(input: &Input) -> bool {
     matches!(input.kind.as_deref().map(str::trim), Some("test"))
-        || input.role.as_deref() == Some(crate::role_template::ROLE_TEST_WRITER)
 }
 
 fn should_deliver_output_files(files: &[PathBuf]) -> bool {
@@ -2314,13 +2312,13 @@ impl Tool for SpawnTool {
                 },
                 "role": {
                     "type": "string",
-                    "enum": ["reviewer", "implementer", "test_worker", "test_writer", "explorer"],
-                    "description": "Backend-owned M14-C role template. When set, the server resolves tool budget, sandbox, approval, model preference, and prompt prefix from the runtime template. `test_writer` writes test cases against the host testgen pipeline (skeleton + coverage ledger) and implies kind=test."
+                    "enum": ["reviewer", "implementer", "test_worker", "explorer"],
+                    "description": "Backend-owned M14-C role template. When set, the server resolves tool budget, sandbox, approval, model preference, and prompt prefix from the runtime template."
                 },
                 "kind": {
                     "type": "string",
                     "enum": ["test"],
-                    "description": "Task-kind hint. `test` records the child as TaskKind::Test (test-writing / verification work) instead of the default Code kind. Implied when role=test_writer."
+                    "description": "Task-kind hint. `test` records the child as TaskKind::Test (test-writing / verification work) instead of the default Code kind."
                 },
                 "context": {
                     "type": "string",

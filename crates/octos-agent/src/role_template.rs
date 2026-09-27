@@ -37,15 +37,6 @@ pub const ROLE_REVIEWER: &str = "reviewer";
 pub const ROLE_IMPLEMENTER: &str = "implementer";
 /// Canonical name for the test / verification worker role.
 pub const ROLE_TEST_WORKER: &str = "test_worker";
-/// Canonical name for the test-case writer role (testgen pipeline).
-pub const ROLE_TEST_WRITER: &str = "test_writer";
-/// The TestWriter role prompt (≤45 words, direction-only — the format and
-/// coverage rules live in the host testgen pipeline, not here). Shared by
-/// the spawn role template AND the in-session `[task-kind:test]` turn
-/// injection so both surfaces stay word-for-word identical.
-pub const ROLE_TEST_WRITER_PROMPT_PREFIX: &str = "ROLE: TestWriter. Fill every stub in the \
-     provided test skeleton. Cover the validation checklist exactly. Run the tests until green. \
-     Never modify application code.";
 /// Canonical name for the read-only codebase analyst role.
 pub const ROLE_EXPLORER: &str = "explorer";
 
@@ -395,9 +386,6 @@ impl RoleTemplate {
             | "test-worker"
             | "verification_worker"
             | "verifier" => ROLE_TEST_WORKER,
-            "test_writer" | "test-writer" | "unit_test_writer" | "testcase_writer" => {
-                ROLE_TEST_WRITER
-            }
             "explore" | "explorer" | "analyst" | "codebase_analyst" | "read_only" | "read-only" => {
                 ROLE_EXPLORER
             }
@@ -537,31 +525,6 @@ const ROLE_TEMPLATES: &[RoleTemplate] = &[
                         lines of output.",
     },
     RoleTemplate {
-        name: ROLE_TEST_WRITER,
-        display_name: "Test Writer",
-        description: "Test-case writer. Fills the host-generated test skeleton (ledger stubs) \
-                      with case data and assertions, runs the suite via the testgen pipeline, \
-                      and never edits application source.",
-        // Test writers PATCH test files (group:fs gives apply_patch /
-        // edit_file / write_file), run the suite (group:runtime), and use
-        // the testgen scaffold/verify pipeline (exact tool name). They do
-        // NOT get group:sessions — a test writer never fans out further —
-        // nor group:memory writes. `fixing is the implementer's job` still
-        // holds: app-bug verdicts go back to the parent for implementer
-        // respawn, the test writer only fixes TEST code.
-        allowed_tools: &[
-            "group:fs",
-            "group:search",
-            "group:runtime",
-            "recall_memory",
-            "testgen",
-        ],
-        default_sandbox_mode: SANDBOX_AUTO,
-        default_approval_policy: APPROVAL_ASK,
-        model_preference: ModelPreference::Coding,
-        prompt_prefix: ROLE_TEST_WRITER_PROMPT_PREFIX,
-    },
-    RoleTemplate {
         name: ROLE_EXPLORER,
         display_name: "Explorer",
         description: "Read-only codebase analyst. Gathers context (files, call sites, prior \
@@ -599,46 +562,9 @@ mod tests {
         let names: Vec<&'static str> = RoleTemplate::all().iter().map(|tpl| tpl.name).collect();
         assert_eq!(
             names,
-            vec![
-                "reviewer",
-                "implementer",
-                "test_worker",
-                "test_writer",
-                "explorer"
-            ],
+            vec!["reviewer", "implementer", "test_worker", "explorer"],
             "canonical role names drifted; update guard + wire docs together"
         );
-    }
-
-    /// Guard: the test writer WRITES tests and RUNS suites, but must not
-    /// spawn further agents nor save memory — and it must advertise the
-    /// testgen pipeline tool it drives.
-    #[test]
-    fn test_writer_patches_tests_and_runs_suites_but_never_spawns() {
-        let tpl = RoleTemplate::for_name(ROLE_TEST_WRITER).expect("test_writer must be registered");
-        assert!(
-            tpl.permits("group:fs"),
-            "needs apply_patch/edit to fill stubs"
-        );
-        assert!(tpl.permits("group:search"));
-        assert!(tpl.permits("group:runtime"), "needs to run the suite");
-        assert!(
-            tpl.permits("testgen"),
-            "drives the scaffold/verify pipeline"
-        );
-        assert!(tpl.permits("recall_memory"));
-        // No fan-out, no memory writes.
-        assert!(!tpl.permits("group:sessions"));
-        assert!(!tpl.permits("spawn"));
-        assert!(!tpl.permits("save_memory"));
-        assert!(!tpl.permits("group:admin"));
-        assert_eq!(tpl.default_sandbox_mode, SANDBOX_AUTO);
-        assert_eq!(tpl.default_approval_policy, APPROVAL_ASK);
-        assert_eq!(tpl.model_preference, ModelPreference::Coding);
-        // The 40-token budget: prefix stays directional and short.
-        let words = tpl.prompt_prefix.split_whitespace().count();
-        assert!(words <= 45, "prompt_prefix drifted long: {words} words");
-        assert!(tpl.prompt_prefix.contains("Never modify application code"));
     }
 
     /// Guard: unknown role names return `None` instead of falling back

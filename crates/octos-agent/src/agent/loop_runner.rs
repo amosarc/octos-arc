@@ -592,73 +592,10 @@ impl Agent {
         attachments: TurnAttachmentContext,
         tracker: Option<&TokenTracker>,
     ) -> Result<ConversationResponse> {
-        // planctl turn marker (`[arc-plan]`): scanned FIRST. A valid
-        // envelope applies the host plan (scan → segment install → disk
-        // store) and the stripped text CONTINUES through the testgen scan
-        // below — both markers can coexist on one turn. A rejected payload
-        // keeps the stripped text plus a short constant notice; a
-        // marker-less turn rehydrates any stored plan from disk (per-turn
-        // agents start cold).
-        let plan_scan = crate::planctl::wire::scan_turn_input(user_content);
-        let plan_message;
-        let user_content: &str = match &plan_scan.envelope {
-            Some(Ok(envelope)) => {
-                if let Some(workspace) = self.tools.workspace_root() {
-                    self.arc_plan_apply(envelope.clone(), workspace);
-                }
-                // Volatile turn-tail rides the USER row (cache law ADR):
-                // the system row keeps only the byte-stable CONTRACT, so
-                // per-turn seq/focus/report changes never invalidate the
-                // conversation prefix cache.
-                plan_message = format!(
-                    "{}\n\n{}",
-                    self.arc_plan_turn_tail(history, &plan_scan.text),
-                    plan_scan.text
-                );
-                plan_message.as_str()
-            }
-            Some(Err(reason)) => {
-                tracing::warn!(reason, "planctl: marked turn payload rejected");
-                plan_message = format!(
-                    "{}\n\n{}",
-                    self.arc_plan_turn_tail(history, ""),
-                    crate::planctl::wire::compose_turn_message(&plan_scan)
-                );
-                plan_message.as_str()
-            }
-            None => {
-                if let Some(workspace) = self.tools.workspace_root() {
-                    self.arc_plan_rehydrate_if_present(workspace);
-                }
-                if self.arc_plan_state().is_some() {
-                    plan_message = format!(
-                        "{}\n\n{user_content}",
-                        self.arc_plan_turn_tail(history, user_content)
-                    );
-                    plan_message.as_str()
-                } else {
-                    user_content
-                }
-            }
-        };
+        // 09-27 planctl 退役:不再识别 [arc-plan] marker/envelope——
+        // turn prompt 原文直送模型(契约/需求由宿主印进工单正文)。
+        let user_content: &str = user_content;
 
-        // testgen turn marker (`[task-kind:test]`): strip the harness marker
-        // and append the bounded host notice (TestWriter role prompt +
-        // scaffold→fill→verify loop contract). This is the in-session
-        // equivalent of spawning a test_writer child — the only option in
-        // solo/stdio sessions where `spawn` is not registered.
-        let turn_scan = crate::testgen::turn::scan_turn_input(user_content);
-        let marked_message;
-        let user_content: &str = if turn_scan.notice.is_some() {
-            marked_message = crate::testgen::turn::compose_turn_message(&turn_scan);
-            tracing::debug!(
-                original_chars = user_content.len(),
-                "testgen: turn marked as test task; host notice appended"
-            );
-            marked_message.as_str()
-        } else {
-            user_content
-        };
         let activity = Arc::new(LoopActivityState::new(Instant::now()));
         let activity_reporter = Arc::new(ActivityTrackingReporter::new(
             activity.clone(),
@@ -671,7 +608,6 @@ impl Agent {
                 // Reset per-run flags
                 self.tools.reset_spawn_only_invoked();
                 self.reset_loop_detected_recently();
-                self.reset_arc_plan_tail_budget();
 
                 // Refresh provider-backed prompt segments (e.g. the memory
                 // block when MEMORY.md changed on disk) before composing.
@@ -2956,34 +2892,6 @@ impl Agent {
         for message in &merged {
             if message.role == MessageRole::Tool && is_productive_tool_message(&message.content) {
                 retry_state.record_productive_tool_call();
-            }
-        }
-
-        // planctl: a successful MUTATING batch may earn an
-        // `<arc-workspace>` tail block (drift movement + change
-        // localization), appended to the batch's LAST Tool message — the
-        // same append-only channel the loop-detector hints use. The
-        // system row is never touched mid-turn (cache law). Capped at 8
-        // blocks per turn; past the cap the plan state still updates,
-        // silently.
-        let plan_mutating_success = tool_success_for_loop_checks.iter().any(|(id, ok)| {
-            *ok && response
-                .tool_calls
-                .iter()
-                .any(|tc| tc.id == *id && crate::snapshot::is_mutating_tool(tc.name.as_str()))
-        });
-        if plan_mutating_success && !tool_files.is_empty() {
-            let emit = self.arc_plan_tail_budget_available();
-            if let Some(block) = self.arc_plan_on_mutating_batch(&tool_files, emit) {
-                self.arc_plan_tail_budget_consume();
-                if let Some(last_tool) = merged
-                    .iter_mut()
-                    .rev()
-                    .find(|m| m.role == MessageRole::Tool)
-                {
-                    last_tool.content.push('\n');
-                    last_tool.content.push_str(&block);
-                }
             }
         }
 

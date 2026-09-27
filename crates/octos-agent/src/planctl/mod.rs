@@ -55,7 +55,7 @@ pub const SEGMENT_NAME: &str = "arc_host_plan";
 
 /// Turn marker prefixing a plan-carrying turn. Harness-owned; the marker
 /// line and the envelope JSON line are stripped from the text the model
-/// sees (mirrors `testgen::turn`).
+/// sees.
 pub const MARKER: &str = "[arc-plan]";
 
 /// Stored plan state (envelope + seq), relative to the workspace root.

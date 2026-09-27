@@ -783,9 +783,6 @@ pub mod check_background_tasks;
 #[cfg(feature = "ast")]
 pub mod code_structure;
 
-#[cfg(feature = "ast")]
-pub use crate::testgen::tool::TestgenTool;
-
 pub use apply_patch::ApplyPatchTool;
 pub use ask_user_question::AskUserQuestionTool;
 pub use coding_tools::{

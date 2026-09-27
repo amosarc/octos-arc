@@ -1,4 +1,4 @@
-//! Turn marker protocol for the ARC host plan (mirrors `testgen::turn`).
+//! Turn marker protocol for the ARC host plan.
 //!
 //! Wire format of a plan-carrying turn:
 //!
@@ -18,10 +18,6 @@
 //! payload line are ALWAYS stripped (bare JSON never enters the
 //! model-visible history) and a short constant [`HOST_PARSE_NOTICE`] is
 //! appended so the model sees the plan is absent this turn.
-//!
-//! Chaining: the loop runner scans `[arc-plan]` FIRST, then feeds the
-//! stripped text through `testgen::turn::scan_turn_input` — both markers
-//! can coexist on one turn.
 
 use super::{
     Envelope, HOST_PARSE_NOTICE, MARKER, MAX_EXTRA_RULES_CHARS, MAX_RULESET_TEXT_CHARS,
