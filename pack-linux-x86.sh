@@ -23,6 +23,11 @@ rm -rf arc-output local-grader .env octos-arc-bundle.zip
 # 进包;链路输入只有 requirements.yaml + reference/)。清掉再打包。
 rm -rf tasks/*/template
 find tasks -name .DS_Store -delete
+# 开发件不进比赛包(防干扰/减面):测试套件、模板冒烟、token 测量、本地
+# 打分器——运行时零 import,纯属 cp -R arc/. 带入。defense in depth:
+# 未来新增 *_test.py 同样被扫掉。
+find . -maxdepth 1 -name '*_test.py' -delete
+rm -f template_smoke.js measure_tokens.py grade-local.py p1_batch_test.py
 # arc/template/ 是 pack.sh「打包即物化」留在仓库的可浏览副本，随 cp -R
 # 进了暂存区；scaffold 只写不删，先清空再生成（与 pack.sh 同一语义），
 # 否则 copytree 撞上已存在的 template/frontend 直接 FileExistsError。
