@@ -846,7 +846,7 @@ mod tests {
     }
 
     /// Issue #971 (M14-C acceptance): the coding tool contract payload
-    /// MUST surface the four backend-owned role templates so AppUI / TUI
+    /// MUST surface the backend-owned role templates so AppUI / TUI
     /// can render a spawn-role picker without hard-coding the role list
     /// client-side. Each entry is the bounded `RoleTemplateSummary`
     /// projection; the server-owned `prompt_prefix` MUST NOT leak.
@@ -860,8 +860,8 @@ mod tests {
             .expect("role_templates array must be present on coding_tool_contract");
         assert_eq!(
             role_templates.len(),
-            5,
-            "the runtime ships five role templates; got {role_templates:?}"
+            4,
+            "the runtime ships four role templates (test_writer retired with the testgen pipeline); got {role_templates:?}"
         );
         let names: Vec<&str> = role_templates
             .iter()
@@ -869,13 +869,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec![
-                "reviewer",
-                "implementer",
-                "test_worker",
-                "test_writer",
-                "explorer"
-            ],
+            vec!["reviewer", "implementer", "test_worker", "explorer"],
             "role_templates must enumerate the canonical names in stable order"
         );
         for entry in role_templates {
