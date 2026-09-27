@@ -18,7 +18,7 @@ cp -R arc/. "$STAGE/octos-arc-linux-x86/"
 cd "$STAGE/octos-arc-linux-x86"
 find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 find . -name '*.pyc' -delete
-rm -rf arc-output local-grader .env octos-arc-bundle.zip
+rm -rf arc-output local-grader .env octos-arc-bundle.zip arc-template
 # tasks/*/template = 本地仿真"就地运行"残留(09-27 实测 473MB 随 cp -R
 # 进包;链路输入只有 requirements.yaml + reference/)。清掉再打包。
 rm -rf tasks/*/template

@@ -79,29 +79,6 @@ port in `ARC_EXTRA_PORTS`.
 - npm dependencies are prewarmed by the host; never run npm install in turns.
 EOF
 
-# arc-template/：模板目录（对齐 agent-arc-based 布局）。参考项目 template/ 与
-# arc-template/templates/web-react-express/ 逐字节一致，此处同构：镜像现生成的
-# template/ + catalog.yaml 登记模板清单。同样每次打包现生成。
-rm -rf arc-template
-mkdir -p arc-template/templates
-cp -R template arc-template/templates/web-react-express
-cat > arc-template/catalog.yaml <<'EOF'
-schema_version: "1.0"
-templates:
-  - id: web-react-express
-    name: Web Application (React + Express)
-    type: web_app
-    version: 1.0.0
-    path: templates/web-react-express
-    stack:
-      - Vite
-      - React
-      - JavaScript
-      - Express
-      - JSON file store
-      - Playwright
-EOF
-
 # 运行时必需：main.py 顶层 import(plan_envelope/fixture_manifest/scaffold/
 # arcbench_agent_runtime) + 惰性 import(octos_stdio) + 内核(bin/) + 初始
 # 模板(template/)
@@ -122,7 +99,6 @@ cp -R arcbench_agent_runtime scaffold bin "$PKG/"
 # 彻底移出比赛包(2026-09-20 的 ENOENT 教训随之失效:兜底路径改为
 # tmpdir + 钉死 PLATFORM_PW_VERSION 安装,不再依赖包内清单)。
 cp -R template "$PKG/template"
-cp -R arc-template "$PKG/arc-template"
 
 # 先 import 后清理：python 生成步骤会重新产生 __pycache__，收尾统一扫掉
 # （先清理后生成会让 pyc 回流进包——pack-linux-x86.sh 曾踩此坑）。

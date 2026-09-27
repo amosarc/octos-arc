@@ -42,7 +42,6 @@ sh arc/pack.sh                               # 得到 octos-arc-bundle.zip
 |---|---|
 | `main.py` | 平台入口：读需求、驱动 Octos、整理产物、上报进度 |
 | `template/` | 提交包携带的初始工作区模板（frontend/+backend/+template.yaml，scaffold 单源；每次 pack.sh 打包时直接现生成） |
-| `arc-template/` | 模板目录（对齐 agent-arc-based 布局）：catalog.yaml + templates/web-react-express/，与 template/ 逐字节镜像，打包时现生成 |
 | `octos_stdio.py` | 通过 `octos serve --stdio` 驱动内核 |
 | `public-tests/<题目>/` | 平台公开的 Playwright 验收测试（会自动喂给模型） |
 | `tasks/<题目>/` | 各题需求文件的离线副本 |
