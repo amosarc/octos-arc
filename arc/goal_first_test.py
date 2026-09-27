@@ -143,11 +143,13 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertIn("goal-first", rules)
         self.assertIn("the model owns it", rules)
         self.assertIn("TOOLBOX (optional, unwired)", rules)
-        # 后端数据面各段与 host-first 逐字一致(已决保留)
+        # 数据面基座说明保留(已决保留的后端数据面 API 说明书)
         for section in ("Host-owned (never rewrite)", "SCHEMA-DRIVEN BACKEND",
-                        "FIXTURE CONTRACT", "SERVER-SIDE VALIDATION",
-                        "UI CONTRACT HYGIENE"):
+                        "FIXTURE CONTRACT"):
             self.assertIn(section, rules)
+        # 09-27 定则:宿主不制定行为规则——两段宿主发明纪律已裁
+        self.assertNotIn("SERVER-SIDE VALIDATION", rules)
+        self.assertNotIn("UI CONTRACT HYGIENE", rules)
 
     def test_envelope_rules_text_override(self):
         env = plan_envelope.build_envelope(
@@ -162,19 +164,47 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertEqual(env2["rules_text"], plan_envelope.HOST_STACK_RULES)
 
 
-class RedLineFilterTests(unittest.TestCase):
-    def test_probe_filter_keeps_flow_only(self):
-        run = {"reds": [
-            {"probe": "flow", "string": "REQ-1: walk", "nodes": ["REQ-1-1-1"],
-             "detail": "scenario walk failed"},
-            {"probe": "text", "string": "Delete", "nodes": ["REQ-2-1"],
-             "detail": "missing"},
-        ]}
-        lines = main._ui_smoke_red_lines(run, probes=("flow",))
-        self.assertIn("REQ-1: walk", lines)
-        self.assertNotIn("Delete", lines)
-        # 不过滤时全渲染
-        self.assertIn("Delete", main._ui_smoke_red_lines(run))
+class SelfTestSkeletonTests(unittest.TestCase):
+    """09-27 定则:宿主不制定规则/不写验收用例——只保留内核放行命令
+    形状所需的最小骨架,测试用例由模型根据需求自生成。"""
+
+    def test_stage_writes_config_and_example_only(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            stage = main.stage_selftest_dir(Path(td), 43101)
+            names = sorted(p.name for p in stage.iterdir())
+            self.assertEqual(
+                names, [".gitignore", "MY-CHECK.spec.ts.example",
+                        "playwright.config.ts"])
+            cfg = (stage / "playwright.config.ts").read_text()
+            self.assertIn("http://127.0.0.1:43101", cfg)
+            self.assertIn("workers: 1", cfg)
+            # 没有宿主编写的 spec(zz-contract-smoke 等)
+            self.assertFalse(names == sorted(names)
+                             and any(n.endswith(".spec.ts")
+                                     for n in names))
+
+    def test_selftest_note_carries_sanctioned_command_shape(self):
+        note = main.build_selftest_note("/opt/cli.js")
+        self.assertIn("test --config .arc/ui-smoke/playwright.config.ts",
+                      note)
+        self.assertIn("scenarios ARE the test oracle", note)
+        note2 = main.build_selftest_note(None)
+        self.assertIn("npx --yes @playwright/test test", note2)
+
+    def test_requirement_messages_extraction(self):
+        tree = node("ROOT", "FOLDER", [
+            node("REQ-1", "FOLDER", [node(
+                "REQ-1-1",
+                description='displays "Username already exists" and '
+                'rejected with "Invalid credentials"')],
+                description='must display "Welcome back"'),
+        ])
+        msgs = main._collect_requirement_messages(tree)
+        self.assertIn("Username already exists", msgs)
+        self.assertIn("Invalid credentials", msgs)
+        self.assertIn("Welcome back", msgs)
+        self.assertEqual(len(msgs), len(set(msgs)))
 
 
 if __name__ == "__main__":

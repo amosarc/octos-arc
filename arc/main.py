@@ -62,11 +62,17 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from arcbench_agent_runtime import AgentRuntime  # noqa: E402
 import fixture_manifest  # noqa: E402  (夹具契约提取/宿主种子编译)
-import flow_suite  # noqa: E402  (description → 平台同构场景流套件 FLOW RUN)
 import plan_envelope  # noqa: E402
 import scaffold  # noqa: E402  (宿主脚手架包:模板/清单/schema 编译唯一公开面)
-import ui_smoke  # noqa: E402  (requirements-only 任务的宿主 UI 契约冒烟)
 import visual_ref  # noqa: E402  (参考图视觉预描述:VISUAL_MODEL 代看注入 tree)
+
+# 09-27 目标优先定则:宿主不制定 UI 规则、不编写验收用例——测试用例由
+# 模型根据需求原文自己生成(ui_smoke/flow_suite 宿主套件已删除)。宿主
+# 只保留:①工具链 CLI 发现(下述 _pw_* 助手);②被内核放行的自测命令
+# 形状所需的 .arc/ui-smoke/playwright.config.ts 最小骨架;③消息桥提取
+# (_REQ_MESSAGE_RE,数据面 codegen 桥的数据源,非 UI 规则)。
+PLATFORM_PW_VERSION = "1.57.0"
+SELFTEST_SUBDIR = ".arc/ui-smoke"
 
 
 _DEBUG_LOG_PATH: Path | None = None
@@ -700,6 +706,158 @@ def _local_grader_root() -> Path:
     return fallback
 
 
+# ------------------------------------------------- playwright toolchain CLI
+# (自 ui_smoke.py 迁入:宿主套件删除后仍需发现镜像全局 cli 供 Tier-2
+#  staged specs 与模型自测命令使用。)
+
+
+def _pw_browsers_dir() -> Path | None:
+    """镜像浏览器目录($PLAYWRIGHT_BROWSERS_PATH 或 /ms-playwright)。
+
+    存在即意味着身处真实/仿真 runner 容器——全局工具链可直用。"""
+    for candidate in (os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
+                      "/ms-playwright"):
+        if candidate and Path(candidate).is_dir() \
+                and any(Path(candidate).glob("chromium-*")):
+            return Path(candidate)
+    return None
+
+
+def _pw_resolve_global_cli() -> Path | None:
+    """镜像全局 @playwright/test 的 cli.js——与评测引擎同一份二进制。
+
+    仅当镜像浏览器目录存在时采信(开发机 host-global 版本不受控)。"""
+    if _pw_browsers_dir() is None:
+        return None
+    cands = [Path("/usr/local/node/lib/node_modules/@playwright/test/cli.js")]
+    try:
+        r = subprocess.run(["npm", "root", "-g"], capture_output=True,
+                           text=True, timeout=30, errors="replace")
+        root = (r.stdout or "").strip().splitlines()[-1].strip() \
+            if (r.stdout or "").strip() else ""
+        if root:
+            cands.append(Path(root) / "@playwright" / "test" / "cli.js")
+    except (OSError, subprocess.SubprocessError, IndexError):
+        pass
+    pw_bin = shutil.which("playwright")
+    if pw_bin:
+        for anc in Path(pw_bin).resolve().parents:
+            cands.append(anc / "lib" / "node_modules" / "@playwright"
+                         / "test" / "cli.js")
+    for cand in cands:
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _pw_lg_cli() -> Path | None:
+    """自验工具链 cli:镜像全局优先;开发机兜底 repo 的 local-grader。"""
+    g = _pw_resolve_global_cli()
+    if g is not None:
+        return g
+    here = Path(__file__).resolve().parent
+    for root in (here / "local-grader", here.parent / "local-grader"):
+        cli = root / "node_modules" / "@playwright" / "test" / "cli.js"
+        if cli.is_file():
+            return cli
+    return None
+
+
+def stage_selftest_dir(output_dir: Path, smoke_port: int,
+                       cli_hint: str | None = None) -> Path:
+    """落盘模型自测所需的最小骨架(非规则、非用例):playwright config +
+    MY-CHECK 示例。内核 shell guard 只放行
+    `test --config .arc/ui-smoke/playwright.config.ts` 形状的命令——
+    模型自写 spec 后以显式文件参数挂该 config 运行。幂等。"""
+    stage = Path(output_dir) / SELFTEST_SUBDIR
+    stage.mkdir(parents=True, exist_ok=True)
+    cfg = ("import { defineConfig } from '@playwright/test';\n"
+           "export default defineConfig({ testDir: '.',\n"
+           "  fullyParallel: false, workers: 1,\n"
+           "  retries: 0,\n"
+           "  timeout: 10_000, expect: { timeout: 10_000 },\n"
+           f"  use: {{ baseURL: 'http://127.0.0.1:{smoke_port}', "
+           "headless: true, screenshot: 'off', trace: 'off' } });\n")
+    (stage / "playwright.config.ts").write_text(cfg, encoding="utf-8")
+    example = """\
+// MY-CHECK.spec.ts.example — write YOUR OWN spec from the requirement
+// text (the node's scenarios are the oracle), then run it with an
+// explicit file argument:
+//   node <cli> test --config .arc/ui-smoke/playwright.config.ts MY-CHECK.spec.ts
+// That form is allowed by the kernel (inline `node -e` browser scripts
+// are not), re-runnable, and green-stop-visible.
+import { test, expect } from '@playwright/test';
+
+test('my check - name what this verifies', async ({ page }) => {
+  await page.goto('/');
+  // Example: walk one form chain end to end.
+  // await page.getByLabel('Workbook name').fill('Q3 Sales');
+  // await page.getByRole('button', { name: 'Create', exact: true }).click();
+  // await expect(page.getByText('Q3 Sales')).toBeVisible();
+  expect(true).toBe(true);
+});
+"""
+    (stage / "MY-CHECK.spec.ts.example").write_text(example, encoding="utf-8")
+    (stage / ".gitignore").write_text(
+        "test-results/\n.playwright-report/\n", encoding="utf-8")
+    for junk in ("test-results", ".playwright-report"):
+        shutil.rmtree(stage / junk, ignore_errors=True)
+    return stage
+
+
+def build_selftest_note(cli_path: str | None) -> str:
+    """节点/收尾提示词附带的模型自测指引(替代原宿主 UI SMOKE RUN)。"""
+    if cli_path:
+        cmd = (f"node {cli_path} test --config "
+               f"{SELFTEST_SUBDIR}/playwright.config.ts "
+               "<your-spec>.spec.ts")
+    else:
+        cmd = (f"npx --yes @playwright/test test --config "
+               f"{SELFTEST_SUBDIR}/playwright.config.ts "
+               "<your-spec>.spec.ts")
+    return (
+        "\nSELF-TEST (you author the tests): derive your own Playwright "
+        "specs from the requirement text — each node's scenarios ARE the "
+        "test oracle (GIVEN = arrange, WHEN = act, THEN = assert, verbatim "
+        "quoted strings = exact accessible names). Write specs under "
+        f"{SELFTEST_SUBDIR}/ (copy MY-CHECK.spec.ts.example as a starting "
+        "point) and run them with an explicit file argument:\n"
+        f"  {cmd}\n"
+        "That command shape is sanctioned; raw browser scripts and "
+        "browserless guessing are not. Red = the flow fails on the RUNNING "
+        "app — fix the app, then rerun.\n")
+
+
+# ------------------------------------------------- requirement message bridge
+# (自 flow_suite.py 迁入:codegen 编译 schema 时的确定性消息桥数据源,
+#  数据面能力,非 UI 规则。)
+_REQ_MESSAGE_Q = (r'["\u201c]([A-Za-z0-9][^"\u201d\u2019\n]{1,119})'
+                  r'["\u201d\u2019]')
+_REQ_MESSAGE_RE = re.compile(
+    r"(?:displays?|displayed|shown?|reject(?:ed)? with|must be rejected with"
+    r"|must display|message(?:\s+is)?)\s*:?\s*" + _REQ_MESSAGE_Q, re.I)
+
+
+def _collect_requirement_messages(tree: dict) -> list[str]:
+    """树内全部引号消息(去重,文档序)——.arc/host/req-messages.json 的
+    数据源,codegen 桥只按后缀/正则挑消息,非消息类引号串是无害噪音。"""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def visit(node) -> None:
+        for m in _REQ_MESSAGE_RE.finditer(str(node.get("description") or "")):
+            name = m.group(1).strip()
+            if name and not ("<" in name and ">" in name) \
+                    and "{" not in name and name not in seen:
+                seen.add(name)
+                out.append(name)
+        for child in node.get("children") or []:
+            visit(child)
+
+    visit(tree or {})
+    return out
+
+
 def _ensure_host_toolchain(log) -> Path | None:
     """宿主尽算原则：自验工具链(Tier-2/ui-smoke/SPEC RUN)三级解析——
 
@@ -714,7 +872,7 @@ def _ensure_host_toolchain(log) -> Path | None:
        VERSION(钉版本,绝不装 latest——npx latest 的浏览器漂移是
        run4/run5 的旧伤)。
     失败返回 None(不致命,Tier-2 自会降级为 model final check)。"""
-    global_cli = ui_smoke.resolve_global_cli()
+    global_cli = _pw_resolve_global_cli()
     if global_cli is not None:
         log(f"[toolchain] using the image-global @playwright/test "
             f"(the evaluator's own engine, zero install): {global_cli}")
@@ -723,7 +881,7 @@ def _ensure_host_toolchain(log) -> Path | None:
     lg_cli = lg / "node_modules" / "@playwright" / "test" / "cli.js"
     env = dict(os.environ, npm_config_registry=scaffold.INSTALL_REGISTRY)
     quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    browsers_dir = ui_smoke._browsers_dir()
+    browsers_dir = _pw_browsers_dir()
     if not lg_cli.is_file():
         log("[toolchain] installing @playwright/test into local-grader ...")
         try:
@@ -737,7 +895,7 @@ def _ensure_host_toolchain(log) -> Path | None:
                 subprocess.run(["npm", "install", "--no-save", "--no-audit",
                                 "--no-fund", "--loglevel", "error",
                                 f"@playwright/test@"
-                                f"{ui_smoke.PLATFORM_PW_VERSION}"],
+                                f"{PLATFORM_PW_VERSION}"],
                                cwd=lg, env=env, timeout=600, check=True,
                                **quiet)
             log("[toolchain] @playwright/test installed")
@@ -799,7 +957,7 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
     (run_dir / "playwright.config.ts").write_text(cfg, encoding="utf-8")
     # 镜像全局优先(评测同引擎);开发机兜底 local-grader;npx --yes 拉
     # latest 的浏览器漂移是 run4/run5 旧伤,只作最后兜底。
-    lg_cli = ui_smoke._lg_cli()
+    lg_cli = _pw_lg_cli()
     if lg_cli is not None:
         cmd = [shutil.which("node") or "node", str(lg_cli),
                "test", "--reporter=json"]
@@ -2171,10 +2329,11 @@ your own server. After editing backend/src run \
 `sh .arc/host/restart-server.sh` (host-provided) to pick changes up; \
 after editing frontend run `npm run build --prefix frontend` — the \
 running server serves the fresh dist immediately, no restart needed.\
-VERIFICATION: after each node, walk its scenario chains yourself (the \
-sanctioned UI SMOKE RUN command, flow-suite.spec.ts included, or \
-curl); the host flow-regresses this family at batch end — scenario \
-flows, not string presence, are the verdict.\
+VERIFICATION: after each node, turn its scenarios into YOUR OWN \
+Playwright spec (GIVEN = arrange, WHEN = act, THEN = assert; quoted \
+strings = exact accessible names) and run it via the SELF-TEST \
+command against the RUNNING app (or curl the API directly) — scenario \
+flows actually walking, not string presence, are the verdict.\
 TOOLBOX (optional, unwired): frontend/src/app/ui.jsx ships proven \
 shapes (NativeSelect/AppDialog/AccountTrigger/SingleError/FixedGrid) — \
 use them or roll your own; the requirement text is the only authority.\
@@ -2184,20 +2343,11 @@ REGRESSION SCOPE: re-check only the families you touched this turn.\
 
 NO_STAGED_SPECS_NOTE = """\
 
-VERIFICATION (no staged specs): this task has NO acceptance specs on \
-disk — the graded tests are hidden and derived from the requirement \
-text. There is NO SPEC RUN command: never look for .arc/acceptance, \
-never write your own Playwright/Puppeteer/chromium script, and never \
-spawn a browser of your own. The host runs a UI CONTRACT SMOKE suite \
-(headless browser, host-authored assertions over the quoted contract \
-strings) and stages it read-only at .arc/ui-smoke/ — run the sanctioned \
-UI SMOKE RUN command below whenever you want a browser-level self-check \
-against the dev server as-is; reds are host-authored contract failures \
-(exact accessible names, openable chains, closable dialogs, selection \
-semantics, BOM-free exports) — fix the app, then rerun. Between turns, \
-also verify by walking the RUNNING app on port {smoke} (curl the API, \
-rebuild the frontend); the host rehearsal report lands in your next \
-HOST REPORT.\
+VERIFICATION (no staged specs — you author the tests): this task has NO acceptance specs on disk — the graded tests are hidden and derived from the requirement text. YOU write the tests: derive Playwright specs from each node's scenarios (GIVEN = arrange, WHEN = act, THEN = assert; quoted strings are exact accessible names) under \
+{selftest_dir}/ — copy MY-CHECK.spec.ts.example as a starting point — and run them with the SELF-TEST command below against the RUNNING app (port {smoke}). Red = the real flow fails — fix the app, then rerun. \
+Never spawn a raw browser or inline browser script; the sanctioned \
+command shape only. Between turns, also verify by curling the API and \
+rebuilding the frontend.\
 """
 
 BATCH_DIRECTIVE_NO_SPEC = """\
@@ -2222,17 +2372,15 @@ Per-node staged specs:
 """
 
 VERIFICATION_RULES = (
-    "\nVERIFICATION RULES: the SPEC RUN command is the ONLY sanctioned way "
-    "to verify — never write your own Playwright/Puppeteer/chromium script "
-    "and never spawn a browser directly. For a ONE-OFF custom check, copy "
-    ".arc/ui-smoke/MY-CHECK.spec.ts.example to .arc/ui-smoke/MY-CHECK."
-    "spec.ts, edit it, and run it with an explicit file argument (that "
-    "form is allowed, re-runnable, and green-stop-visible). NEVER revert "
-    "project files with git checkout/reset/restore — the repo is "
-    "host-managed for traceability; when a check fails, fix forward with "
-    "edits.\n")
-
-
+    "\nVERIFICATION RULES: verify with real evidence. With staged specs "
+    "the SPEC RUN command is the primary way; for anything else write "
+    "your OWN Playwright spec from the requirement text (copy "
+    f"{SELFTEST_SUBDIR}/MY-CHECK.spec.ts.example, edit it) and run it "
+    "with an explicit file argument via the SELF-TEST command — that "
+    "form is allowed, re-runnable, and green-stop-visible. Never spawn "
+    "a raw browser or inline browser script. NEVER revert project "
+    "files with git checkout/reset/restore — the repo is host-managed "
+    "for traceability; when a check fails, fix forward with edits.\n")
 def build_spec_run_cmd(cli_path: str | None,
                        spec_files: list[str] | None = None) -> str:
     """SPEC RUN command with an optional per-batch file filter.
@@ -2338,129 +2486,18 @@ check. Fix what is wrong; do not rebuild what works. Do not commit.\
 """
 
 HOST_FINAL_CHECK_UI_PROMPT = """\
-The host verified build + boot + ports, plus the UI CONTRACT SMOKE \
-browser suite where available — semantic behavior (correct values, \
-ordering, formatting) is still yours to verify. Walk the action chains \
-in the ACCEPTANCE sections on the running app — visible feedback for \
-every named control, exactly one visible error element per failure, \
-strict-mode unique echoes, verbatim labels and seeded values. Report \
-one line of evidence per chain; an empty "all good" without evidence \
-is a failed check. BUDGET: one walk per chain — verify each chain \
-once, fix only what is red, then end the turn; never re-run whole \
-suites and never re-verify chains that already passed. Fix what is \
-broken; do not rebuild what works. Do not commit.\
+The host verified build + boot + ports — everything in a real browser \
+is yours to verify with your OWN specs (derive them from the \
+requirement scenarios; the SELF-TEST command runs them against the \
+running app). Walk the action chains in the ACCEPTANCE sections — \
+visible feedback for every named control, exactly one visible error \
+element per failure, strict-mode unique echoes, verbatim labels and \
+seeded values. Report one line of evidence per chain; an empty "all \
+good" without evidence is a failed check. BUDGET: one walk per chain — \
+verify each chain once, fix only what is red, then end the turn; never \
+re-run whole suites and never re-verify chains that already passed. \
+Fix what is broken; do not rebuild what works. Do not commit.\
 """
-
-UI_SMOKE_REPAIR_PROMPT = """\
-HOST UI SMOKE RED — the host ran its browser contract suite against \
-your app (port {smoke}) and these checks FAILED. Each item is a \
-host-authored contract assertion, not a suggestion. Fix the app code \
-(paths under frontend/src), rebuild with `npm run build` in frontend/, \
-restart via `sh .arc/host/restart-server.sh {smoke}`, then rerun the \
-UI SMOKE RUN command to confirm green. Do not touch passing flows.
-
-ANTI-GAMING RULE (absolute): clear a red only by making the REAL \
-control or flow work. NEVER surface contract strings as static text \
-(a span/chip/label list naming the string), never add decoy elements \
-with contract names, never widen a control to swallow a string. The \
-crawler only credits interactive controls and structural name \
-carriers (headings, table cells, dialog names, aria-labels) — static \
-text clears nothing, and grader strict-mode locators punish decoys.
-
-If you have POSITIVE EVIDENCE a red is a crawler-state artifact (the \
-control genuinely exists and works, e.g. it only appears after a \
-specific user action the crawler cannot reach), say exactly that in \
-your completion note with the evidence — the host reads it. Do NOT \
-restructure correct UI to chase such a red.
-
-Red items (probe | contract string | what the browser found):
-{reds}
-{visual}
-Fix directions by probe: affordance = no interactive/structural \
-carrier exposes the exact string — implement the chain. Native \
-<select> options DO count as carriers and graders drive them with \
-selectOption; keep selects native. strict-mode = the string \
-matches MORE THAN ONE visible clickable — keep exactly ONE element \
-per value; grid-structure = the grid lacks visible column/row \
-headers or coordinate-named gridcells — render the complete grid; \
-grid-extent = a spreadsheet grid that renders only the data region — \
-render a FIXED-SIZE empty grid (≥8 columns × ≥15 rows) so empty \
-cells are selectable and typeable; auth-gate = after signing in, \
-the username is not its own visible exact-text element (or does not \
-survive reload) — render it inside the account-menu trigger, e.g. \
-<button aria-label="Account menu"><span>{username}</span></button>; \
-combobox = a custom dropdown without aria-expanded — switch to a \
-native <select>; disabled-only = the named control exists but stays \
-disabled — enable it once required inputs are filled; exact-name = a \
-dialog button contains the contract string only as a substring — \
-rename it to the EXACT accessible name; escape-close = the dialog \
-must close on Escape (and overlay/cancel), an undismissable overlay \
-blocks every later grader step; shift-select = click + Shift-click \
-must keep BOTH cells aria-selected="true" — never collapse the \
-selection in the click handler; page-alive = an interaction left \
-the page unclickable (stuck overlay); download = exported file is \
-empty or starts with a UTF-8 BOM — strip it; flow = a generated \
-scenario walk failed (the title names the REQ) — the named controls/\
-dialogs/messages did not chain end-to-end in a real browser; walk \
-that requirement's chain by hand on port {smoke} and fix the real \
-flow, REQ-1 family items first (the grader aborts the suite after \
-consecutive failures).\
-"""
-
-def _breaker_line(ui_run: dict | None) -> str:
-    """止损模拟一行(github 二跑铁证:runner 连败即弃测)——把"修哪条
-    最值钱"变成算术,写进 final prompt。"""
-    bk = (ui_run or {}).get("breaker")
-    if not bk or not bk.get("cut"):
-        return ""
-    return ("\nBREAKER SIMULATION (the grader aborts the suite after ~8 "
-            f"consecutive failures): as-is ~{bk['simulated_pass']}/"
-            f"{bk['total']} tests would run before the cutoff after "
-            f"\"{bk['cut_after']}\"; ~{bk['blocked']} more tests are "
-            "blocked behind that failing chain — fixing its head \""
-            f"{bk.get('first_fail')}\" FIRST unlocks them. Entry-family "
-            "chains gate everything behind them.")
-
-
-def _ui_smoke_red_lines(ui_run: dict, limit: int = 12,
-                        probes: tuple | None = None) -> str:
-    """红项 → 提示词用的一行一证据清单(去重、限长、可按 probe 过滤)。
-
-    probes=("flow",) 只渲染场景流红项——goal-first 下 flow 是唯一硬门,
-    presence 红仅作 advisory,不再驱动修复轮(拆掉字符串游戏的激励面)。
-    """
-    seen: set = set()
-    lines: list[str] = []
-    for r in ui_run.get("reds") or []:
-        if probes is not None and r.get("probe") not in probes:
-            continue
-        key = (r.get("probe"), r.get("string"))
-        if key in seen:
-            continue
-        seen.add(key)
-        nodes = ",".join(r.get("nodes") or []) or "-"
-        detail = str(r.get("detail") or "").split(" — ")[0][:110]
-        lines.append(f"- [{r.get('probe')}] \"{r.get('string')}\" "
-                     f"({nodes}): {detail}")
-        if len(lines) >= limit:
-            break
-    return "\n".join(lines)
-
-
-def _ui_smoke_visual_lines(ui_run: dict, limit: int = 2) -> str:
-    """红项截图的视觉模型描述 → 修复提示词的页面实况段(有才出现)。
-
-    模型此前修红项时"看不见"自己的页面;宿主在红项命中时截图,由
-    VISUAL_MODEL 转述成可行动文字(复用 visual_ref 通道与缓存)。"""
-    visuals = ui_run.get("visuals") or []
-    if not visuals:
-        return ""
-    lines = ["Page evidence at failure (visual model descriptions of the "
-             "host screenshots — read them before fixing):"]
-    for v in visuals[:limit]:
-        lines.append(f"- {v.get('label', 'page')}: "
-                     f"{str(v.get('text') or '')[:600]}")
-    return "\n".join(lines) + "\n"
 
 ACCEPTANCE_STAGED_NOTE = """\
 The official Playwright specs are staged READ-ONLY at .arc/acceptance/ \
@@ -3139,68 +3176,25 @@ def main() -> int:
         else:
             log("[fixture] no machine-compilable fixtures; contract rides "
                 "in FOCUS GIVEN lists")
-        # ---- UI 契约冒烟 staging(必须在 fixture materialize 之后) ----
-        # auth 前奏取登录账号:db.json(刚播种)→ 编译结果双源回退。auth
-        # 缺失 + db 有登录用户 = 爬虫将未登录扫过门控应用 → 全量误报红
-        # (2026-09-26 github:33 红劫持 final 修复循环,诱导静态铺字符串)。
-        ui_smoke_entries: list = []
-        ui_smoke_cmd = ""
-        ui_smoke_auth: dict | None = None
-        if (plan_on
-                and os.environ.get("OCTOS_ARC_UI_SMOKE", "1") != "0"):
-            ui_smoke_entries = ui_smoke.collect_contract_strings(tree)
-            cli_hint = (str(toolchain_cli)
-                        if toolchain_cli is not None else
-                        "local-grader/node_modules/@playwright/test/cli.js")
-            ui_smoke_auth = ui_smoke.fixture_auth(
-                output_dir, ui_smoke_entries,
-                fixture_password=fixture_manifest.FIXTURE_PASSWORD)
-            if ui_smoke_auth is None:
-                ui_smoke_auth = ui_smoke.auth_from_compiled(
-                    fixture_compiled, ui_smoke_entries,
-                    fixture_password=fixture_manifest.FIXTURE_PASSWORD)
-            if (ui_smoke_auth is None
-                    and ui_smoke.db_login_users(output_dir)):
-                log("[ui-smoke] WARNING: app has login users but no auth "
-                    "prelude could be derived — the crawl will run "
-                    "signed-out and gated contract strings WILL false-red; "
-                    "auth-gate probe disabled")
-            ui_smoke.stage_ui_smoke(
-                output_dir, ui_smoke_entries, smoke_port, cli_hint,
-                auth=ui_smoke_auth)
-            ui_smoke_cmd = ui_smoke.build_ui_smoke_cmd(
+        # ---- 模型自测骨架 staging(09-27 目标优先定则) ----
+        # 宿主不再编写验收用例(ui_smoke 契约套件/flow_suite 流套件已
+        # 删除)——测试用例由模型根据需求原文自己生成。宿主只落盘内核
+        # 放行命令形状所需的最小骨架:playwright.config.ts + MY-CHECK
+        # 示例。凭据前奏等由模型按各自 spec 自行 arrange。
+        selftest_note = ""
+        if plan_on:
+            stage_selftest_dir(output_dir, smoke_port)
+            selftest_note = build_selftest_note(
                 str(toolchain_cli) if toolchain_cli is not None else None)
-            # 3.11 兼容:括号内跨行的 f-string 表达式要 PEP 701(3.12+),
-            # runner/测试的 3.11 解析器直接 SyntaxError,提到括号外拼。
-            auth_desc = ("on (" + ui_smoke_auth["username"] + ")"
-                         if ui_smoke_auth else "off")
-            log(f"[plan] UI contract smoke staged: "
-                f"{len(ui_smoke_entries)} contract strings, "
-                f"auth={auth_desc}")
-        # 场景流套件(FLOW RUN,09-27 契合度定论的主杠杆):从 ATOMIC
-        # description 确定性生成平台同构的交互级走查 spec——契约串
-        # presence 级探针看不见"控件存在但流走不通"类缺陷(sheet 二跑
-        # save 永久禁用/创建页强制填名、github 用户名非独立精确文本全
-        # 是这类),平台隐藏 spec 恰恰全是场景流。auth=None 时登录前奏
-        # 不可推导,需登录的流整条跳过(不产必红噪音)。
-        flow_node_map: dict[str, str] = {}
-        if (plan_on and ui_smoke_entries
-                and os.environ.get("OCTOS_ARC_UI_SMOKE", "1") != "0"):
-            flow_text, flow_node_map = flow_suite.generate_spec(
-                tree, ui_smoke_auth)
-            if flow_text:
-                (output_dir / ui_smoke.UI_SMOKE_SUBDIR
-                 / flow_suite.FLOW_SPEC_NAME).write_text(
-                    flow_text, encoding="utf-8")
-                log(f"[plan] flow suite staged: {len(flow_node_map)} "
-                    "scenario-flow test(s) "
-                    "(authoritative; batch-regressed + final-gated)")
+            log("[plan] self-test skeleton staged "
+                f"({SELFTEST_SUBDIR}/playwright.config.ts + example); "
+                "tests are model-authored from the requirement text")
         # C1 配套:需求引号消息 sidecar——codegen 编译 schema 时确定性
         # 桥接("<X> is required"/"<X> already exists" 灌字段三态消息,
         # credential 族进 messages.loginFailure)。宿主生成 API 的错误
         # 面由此默认英文契约族、需求逐字串优先(中文默认与英文逐字
         # 契约冲突,注册/登录族=第一测试族+止损敏感区)。
-        req_msgs = flow_suite.collect_messages(tree)
+        req_msgs = _collect_requirement_messages(tree)
         if req_msgs:
             try:
                 host_msg_dir = output_dir / ".arc" / "host"
@@ -3468,19 +3462,7 @@ def main() -> int:
             failed: list[str] = []
             node_done_notes: dict[str, str] = {}
             segment_digest_pending = False
-            # goal-first 家族止损:同一家族流红连续 2 轮热修不收敛 →
-            # 标记 bust,final 修复轮不再为它烧墙钟(把时间让给别的家族)。
-            family_strikes: dict[str, int] = {}
 
-            def _red_family(red: dict) -> str | None:
-                nodes = red.get("nodes") or []
-                if not nodes or not family_of:
-                    return None
-                fam = family_of.get(str(nodes[0]))
-                return str(fam.get("id")) if fam else None
-
-            def _busted_families() -> set[str]:
-                return {f for f, s in family_strikes.items() if s >= 2}
 
             def _feature_file_for(ids: list[str]) -> str:
                 """本批节点的家族 feature 文件(宿主预生成 stub)点名。"""
@@ -3493,9 +3475,6 @@ def main() -> int:
                         "lists this node's REQ id)")
 
             for idx, batch in enumerate(node_batches, 1):
-                # 批末 UI 静态轻检的红串(建议性)——下一批节点 prompt 顶部
-                # 提醒,不阻断不翻状态;final 的完整爬虫才是权威判定。
-                ui_smoke_note = ""
                 # A2 会话分段:每 SEGMENT_BATCHES 批重置 stdio 会话,切断
                 # O(n²) 历史重放(run-002 实测 1.35 亿 token 的主 driver)。
                 # 上下文经 planctl 磁盘重水合续命(envelope + repoMap 全量
@@ -3590,8 +3569,10 @@ def main() -> int:
                             batch_specs)
                     else:
                         node_prompt = base_prompt \
-                            + NO_STAGED_SPECS_NOTE.format(smoke=smoke_port) \
-                            + ui_smoke_cmd
+                            + NO_STAGED_SPECS_NOTE.format(
+                                smoke=smoke_port,
+                                selftest_dir=SELFTEST_SUBDIR) \
+                            + selftest_note
                     if len(batch) > 1:
                         node_prompt += (
                             BATCH_DIRECTIVE.format(
@@ -3618,8 +3599,6 @@ def main() -> int:
                     # 直到本批某个 turn 真正成功才在下方清掉。
                     node_prompt += _segment_digest(
                         node_done_notes, plan_statuses)
-                if ui_smoke_note:
-                    node_prompt += ui_smoke_note
                 if codegen_on and not scaffold.schema_path(output_dir).exists():
                     node_prompt += SCHEMA_DIRECTIVE
                 if template_ready:
@@ -3798,28 +3777,7 @@ def main() -> int:
                             log(f"[plan] batch rollback failed: {exc}")
                     for nid in batch_ids:
                         plan_statuses[nid] = batch_state
-                    # UI 契约静态轻检(秒级,读 frontend/dist 文件,不 boot):
-                    # 契约串逐字缺失=整条链没实现(sheet 实证的 Rename
-                    # workbook 类)。红串建议性提醒到下一批,权威判定在 final。
-                    if ui_smoke_entries:
-                        static = ui_smoke.scan_built_assets(
-                            output_dir / "frontend" / "dist",
-                            ui_smoke_entries)
-                        if static.get("attempted") and static["reds"]:
-                            miss = ", ".join(
-                                f'"{r["value"]}"({",".join(r["nodes"][:2])})'
-                                for r in static["reds"][:8])
-                            ui_smoke_note = (
-                                "\nUI SMOKE static scan (host, advisory): "
-                                f"{len(static['reds'])} contract string(s) "
-                                "absent from the built bundle — the whole "
-                                "chain is likely unimplemented: " + miss +
-                                ". Implement or surface them; the final "
-                                "browser crawl re-checks.\n")
-                            log(f"[plan] ui-smoke static: "
-                                f"{len(static['reds'])} missing")
-                        else:
-                            ui_smoke_note = ""
+
                     if r_err is None:
                         # Wall-cut turn whose code actually rehearsal-greened.
                         completed_specs.extend(
@@ -3894,72 +3852,7 @@ def main() -> int:
                             elif g_run:
                                 log(f"[plan] regression green: "
                                     f"{g_run[0]}p/{g_run[1]}f")
-                    # 批后流回归(FLOW):无 staged specs 的任务此前零批后
-                    # 回归;现在对"已完成节点"的流走查做平台同构回归——
-                    # grep 过滤只跑已实现节点,未实现流不产噪音。红 → 一轮
-                    # 修复趁上下文热(流级缺陷拖到 final 才发现就是
-                    # github 二跑 40 分钟耗尽的形态)。
-                    if (r_err is None and flow_node_map and not time_up()
-                            and os.environ.get("OCTOS_ARC_HOST_GRADE",
-                                               "1") != "0"
-                            and os.environ.get("OCTOS_ARC_FLOW_REGRESSION",
-                                               "1") != "0"):
-                        done_flow = [nid for nid, st in plan_statuses.items()
-                                     if st == "done" and nid in flow_node_map]
-                        if done_flow:
-                            grep = flow_suite.grep_for(done_flow)
-                            fr = ui_smoke.run_smoke(
-                                output_dir, smoke_port, ui_smoke_entries,
-                                spec_ports_extra, auth=ui_smoke_auth,
-                                grep=grep)
-                            if fr is not None and fr["failed"] > 0:
-                                flow_suite.merge_flow_fails(fr, flow_node_map)
-                                log(f"[plan] flow regression RED: "
-                                    f"{fr['passed']}p/{fr['failed']}f over "
-                                    f"{len(done_flow)} done node(s)")
-                                # goal-first:修复轮只喂流红(presence 是
-                                # advisory);修复后复检一次,仍红 → 家族记
-                                # 一次 strike(2 次 bust,final 不再烧墙钟)。
-                                if goal_first:
-                                    busted = _busted_families()
-                                    repair_view = dict(
-                                        fr, reds=[r for r in fr["reds"]
-                                                  if r.get("probe") == "flow"
-                                                  and _red_family(r)
-                                                  not in busted])
-                                else:
-                                    repair_view = fr
-                                if repair_view["reds"]:
-                                    r_wall = turn_wall(len(batch))
-                                    driver.run(UI_SMOKE_REPAIR_PROMPT.format(
-                                        reds=_ui_smoke_red_lines(
-                                            repair_view, limit=10),
-                                        port=args.web_port, smoke=smoke_port,
-                                        visual=_ui_smoke_visual_lines(fr)),
-                                        min(node_timeout, r_wall), r_wall)
-                                if goal_first and repair_view["reds"]:
-                                    fr2 = ui_smoke.run_smoke(
-                                        output_dir, smoke_port,
-                                        ui_smoke_entries, spec_ports_extra,
-                                        auth=ui_smoke_auth, grep=grep)
-                                    if fr2 is not None and fr2["failed"] > 0:
-                                        flow_suite.merge_flow_fails(
-                                            fr2, flow_node_map)
-                                        for r in fr2["reds"]:
-                                            if r.get("probe") != "flow":
-                                                continue
-                                            fam = _red_family(r)
-                                            if fam:
-                                                family_strikes[fam] = \
-                                                    family_strikes.get(fam, 0) + 1
-                                                log(f"[plan] flow stop-loss: "
-                                                    f"family {fam} strike "
-                                                    f"{family_strikes[fam]} "
-                                                    "(still red after "
-                                                    "batch-end repair)")
-                            elif fr is not None:
-                                log(f"[plan] flow regression green: "
-                                    f"{fr['passed']}p/{fr['failed']}f")
+
                     # validation_probes lives on HostSignals (next to
                     # rehearsal), not inside RehearsalReport.
                     r_report.pop("validation_probes", None)
@@ -3992,8 +3885,6 @@ def main() -> int:
                     log("[codegen] final compile done")
             # Final verification pass; octos leaves the port free.
             ok, text = False, "skipped: time budget"
-            # C2 事件标记要用;legacy 非 plan 路径不赋值,这里统一初始化。
-            ui_run = None
             if time_up():
                 log("[flow] time budget exhausted; skipping final verification")
             elif plan_on:
@@ -4021,91 +3912,7 @@ def main() -> int:
                         f"{tier2_run[0]}p/{tier2_run[1]}f"
                         if tier2_run else "[plan] Tier-2 unavailable; "
                                          "degrading to model final check")
-                # UI 契约冒烟权威判定(requirements-only 任务):从种子起跑
-                # 完整浏览器爬虫;红项=宿主 authored 契约失败,先走 ≤2 轮
-                # 修复循环,终态红项进 final prompt 作为 ground truth。
-                ui_run = None
-                if (ui_smoke_entries and f_err is None
-                        and not time_up()):
-                    ui_run = ui_smoke.run_smoke(
-                        output_dir, smoke_port, ui_smoke_entries,
-                        spec_ports_extra,
-                        auth=ui_smoke_auth,
-                        fixture_password=fixture_manifest.FIXTURE_PASSWORD)
-                    if ui_run is not None:
-                        flow_suite.merge_flow_fails(ui_run, flow_node_map)
-                        ui_run["breaker"] = flow_suite.breaker_view(ui_run)
-                        log(f"[plan] UI contract smoke: "
-                            f"{ui_run['passed']}p/{ui_run['failed']}f "
-                            f"({len(ui_run['reds'])} red item(s)"
-                            + (f", {ui_run.get('flow_reds', 0)} flow red(s)"
-                               if ui_run.get("flow_reds") else "") + ")")
-                        for fix_attempt in (1, 2):
-                            # goal-first 硬门=flow 红(排除已 bust 家族);
-                            # presence-only 红不再驱动修复轮。
-                            if goal_first:
-                                busted = _busted_families()
-                                open_reds = [
-                                    r for r in ui_run["reds"]
-                                    if r.get("probe") == "flow"
-                                    and _red_family(r) not in busted]
-                                if not open_reds:
-                                    break
-                            elif not ui_run["reds"] or time_up():
-                                break
-                            if time_up():
-                                break
-                            r_wall = turn_wall(1)
-                            reds_txt = _ui_smoke_red_lines(
-                                ui_run, limit=12,
-                                probes=("flow",) if goal_first else None)
-                            driver.run(UI_SMOKE_REPAIR_PROMPT.format(
-                                reds=reds_txt, port=args.web_port,
-                                smoke=smoke_port,
-                                visual=_ui_smoke_visual_lines(ui_run)),
-                                min(node_timeout, r_wall), r_wall)
-                            # 修复后必须重建前端再复检(爬虫对着 dist 跑)。
-                            _rehearse_startup(output_dir, smoke_port,
-                                              probes=[], extra_ports=[],
-                                              report={"build_ok": False,
-                                                      "boot_ok": False,
-                                                      "routes": [],
-                                                      "digest": ""},
-                                              fixture_probes=[])
-                            ui_run = ui_smoke.run_smoke(
-                                output_dir, smoke_port, ui_smoke_entries,
-                                spec_ports_extra,
-                                auth=ui_smoke_auth,
-                                fixture_password=fixture_manifest.FIXTURE_PASSWORD)
-                            if ui_run is not None:
-                                flow_suite.merge_flow_fails(
-                                    ui_run, flow_node_map)
-                                ui_run["breaker"] = flow_suite.breaker_view(
-                                    ui_run)
-                                # goal-first 家族止损:修复后仍红的流项给
-                                # 其家族记 strike(批末 1 + final 1 = 2 即
-                                # bust,下一轮自动跳过)。
-                                if goal_first:
-                                    for r in ui_run["reds"]:
-                                        if r.get("probe") != "flow":
-                                            continue
-                                        fam = _red_family(r)
-                                        if fam:
-                                            family_strikes[fam] = \
-                                                family_strikes.get(fam, 0) + 1
-                            log(f"[plan] ui-smoke repair {fix_attempt}: "
-                                f"{ui_run['failed']}f"
-                                if ui_run else
-                                f"[plan] ui-smoke repair {fix_attempt}: n/a")
-                        if goal_first and family_strikes:
-                            busted = _busted_families()
-                            if busted:
-                                log(f"[plan] flow stop-loss: final repair "
-                                    f"no longer targets {sorted(busted)} "
-                                    "(2+ strikes)")
-                    else:
-                        log("[plan] UI contract smoke not attempted "
-                            "(toolchain/boot unavailable)")
+
                 driver.set_envelope(
                     phase="final", task=plan_task, atomic_nodes=atomic_nodes,
                     statuses=plan_statuses, focus=None, ports=plan_ports,
@@ -4118,17 +3925,12 @@ def main() -> int:
                     arrange_nodes=fixture_arranged_nodes,
                     rules_text=rules_text)
                 _prune_acceptance_junk(output_dir, tests_dir, log)
-                ui_green = (ui_run is not None and ui_run["failed"] == 0
-                            and ui_run["passed"] > 0)
-                # goal-first:flow 红为 0 即视为浏览器门通过(presence 红
-                # 降 advisory,不阻断跳过 final LLM 轮)。
-                browser_green = (ui_run is not None
-                                 and ui_run.get("flow_reds", 0) == 0
-                                 and ui_run["passed"] > 0) \
-                    if goal_first else ui_green
+                # 09-27 定则:宿主不再跑自写浏览器套件——跳过 final LLM 轮
+                # 的门只剩 Tier-1 探针绿 + Tier-2 staged specs(任务自带
+                # 公开测试)全绿;requirements-only 任务的浏览器级验证由
+                # 模型自写 spec 自证(见 SELF-TEST 指引)。
                 if (f_err is None and tier2_run is not None
-                        and tier2_run[1] == 0 and tier2_run[0] > 0
-                        and (not ui_smoke_entries or browser_green)):
+                        and tier2_run[1] == 0 and tier2_run[0] > 0):
                     ok, text = True, ("host spec run all green "
                                       f"({tier2_run[0]} passed); final LLM turn skipped")
                     log("[plan] Tier-2 all green; skipping final LLM turn")
@@ -4160,75 +3962,7 @@ def main() -> int:
                             f"{tier2_run[0]} staged specs PASS on port "
                             f"{smoke_port}. Do not re-run suites; spot-check "
                             "one chain if you must, then end the turn.")
-                    if ui_run is not None and ui_run["reds"]:
-                        if goal_first:
-                            # goal-first 裁判:flow 红是唯一必修 ground
-                            # truth(busted 家族已止损排除);presence 红只
-                            # 作 advisory 提示——不再构成"铺字符串"的激励。
-                            busted = _busted_families()
-                            must = [r for r in ui_run["reds"]
-                                    if r.get("probe") == "flow"
-                                    and _red_family(r) not in busted]
-                            n_advisory = len(ui_run["reds"]) - len(must)
-                            if must:
-                                final_prompt += (
-                                    "\nHOST UI SMOKE (ground truth, headless "
-                                    f"browser vs this app on port "
-                                    f"{smoke_port}): {ui_run['passed']} "
-                                    f"passed, {len(must)} scenario-flow "
-                                    "item(s) FAILED:\n"
-                                    + _ui_smoke_red_lines(
-                                        dict(ui_run, reds=must), limit=14)
-                                    + "\nFix exactly these — they are "
-                                    "platform-shaped scenario walks (the "
-                                    "title names the REQ): walk that "
-                                    "requirement's chain on port "
-                                    + str(smoke_port) + ", fix the real "
-                                    "flow. After fixing, rerun the UI "
-                                    "SMOKE RUN command with "
-                                    "flow-suite.spec.ts appended to its "
-                                    "file arguments."
-                                    + _breaker_line(ui_run)
-                                    + _ui_smoke_visual_lines(ui_run))
-                            if n_advisory:
-                                final_prompt += (
-                                    f"\nADVISORY (not must-fix): {n_advisory} "
-                                    "presence-probe red item(s) — exact "
-                                    "accessible names likely missing; "
-                                    "surface them only when a fix for the "
-                                    "flow above is already in hand.")
-                        else:
-                            # UI 契约爬虫/场景流红项=宿主 authored ground
-                            # truth:点名串+探针+证据,模型只修红项、不重建
-                            # 绿项。[flow] 红是场景走查失败(平台 spec 同构)
-                            # ——runner 连续失败止损,入口家族流红必修。
-                            final_prompt += (
-                                "\nHOST UI SMOKE (ground truth, headless "
-                                f"browser vs this app on port {smoke_port}): "
-                                f"{ui_run['passed']} passed, "
-                                f"{ui_run['failed']} "
-                                f"FAILED. Red items:\n"
-                                + _ui_smoke_red_lines(ui_run, limit=14)
-                                + "\nFix exactly these — [flow] items FIRST "
-                                "(they are platform-shaped scenario walks; "
-                                "the title names the REQ): walk that "
-                                "requirement's "
-                                "chain on port " + str(smoke_port) + ", fix "
-                                "the real flow. Then the probe items (exact "
-                                "accessible names, visible controls, "
-                                "Escape-closable dialogs, Shift-click keeps "
-                                "selection, BOM-free exports). After fixing, "
-                                "rerun the UI SMOKE RUN command with "
-                                "flow-suite.spec.ts appended to its file "
-                                "arguments."
-                                + _breaker_line(ui_run)
-                                + _ui_smoke_visual_lines(ui_run))
-                    elif browser_green and not tests_dir:
-                        final_prompt += (
-                            "\nHOST UI SMOKE (ground truth): all browser "
-                            f"contract checks PASS ({ui_run['passed']}). "
-                            "Spot-check one semantic chain if you must, "
-                            "then end the turn.")
+
                     # Filtered to the red tests' own specs (or all staged
                     # files as fallback): the final turn never needs the
                     # unfiltered full-suite form — Tier-2 owns that, and
@@ -4242,7 +3976,8 @@ def main() -> int:
                             final_spec_files(tier2_run, output_dir))
                     else:
                         final_prompt += NO_STAGED_SPECS_NOTE.format(
-                            smoke=smoke_port)
+                            smoke=smoke_port,
+                            selftest_dir=SELFTEST_SUBDIR)
                     _ensure_dev_server(output_dir, smoke_port,
                                        spec_ports_extra, log)
                     log("[flow] final verification turn starting (slim, "
@@ -4366,15 +4101,6 @@ def main() -> int:
         # 无证据则不标(平台自有判官)。
         final_skipped = (not ok) and text.startswith("skipped: time budget")
         red_nodes: dict[str, str] = {}
-        if ui_run is not None:
-            for r in ui_run.get("reds") or []:
-                # goal-first:只有流红(场景走查失败)是节点级负证据;
-                # presence 红不再连坐节点(test/failed 标记)。
-                if goal_first and r.get("probe") != "flow":
-                    continue
-                for nid in r.get("nodes") or []:
-                    red_nodes.setdefault(
-                        nid, f"[{r.get('probe')}] {r.get('string')}")
         for node in atomic_nodes:
             node_id = str(node.get("id"))
             if node_id in failed:

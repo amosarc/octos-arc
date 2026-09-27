@@ -142,8 +142,11 @@ check("spec cmd: green-stop marker (.arc/acceptance) present",
       ".arc/acceptance/playwright.config.ts" in cmd)
 check("spec cmd: git rollback banned",
       "git checkout/reset/restore" in cmd)
-check("spec cmd: custom harness banned",
-      "never write your own Playwright" in cmd)
+# 09-27 目标优先定则:测试用例由模型根据需求自生成——旧"禁止自写
+# Playwright"政策翻转,新政策=自写 spec 走被批准命令形状。
+check("spec cmd: model-authored specs sanctioned",
+      "your OWN Playwright spec" in cmd and "explicit file argument" in cmd,
+      cmd[-120:])
 
 cmd_full = main.build_spec_run_cmd("/path/to/cli.js")
 # 5623442 起 VERIFICATION_RULES 指引提及 MY-CHECK.spec.ts(正文合法);
