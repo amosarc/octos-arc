@@ -66,7 +66,10 @@ guard(自测命令放行形状/full-spec-run/trace-deny)、OCTOS_TOOL_ALLOWLIST�
 `build_system_row_context` 预留参数位,触发条件=仿真显示模型反复定点重读
 已完成家族契约。
 环境开关:`OCTOS_ARC_GOAL_FIRST`(目标优先家族工单,缺省开;=0 回退
-host-first 兄弟批路径,同样无 envelope)、`OCTOS_ARC_HOST_SCAFFOLD`
+host-first 兄弟批路径,同样无 envelope)、`OCTOS_ARC_FAMILIES`(运行范围,
+首跑/快迭代:逗号分隔 id,任意层级前缀——`REQ-1`=整家族/`REQ-2-3`=子
+家族/原子 id;范围外家族不生成工单/不计进度/不进 Tier-2 判定面,系统行
+追加 RUN SCOPE 段;未设置=全量)、`OCTOS_ARC_HOST_SCAFFOLD`
 (宿主落盘基础设施,缺省开)、`OCTOS_ARC_HOST_GRADE`(final 轮 Tier-2 宿主
 跑 staged Playwright,缺省关)。
 

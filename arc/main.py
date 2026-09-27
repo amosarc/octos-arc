@@ -1364,15 +1364,18 @@ def render_requirements_map(tree: dict) -> str:
 
 
 def build_system_row_context(tree: dict, rules_text: str,
-                             fixture_rules: str) -> str:
+                             fixture_rules: str,
+                             scope: frozenset[str] | None = None) -> str:
     """系统行常驻层(全局层,字节稳定,缓存 0 号位)。
 
     分层装配的全局层:root 契约 + 标题树 + 契约 + 播种契约。经
     <data_dir>/AGENTS.md 进入内核系统行(load_bootstrap_files 通道,
     base+date 之后、memory 之前);每分段重读一次,段内逐字节稳定。
     挥发物(进度账本/家族细节/批节点)绝不进这里——会破坏前缀缓存。
+    scope=运行范围(OCTOS_ARC_FAMILIES)时追加 RUN SCOPE 段(整 run
+    恒定,仍字节稳定);标题树保持全量——范围是调度决策不是需求裁剪。
     """
-    return "\n\n".join((
+    parts = [
         "ROOT CONTRACT (verbatim — global rules that bind every family):",
         render_root_contract(tree),
         "APP OUTLINE (every family/sub-family in document order — "
@@ -1382,7 +1385,14 @@ def build_system_row_context(tree: dict, rules_text: str,
         render_map_outline(tree),
         rules_text,
         fixture_rules,
-    ))
+    ]
+    if scope:
+        parts.append(
+            "RUN SCOPE (operator-limited): this run implements ONLY "
+            + ", ".join(sorted(scope))
+            + " — work orders for other families are out of scope; do "
+            "not implement them, and expect their surfaces to be absent.")
+    return "\n\n".join(parts)
 
 
 def collect_dependency_context(tree: dict, batch: list[dict],
@@ -1526,12 +1536,13 @@ def group_families(tree: dict, max_batch: int = 6) -> list[list[dict]]:
 
 
 def _progress_ledger_line(family_of: dict[str, dict],
-                          statuses: dict[str, str]) -> str:
+                          statuses: dict[str, str],
+                          only: frozenset[str] | None = None) -> str:
     """家族级进度账本一行(planctl 退役后全局进度的唯一载体)。
 
     家族状态:全部节点 done → done;任一 blocked → blocked;否则任一
     active → active;其余 pending。非 goal-first(无家族索引)时退化为
-    节点计数摘要。
+    节点计数摘要。only=运行范围(OCTOS_ARC_FAMILIES)时范围外家族不列。
     """
     if not family_of:
         done = sum(1 for s in statuses.values() if s == "done")
@@ -1543,6 +1554,8 @@ def _progress_ledger_line(family_of: dict[str, dict],
         fam_nodes.setdefault(str(fam.get("id")), []).append(nid)
     parts = []
     for fid, nids in fam_nodes.items():
+        if only is not None and fid not in only:
+            continue
         sts = [statuses.get(n, "pending") for n in nids]
         if all(s == "done" for s in sts):
             st = "done"
@@ -1554,6 +1567,54 @@ def _progress_ledger_line(family_of: dict[str, dict],
             st = "pending"
         parts.append(f"{fid}:{st}")
     return "PROGRESS (family ledger, document order): " + ", ".join(parts)
+
+
+# ------------------------------------------------------- run scope (灵活范围)
+#
+# 首跑/快迭代机制:OCTOS_ARC_FAMILIES 限定本次 run 只实现哪些家族(逗号
+# 分隔 id;接受任意层级前缀——"REQ-1"=整个家族,"REQ-2-3"=子家族,
+# "REQ-2-3-1"=单原子)。范围外家族不生成工单、不计进度、不进 Tier-2,
+# 实现最小代价提交测试。未设置=全量(默认)。
+
+
+def parse_family_scope(raw: str | None) -> frozenset[str]:
+    """"REQ-1, REQ-2-3" → {REQ-1, REQ-2-3};空 → frozenset()(全量)。"""
+    if not raw:
+        return frozenset()
+    return frozenset(s.strip() for s in raw.split(",") if s.strip())
+
+
+def _node_matches_scope(nid: str, scope: frozenset[str]) -> bool:
+    """节点 id 命中范围:精确相等或以某个范围 id 为层级前缀(-/. 边界)。"""
+    return any(nid == s or nid.startswith(s + "-") or nid.startswith(s + ".")
+               for s in scope)
+
+
+def batch_in_scope(batch: list[dict], scope: frozenset[str],
+                   family_of: dict[str, dict]) -> bool:
+    """本批是否在运行范围内(任一节点命中即入;家族批整体进退)。"""
+    if not scope:
+        return True
+    for n in batch:
+        nid = str(n.get("id"))
+        if _node_matches_scope(nid, scope) or (
+                nid in family_of and _node_matches_scope(
+                    str(family_of[nid].get("id")), scope)):
+            return True
+    return False
+
+
+def scoped_spec_files(spec_map: dict[str, list[str]],
+                      node_batches: list[list[dict]],
+                      scope: frozenset[str],
+                      family_of: dict[str, dict]) -> list[str]:
+    """范围内节点的 staged specs(范围 run 的 Tier-2 判定面)。"""
+    wanted: set[str] = set()
+    for batch in node_batches:
+        if batch_in_scope(batch, scope, family_of):
+            for n in batch:
+                wanted.update(spec_map.get(str(n.get("id"))) or [])
+    return sorted(wanted)
 
 
 # ---------------------------------------------------------------- octos driver
@@ -2867,19 +2928,37 @@ def main() -> int:
         goal_first = os.environ.get("OCTOS_ARC_GOAL_FIRST", "1") != "0"
         # goal-first: 家族工单——一个顶层家族一次交给代理连贯深实现
         # (超大家族沿子家族边界切);=0 走兄弟批。预算随批规模放大。
+        # OCTOS_ARC_FAMILIES=运行范围(首跑/快迭代):只实现列出的家族
+        # (任意层级前缀,"REQ-1"/"REQ-2-3"/原子 id 均可,逗号分隔),
+        # 范围外家族不生成工单/不计进度/不进 Tier-2;未设置=全量。
         batch_n = int(os.environ.get("OCTOS_ARC_NODE_BATCH", "2"))
+        family_scope = parse_family_scope(
+            os.environ.get("OCTOS_ARC_FAMILIES"))
         family_of: dict[str, dict] = {}
         if goal_first:
             family_batch_max = int(
                 os.environ.get("OCTOS_ARC_FAMILY_BATCH_MAX", "6"))
             node_batches = group_families(tree, family_batch_max)
             family_of = family_index(tree)
+            if family_scope:
+                before = len(node_batches)
+                node_batches = [
+                    b for b in node_batches
+                    if batch_in_scope(b, family_scope, family_of)]
+                log(f"[scope] OCTOS_ARC_FAMILIES={','.join(sorted(family_scope))}: "
+                    f"{before} → {len(node_batches)} work order(s) "
+                    f"({sum(len(b) for b in node_batches)} node(s)); "
+                    "out-of-scope families: no work orders, no ledger, "
+                    "no Tier-2")
             log(f"[flow] goal-first family work orders: "
                 f"{len(node_batches)} batch(es) for {len(atomic_nodes)} "
                 f"nodes over "
                 f"{len({str(f.get('id')) for f in family_of.values()})} "
                 "familie(s)")
         else:
+            if family_scope:
+                log("[scope] OCTOS_ARC_FAMILIES set but GOAL_FIRST=0 — "
+                    "scope applies to family work orders only; ignored")
             node_batches = group_siblings(tree, batch_n)
         max_batch = max((len(b) for b in node_batches), default=1)
         # Iteration-cap coupling: a healthy node needs 3-40 kernel
@@ -3211,7 +3290,8 @@ def main() -> int:
         if goal_first:
             sysrow = write_system_row_file(
                 data_dir, build_system_row_context(
-                    tree, rules_text, fixture_rules))
+                    tree, rules_text, fixture_rules,
+                    scope=family_scope or None))
             log(f"[system-row] stable context injected: {sysrow} "
                 f"({sysrow.stat().st_size / 1024:.0f} KB; resident at "
                 "prefix position 0 — work orders carry only the delta)")
@@ -3438,9 +3518,11 @@ def main() -> int:
                     plan_statuses[nid] = "active"
                 # 进度账本行:家族级状态(全家族节点 done=done;任一
                 # blocked=blocked;否则 active/pending),随工单下发——
-                # planctl 退役后全局进度的唯一载体。
+                # planctl 退役后全局进度的唯一载体。范围 run 只列范围
+                # 内家族(范围外不制造"永远 pending"的噪音)。
                 progress_line = _progress_ledger_line(
-                    family_of, plan_statuses)
+                    family_of, plan_statuses,
+                    only=family_scope or None)
                 if goal_first:
                     # 分层装配:全局层(地图+契约+播种契约)常驻系统行;
                     # 工单=模块层(本家族全子树)+依赖闭包+批节点+进度。
@@ -3801,8 +3883,14 @@ def main() -> int:
                 tier2_run = None
                 if f_err is None and os.environ.get("OCTOS_ARC_HOST_GRADE",
                                                     "1") != "0":
+                    # 范围 run:Tier-2 判定面收窄到范围内节点的 specs
+                    # (全量套件对未实现家族必然全红,会把 final 带偏)。
+                    tier2_specs = (scoped_spec_files(
+                        spec_map, node_batches, family_scope, family_of)
+                        if (family_scope and goal_first) else None)
                     tier2_run = _run_staged_playwright(
-                        output_dir, smoke_port, tests_dir, spec_ports_extra)
+                        output_dir, smoke_port, tests_dir, spec_ports_extra,
+                        spec_files=tier2_specs)
                     hs["spec_run"] = (
                         {"passed": tier2_run[0], "failed": tier2_run[1],
                          "digest": tier2_run[2]} if tier2_run else None)
@@ -3889,7 +3977,8 @@ def main() -> int:
                         # the model's self-report.
                         r_ok, r_fail, r_digest = _run_staged_playwright(
                             output_dir, smoke_port, tests_dir,
-                            spec_ports_extra) or (0, 0, "")
+                            spec_ports_extra,
+                            spec_files=tier2_specs) or (0, 0, "")
                         log(f"[plan] Tier-2 re-run after fix: "
                             f"{r_ok}p/{r_fail}f")
                         hs["spec_run_rerun"] = {"passed": r_ok,

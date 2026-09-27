@@ -165,6 +165,74 @@ class DependencyClosureTests(unittest.TestCase):
             main.collect_dependency_context(TREE, [n], fam_of), "")
 
 
+class RunScopeTests(unittest.TestCase):
+    """运行范围机制:OCTOS_ARC_FAMILIES 限定本次 run 实现的家族。"""
+
+    BATCHES = main.group_families(TREE)
+
+    def test_parse_empty_means_all(self):
+        self.assertEqual(main.parse_family_scope(None), frozenset())
+        self.assertEqual(main.parse_family_scope(""), frozenset())
+        self.assertEqual(main.parse_family_scope(" , "),
+                         frozenset())
+
+    def test_parse_comma_ids(self):
+        self.assertEqual(main.parse_family_scope("REQ-1, REQ-2-3"),
+                         frozenset({"REQ-1", "REQ-2-3"}))
+
+    def test_batch_filter_family_level(self):
+        scope = main.parse_family_scope("REQ-1")
+        kept = [b for b in self.BATCHES
+                if main.batch_in_scope(b, scope, main.family_index(TREE))]
+        flat = [n["id"] for b in kept for n in b]
+        self.assertTrue(all(i.startswith("REQ-1") for i in flat))
+        self.assertTrue(flat)
+
+    def test_batch_filter_subfamily_prefix(self):
+        # 批粒度语义:子家族前缀命中 → 含它的整个工单保留(家族批整体
+        # 进退);未命中的家族批排除。
+        scope = main.parse_family_scope("REQ-1-1")
+        kept = [b for b in self.BATCHES
+                if main.batch_in_scope(b, scope, main.family_index(TREE))]
+        flat = [n["id"] for b in kept for n in b]
+        self.assertIn("REQ-1-1-1", flat)
+        self.assertNotIn("REQ-2-1", flat)
+        self.assertNotIn("REQ-3-1", flat)
+
+    def test_batch_filter_no_match_excludes_all(self):
+        scope = main.parse_family_scope("REQ-9")
+        kept = [b for b in self.BATCHES
+                if main.batch_in_scope(b, scope, main.family_index(TREE))]
+        self.assertEqual(kept, [])
+
+    def test_scoped_spec_files_follow_scope(self):
+        spec_map = {"REQ-1-1-1": ["a.spec.ts"], "REQ-2-1": ["b.spec.ts"]}
+        scope = main.parse_family_scope("REQ-1")
+        files = main.scoped_spec_files(
+            spec_map, self.BATCHES, scope, main.family_index(TREE))
+        self.assertEqual(files, ["a.spec.ts"])
+
+    def test_ledger_omits_out_of_scope_families(self):
+        fam_of = main.family_index(TREE)
+        statuses = {n["id"]: "pending" for n in main.flatten_atomic(TREE)}
+        line = main._progress_ledger_line(
+            fam_of, statuses, only=frozenset({"REQ-1"}))
+        self.assertIn("REQ-1:pending", line)
+        self.assertNotIn("REQ-2", line)
+        self.assertNotIn("REQ-3", line)
+
+    def test_system_row_scope_section(self):
+        with_scope = main.build_system_row_context(
+            TREE, "rules", "fx", scope=frozenset({"REQ-1"}))
+        self.assertIn("RUN SCOPE", with_scope)
+        self.assertIn("REQ-1", with_scope)
+        without = main.build_system_row_context(TREE, "rules", "fx")
+        self.assertNotIn("RUN SCOPE", without)
+        # scope 段不破坏字节稳定性(同 scope 两次生成相同)
+        self.assertEqual(with_scope, main.build_system_row_context(
+            TREE, "rules", "fx", scope=frozenset({"REQ-1"})))
+
+
 class SystemRowTests(unittest.TestCase):
     """分层装配:全局层常驻系统行(缓存 0 号位),模块层随工单。"""
 
