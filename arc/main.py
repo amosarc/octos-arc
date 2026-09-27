@@ -1113,6 +1113,125 @@ def describe_node(node: dict,
     return "\n".join(lines)
 
 
+# ------------------------------------------------------- goal-first context
+#
+# 09-27 转向(宿主优先→目标优先):requirements.yaml 不整份透传
+# (github 3819 行/sheet 3022 行),分层封装——
+#   render_requirements_map: root description 逐字 + 一级标题地图
+#     (每家族 id+name 及其子标题),每工单必带,~2-3KB;
+#   describe_family_context: 本批所属家族的 FOLDER 契约逐字
+#     (家族级+命中子家族级——模块契约此前只进 shared_contract 且被
+#     12KB 截断,github 24.5KB 权限契约被裁半);
+#   group_families: 顶层家族一个工单,超大家族沿子家族边界切。
+# 全部确定性树遍历,零 LLM,字节稳定。
+
+
+def render_requirements_map(tree: dict) -> str:
+    """root description 逐字 + 一级标题地图(各家族 id+name 与子标题)。"""
+    lines = [
+        "REQUIREMENTS MAP (authoritative app outline):",
+        "ROOT CONTRACT (verbatim — global rules that bind every family):",
+        str((tree or {}).get("description") or "").strip() or "(none)",
+        "",
+        "APP OUTLINE (every requirement family in document order, with "
+        "its sub-headings — locate any section here, then read THAT "
+        "section of requirements/requirements.yaml when a contract "
+        "spans families):",
+    ]
+    for folder in (tree or {}).get("children") or []:
+        if not isinstance(folder, dict):
+            continue
+        lines.append(f"- {folder.get('id')}: "
+                     f"{' '.join(str(folder.get('name') or '').split())}")
+
+        def outline(folder: dict, depth: int) -> None:
+            pad = "    " * depth
+            for child in folder.get("children") or []:
+                if not isinstance(child, dict):
+                    continue
+                # 子标题=FOLDER 层级;ATOMIC 叶子是工单项,由各家族工单
+                # 逐字携带,不进地图(避免地图与工单双份)。
+                if str(child.get("type", "")).upper() == "ATOMIC":
+                    continue
+                lines.append(f"{pad}{child.get('id')}: "
+                             f"{' '.join(str(child.get('name') or '').split())}")
+                outline(child, depth + 1)
+
+        outline(folder, 1)
+    return "\n".join(lines)
+
+
+def family_index(tree: dict) -> dict[str, dict]:
+    """原子 id → 顶层家族节点(goal-first 家族工单的上下文锚)。"""
+    out: dict[str, dict] = {}
+    for folder in (tree or {}).get("children") or []:
+        if isinstance(folder, dict):
+            for n in flatten_atomic(folder):
+                nid = str(n.get("id"))
+                if nid:
+                    out[nid] = folder
+    return out
+
+
+def describe_family_context(family: dict, batch: list[dict]) -> str:
+    """本批所属家族的 FOLDER 契约逐字(家族级 + 命中子家族级,无截断)。
+
+    未命中本批节点的子家族剪枝(它们随各自工单下发)。
+    """
+    ids = {str(n.get("id")) for n in batch}
+    parts: list[str] = []
+
+    def hit(node: dict) -> bool:
+        return any(str(n.get("id")) in ids
+                   for n in flatten_atomic(node))
+
+    top = str(family.get("description") or "").strip()
+    if top:
+        parts.append(f"[{family.get('id')} — {family.get('name', '')}]\n{top}")
+
+    def walk(node: dict) -> None:
+        for child in node.get("children") or []:
+            if not isinstance(child, dict):
+                continue
+            if str(child.get("type", "")).upper() == "ATOMIC":
+                continue
+            if hit(child):
+                desc = str(child.get("description") or "").strip()
+                if desc:
+                    parts.append(
+                        f"[{child.get('id')} — {child.get('name', '')}]\n{desc}")
+                walk(child)
+
+    walk(family)
+    return "\n\n".join(parts)
+
+
+def group_families(tree: dict, max_batch: int = 6) -> list[list[dict]]:
+    """goal-first 调度:一个顶层家族一个工单;超大家族沿子家族边界切。
+
+    与 group_siblings 同序语义:批拼接严格等于 flatten_atomic(tree),
+    跨批依赖序不变。>max_batch 的家族用 group_siblings 在家族内切
+    (它按最近父 FOLDER 分组,天然沿子家族 REQ-N-M 边界)。
+    """
+    batches: list[list[dict]] = []
+    for folder in (tree or {}).get("children") or []:
+        if not isinstance(folder, dict):
+            continue
+        nodes = flatten_atomic(folder)
+        if not nodes:
+            continue
+        if len(nodes) <= max_batch:
+            batches.append(nodes)
+        else:
+            batches.extend(group_siblings(folder, 4))
+    flat = [n for b in batches for n in b]
+    all_atomic = flatten_atomic(tree)
+    if [str(n.get("id")) for n in flat] != [str(n.get("id")) for n in all_atomic]:
+        # 树形状意外(ROOT 直挂/异型节点)——退化为兄弟批,序仍保真。
+        batches = group_siblings(tree, 4)
+    return batches
+
+
 # ---------------------------------------------------------------- octos driver
 
 OCTOS_RELEASE_URL = (
@@ -1501,7 +1620,8 @@ class OctosDriver:
                      seeded_nodes: set | frozenset | None = None,
                      shared_contract: str | None = None,
                      specs_staged: bool = False,
-                     arrange_nodes: set | frozenset | None = None) -> None:
+                     arrange_nodes: set | frozenset | None = None,
+                     rules_text: str | None = None) -> None:
         """(Re)build the plan envelope; the next run() wraps it."""
         if not self.plan_capable:
             return
@@ -1512,7 +1632,8 @@ class OctosDriver:
             ports=ports, spec_map=spec_map, host_signals=host_signals,
             extra_rules=extra_rules, fixture_given=fixture_given,
             seeded_nodes=seeded_nodes, shared_contract=shared_contract,
-            specs_staged=specs_staged, arrange_nodes=arrange_nodes)
+            specs_staged=specs_staged, arrange_nodes=arrange_nodes,
+            rules_text=rules_text)
         # 防御(内核 wire.rs:174-178 精确匹配 step id):复合/越界 focus
         # 会让内核丢弃整个 envelope(PLAN/FOCUS/validation 全不装)。
         if self.envelope["focus"] is not None:
@@ -1938,7 +2059,37 @@ JavaScript/JSX only; dependencies are preinstalled — \
 never run npm install. Do not commit; the harness handles git.\
 PORT DISCIPLINE: run any dev/test server ONLY on port {smoke}; NEVER \
 bind port {port} (the grader watches it — binding it kills the whole \
-run). Stop every server you started when done.\
+run). Stop every server you started when done.
+"""
+
+# goal-first 骨架轮:模板已在位可启动,但 App 外壳/路由/家族文件结构由
+# 代理依需求地图自建(不再引用宿主预装配 stub)。db.json 种子保护条款
+# 保留——那是数据契约,不是宿主优先残留。
+GOAL_FIRST_SKELETON_PROMPT = """\
+Lay this application's skeleton — you own frontend/src. The host backend \
+is already running (host-owned backend files: do NOT rewrite them). \
+Work from the REQUIREMENTS MAP below:
+1) backend/data/schema.json per the HOST CONTRACT (a host-written \
+starter covering the seeded collections may already exist — EXTEND it, \
+keep every entity name and seeded row; the host compiles it and mounts \
+CRUD + auth).
+2) Fixture records the FIXTURE CONTRACT lists as still unseeded go into \
+backend/data/db.json (the host already compiled every machine-readable \
+data:/GIVEN fixture into it — NEVER delete or rename those rows).
+3) The frontend shell: src/app/App.jsx layout/routing as the map \
+demands, plus one self-contained feature file per requirement family \
+under frontend/src/features/<name>.jsx whose header comment lists that \
+family's REQ ids (empty components are fine — the family work orders \
+fill them).
+The map above is the app outline: when a contract spans families, read \
+THAT section of requirements/requirements.yaml by its heading — never \
+re-derive seed data from the yaml (the fixture contract rides in your \
+CONTRACT/FOCUS sections and the seeded db.json). \
+JavaScript/JSX only; dependencies are preinstalled — never run npm \
+install. Do not commit; the harness handles git.
+PORT DISCIPLINE: run any dev/test server ONLY on port {smoke}; NEVER \
+bind port {port} (the grader watches it — binding it kills the whole \
+run). Stop every server you started when done.
 """
 
 HOST_NODE_PROMPT_TEMPLATE = """\
@@ -1972,6 +2123,42 @@ regression in an already-green feature costs its tests.
 REGRESSION SCOPE: when re-checking earlier work, run ONLY the specs of \
 the features you touched this turn — the batch-filtered SPEC RUN below \
 is exactly that scope; anything wider wastes minutes per run.\
+
+{node_spec}"""
+
+# goal-first 家族工单:深度实现(真实可操作功能,浏览器走场景流才是判
+# 官)+ frontend/src 全域所有权 + 无 40-ops 帽。地图与本家族全文在
+# node_spec 头部注入(见主循环组装处)。
+GOAL_FIRST_NODE_PROMPT_TEMPLATE = """\
+Implement requirement family {node_id} DEEP — goal-first: every node in \
+this work order must become a REAL, operable feature. A grader in a \
+real browser walks each scenario end-to-end; strings on the page \
+without a working flow score zero. The pinned HOST CONTRACT applies \
+exactly; the focus section carries this batch's acceptance signals. Do \
+not commit.\
+Definition of done: every scenario of every node in this work order \
+walks through on the RUNNING app; every GIVEN fixture is addressable \
+(the account signs in, the object opens, cell/field values match \
+verbatim); red means fix, not report.\
+SCOPE: you own frontend/src as a whole — structure it as the \
+requirements demand (restructure the shell, add files, split or merge \
+features); never regress an already-green family, and never touch the \
+host-owned backend files listed in the HOST CONTRACT (business data \
+goes through backend/data/schema.json + backend/src/routes/index.js).\
+PORT DISCIPLINE: NEVER bind port {port}. The app is ALREADY RUNNING, \
+host-managed, on port {smoke} — verify by curl directly; do NOT start \
+your own server. After editing backend/src run \
+`sh .arc/host/restart-server.sh` (host-provided) to pick changes up; \
+after editing frontend run `npm run build --prefix frontend` — the \
+running server serves the fresh dist immediately, no restart needed.\
+VERIFICATION: after each node, walk its scenario chains yourself (the \
+sanctioned UI SMOKE RUN command, flow-suite.spec.ts included, or \
+curl); the host flow-regresses this family at batch end — scenario \
+flows, not string presence, are the verdict.\
+TOOLBOX (optional, unwired): frontend/src/app/ui.jsx ships proven \
+shapes (NativeSelect/AppDialog/AccountTrigger/SingleError/FixedGrid) — \
+use them or roll your own; the requirement text is the only authority.\
+REGRESSION SCOPE: re-check only the families you touched this turn.\
 
 {node_spec}"""
 
@@ -2215,11 +2402,18 @@ def _breaker_line(ui_run: dict | None) -> str:
             "chains gate everything behind them.")
 
 
-def _ui_smoke_red_lines(ui_run: dict, limit: int = 12) -> str:
-    """红项 → 提示词用的一行一证据清单(去重、限长)。"""
+def _ui_smoke_red_lines(ui_run: dict, limit: int = 12,
+                        probes: tuple | None = None) -> str:
+    """红项 → 提示词用的一行一证据清单(去重、限长、可按 probe 过滤)。
+
+    probes=("flow",) 只渲染场景流红项——goal-first 下 flow 是唯一硬门,
+    presence 红仅作 advisory,不再驱动修复轮(拆掉字符串游戏的激励面)。
+    """
     seen: set = set()
     lines: list[str] = []
     for r in ui_run.get("reds") or []:
+        if probes is not None and r.get("probe") not in probes:
+            continue
         key = (r.get("probe"), r.get("string"))
         if key in seen:
             continue
@@ -2668,13 +2862,35 @@ def main() -> int:
             log(f"[plan] version probe failed ({exc}); legacy prompts")
         log(f"[plan] host plan {'ENABLED' if plan_on else 'disabled'} "
             f"(OCTOS_ASSUME_ARC_PLAN={os.environ.get('OCTOS_ASSUME_ARC_PLAN', '<unset>')})")
+        # goal-first 总开关(09-27 宿主优先→目标优先):默认 1;=0 完整
+        # 回退旧宿主优先路径(A/B 用)。消费点:家族调度、stub 预装配、
+        # 骨架轮跳过、工单提示词、rules_text、验收门(flow 唯一硬门)。
+        goal_first = os.environ.get("OCTOS_ARC_GOAL_FIRST", "1") != "0"
         # P1 sibling batching: one turn implements up to N consecutive
         # leaves of the same parent FOLDER (plan_on path only — the legacy
         # path stays per-node). OCTOS_ARC_NODE_BATCH=1 is the rollback
         # switch (every leaf its own turn, legacy behavior).
+        # goal-first: 家族工单——一个顶层家族一次交给代理连贯深实现
+        # (超大家族沿子家族边界切),预算随批规模自动放大。
         batch_n = int(os.environ.get("OCTOS_ARC_NODE_BATCH", "2"))
-        node_batches = group_siblings(tree, batch_n) if plan_on else \
-            [[n] for n in atomic_nodes]
+        family_of: dict[str, dict] = {}
+        req_map = ""
+        if plan_on and goal_first:
+            family_batch_max = int(
+                os.environ.get("OCTOS_ARC_FAMILY_BATCH_MAX", "6"))
+            node_batches = group_families(tree, family_batch_max)
+            family_of = family_index(tree)
+            req_map = render_requirements_map(tree)
+        elif plan_on:
+            node_batches = group_siblings(tree, batch_n)
+        else:
+            node_batches = [[n] for n in atomic_nodes]
+        if plan_on and goal_first:
+            log(f"[flow] goal-first family work orders: "
+                f"{len(node_batches)} batch(es) for {len(atomic_nodes)} "
+                f"nodes over "
+                f"{len({str(f.get('id')) for f in family_of.values()})} "
+                "familie(s)")
         max_batch = max((len(b) for b in node_batches), default=1)
         # Iteration-cap coupling: a healthy node needs 3-40 kernel
         # iterations (keep-25 data, median ~15), so a batch of B legitimately
@@ -2824,8 +3040,12 @@ def main() -> int:
         # 注释=该家族 REQ 工单),App.jsx/routes 装配版只在原始字节时
         # 改写。节点轮提示词由此能点名本批家族文件,模型从"推理划分"
         # 降为"填空"。
+        # goal-first:家族 stub 预装配默认关——填空框架被证伪为浅实现
+        # 放大器(09-27 转向);OCTOS_ARC_FEATURE_STUBS=1 可显式重开。
         feature_of: dict[str, str] = {}
-        if os.environ.get("OCTOS_ARC_FEATURE_STUBS", "1") != "0":
+        stubs_default = "0" if goal_first else "1"
+        if os.environ.get("OCTOS_ARC_FEATURE_STUBS",
+                          stubs_default) != "0":
             _stubs, feature_of = scaffold.task_stubs(tree)
             shape_written = scaffold.scaffold_task_features(
                 output_dir, tree, log=log)
@@ -3081,6 +3301,10 @@ def main() -> int:
         # (决定 CONTRACT 指针行与提示词的 SPEC RUN 装置)。
         shared_contract = plan_envelope.build_shared_contract(tree) \
             if plan_on else None
+        # goal-first 契约文案:frontend/src 全域归模型/UI kit 降为工具箱;
+        # 后端数据面/夹具/校验各段与 host-first 逐字一致。
+        rules_text = (plan_envelope.HOST_STACK_RULES_GOAL_FIRST
+                      if (plan_on and goal_first) else None)
         specs_staged = bool(tests_dir)
         if plan_on:
             driver.set_envelope(
@@ -3096,7 +3320,8 @@ def main() -> int:
                 seeded_nodes=fixture_seeded_nodes,
                 shared_contract=shared_contract,
                 specs_staged=specs_staged,
-                arrange_nodes=fixture_arranged_nodes)
+                arrange_nodes=fixture_arranged_nodes,
+                rules_text=rules_text)
 
         try:
             # Step 0: orient in the starter project + shared foundations.
@@ -3105,7 +3330,11 @@ def main() -> int:
             # is skipped entirely; the first model turn is node 1. The
             # legacy loop below only runs when scaffolding is disabled
             # (OCTOS_ARC_HOST_SCAFFOLD=0) or the template is incomplete.
-            template_complete = scaffold.template_complete(output_dir)
+            # goal-first:模板数据面虽完整,skeleton 轮仍必走——App 外壳/
+            # 路由/家族文件结构由代理依需求地图自建(不再由 taskshape
+            # 预装配),复用下方现成的 legacy 重试机。
+            template_complete = (not goal_first) and \
+                scaffold.template_complete(output_dir)
             if template_complete:
                 log("[flow] host template complete; skeleton turn skipped "
                     f"({len(atomic_nodes)} atomic nodes queued)")
@@ -3123,8 +3352,13 @@ def main() -> int:
                     break
                 t0 = time.time()
                 if plan_on:
-                    sk_prompt = HOST_SKELETON_PROMPT.format(
-                        port=args.web_port, smoke=smoke_port)
+                    if goal_first:
+                        sk_prompt = GOAL_FIRST_SKELETON_PROMPT.format(
+                            port=args.web_port, smoke=smoke_port) \
+                            + "\n" + req_map
+                    else:
+                        sk_prompt = HOST_SKELETON_PROMPT.format(
+                            port=args.web_port, smoke=smoke_port)
                     if tests_dir:
                         sk_prompt += "\n" + ACCEPTANCE_STAGED_NOTE
                 else:
@@ -3214,6 +3448,19 @@ def main() -> int:
             failed: list[str] = []
             node_done_notes: dict[str, str] = {}
             segment_digest_pending = False
+            # goal-first 家族止损:同一家族流红连续 2 轮热修不收敛 →
+            # 标记 bust,final 修复轮不再为它烧墙钟(把时间让给别的家族)。
+            family_strikes: dict[str, int] = {}
+
+            def _red_family(red: dict) -> str | None:
+                nodes = red.get("nodes") or []
+                if not nodes or not family_of:
+                    return None
+                fam = family_of.get(str(nodes[0]))
+                return str(fam.get("id")) if fam else None
+
+            def _busted_families() -> set[str]:
+                return {f for f, s in family_strikes.items() if s >= 2}
 
             def _feature_file_for(ids: list[str]) -> str:
                 """本批节点的家族 feature 文件(宿主预生成 stub)点名。"""
@@ -3283,10 +3530,32 @@ def main() -> int:
                         seeded_nodes=fixture_seeded_nodes,
                         shared_contract=shared_contract,
                         specs_staged=specs_staged,
-                        arrange_nodes=fixture_arranged_nodes)
-                    node_spec = "\n\n".join(
-                        describe_node(n, fixture_seeded_scenarios)
-                        for n in batch)
+                        arrange_nodes=fixture_arranged_nodes,
+                        rules_text=rules_text)
+                    if goal_first:
+                        # 分层上下文:需求地图(root 契约逐字+全家族标题
+                        # 地图)→ 本家族 FOLDER 契约逐字 → 本批 REQ 逐字。
+                        fam = family_of.get(batch_ids[0])
+                        fam_ctx = describe_family_context(fam, batch) \
+                            if fam is not None else ""
+                        node_spec = "\n\n".join(x for x in (
+                            req_map,
+                            "THIS FAMILY — folder contracts (verbatim):",
+                            fam_ctx,
+                            "THIS BATCH — requirement nodes (verbatim):",
+                            "\n\n".join(describe_node(n, fixture_seeded_scenarios)
+                                       for n in batch)) if x)
+                        base_prompt = GOAL_FIRST_NODE_PROMPT_TEMPLATE.format(
+                            node_id=focus_id, node_spec=node_spec,
+                            port=args.web_port, smoke=smoke_port)
+                    else:
+                        node_spec = "\n\n".join(
+                            describe_node(n, fixture_seeded_scenarios)
+                            for n in batch)
+                        base_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
+                            node_id=focus_id, node_spec=node_spec,
+                            port=args.web_port, smoke=smoke_port,
+                            feature_file=_feature_file_for(batch_ids))
                     batch_specs = sorted(
                         {f for nid in batch_ids
                          for f in (spec_map.get(nid) or [])})
@@ -3295,19 +3564,12 @@ def main() -> int:
                     # 题)改发"走查运行中应用"契约——指向从未落盘的
                     # .arc/acceptance 只会制造不可达成的退出条件。
                     if batch_specs:
-                        node_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
-                            node_id=focus_id, node_spec=node_spec,
-                            port=args.web_port, smoke=smoke_port,
-                            feature_file=_feature_file_for(batch_ids)) \
-                            + build_spec_run_cmd(
-                                str(toolchain_cli)
-                                if toolchain_cli is not None else None,
-                                batch_specs)
+                        node_prompt = base_prompt + build_spec_run_cmd(
+                            str(toolchain_cli)
+                            if toolchain_cli is not None else None,
+                            batch_specs)
                     else:
-                        node_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
-                            node_id=focus_id, node_spec=node_spec,
-                            port=args.web_port, smoke=smoke_port,
-                            feature_file=_feature_file_for(batch_ids)) \
+                        node_prompt = base_prompt \
                             + NO_STAGED_SPECS_NOTE.format(smoke=smoke_port) \
                             + ui_smoke_cmd
                     if len(batch) > 1:
@@ -3635,12 +3897,46 @@ def main() -> int:
                                 log(f"[plan] flow regression RED: "
                                     f"{fr['passed']}p/{fr['failed']}f over "
                                     f"{len(done_flow)} done node(s)")
-                                r_wall = turn_wall(len(batch))
-                                driver.run(UI_SMOKE_REPAIR_PROMPT.format(
-                                    reds=_ui_smoke_red_lines(fr, limit=10),
-                                    port=args.web_port, smoke=smoke_port,
-                                    visual=_ui_smoke_visual_lines(fr)),
-                                    min(node_timeout, r_wall), r_wall)
+                                # goal-first:修复轮只喂流红(presence 是
+                                # advisory);修复后复检一次,仍红 → 家族记
+                                # 一次 strike(2 次 bust,final 不再烧墙钟)。
+                                if goal_first:
+                                    busted = _busted_families()
+                                    repair_view = dict(
+                                        fr, reds=[r for r in fr["reds"]
+                                                  if r.get("probe") == "flow"
+                                                  and _red_family(r)
+                                                  not in busted])
+                                else:
+                                    repair_view = fr
+                                if repair_view["reds"]:
+                                    r_wall = turn_wall(len(batch))
+                                    driver.run(UI_SMOKE_REPAIR_PROMPT.format(
+                                        reds=_ui_smoke_red_lines(
+                                            repair_view, limit=10),
+                                        port=args.web_port, smoke=smoke_port,
+                                        visual=_ui_smoke_visual_lines(fr)),
+                                        min(node_timeout, r_wall), r_wall)
+                                if goal_first and repair_view["reds"]:
+                                    fr2 = ui_smoke.run_smoke(
+                                        output_dir, smoke_port,
+                                        ui_smoke_entries, spec_ports_extra,
+                                        auth=ui_smoke_auth, grep=grep)
+                                    if fr2 is not None and fr2["failed"] > 0:
+                                        flow_suite.merge_flow_fails(
+                                            fr2, flow_node_map)
+                                        for r in fr2["reds"]:
+                                            if r.get("probe") != "flow":
+                                                continue
+                                            fam = _red_family(r)
+                                            if fam:
+                                                family_strikes[fam] = \
+                                                    family_strikes.get(fam, 0) + 1
+                                                log(f"[plan] flow stop-loss: "
+                                                    f"family {fam} strike "
+                                                    f"{family_strikes[fam]} "
+                                                    "(still red after "
+                                                    "batch-end repair)")
                             elif fr is not None:
                                 log(f"[plan] flow regression green: "
                                     f"{fr['passed']}p/{fr['failed']}f")
@@ -3667,7 +3963,8 @@ def main() -> int:
                         seeded_nodes=fixture_seeded_nodes,
                         shared_contract=shared_contract,
                         specs_staged=specs_staged,
-                        arrange_nodes=fixture_arranged_nodes)
+                        arrange_nodes=fixture_arranged_nodes,
+                        rules_text=rules_text)
 
             if codegen:
                 codegen.stop()
@@ -3724,10 +4021,24 @@ def main() -> int:
                             + (f", {ui_run.get('flow_reds', 0)} flow red(s)"
                                if ui_run.get("flow_reds") else "") + ")")
                         for fix_attempt in (1, 2):
-                            if not ui_run["reds"] or time_up():
+                            # goal-first 硬门=flow 红(排除已 bust 家族);
+                            # presence-only 红不再驱动修复轮。
+                            if goal_first:
+                                busted = _busted_families()
+                                open_reds = [
+                                    r for r in ui_run["reds"]
+                                    if r.get("probe") == "flow"
+                                    and _red_family(r) not in busted]
+                                if not open_reds:
+                                    break
+                            elif not ui_run["reds"] or time_up():
+                                break
+                            if time_up():
                                 break
                             r_wall = turn_wall(1)
-                            reds_txt = _ui_smoke_red_lines(ui_run, limit=12)
+                            reds_txt = _ui_smoke_red_lines(
+                                ui_run, limit=12,
+                                probes=("flow",) if goal_first else None)
                             driver.run(UI_SMOKE_REPAIR_PROMPT.format(
                                 reds=reds_txt, port=args.web_port,
                                 smoke=smoke_port,
@@ -3751,10 +4062,27 @@ def main() -> int:
                                     ui_run, flow_node_map)
                                 ui_run["breaker"] = flow_suite.breaker_view(
                                     ui_run)
+                                # goal-first 家族止损:修复后仍红的流项给
+                                # 其家族记 strike(批末 1 + final 1 = 2 即
+                                # bust,下一轮自动跳过)。
+                                if goal_first:
+                                    for r in ui_run["reds"]:
+                                        if r.get("probe") != "flow":
+                                            continue
+                                        fam = _red_family(r)
+                                        if fam:
+                                            family_strikes[fam] = \
+                                                family_strikes.get(fam, 0) + 1
                             log(f"[plan] ui-smoke repair {fix_attempt}: "
                                 f"{ui_run['failed']}f"
                                 if ui_run else
                                 f"[plan] ui-smoke repair {fix_attempt}: n/a")
+                        if goal_first and family_strikes:
+                            busted = _busted_families()
+                            if busted:
+                                log(f"[plan] flow stop-loss: final repair "
+                                    f"no longer targets {sorted(busted)} "
+                                    "(2+ strikes)")
                     else:
                         log("[plan] UI contract smoke not attempted "
                             "(toolchain/boot unavailable)")
@@ -3767,13 +4095,20 @@ def main() -> int:
                     seeded_nodes=fixture_seeded_nodes,
                     shared_contract=shared_contract,
                     specs_staged=specs_staged,
-                    arrange_nodes=fixture_arranged_nodes)
+                    arrange_nodes=fixture_arranged_nodes,
+                    rules_text=rules_text)
                 _prune_acceptance_junk(output_dir, tests_dir, log)
                 ui_green = (ui_run is not None and ui_run["failed"] == 0
                             and ui_run["passed"] > 0)
+                # goal-first:flow 红为 0 即视为浏览器门通过(presence 红
+                # 降 advisory,不阻断跳过 final LLM 轮)。
+                browser_green = (ui_run is not None
+                                 and ui_run.get("flow_reds", 0) == 0
+                                 and ui_run["passed"] > 0) \
+                    if goal_first else ui_green
                 if (f_err is None and tier2_run is not None
                         and tier2_run[1] == 0 and tier2_run[0] > 0
-                        and (not ui_smoke_entries or ui_green)):
+                        and (not ui_smoke_entries or browser_green)):
                     ok, text = True, ("host spec run all green "
                                       f"({tier2_run[0]} passed); final LLM turn skipped")
                     log("[plan] Tier-2 all green; skipping final LLM turn")
@@ -3784,6 +4119,10 @@ def main() -> int:
                     final_prompt = (
                         HOST_FINAL_CHECK_PROMPT if probe_list
                         else HOST_FINAL_CHECK_UI_PROMPT)
+                    if goal_first and req_map:
+                        # goal-first:final 修复轮同样前置需求地图,保证
+                        # 修复时全局契约可及(不靠会话残留记忆)。
+                        final_prompt += "\n" + req_map
                     if tier2_run and tier2_run[1] > 0:
                         # Tier-2 ran and is RED: the failing titles are ground
                         # truth — hand them to the model instead of letting it
@@ -3802,30 +4141,69 @@ def main() -> int:
                             f"{smoke_port}. Do not re-run suites; spot-check "
                             "one chain if you must, then end the turn.")
                     if ui_run is not None and ui_run["reds"]:
-                        # UI 契约爬虫/场景流红项=宿主 authored ground
-                        # truth:点名串+探针+证据,模型只修红项、不重建
-                        # 绿项。[flow] 红是场景走查失败(平台 spec 同构)
-                        # ——runner 连续失败止损,入口家族流红必修。
-                        final_prompt += (
-                            "\nHOST UI SMOKE (ground truth, headless "
-                            f"browser vs this app on port {smoke_port}): "
-                            f"{ui_run['passed']} passed, {ui_run['failed']} "
-                            f"FAILED. Red items:\n"
-                            + _ui_smoke_red_lines(ui_run, limit=14)
-                            + "\nFix exactly these — [flow] items FIRST "
-                            "(they are platform-shaped scenario walks; the "
-                            "title names the REQ): walk that requirement's "
-                            "chain on port " + str(smoke_port) + ", fix the "
-                            "real flow. Then the probe items (exact "
-                            "accessible names, visible controls, "
-                            "Escape-closable dialogs, Shift-click keeps "
-                            "selection, BOM-free exports). After fixing, "
-                            "rerun the UI SMOKE RUN command with "
-                            "flow-suite.spec.ts appended to its file "
-                            "arguments."
-                            + _breaker_line(ui_run)
-                            + _ui_smoke_visual_lines(ui_run))
-                    elif ui_green and not tests_dir:
+                        if goal_first:
+                            # goal-first 裁判:flow 红是唯一必修 ground
+                            # truth(busted 家族已止损排除);presence 红只
+                            # 作 advisory 提示——不再构成"铺字符串"的激励。
+                            busted = _busted_families()
+                            must = [r for r in ui_run["reds"]
+                                    if r.get("probe") == "flow"
+                                    and _red_family(r) not in busted]
+                            n_advisory = len(ui_run["reds"]) - len(must)
+                            if must:
+                                final_prompt += (
+                                    "\nHOST UI SMOKE (ground truth, headless "
+                                    f"browser vs this app on port "
+                                    f"{smoke_port}): {ui_run['passed']} "
+                                    f"passed, {len(must)} scenario-flow "
+                                    "item(s) FAILED:\n"
+                                    + _ui_smoke_red_lines(
+                                        dict(ui_run, reds=must), limit=14)
+                                    + "\nFix exactly these — they are "
+                                    "platform-shaped scenario walks (the "
+                                    "title names the REQ): walk that "
+                                    "requirement's chain on port "
+                                    + str(smoke_port) + ", fix the real "
+                                    "flow. After fixing, rerun the UI "
+                                    "SMOKE RUN command with "
+                                    "flow-suite.spec.ts appended to its "
+                                    "file arguments."
+                                    + _breaker_line(ui_run)
+                                    + _ui_smoke_visual_lines(ui_run))
+                            if n_advisory:
+                                final_prompt += (
+                                    f"\nADVISORY (not must-fix): {n_advisory} "
+                                    "presence-probe red item(s) — exact "
+                                    "accessible names likely missing; "
+                                    "surface them only when a fix for the "
+                                    "flow above is already in hand.")
+                        else:
+                            # UI 契约爬虫/场景流红项=宿主 authored ground
+                            # truth:点名串+探针+证据,模型只修红项、不重建
+                            # 绿项。[flow] 红是场景走查失败(平台 spec 同构)
+                            # ——runner 连续失败止损,入口家族流红必修。
+                            final_prompt += (
+                                "\nHOST UI SMOKE (ground truth, headless "
+                                f"browser vs this app on port {smoke_port}): "
+                                f"{ui_run['passed']} passed, "
+                                f"{ui_run['failed']} "
+                                f"FAILED. Red items:\n"
+                                + _ui_smoke_red_lines(ui_run, limit=14)
+                                + "\nFix exactly these — [flow] items FIRST "
+                                "(they are platform-shaped scenario walks; "
+                                "the title names the REQ): walk that "
+                                "requirement's "
+                                "chain on port " + str(smoke_port) + ", fix "
+                                "the real flow. Then the probe items (exact "
+                                "accessible names, visible controls, "
+                                "Escape-closable dialogs, Shift-click keeps "
+                                "selection, BOM-free exports). After fixing, "
+                                "rerun the UI SMOKE RUN command with "
+                                "flow-suite.spec.ts appended to its file "
+                                "arguments."
+                                + _breaker_line(ui_run)
+                                + _ui_smoke_visual_lines(ui_run))
+                    elif browser_green and not tests_dir:
                         final_prompt += (
                             "\nHOST UI SMOKE (ground truth): all browser "
                             f"contract checks PASS ({ui_run['passed']}). "
@@ -3970,6 +4348,10 @@ def main() -> int:
         red_nodes: dict[str, str] = {}
         if ui_run is not None:
             for r in ui_run.get("reds") or []:
+                # goal-first:只有流红(场景走查失败)是节点级负证据;
+                # presence 红不再连坐节点(test/failed 标记)。
+                if goal_first and r.get("probe") != "flow":
+                    continue
                 for nid in r.get("nodes") or []:
                     red_nodes.setdefault(
                         nid, f"[{r.get('probe')}] {r.get('string')}")

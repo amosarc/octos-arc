@@ -122,6 +122,102 @@ clicks keep selection (Shift-click extends the range — never collapse \
 it to the clicked cell in the click handler); downloads are \
 byte-exact: no UTF-8 BOM, exact CSV quoting."""
 
+# goal-first 变体(09-27 宿主优先→目标优先转向):后端数据面/夹具/校验/
+# UI 契约卫生各段与 host-first 完全一致;差异只在 FRONTEND 段——frontend/src
+# 全域归模型,UI kit 从"必须用"降为"可选工具箱",需求原文是唯一权威。
+# RULES_MUST_NAME 的路径拼写同样必须逐一点名(scaffold_test 双断言)。
+HOST_STACK_RULES_GOAL_FIRST = """\
+HOST CONTRACT (goal-first: the requirement text is the authoritative \
+product contract — quoted names are exact accessible names and quoted \
+rules bind verbatim; where staged specs exist they remain ground truth):
+STACK: React(Vite) frontend + Express backend, PREBUILT BY THE HOST — \
+the backend already runs. Host-owned (never rewrite): src/app.js + \
+src/index.js (bootstrap; PORT + ARC_EXTRA_PORTS; serves frontend/dist), \
+src/lib/util.js (responses/cookies/ids), src/lib/validate.js \
+(schema-driven validators, English contract-family error defaults), \
+src/database/store.js (atomic JSON store: coll/one/all/dup/insert/\
+remove/save + scrypt hash/verify), src/database/engine.js (schema-driven \
+CRUD factory), src/lib/auth.js (register/login/logout/me + sessions). Dependencies are PREINSTALLED — never run npm install, \
+never add npm packages.
+FRONTEND (goal-first — the model owns it): frontend/src is yours to \
+shape as the requirements demand: frontend/src/app/App.jsx, the shell, \
+frontend/src/app/styles.css, and frontend/src/features/ — restructure \
+freely (a proven shape: one self-contained file per requirement family \
+under frontend/src/features/<name>.jsx, App.jsx a thin assembly layer). \
+Keep frontend/src/main.jsx, frontend/src/app/store.jsx \
+(useResource('<entity>')) and frontend/src/app/api.js working as the \
+backend client — extend them, never fork shared state into features. TOOLBOX (optional, unwired): \
+frontend/src/app/ui.jsx ships proven shapes — NativeSelect (dropdowns = \
+native <select>, graders use selectOption), AppDialog (native <dialog> \
+modals), AccountTrigger (username its own exact-text node + the \
+requirement's trigger label — the observed full-score shape), \
+SingleError (one visible error element) and FixedGrid (fixed-size \
+role=grid) — use them or roll your own; the requirement text is the \
+only authority. frontend/src/features/README.md carries the GRID \
+EDITOR KERNEL PATTERN — grid-like families build on ONE shared \
+selection/editing state model instead of re-implementing it per \
+feature.
+SCHEMA-DRIVEN BACKEND: to add data, write backend/data/schema.json = \
+{"entities":[{"name":"users","auth":true,"label":"用户名","fields":[...]}]}; \
+field keys: name, label (used in error messages), type \
+(string|number|boolean|password), required, unique, min, max, pattern \
+(JS regex), enum, match (mirror field, e.g. confirmPassword), format \
+(email|username|password), message (single) or messages \
+{required,invalid,duplicate} per reason (quoted "<X> is required"/ \
+"<X> already exists" auto-map; copy quoted error strings verbatim). \
+The host compiles it \
+to src/database/schema.js and mounts CRUD at /api/<entity> \
+automatically; entities with auth:true additionally get \
+/api/auth/register (validates ALL fields, scrypt-hashes the secret, \
+auto-login session), /api/auth/login (accepts any unique identifier \
+(username or email; trimmed, email case-insensitive), uniform failure message (quoted credential string wins via the codegen \
+bridge, default "Invalid username or password"; never reveals existence), /api/auth/logout, /api/me (session restore; sessions \
+survive server restart). Non-plain-CRUD endpoints (search/booking flows) go in \
+src/routes/index.js using store + lib helpers.
+FIXTURE CONTRACT (graded, not demo data): the `data:` section + every \
+scenario GIVEN line are the graded seed contract, already compiled into \
+backend/data/db.json. Names may carry a unique suffix, but roles, \
+ownership, visibility, relationships match VERBATIM; NEVER delete or rename seeded rows \
+or collections, and extend schema.json so every seeded field is \
+exposed. Scenarios that MODIFY data each need their OWN fresh \
+preconfigured instance (never share one mutable fixture across \
+scenarios). Files/commits are the single source of truth: branches \
+store head references only, NEVER duplicate whole file trees per \
+branch or fork. db.json is the SEED: runtime state goes to db.run.json \
+and every server restart resets to the seed (sh .arc/host/\
+restart-server.sh); db.run.json must NEVER ship.
+SERVER-SIDE VALIDATION (generic discipline, every task): the backend \
+re-validates ALL input and never trusts the client. Enforce the \
+contract's required/length/format/uniqueness rules EXACTLY, boundaries \
+included (min, min+1, max, max+1). Any rejected submit stays on the \
+page, shows exactly ONE visible error, and creates no records or \
+sessions. Empty, oversized, or wrong-type payloads must be rejected \
+(4xx) — a 5xx on any input is a bug. Before declaring done, walk the \
+FAILURE cases (empty/missing/oversized/duplicate), not just the happy \
+path.
+
+UI CONTRACT HYGIENE (graded in a real browser by the host smoke and \
+the hidden tests): every quoted string in a requirement is a VISIBLE \
+control with that EXACT accessible name — substring variants \
+("Delete worksheet" vs the required "Delete") fail, and hidden \
+<select> options are not visible controls (use a native <select> the \
+grader can selectOption, or visible radios/buttons); WIDGETS are \
+NATIVE-FIRST — dropdowns are always native <select> with real <option> \
+labels (a custom div dropdown is invisible to every selector without \
+full ARIA combobox semantics), modals prefer the native <dialog> \
+element (showModal() gives Escape/backdrop close and focus trapping \
+for free), and custom is built ONLY where HTML has no native widget \
+(menus/tabs/grids) with the requirement's exact ARIA roles mandatory; a DATA GRID renders its \
+COMPLETE structure — role="grid" with visible columnheader/rowheader \
+cells and gridcells named by coordinate (A1), never the data region \
+alone; a SUBMIT/SAVE control must become enabled once required fields \
+are filled — a permanently disabled submit can never be clicked by a \
+test; every dialog closes on Escape AND on cancel/overlay click — \
+an undismissable overlay blocks every later grader step; modifier \
+clicks keep selection (Shift-click extends the range — never collapse \
+it to the clicked cell in the click handler); downloads are \
+byte-exact: no UTF-8 BOM, exact CSV quoting."""
+
 # 契约前缀双语表(中文全角冒号 / 英文冒号,英文大小写不敏感)
 _VALIDATION_PREFIXES = ("Validation 契约：", "Validation contract:")
 
@@ -436,6 +532,7 @@ def build_envelope(
     shared_contract: str | None = None,
     specs_staged: bool = False,
     arrange_nodes: set[str] | frozenset[str] | None = None,
+    rules_text: str | None = None,
 ) -> dict:
     """Build one envelope dict (snake_case, mirrors planctl::Envelope).
 
@@ -510,7 +607,7 @@ def build_envelope(
         "shared_contract": (shared_contract[:12000]
                             if shared_contract else None),
         "rules": RULESET,
-        "rules_text": HOST_STACK_RULES,
+        "rules_text": rules_text or HOST_STACK_RULES,
         "extra_rules": (extra_rules[:2400] if extra_rules else None),
         "ports": {
             "grade": int(ports.get("grade", 0)),

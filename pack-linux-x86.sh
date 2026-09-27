@@ -19,6 +19,10 @@ cd "$STAGE/octos-arc-linux-x86"
 find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 find . -name '*.pyc' -delete
 rm -rf arc-output local-grader .env octos-arc-bundle.zip
+# tasks/*/template = 本地仿真"就地运行"残留(09-27 实测 473MB 随 cp -R
+# 进包;链路输入只有 requirements.yaml + reference/)。清掉再打包。
+rm -rf tasks/*/template
+find tasks -name .DS_Store -delete
 # arc/template/ 是 pack.sh「打包即物化」留在仓库的可浏览副本，随 cp -R
 # 进了暂存区；scaffold 只写不删，先清空再生成（与 pack.sh 同一语义），
 # 否则 copytree 撞上已存在的 template/frontend 直接 FileExistsError。
