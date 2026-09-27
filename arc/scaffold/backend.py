@@ -37,27 +37,33 @@ exports.now = () => new Date().toISOString();
 """
 
 VALIDATE_JS = """\
-// validate.js — schema 词表驱动校验;check(fields, body) → [{field,msg}],消息中英双关键字。
-const FMT = {
-  email: (v) => (v.length <= 254 && /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(v)) || '邮箱无效 (invalid email)',
-  username: (v) => /^[A-Za-z0-9_-]{3,32}$/.test(v) || '用户名需 3-32 位字母数字连字符下划线 (invalid username)',
-  password: (v, f) => { const min = f.min || 12; const max = f.max || 128; const ok = v.length >= min && v.length <= max && /[a-z]/.test(v) && /[A-Z]/.test(v) && /[0-9]/.test(v) && /[^A-Za-z0-9]/.test(v); return ok || `密码需 ${min}-${max} 位且含大小写字母数字特殊字符 (invalid password)`; },
-};
+// validate.js — schema 词表驱动校验;check(fields, body) → [{field,msg}]。
+// 消息三级:field.messages[required|invalid|duplicate|match](三态) >
+// field.message(单一覆盖,兼容) > 英文契约族默认("X is required"/
+// "X is invalid"/"X does not match Y")。需求原文逐字引号串由
+// scaffold.codegen 桥自动灌进 messages(09-27 C1:中文默认与需求英文
+// 逐字契约冲突,注册/登录族是第一测试族+止损敏感区)。
 const LABEL = (f) => f.label || f.name;
+const MSG = (f, kind, dflt) => (f.messages && f.messages[kind]) || f.message || dflt;
+const FMT = {
+  email: (v, f) => (v.length <= 254 && /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(v)) || MSG(f, 'invalid', `${LABEL(f)} is invalid`),
+  username: (v, f) => /^[A-Za-z0-9_-]{3,32}$/.test(v) || MSG(f, 'invalid', `Invalid ${LABEL(f).toLowerCase()}`),
+  password: (v, f) => { const min = f.min || 12; const max = f.max || 128; const ok = v.length >= min && v.length <= max && /[a-z]/.test(v) && /[A-Z]/.test(v) && /[0-9]/.test(v) && /[^A-Za-z0-9]/.test(v); return ok || MSG(f, 'invalid', `Invalid ${LABEL(f).toLowerCase()}: must be ${min}-${max} characters with upper, lower, digit and symbol`); },
+};
 exports.check = (fields, body) => {
   const errors = [];
   for (const f of fields || []) {
-    if (f.match) { if (String(body[f.name] || '') !== String(body[f.match] || '')) errors.push({ field: f.name, msg: f.message || `${LABEL(f)}与${f.match}不一致 (match)` }); continue; }
+    if (f.match) { if (String(body[f.name] || '') !== String(body[f.match] || '')) errors.push({ field: f.name, msg: MSG(f, 'match', `${LABEL(f)} does not match ${f.match}`) }); continue; }
     const v = body[f.name];
-    if (v === undefined || v === null || v === '') { if (f.required) errors.push({ field: f.name, msg: f.message || `${LABEL(f)}必填 (required)` }); continue; }
-    if (f.type === 'number' && typeof v !== 'number') { errors.push({ field: f.name, msg: f.message || `${LABEL(f)}需为数字 (invalid)` }); continue; }
-    if (f.type === 'boolean' && typeof v !== 'boolean') { errors.push({ field: f.name, msg: f.message || `${LABEL(f)}需为布尔 (invalid)` }); continue; }
-    if (f.enum && !f.enum.includes(v)) { errors.push({ field: f.name, msg: f.message || `${LABEL(f)}无效 (invalid)` }); continue; }
+    if (v === undefined || v === null || v === '') { if (f.required) errors.push({ field: f.name, msg: MSG(f, 'required', `${LABEL(f)} is required`) }); continue; }
+    if (f.type === 'number' && typeof v !== 'number') { errors.push({ field: f.name, msg: MSG(f, 'invalid', `${LABEL(f)} is invalid`) }); continue; }
+    if (f.type === 'boolean' && typeof v !== 'boolean') { errors.push({ field: f.name, msg: MSG(f, 'invalid', `${LABEL(f)} is invalid`) }); continue; }
+    if (f.enum && !f.enum.includes(v)) { errors.push({ field: f.name, msg: MSG(f, 'invalid', `${LABEL(f)} is invalid`) }); continue; }
     const s = String(v);
-    if ((f.min && s.length < f.min) || (f.max && s.length > f.max)) { errors.push({ field: f.name, msg: f.message || `${LABEL(f)}长度需 ${f.min || 0}-${f.max || 128} (invalid)` }); continue; }
-    if (f.pattern && !new RegExp(f.pattern).test(s)) { errors.push({ field: f.name, msg: f.message || `${LABEL(f)}格式无效 (invalid)` }); continue; }
+    if ((f.min && s.length < f.min) || (f.max && s.length > f.max)) { errors.push({ field: f.name, msg: MSG(f, 'invalid', `${LABEL(f)} is invalid`) }); continue; }
+    if (f.pattern && !new RegExp(f.pattern).test(s)) { errors.push({ field: f.name, msg: MSG(f, 'invalid', `${LABEL(f)} is invalid`) }); continue; }
     const fmt = f.format || (f.type === 'password' ? 'password' : null);
-    if (fmt && FMT[fmt]) { const r = FMT[fmt](s, f); if (r !== true) errors.push({ field: f.name, msg: f.message || r }); }
+    if (fmt && FMT[fmt]) { const r = FMT[fmt](s, f); if (r !== true) errors.push({ field: f.name, msg: r }); }
   }
   return errors;
 };
@@ -94,11 +100,13 @@ exports.verify = (pw, stored) => { try { const [salt, h] = String(stored).split(
 
 ENGINE_JS = """\
 // engine.js — schema 驱动 CRUD(非 auth 实体):每实体 POST(建)/GET(列)/GET /:id;坏载荷一律 4xx。
+// 消息三级与 validate.js 同律:messages.duplicate > message > "X already exists"。
 const store = require('./store'); const { check } = require('../lib/validate'); const U = require('../lib/util');
 const SECRET = (f) => f.type === 'password' || f.format === 'password';
+const DUP = (f) => (f.messages && f.messages.duplicate) || f.message || `${f.label || f.name} already exists`;
 const pub = (e, r) => { const o = { id: r.id, createdAt: r.createdAt }; for (const f of e.fields || []) if (!SECRET(f) && r[f.name] !== undefined) o[f.name] = r[f.name]; return o; };
 const plain = (req) => req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
-const uniq = (e, body) => { const errors = check(e.fields, body); for (const f of e.fields || []) if (f.unique && body[f.name] !== undefined && store.dup(e.name, f.name, body[f.name])) errors.push({ field: f.name, msg: f.message || `${f.label || f.name}已存在 (duplicate)` }); return errors; };
+const uniq = (e, body) => { const errors = check(e.fields, body); for (const f of e.fields || []) if (f.unique && body[f.name] !== undefined && store.dup(e.name, f.name, body[f.name])) errors.push({ field: f.name, msg: DUP(f) }); return errors; };
 exports.mount = (app, schema) => {
   for (const e of (schema.entities || []).filter((x) => !x.auth)) {
     const base = `/api/${e.name}`;
@@ -109,20 +117,24 @@ exports.mount = (app, schema) => {
       const row = { id: U.id(), createdAt: U.now() };
       for (const f of e.fields || []) if (!f.match && body[f.name] !== undefined) row[f.name] = SECRET(f) ? store.hash(body[f.name]) : body[f.name];
       U.json(res, 201, pub(e, store.insert(e.name, row)));
-    } catch { U.bad(res, [{ msg: '请求无效 (invalid)' }]); } });
-    app.get(base, (req, res) => { try { U.json(res, 200, store.all(e.name).map((r) => pub(e, r))); } catch { U.bad(res, [{ msg: '请求无效 (invalid)' }]); } });
-    app.get(`${base}/:id`, (req, res) => { try { const r = store.one(e.name, (x) => x.id === req.params.id); return r ? U.json(res, 200, pub(e, r)) : U.json(res, 404, { errors: [{ msg: '资源不存在 (not found)' }] }); } catch { U.bad(res, [{ msg: '请求无效 (invalid)' }]); } });
+    } catch { U.bad(res, [{ msg: 'Invalid request' }]); } });
+    app.get(base, (req, res) => { try { U.json(res, 200, store.all(e.name).map((r) => pub(e, r))); } catch { U.bad(res, [{ msg: 'Invalid request' }]); } });
+    app.get(`${base}/:id`, (req, res) => { try { const r = store.one(e.name, (x) => x.id === req.params.id); return r ? U.json(res, 200, pub(e, r)) : U.json(res, 404, { errors: [{ msg: 'Not found' }] }); } catch { U.bad(res, [{ msg: 'Invalid request' }]); } });
   }
 };
 """
 
 AUTH_JS = """\
 // auth.js — 通用认证:schema 中 auth:true 的实体激活;登录标识 = 该实体 unique 非密码字段(用户名或邮箱)。
+// 登录失败文案:schema.messages.loginFailure(需求引号串,codegen 桥灌入)>
+// 默认 "Invalid username or password"——统一文案不泄露账号存在性,
+// 且文本可被需求逐字契约覆盖(09-27 C1)。
 const store = require('../database/store'); const { check } = require('./validate'); const U = require('./util');
 const COOKIE = 'arc_session';
 const SECRET = (f) => f.type === 'password' || f.format === 'password';
+const DUP = (f) => (f.messages && f.messages.duplicate) || f.message || `${f.label || f.name} already exists`;
 const pub = (e, r) => { const o = { id: r.id }; for (const f of e.fields || []) if (!SECRET(f) && !f.match && r[f.name] !== undefined) o[f.name] = r[f.name]; return o; };
-const uniq = (e, body) => { const errors = check(e.fields, body); for (const f of e.fields || []) if (f.unique && body[f.name] !== undefined && store.dup(e.name, f.name, body[f.name])) errors.push({ field: f.name, msg: f.message || `${f.label || f.name}已存在 (duplicate)` }); return errors; };
+const uniq = (e, body) => { const errors = check(e.fields, body); for (const f of e.fields || []) if (f.unique && body[f.name] !== undefined && store.dup(e.name, f.name, body[f.name])) errors.push({ field: f.name, msg: DUP(f) }); return errors; };
 const matchIdent = (f, stored, ident) => stored !== undefined && (String(stored) === ident || (f.format === 'email' && String(stored).toLowerCase() === ident.toLowerCase()));
 const startSession = (res, userId) => { const token = U.token(); store.insert('sessions', { token, userId, createdAt: U.now() }); U.setCookie(res, COOKIE, token); };
 const readToken = (req) => (req.cookies || {})[COOKIE];
@@ -130,6 +142,7 @@ exports.currentUser = (e, req) => { const t = readToken(req); const s = t && sto
 exports.mount = (app, schema) => {
   const e = (schema.entities || []).find((x) => x.auth);
   if (!e) return;
+  const LOGIN_FAIL = (schema.messages && schema.messages.loginFailure) || 'Invalid username or password';
   const pwField = (e.fields || []).find(SECRET);
   const ids = (e.fields || []).filter((f) => f.unique && !SECRET(f) && !f.match);
   app.post('/api/auth/register', (req, res) => { try {
@@ -141,15 +154,15 @@ exports.mount = (app, schema) => {
     store.insert(e.name, row);
     startSession(res, row.id);
     U.json(res, 201, { user: pub(e, row) });
-  } catch { U.bad(res, [{ msg: '请求无效 (invalid)' }]); } });
+  } catch { U.bad(res, [{ msg: 'Invalid request' }]); } });
   app.post('/api/auth/login', (req, res) => { try {
     const b = req.body || {};
     const ident = String(b.username !== undefined ? b.username : b.identifier !== undefined ? b.identifier : b.email || '').trim();
     const row = ident && store.one(e.name, (r) => ids.some((f) => matchIdent(f, r[f.name], ident)));
-    if (!row || !pwField || !store.verify(String(b.password || ''), row[pwField.name])) return U.err(res, '账号或密码错误 (invalid credentials)');
+    if (!row || !pwField || !store.verify(String(b.password || ''), row[pwField.name])) return U.err(res, LOGIN_FAIL);
     startSession(res, row.id);
     U.json(res, 200, { user: pub(e, row) });
-  } catch { U.err(res, '账号或密码错误 (invalid credentials)'); } });
+  } catch { U.err(res, LOGIN_FAIL); } });
   app.post('/api/auth/logout', (req, res) => { const t = readToken(req); if (t) store.remove('sessions', (s) => s.token === t); U.setCookie(res, COOKIE, ''); U.json(res, 200, { ok: true }); });
   app.get('/api/me', (req, res) => { const u = exports.currentUser(e, req); U.json(res, 200, { user: u ? pub(e, u) : null }); });
 };

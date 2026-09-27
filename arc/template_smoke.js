@@ -5,7 +5,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const app = require(path.join(process.cwd(), 'src', 'app'));
 const Phase2 = process.argv[2] === 'phase2';
-const TOKEN_MSG = '账号或密码错误 (invalid credentials)';
+const TOKEN_MSG = 'Invalid username or password';
 let B = 'http://127.0.0.1';
 let cookie = Phase2 && process.env.ARC_TEST_TOKEN ? 'arc_session=' + process.env.ARC_TEST_TOKEN : '';
 async function call(method, path, body, withCookie = true) {
@@ -39,8 +39,8 @@ const ok = (name, cond) => { if (!cond) { console.error('FAIL ' + name); process
     ok('register-persists-hash', db.collections.users[0].password.includes(':') && db.collections.users[0].password.length < 200 && !db.collections.users[0].password.includes('Valid-password'));
     ok('register-persists-session', db.collections.sessions.length === 1);
     ok('seed-file-untouched-by-runtime', !((seed.collections || {}).users || []).length, 'db.json must stay the pristine seed');
-    ok('register-dup-username', (await p('POST', '/api/auth/register', { username: 'tb-user-1', email: 'other@x.com', password: 'Valid-password-123!', confirmPassword: 'Valid-password-123!', idType: '护照', idNumber: 'P2', ptype: '成人', agree: true })).json.errors.some((e) => /duplicate/.test(e.msg)));
-    ok('register-bad-password', (await call('POST', '/api/auth/register', { username: 'u2', email: 'u2@x.com', password: 'short', confirmPassword: 'short', idType: '护照', idNumber: 'P3', ptype: '成人', agree: true })).json.errors.some((e) => /invalid password/.test(e.msg)));
+    ok('register-dup-username', (await p('POST', '/api/auth/register', { username: 'tb-user-1', email: 'other@x.com', password: 'Valid-password-123!', confirmPassword: 'Valid-password-123!', idType: '护照', idNumber: 'P2', ptype: '成人', agree: true })).json.errors.some((e) => /already exists/i.test(e.msg)));
+    ok('register-bad-password', (await call('POST', '/api/auth/register', { username: 'u2', email: 'u2@x.com', password: 'short', confirmPassword: 'short', idType: '护照', idNumber: 'P3', ptype: '成人', agree: true })).json.errors.some((e) => /invalid password/i.test(e.msg)));
     ok('register-mismatch', (await call('POST', '/api/auth/register', { username: 'u3', email: 'u3@x.com', password: 'Valid-password-123!', confirmPassword: 'nope', idType: '护照', idNumber: 'P4', ptype: '成人', agree: true })).json.errors.some((e) => /match/.test(e.msg)));
     ok('register-missing', (await call('POST', '/api/auth/register', {})).json.errors.some((e) => /required/.test(e.msg)));
     const login = await call('POST', '/api/auth/login', { username: '  user@example.com ', password: 'Valid-password-123!' });

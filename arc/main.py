@@ -1356,6 +1356,14 @@ def build_octos_env(config_dir: Path) -> dict:
     # could not run. The container is already the isolation boundary, so
     # disable octos' inner sandbox there (honoured by `octos serve --solo`).
     env.setdefault("OCTOS_DANGER_FULL_ACCESS", "1")
+    # 工具 spec 收窄:平台实跑 trace(github 二跑 + sheet,合计 1333 次
+    # 工具调用)只出现过 9 个工具;其余 ~28 个内置 spec 是每请求固定
+    # token 地板 + 选择摩擦。白名单把模型可见 spec 收到证据支撑的集合,
+    # 隐藏工具仍注册(内部调用不受影响)。运维显式 export 优先于此默认。
+    env.setdefault(
+        "OCTOS_TOOL_ALLOWLIST",
+        "bash,read_file,edit_file,write_file,grep,list_dir,update_plan",
+    )
     # Any npm/npx the model runs inside the runner goes to the China mirror;
     # npmjs.org is slow/unreliable from the ARC runner network.
     env.setdefault("npm_config_registry", "https://registry.npmmirror.com")
@@ -1803,30 +1811,27 @@ some with ANCHORED regexes like /^name$/i — a field the requirement calls \
 "Name" must be labeled exactly "Name"; "Full Name" or "Your Name" never \
 matches.
 - UNIQUENESS (strict mode): any value the page echoes — search criteria, \
-city names, dates, usernames — must appear in EXACTLY ONE visible element. \
-Put normalized search criteria in ONE summary line; train cards show train \
-number, stations, and times but must NOT repeat the searched city names or \
-date as bare text anywhere else on the page. Round 31 shipped cards with a \
-"Shanghai to Beijing" route line under a criteria summary containing the \
-same words: getByText('Shanghai') matched 3 elements and every \
-search/booking test died with "strict mode violation".
-- SEED DATA: when the requirement states concrete published records (e.g. \
-"a Shanghai to Beijing journey on Sun, May 31 has train number G532"), the \
-database seed MUST include exactly those records, with dates stored and \
-matched as the verbatim strings shown ("Sun, May 31" is data, not an ISO \
-date). Search matching is case-insensitive and trims surrounding whitespace. \
-OPTION LABELS ARE FIXTURE DATA TOO: every concrete example value in the \
-requirement (account nationalities, seat classes, station lists) must \
-appear verbatim as <option>/radio labels — if the sample account has \
-nationality "Chinese", the select must include an option labeled exactly \
-"Chinese". Round 31's registration tests all timed out because the \
-nationality select lacked the fixture's option label ("did not find some \
-options").
+names, dates — must appear in EXACTLY ONE visible element. Put the \
+normalized criteria in ONE summary line; result cards may show their own \
+fields but must NOT repeat the searched values as bare text anywhere else \
+(round 31's result cards echoed the searched value under the criteria \
+summary: getByText matched 3 elements and every search test died with \
+"strict mode violation").
+- SEED DATA: when the requirement states concrete published records (a \
+named entity whose searches/listings must return specific values), the \
+database seed MUST include exactly those records, stored and matched as \
+the verbatim strings shown — a displayed date is data, never re-format it \
+into another notation. Search matching is case-insensitive and trims \
+surrounding whitespace. OPTION LABELS ARE FIXTURE DATA TOO: every concrete \
+example value in the requirement must appear verbatim as an <option>/radio \
+label (round 31's registration tests all timed out because one select \
+lacked the fixture's option label — "did not find some options").
 - SESSIONS: after registration or login, redirect to the home page. The \
 requirement's minimum is that the signed-in username remains VISIBLE after \
 reload; the SAFEST form (satisfies every locator style) is the username as \
-its own visible exact-text element inside the account-menu trigger: \
-<button aria-label="Account menu"><span>{username}</span></button> — a bare \
+its own visible exact-text element inside the account trigger: \
+<button aria-label="{the trigger name the requirement quotes}">\
+<span>{username}</span></button> — a bare \
 "Welcome, {username}" heading passes the loose reading but fails exact-text \
 locators; the trigger pattern passes both. The session must survive page \
 reload. Sign-out placement follows the requirement text verbatim (a header \
@@ -1839,20 +1844,19 @@ form-level summary together: round 31 rendered both "Date is required." \
 and "Please fix the invalid search criteria.", two elements matched the \
 test's error regex, and strict mode failed the assertion.
 - ONE MATCH PER VALUE FORM: when the same entity has a short and a long \
-written form (city "Shanghai" vs station "Shanghai Hongqiao"), a page must \
-render forms so that only ONE element matches — tests use a combined regex \
-like /shanghaihongqiao|shanghai/i, and two matching elements is a strict \
-mode violation (round 32's booking page showed both dd#train-from \
-"Shanghai" and dd#train-departure-station "Shanghai Hongqiao"). Pick one \
-display form per page and use it in exactly one element.
+written form (a city vs its station, a short name vs a full name), a page \
+must render ONE form so only ONE element matches — tests use combined \
+regexes over both forms, and two matching elements is a strict-mode \
+violation (round 32 showed both forms on one page and lost every related \
+assertion). Pick one display form per page and use it in exactly one \
+element.
 - UNLISTED CONTROL VALUES: when the requirement says a value must be "one \
-of the values offered by the control" WITHOUT listing them, offer a broad \
-standard set — for a nationality select include at least China, Vietnam, \
-United States, Japan, South Korea, United Kingdom, France, Germany, \
-Canada, Australia (round 31/32: the registration tests select the option \
-labeled "Vietnam"; without it every registration test times out). A gender \
-control is exactly two radio inputs labeled "Male" and "Female". Text \
-fields must accept ISO date strings like "2035-12-31".
+of the values offered by the control" WITHOUT listing them, offer the \
+broad standard set for that domain — a closed domain (nationality, \
+gender, salutation) renders its standard options verbatim, and any value \
+the tests plausibly select must be present (round 31/32 lost whole test \
+families to one missing standard option). Text fields accept values \
+verbatim — never re-format or re-parse what the requirement shows.
 - NATIVE-FIRST WIDGETS: never hand-roll what the platform ships. \
 Dropdowns are native <select> + <option> — graders use \
 getByRole('combobox') and selectOption; a custom div dropdown is \
@@ -1918,18 +1922,18 @@ no native HTML5 validation — validate in JS and render inline error text \
 (words like required/invalid/match/duplicate), EXACTLY ONE error element, \
 stay on the same page, create no records; every echoed value appears in \
 EXACTLY ONE visible element (strict mode); seed the requirement's concrete \
-records and option labels VERBATIM, and give unlisted control values a \
-broad standard set (nationalities including Vietnam; gender = exactly two \
-radios "Male"/"Female"; text fields accept ISO dates); widgets are \
+records and option labels VERBATIM, and give unlisted control values the \
+broad standard set of their domain; text fields accept values verbatim; \
+widgets are \
 native-first — native <select> dropdowns, native <dialog> modals; \
 custom widgets only where HTML has none, with the requirement's exact \
 ARIA roles; the scaffold's frontend/src/app/ui.jsx primitives \
 (NativeSelect/AppDialog/AccountTrigger/SingleError/FixedGrid) ARE \
 those shapes — import them; grids render headers plus \
 coordinate-named gridcells; submits enable once required fields are \
-filled; after login or \
-registration show the exact username plus a "Sign out" link, with the \
-session surviving page reload; the UI is text-only (never OCR images; \
+filled; after login or registration show the exact username (its own \
+exact-text node in the trigger the requirement names) plus the sign-out \
+control the requirement specifies, with the session surviving page reload; the UI is text-only (never OCR images; \
 inline visual-model descriptions are style/layout reference only — \
 never a source of strings); write code first.\
 """
@@ -1950,9 +1954,10 @@ already exist — EXTEND it, keep every entity name and seeded row; the \
 host compiles it and mounts CRUD + auth), the fixture records the FIXTURE \
 CONTRACT lists as still unseeded into backend/data/db.json (the host \
 already compiled every machine-readable data:/GIVEN fixture into it — \
-NEVER delete or rename those rows), and the first frontend feature file \
-under frontend/src/features/ (wire it in src/app/App.jsx per the FRONTEND \
-LAYOUT contract). Do NOT read requirements/requirements.yaml wholesale to \
+NEVER delete or rename those rows), and the first requirement family's \
+stub under frontend/src/features/ (host-pre-created per family, REQ work \
+order in each header — fill it in place; mounts are pre-wired in \
+src/app/App.jsx, rearrange freely). Do NOT read requirements/requirements.yaml wholesale to \
 recover seed data — the fixture contract is fully carried by your \
 CONTRACT/FOCUS/GIVEN sections and the seeded db.json. \
 JavaScript/JSX only; dependencies are preinstalled — \
@@ -1984,11 +1989,12 @@ whole in one edit and make surgical edits elsewhere, then verify once; \
 re-reading files you just wrote, micro-edits, and repeat builds burn \
 the shared wall clock and starve the remaining requirements (a skipped \
 node scores zero for every test behind it).
-ISOLATION: put this node's UI in frontend/src/features/<node-or-domain>\
-.jsx (whole new file) and wire it in frontend/src/app/App.jsx with one \
-import + one mount. Do NOT edit other features' files, and do NOT \
-rewrite shared app files — a regression in an already-green feature \
-costs its tests.
+ISOLATION: implement this node's UI in {feature_file} — a \
+host-pre-created stub under frontend/src/features/ whose header lists \
+this family's REQ ids; fill it IN PLACE (add sibling files only when a \
+sub-domain warrants). Wire/rearrange mounts in src/app/App.jsx. Do NOT \
+edit other features' files, and do NOT rewrite shared app files — a \
+regression in an already-green feature costs its tests.
 REGRESSION SCOPE: when re-checking earlier work, run ONLY the specs of \
 the features you touched this turn — the batch-filtered SPEC RUN below \
 is exactly that scope; anything wider wastes minutes per run.\
@@ -2127,9 +2133,12 @@ SCHEMA_DIRECTIVE = """
 FIRST ACTION: write %(schema_json)s declaring this task's data — \
 {"entities":[{"name":"users","auth":true,"fields":[...]}]} with field keys \
 name/label/type(string|number|boolean|password)/required/unique/min/max/\
-pattern/enum/match/format(email|username|password)/message, per the HOST \
-CONTRACT. CRUD at /api/<entity> and auth (register/login/logout/me) then \
-exist automatically — build the UI on them; write ONLY task-specific \
+pattern/enum/match/format(email|username|password), plus message (single) \
+or messages {required,invalid,duplicate} per reason — quoted "<X> is \
+required"/"<X> already exists" strings auto-map onto matching fields, and \
+any OTHER quoted error string in the requirement must be copied verbatim \
+into messages. CRUD at /api/<entity> and auth (register/login/logout/me) \
+then exist automatically — build the UI on them; write ONLY task-specific \
 endpoints (search/booking flows) in src/routes/index.js. Extend \
 backend/data/db.json only with fixture records still missing from the \
 FIXTURE CONTRACT — never delete or rename host-seeded rows. \
@@ -2487,7 +2496,7 @@ violations (these silently score 0 in the automated tests):
 requirement echoes (city names, dates, usernames, station names), \
 enumerate EVERY element that will contain it in the rendered DOM. If your \
 pages are server-rendered, do it against the running server: `curl -s \
-<page> | grep -o 'Shanghai' | wc -l` — the count must be 1 (one element). \
+<page> | grep -o '<searched value>' | wc -l` — the count must be 1. \
 If pages are client-rendered, read the render code instead and list the \
 elements each value lands in (summary line? card title? both = failure). \
 Any searched value appearing in more than one element is a strict-mode \
@@ -2817,6 +2826,20 @@ def main() -> int:
                 f"{scaffolded}")
         else:
             log("[plan] OCTOS_ARC_HOST_SCAFFOLD=0; scaffolding left to the model")
+        # 任务形状预生成(09-27:两次真实交付对照——github 模型自己推对
+        # 了 14 个 feature 文件,sheet 推成了 97KB 巨石;家族划分本就
+        # 在需求树里,宿主尽算):每需求家族一对 feature/route stub(头
+        # 注释=该家族 REQ 工单),App.jsx/routes 装配版只在原始字节时
+        # 改写。节点轮提示词由此能点名本批家族文件,模型从"推理划分"
+        # 降为"填空"。
+        feature_of: dict[str, str] = {}
+        if os.environ.get("OCTOS_ARC_FEATURE_STUBS", "1") != "0":
+            _stubs, feature_of = scaffold.task_stubs(tree)
+            shape_written = scaffold.scaffold_task_features(
+                output_dir, tree, log=log)
+            if not shape_written:
+                log("[scaffold] task shape already present (or tree empty); "
+                    "no stubs written")
         # 模板已就位时依赖由宿主预装(模型零安装);codegen 门控紧随其后。
         template_ready = scaffold.template_ready(output_dir)
         if template_ready:
@@ -2937,6 +2960,23 @@ def main() -> int:
                 log(f"[plan] flow suite staged: {len(flow_node_map)} "
                     "scenario-flow test(s) "
                     "(authoritative; batch-regressed + final-gated)")
+        # C1 配套:需求引号消息 sidecar——codegen 编译 schema 时确定性
+        # 桥接("<X> is required"/"<X> already exists" 灌字段三态消息,
+        # credential 族进 messages.loginFailure)。宿主生成 API 的错误
+        # 面由此默认英文契约族、需求逐字串优先(中文默认与英文逐字
+        # 契约冲突,注册/登录族=第一测试族+止损敏感区)。
+        req_msgs = flow_suite.collect_messages(tree)
+        if req_msgs:
+            try:
+                host_msg_dir = output_dir / ".arc" / "host"
+                host_msg_dir.mkdir(parents=True, exist_ok=True)
+                (host_msg_dir / "req-messages.json").write_text(
+                    json.dumps(req_msgs, ensure_ascii=False) + "\n",
+                    encoding="utf-8")
+                log(f"[fixture] requirement message sidecar: "
+                    f"{len(req_msgs)} quoted string(s) for the codegen bridge")
+            except OSError as exc:
+                log(f"[fixture] req-messages sidecar write failed: {exc}")
         # extra_rules 全局契约:确定性渲染(静态 manifest → 每轮字节相同,
         # 缓存律),经稳定 CONTRACT 段常驻;节点 GIVEN 走 FOCUS validation 前缀。
         fixture_rules = fixture_manifest.render_extra_rules(
@@ -3179,6 +3219,17 @@ def main() -> int:
             failed: list[str] = []
             node_done_notes: dict[str, str] = {}
             segment_digest_pending = False
+
+            def _feature_file_for(ids: list[str]) -> str:
+                """本批节点的家族 feature 文件(宿主预生成 stub)点名。"""
+                for nid in ids:
+                    hit = feature_of.get(nid)
+                    if hit:
+                        return f"frontend/src/features/{hit}"
+                return ("frontend/src/features/<family>.jsx "
+                        "(pick the host-pre-created stub whose header "
+                        "lists this node's REQ id)")
+
             for idx, batch in enumerate(node_batches, 1):
                 # 批末 UI 静态轻检的红串(建议性)——下一批节点 prompt 顶部
                 # 提醒,不阻断不翻状态;final 的完整爬虫才是权威判定。
@@ -3251,7 +3302,8 @@ def main() -> int:
                     if batch_specs:
                         node_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
                             node_id=focus_id, node_spec=node_spec,
-                            port=args.web_port, smoke=smoke_port) \
+                            port=args.web_port, smoke=smoke_port,
+                            feature_file=_feature_file_for(batch_ids)) \
                             + build_spec_run_cmd(
                                 str(toolchain_cli)
                                 if toolchain_cli is not None else None,
@@ -3259,7 +3311,8 @@ def main() -> int:
                     else:
                         node_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
                             node_id=focus_id, node_spec=node_spec,
-                            port=args.web_port, smoke=smoke_port) \
+                            port=args.web_port, smoke=smoke_port,
+                            feature_file=_feature_file_for(batch_ids)) \
                             + NO_STAGED_SPECS_NOTE.format(smoke=smoke_port) \
                             + ui_smoke_cmd
                     if len(batch) > 1:
@@ -3627,6 +3680,8 @@ def main() -> int:
                     log("[codegen] final compile done")
             # Final verification pass; octos leaves the port free.
             ok, text = False, "skipped: time budget"
+            # C2 事件标记要用;legacy 非 plan 路径不赋值,这里统一初始化。
+            ui_run = None
             if time_up():
                 log("[flow] time budget exhausted; skipping final verification")
             elif plan_on:
@@ -3906,15 +3961,32 @@ def main() -> int:
         # A budget-skipped final pass says nothing about node tests — the
         # platform's own Playwright run is the verdict there, so leave the
         # nodes unmarked instead of blanket-failing the ones that landed.
+        # C2(09-27 宿主过度定制审计):事件按节点级证据标记,final 不绿
+        # 不再全量连坐——旧逻辑把自验噪音(ui-smoke 已知有状态依赖
+        # 假红族)直接变成平台侧 requirement_state=test/failed 全量,
+        # 已工作节点被报死。证据序:浏览器红项点名节点(权威负)>
+        # 批 rehearsal 绿(build+boot+探针,正)> final 全绿(兜底正)>
+        # 无证据则不标(平台自有判官)。
         final_skipped = (not ok) and text.startswith("skipped: time budget")
+        red_nodes: dict[str, str] = {}
+        if ui_run is not None:
+            for r in ui_run.get("reds") or []:
+                for nid in r.get("nodes") or []:
+                    red_nodes.setdefault(
+                        nid, f"[{r.get('probe')}] {r.get('string')}")
         for node in atomic_nodes:
             node_id = str(node.get("id"))
             if node_id in failed:
                 events.mark_test_failed(node_id, "final verification did not pass")
+            elif node_id in red_nodes:
+                events.mark_test_failed(
+                    node_id,
+                    "host browser evidence: " + red_nodes[node_id][:200])
+            elif plan_statuses.get(node_id) == "done":
+                events.mark_test_passed(
+                    node_id, "batch rehearsal green (host build+boot+probes)")
             elif ok:
                 events.mark_test_passed(node_id, "verified by octos final check")
-            elif not final_skipped:
-                events.mark_test_failed(node_id, "final verification did not pass")
         runtime.git.commit("chore: final verification pass")
 
         if failed:

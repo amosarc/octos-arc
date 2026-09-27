@@ -123,6 +123,116 @@ class CompileSchemaTests(unittest.TestCase):
             self.assertEqual(sc.compile_schema(out), [])
             self.assertFalse((out / sc.codegen.SCHEMA_JS).read_text().count("blob"))
 
+    def test_message_bridge_maps_requirement_quotes(self):
+        # C1(09-27):需求引号消息 sidecar → 字段三态消息 + loginFailure。
+        # 模型显式写的 message/messages 永不被覆盖;不匹配的串是无害噪音。
+        with TemporaryDirectory() as td:
+            out = Path(td)
+            sc.scaffold(out)
+            p = sc.schema_path(out)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"entities": [
+                {"name": "users", "auth": True, "fields": [
+                    {"name": "username", "type": "string", "required": True,
+                     "unique": True},
+                    {"name": "title", "type": "string", "required": True},
+                    {"name": "email", "type": "string", "required": True,
+                     "unique": True, "message": "Model override"}]}]}),
+                encoding="utf-8")
+            from scaffold.manifest import REQ_MESSAGES_REL
+            sidecar = out / REQ_MESSAGES_REL
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            sidecar.write_text(json.dumps([
+                "Username already exists", "Title is required",
+                "Email already exists", "Invalid credentials",
+                "A workbook must contain at least one worksheet"]),
+                encoding="utf-8")
+            sc.compile_schema(out)
+            compiled = (out / sc.codegen.SCHEMA_JS).read_text(encoding="utf-8")
+            self.assertIn('"Username already exists"', compiled)   # 字段名直配→duplicate
+            self.assertIn('"Title is required"', compiled)         # →required
+            self.assertNotIn('"Email already exists"', compiled)   # 模型 message 优先,不覆盖
+            self.assertIn("loginFailure", compiled)                # credential 族→loginFailure
+            self.assertIn('"Invalid credentials"', compiled)
+            self.assertNotIn("workbook", compiled.lower())         # 无害噪音不进 schema
+
+
+class TaskShapeTests(unittest.TestCase):
+    """taskshape:需求树 → 家族 stub 预生成(幂等/不覆盖/工单头)。"""
+
+    MINI_TREE = {
+        "id": "ROOT", "type": "FOLDER", "children": [
+            {"id": "REQ-1", "type": "FOLDER", "name": "Identity & Access",
+             "children": [
+                 {"id": "REQ-1-1", "type": "ATOMIC", "name": "Sign Up",
+                  "description": "d", "children": []},
+                 {"id": "REQ-1-2", "type": "ATOMIC", "name": "Sign In",
+                  "description": "d", "children": []}]},
+            {"id": "REQ-2", "type": "FOLDER", "name": "Dashboards/Views",
+             "children": [
+                 {"id": "REQ-2-1", "type": "ATOMIC", "name": "Overview",
+                  "description": "d", "children": []}]},
+        ]}
+
+    def test_task_stubs_families_and_map(self):
+        stubs, nmap = sc.task_stubs(self.MINI_TREE)
+        slugs = [s["slug"] for s in stubs]
+        self.assertEqual(len(slugs), 2)
+        self.assertTrue(slugs[0].startswith("req1-"))
+        self.assertIn("identity", slugs[0])
+        # 非法字符入 slug(斜杠/&)必须被清洗
+        self.assertNotIn("/", slugs[1]); self.assertNotIn("&", slugs[0])
+        self.assertEqual(nmap["REQ-1-1"], slugs[0] + ".jsx")
+        self.assertEqual(nmap["REQ-2-1"], slugs[1] + ".jsx")
+        comp = stubs[0]["component"]
+        self.assertTrue(comp[0].isalpha() and comp[0].isupper())
+
+    def test_stub_headers_carry_work_order(self):
+        from scaffold import taskshape
+        stubs, _ = sc.task_stubs(self.MINI_TREE)
+        text = taskshape._feature_stub(stubs[0])
+        self.assertIn("REQ-1-1 Sign Up", text)
+        self.assertIn("host-pre-created", text.lower())
+        self.assertIn("export default function", text)
+        rtext = taskshape._route_stub(stubs[0])
+        self.assertIn("module.exports = (app)", rtext.replace(" => {", " = (app)").replace("};", "")) or \
+            self.assertIn("module.exports = (app) => {", rtext)
+
+    def test_scaffold_task_features_idempotent_no_clobber(self):
+        with TemporaryDirectory() as td:
+            out = Path(td)
+            sc.scaffold(out)
+            first = sc.scaffold_task_features(out, self.MINI_TREE)
+            self.assertGreater(len(first), 2)
+            stub = out / "frontend/src/features" / (
+                sc.task_stubs(self.MINI_TREE)[0][0]["slug"] + ".jsx")
+            self.assertTrue(stub.is_file())
+            # 幂等:第二遍零写入
+            self.assertEqual(sc.scaffold_task_features(out, self.MINI_TREE), [])
+            # 模型已写内容永不覆盖
+            stub.write_text("// model work\n", encoding="utf-8")
+            app = out / "frontend/src/app/App.jsx"
+            app.write_text("// model app\n", encoding="utf-8")
+            sc.scaffold_task_features(out, self.MINI_TREE)
+            self.assertEqual(stub.read_text(encoding="utf-8"), "// model work\n")
+            self.assertEqual(app.read_text(encoding="utf-8"), "// model app\n")
+
+    def test_wiring_is_pristine_only(self):
+        with TemporaryDirectory() as td:
+            out = Path(td)
+            sc.scaffold(out)
+            sc.scaffold_task_features(out, self.MINI_TREE)
+            routes = out / "backend/src/routes/index.js"
+            text = routes.read_text(encoding="utf-8")
+            self.assertIn("require('./", text)
+            import subprocess, sys as _sys
+            node = _node_bin()
+            if node:
+                for js in routes.parent.glob("*.js"):
+                    r = subprocess.run([node, "--check", str(js)],
+                                       capture_output=True, text=True)
+                    self.assertEqual(r.returncode, 0, f"{js}: {r.stderr}")
+
 
 class ScaffoldLifecycleTests(unittest.TestCase):
     """scaffold/template_ready/template_complete 的幂等与判定语义。"""

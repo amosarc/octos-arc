@@ -31,32 +31,30 @@ WIPE_GLOBS = ("*.spec.ts", "support")
 HOST_STACK_RULES = """\
 HOST CONTRACT (graded Playwright specs are ground truth — where the \
 requirement text disagrees, the spec wins):
-STACK: React(Vite) frontend + Express backend, PREBUILT BY THE HOST — the \
-backend is already a complete running app. Host-owned files (never \
-rewrite): src/app.js + src/index.js (bootstrap; listens on PORT plus \
-every port in ARC_EXTRA_PORTS; serves frontend/dist), src/lib/util.js \
-(responses/cookies/ids), src/lib/validate.js (schema-driven validators, \
-CN/EN error text), src/database/store.js (atomic JSON store: coll/one/\
-all/dup/insert/remove/save + scrypt hash/verify), src/database/engine.js \
-(schema-driven CRUD factory), src/lib/auth.js (register/login/logout/me \
-+ sessions). Dependencies are PREINSTALLED — never run npm install, \
+STACK: React(Vite) frontend + Express backend, PREBUILT BY THE HOST — \
+the backend already runs. Host-owned (never rewrite): src/app.js + \
+src/index.js (bootstrap; PORT + ARC_EXTRA_PORTS; serves frontend/dist), \
+src/lib/util.js (responses/cookies/ids), src/lib/validate.js \
+(schema-driven validators, English contract-family error defaults), \
+src/database/store.js (atomic JSON store: coll/one/all/dup/insert/\
+remove/save + scrypt hash/verify), src/database/engine.js (schema-driven \
+CRUD factory), src/lib/auth.js (register/login/logout/me + sessions). Dependencies are PREINSTALLED — never run npm install, \
 never add npm packages.
 FRONTEND LAYOUT (isolation contract): every requirement's UI lives in \
 its OWN self-contained file frontend/src/features/<name>.jsx (default \
-export; the component, its local state/hooks, and its scoped styles all \
-in that one file). frontend/src/features/README.md (host-owned) carries \
+export; component+state+styles in that one file). frontend/src/features/README.md (host-owned) carries \
 the GRID EDITOR KERNEL PATTERN — grid-like tasks must build on ONE \
 shared selection/editing state model per the README instead of \
 re-implementing it per feature. Graded UI shapes are CODE: \
 frontend/src/app/ui.jsx ships NativeSelect (dropdowns = native \
 <select>, graders use selectOption), AppDialog (modals = native \
-<dialog>), AccountTrigger (signed-in username as its OWN exact-text \
-node in an aria-labelled trigger), SingleError (one visible error \
-element) and FixedGrid (fixed-size role=grid, lettered headers, \
-coordinate-named gridcells) — use them, never hand-roll. \
+<dialog>), AccountTrigger (username its own exact-text node; pass the \
+requirement's trigger label), SingleError (one visible error \
+element) and FixedGrid (fixed-size role=grid; pass the \
+requirement's grid name) — use them, never hand-roll. \
 frontend/src/app/App.jsx is the ASSEMBLY layer only — \
-per feature add one import and one mount; the FIRST requirement may lay \
-out the page structure there, after that never put business logic in it. \
+per feature one import+mount; the FIRST requirement may lay out the \
+page structure, never business logic after that. \
 Shared entities go through frontend/src/app/store.jsx \
 (useResource('<entity>')) — never duplicate shared state inside \
 features. NEVER edit another requirement's feature file; keep \
@@ -68,21 +66,22 @@ SCHEMA-DRIVEN BACKEND: to add data, write backend/data/schema.json = \
 field keys: name, label (used in error messages), type \
 (string|number|boolean|password), required, unique, min, max, pattern \
 (JS regex), enum, match (mirror field, e.g. confirmPassword), format \
-(email|username|password), message (custom error). The host compiles it \
+(email|username|password), message (single) or messages \
+{required,invalid,duplicate} per reason (quoted "<X> is required"/ \
+"<X> already exists" auto-map; copy quoted error strings verbatim). \
+The host compiles it \
 to src/database/schema.js and mounts CRUD at /api/<entity> \
 automatically; entities with auth:true additionally get \
-/api/auth/register (validates ALL entity fields, scrypt-hashes the \
-secret, creates a session = auto-login), /api/auth/login (accepts any \
-unique field as identifier: username or email, trimmed, email \
-case-insensitive, uniform failure message that never reveals account \
-existence), /api/auth/logout, /api/me (session restore; sessions \
-survive server restart). Endpoints that are NOT plain CRUD (search / \
-booking flows) go in src/routes/index.js using store + lib helpers.
-FIXTURE CONTRACT (graded, not demo data): the requirement's `data:` \
-section and every scenario GIVEN line are the graded seed contract — \
-the host has already compiled them into backend/data/db.json. Names \
-may carry a unique suffix, but roles, ownership, visibility, and \
-relationships must match VERBATIM; NEVER delete or rename seeded rows \
+/api/auth/register (validates ALL fields, scrypt-hashes the secret, \
+auto-login session), /api/auth/login (accepts any unique identifier \
+(username or email; trimmed, email case-insensitive), uniform failure message (quoted credential string wins via the codegen \
+bridge, default "Invalid username or password"; never reveals existence), /api/auth/logout, /api/me (session restore; sessions \
+survive server restart). Non-plain-CRUD endpoints (search/booking flows) go in \
+src/routes/index.js using store + lib helpers.
+FIXTURE CONTRACT (graded, not demo data): the `data:` section + every \
+scenario GIVEN line are the graded seed contract, already compiled into \
+backend/data/db.json. Names may carry a unique suffix, but roles, \
+ownership, visibility, relationships match VERBATIM; NEVER delete or rename seeded rows \
 or collections, and extend schema.json so every seeded field is \
 exposed. Scenarios that MODIFY data each need their OWN fresh \
 preconfigured instance (never share one mutable fixture across \

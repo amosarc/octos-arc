@@ -303,6 +303,28 @@ def _signin_is_node(node: dict) -> bool:
                           re.I))
 
 
+def collect_messages(tree: dict) -> list[str]:
+    """树内全部引号消息(去重,文档序)。
+
+    宿主侧 .arc/host/req-messages.json sidecar 的数据源——codegen 编译
+    schema 时做确定性桥接("<X> is required"/"<X> already exists" →
+    字段 messages,credential 族 → loginFailure)。非消息类引号串
+    (按钮名/标签)对桥是无害噪音:桥只按后缀/正则挑消息。"""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def visit(node) -> None:
+        for _, m in _messages(str(node.get("description") or "")):
+            if m not in seen:
+                seen.add(m)
+                out.append(m)
+        for child in node.get("children") or []:
+            visit(child)
+
+    visit(tree or {})
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 流 spec 生成
 # ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@
     template_complete(output_dir)     可跳过 skeleton 轮(+auth/engine/schema)
     prewarm_deps(output_dir, log)     宿主代装 backend/frontend 依赖
     compile_schema / Watcher / schema_path / load_schema   schema 编译
+    task_stubs / scaffold_task_features   需求树→家族 stub 预生成(taskshape)
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from pathlib import Path
 
 from . import backend, frontend, manifest  # noqa: F401  (re-export 便于排查)
 from .codegen import Watcher, compile_schema, load_schema, schema_path
+from .taskshape import scaffold_task_features, task_stubs
 from .manifest import (  # noqa: F401
     CODEGEN_STATE_REL,
     COMPLETE_KEYS,
@@ -35,6 +37,7 @@ from .manifest import (  # noqa: F401
 
 __all__ = [
     "scaffold", "template_ready", "template_complete", "prewarm_deps",
+    "task_stubs", "scaffold_task_features",
     "Watcher", "compile_schema", "load_schema", "schema_path",
     "SCAFFOLD_FILES", "READY_KEYS", "COMPLETE_KEYS", "SCHEMA_JSON_REL",
     "COOKIE_NAME", "NPM_REGISTRY", "STACK_ID", "RULES_MUST_NAME",

@@ -20,6 +20,10 @@ COOKIE_NAME = "arc_session"
 SCHEMA_JSON_REL = "backend/data/schema.json"
 SCHEMA_JS_REL = "backend/src/database/schema.js"
 CODEGEN_STATE_REL = ".arc/host-codegen.json"
+# 需求引号消息 sidecar(main.py 写,codegen 读):编译 schema 时做
+# 确定性桥接——"<X> is required"/"<X> already exists" 灌进字段
+# messages,credential 族串进 schema.messages.loginFailure。
+REQ_MESSAGES_REL = ".arc/host/req-messages.json"
 
 # 就绪(宿主模板已落盘)与完整(可跳过 skeleton 轮)判定键——原 main.py 硬编码。
 READY_KEYS = ("frontend", "frontend/src/app/App.jsx", "backend/src/app.js")
@@ -63,7 +67,8 @@ SCAFFOLD_FILES: dict[str, tuple[str, str]] = {
 }
 # 模型独占文件:宿主不落盘,清单内仅登记路径供 prompt/契约引用。
 # frontend/src/features/ 是模型的 UI 扩展面(每需求域一个自包含文件);
-# 宿主只落 README.md 契约(B2 网格内核模式),.jsx/.js 一律归模型。
+# 宿主只落 README.md 契约(B2 网格内核模式),.jsx/.js 一律归模型——
+# 例外:taskshape 首次播种的家族 stub(仅文件不存在时写,永不覆盖)。
 MODEL_FILES = (SCHEMA_JSON_REL, "frontend/src/features/*.jsx")
 
 # HOST_STACK_RULES(plan_envelope 文字契约)必须逐一点名的路径拼写。

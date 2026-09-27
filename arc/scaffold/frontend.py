@@ -254,6 +254,9 @@ FEATURES_README = """\
 
 Each requirement domain lives in its own self-contained file here
 (<name>.jsx, default export). This README is HOST-OWNED (read-only).
+The host PRE-CREATES one stub per requirement family at initialization
+(headers list the family's REQ ids as a work order); fill them in place
+and add sibling files freely — the division is a starting grid, not a cage.
 
 ## Grid editor kernel pattern (spreadsheet-like tasks)
 
@@ -359,10 +362,13 @@ export function AppDialog({ name, open, onClose, children }) {
 // Signed-in identity: the username must be its OWN exact-text element
 // inside the account trigger (graders assert getByText(username,
 // {exact:true}) and click it to open the menu — a "Welcome, {user}"
-// heading fails every exact-text locator).
-export function AccountTrigger({ username, onOpen }) {
+// heading fails every exact-text locator). Pass the trigger's accessible
+// name from the REQUIREMENT via label; without it the button is named by
+// the username span itself (still exact-text clickable).
+export function AccountTrigger({ username, onOpen, label }) {
+  const props = label ? { 'aria-label': label } : {};
   return (
-    <button aria-label="Account menu" onClick={onOpen}>
+    <button {...props} onClick={onOpen}>
       <span className="acc-username">{username}</span>
     </button>
   );
@@ -376,24 +382,37 @@ export function SingleError({ message }) {
   return <div role="alert" className="form-error">{message}</div>;
 }
 
-const COL_LETTERS = 'ABCDEFGHIJ';
+// Column letters beyond Z wrap to AA, AB, ... — no artificial column cap
+// (a capped grid dies the first time a grader clicks past it).
+const colLetters = (n) => {
+  const out = [];
+  for (let i = 0; i < Math.max(1, n); i++) {
+    let s = '';
+    let j = i;
+    do { s = String.fromCharCode(65 + (j % 26)) + s; j = Math.floor(j / 26) - 1; } while (j >= 0);
+    out.push(s);
+  }
+  return out;
+};
 
 // Spreadsheet-shaped grid: FIXED-SIZE (empty cells beyond the data region
 // stay selectable — a data-sized grid killed ~7 requirements in one run),
 // role=grid + named columnheaders (letters) + rowheaders (numbers) +
-// gridcells whose accessible name is the coordinate (A1). Owns NO state:
-// pass textAt(coord) and the selection Set; wire click/mousedown/context
-// menu handlers to your grid state.
-export function FixedGrid({ name = 'Worksheet grid', rows = 26, cols = 10,
+// gridcells whose accessible name is the coordinate (A1). name and
+// multiselectable come FROM THE REQUIREMENT (its quoted grid name and
+// selection contract). Owns NO state: pass textAt(coord) and the
+// selection Set; wire click/mousedown/context-menu handlers yourself.
+export function FixedGrid({ name, rows = 26, cols = 10, multiselectable = true,
                             textAt, selected, onCellClick, onCellDown,
                             onContextMenu }) {
-  const letters = COL_LETTERS.slice(0, Math.max(1, Math.min(cols, 10)));
+  const letters = colLetters(cols);
   return (
-    <table role="grid" aria-label={name} aria-multiselectable="true">
+    <table role="grid" aria-label={name}
+           aria-multiselectable={multiselectable ? 'true' : 'false'}>
       <thead>
         <tr role="row">
           <td></td>
-          {letters.split('').map((c) => (
+          {letters.map((c) => (
             <th key={c} role="columnheader">{c}</th>
           ))}
         </tr>
@@ -402,7 +421,7 @@ export function FixedGrid({ name = 'Worksheet grid', rows = 26, cols = 10,
         {Array.from({ length: rows }, (_, i) => i + 1).map((r) => (
           <tr key={r} role="row">
             <th role="rowheader">{String(r)}</th>
-            {letters.split('').map((c) => {
+            {letters.map((c) => {
               const coord = c + r;
               const sel = selected && selected.has && selected.has(coord);
               return (
