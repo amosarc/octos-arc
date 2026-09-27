@@ -5,7 +5,7 @@ Run: python3 arc/p1_batch_test.py
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import main  # noqa: E402
 
 

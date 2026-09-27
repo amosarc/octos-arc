@@ -12,7 +12,7 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import main  # noqa: E402
 import plan_envelope  # noqa: E402
@@ -98,7 +98,7 @@ class RequirementsMapTests(unittest.TestCase):
 
     def test_real_task_maps_carry_every_atomic(self):
         for task in ("hackathon--github", "hackathon--sheet"):
-            req = Path(__file__).resolve().parent / "tasks" / task
+            req = Path(__file__).resolve().parent.parent / "tasks" / task
             if not (req / "requirements.yaml").exists():
                 continue
             tree = main.load_requirement_tree(req)
