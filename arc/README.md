@@ -65,6 +65,8 @@ guard(自测命令放行形状/full-spec-run/trace-deny)、OCTOS_TOOL_ALLOWLIST�
 ~87KB 瘦到 ~10KB。升级路径 C-lite(分段累积已完成家族 FOLDER 契约)已在
 `build_system_row_context` 预留参数位,触发条件=仿真显示模型反复定点重读
 已完成家族契约。
+**提交范围配置见 [SCOPE.md](SCOPE.md)**——正式提交改 `main.py` 顶部 `COMPETITION_FAMILY_SCOPE` 常量重打包;本地用 env 覆盖。
+
 环境开关:`OCTOS_ARC_GOAL_FIRST`(目标优先家族工单,缺省开;=0 回退
 host-first 兄弟批路径,同样无 envelope)、`OCTOS_ARC_FAMILIES`(运行范围,
 首跑/快迭代:逗号分隔 id,任意层级前缀——`REQ-1`=整家族/`REQ-2-3`=子

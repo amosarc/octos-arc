@@ -72,9 +72,17 @@ import visual_ref  # noqa: E402  (参考图视觉预描述:VISUAL_MODEL 代看�
 # 形状所需的 .arc/ui-smoke/playwright.config.ts 最小骨架;③消息桥提取
 # (_REQ_MESSAGE_RE,数据面 codegen 桥的数据源,非 UI 规则)。
 PLATFORM_PW_VERSION = "1.57.0"
-SELFTEST_SUBDIR = ".arc/ui-smoke"
+SELFTEST_SUBDIR = "./ui-smoke"
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 比赛提交范围(平台无法传 env,正式提交改这里后重打包;详见 arc/SCOPE.md)
+#   "REQ-1"        → 只实现并提交 REQ-1 家族(快迭代/分段提交)
+#   "REQ-1,REQ-3"  → 任意家族/子家族/原子 id 组合
+#   ""             → 全量(最终冲分提交务必改回这里!)
+# 本地仿真不受它影响:env OCTOS_ARC_FAMILIES 设置时覆盖此值。
+COMPETITION_FAMILY_SCOPE = "REQ-1"
+# ═══════════════════════════════════════════════════════════════════
 _DEBUG_LOG_PATH: Path | None = None
 _DEBUG_LOG_LOCK = threading.Lock()
 
@@ -2973,8 +2981,15 @@ def main() -> int:
         # goal-first 总开关与运行范围,提前到视觉通道之前——范围 run 的
         # 参考图描述只做范围内节点(27 张全量是范围外死重)。
         goal_first = os.environ.get("OCTOS_ARC_GOAL_FIRST", "1") != "0"
-        family_scope = parse_family_scope(
-            os.environ.get("OCTOS_ARC_FAMILIES"))
+        # 范围解析优先级:env 显式 > COMPETITION_FAMILY_SCOPE(烤入默认)。
+        # 平台提交无法传 env → 正式范围改 main.py 顶部常量后重打包
+        # (见 arc/SCOPE.md);本地仿真用 env-file 覆盖,"all"/"*" 显式全量。
+        _raw_scope = os.environ.get("OCTOS_ARC_FAMILIES")
+        if _raw_scope is None:
+            _raw_scope = COMPETITION_FAMILY_SCOPE
+        elif _raw_scope.strip().lower() in ("", "all", "*"):
+            _raw_scope = ""
+        family_scope = parse_family_scope(_raw_scope)
         family_of = family_index(tree) if goal_first else {}
         # 夹具契约提取(ROOT data: 段 / 场景 GIVEN / "Seed data supplies" 句 /
         # E2E_* 环境项)——宿主尽算:先结构化,再编译种子、注入 envelope、
@@ -3000,7 +3015,6 @@ def main() -> int:
         runtime.git.ensure_repo()
 
         octos_bin = find_octos()
-        # 09-27 planctl 退役:不再有 plan 模式/版本门控——契约与需求全在
         # 工单正文,内核只做驱动与治理(shell guard/折叠/迭代帽照旧)。
         # goal-first 总开关(宿主优先→目标优先):默认 1;=0 回退旧宿主
         # 优先提示词路径(A/B 用,同样无 envelope)。
