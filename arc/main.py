@@ -1617,6 +1617,38 @@ def scoped_spec_files(spec_map: dict[str, list[str]],
     return sorted(wanted)
 
 
+def _in_scope_node_ids(tree: dict, scope: frozenset[str],
+                       family_of: dict[str, dict]) -> frozenset[str] | None:
+    """范围 run 的节点白名单(视觉通道过滤用);无范围 → None(全量)。
+
+    覆盖:命中前缀的节点(任意层级)+ 范围内原子的祖先 FOLDER
+    (家族/子家族描述里的图同样属于范围内契约)。"""
+    if not scope:
+        return None
+    scoped_atomic = {str(n.get("id")) for n in flatten_atomic(tree)
+                     if _node_matches_scope(str(n.get("id")), scope)
+                     or (str(n.get("id")) in family_of
+                         and _node_matches_scope(
+                             str(family_of[str(n.get("id"))].get("id")),
+                             scope))}
+    out = set(scoped_atomic)
+
+    def walk(node: dict) -> None:
+        nid = str(node.get("id") or "")
+        if nid and any(a == nid or a.startswith(nid + "-")
+                       or a.startswith(nid + ".")
+                       for a in scoped_atomic):
+            out.add(nid)
+        for child in node.get("children") or []:
+            if isinstance(child, dict):
+                walk(child)
+
+    for folder in (tree or {}).get("children") or []:
+        if isinstance(folder, dict):
+            walk(folder)
+    return frozenset(out)
+
+
 # ---------------------------------------------------------------- octos driver
 
 OCTOS_RELEASE_URL = (
@@ -2898,6 +2930,12 @@ def main() -> int:
         atomic_nodes = flatten_atomic(tree)
         if not atomic_nodes:
             raise ValueError("no ATOMIC requirement nodes found")
+        # goal-first 总开关与运行范围,提前到视觉通道之前——范围 run 的
+        # 参考图描述只做范围内节点(27 张全量是范围外死重)。
+        goal_first = os.environ.get("OCTOS_ARC_GOAL_FIRST", "1") != "0"
+        family_scope = parse_family_scope(
+            os.environ.get("OCTOS_ARC_FAMILIES"))
+        family_of = family_index(tree) if goal_first else {}
         # 夹具契约提取(ROOT data: 段 / 场景 GIVEN / "Seed data supplies" 句 /
         # E2E_* 环境项)——宿主尽算:先结构化,再编译种子、注入 envelope、
         # 生成 0-token 探针。github 2 分根因:这些契约此前全链无人消费。
@@ -2905,11 +2943,12 @@ def main() -> int:
 
         # 参考图视觉注入:![image](reference/*.png) 对文本通道是死文本,
         # 宿主用 VISUAL_MODEL(默认 glm-5.3-flash)按视觉格式预描述后原地
-        # 改写 tree,describe_node/plan envelope 等下游提示词自动携带。
+        # 改写 tree,describe_node 等下游提示词自动携带。
         # 置于 fixture 提取之后(提取读原文)、traceability 存档之后
         # (平台工件保留原树);best-effort,失败降级为占位说明。
         visual_ref.apply_visual_references(
-            tree, dest_req, log=log, work_dir=output_dir)
+            tree, dest_req, log=log, work_dir=output_dir,
+            only_nodes=_in_scope_node_ids(tree, family_scope, family_of))
 
         tests_dir = locate_acceptance_tests(tree, Path(__file__).resolve().parent)
         if tests_dir:
@@ -2931,15 +2970,12 @@ def main() -> int:
         # OCTOS_ARC_FAMILIES=运行范围(首跑/快迭代):只实现列出的家族
         # (任意层级前缀,"REQ-1"/"REQ-2-3"/原子 id 均可,逗号分隔),
         # 范围外家族不生成工单/不计进度/不进 Tier-2;未设置=全量。
+        # (goal_first/family_scope/family_of 已提前到视觉通道之前。)
         batch_n = int(os.environ.get("OCTOS_ARC_NODE_BATCH", "2"))
-        family_scope = parse_family_scope(
-            os.environ.get("OCTOS_ARC_FAMILIES"))
-        family_of: dict[str, dict] = {}
         if goal_first:
             family_batch_max = int(
                 os.environ.get("OCTOS_ARC_FAMILY_BATCH_MAX", "6"))
             node_batches = group_families(tree, family_batch_max)
-            family_of = family_index(tree)
             if family_scope:
                 before = len(node_batches)
                 node_batches = [

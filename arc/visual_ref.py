@@ -77,8 +77,13 @@ def _iter_step_contents(node: dict):
                 yield step
 
 
-def collect_image_refs(tree: dict) -> list[str]:
-    """需求树里引用的本地图片路径(按首次出现顺序去重,忽略远程 URL)。"""
+def collect_image_refs(tree: dict,
+                       only_nodes: set[str] | frozenset[str] | None = None
+                       ) -> list[str]:
+    """需求树里引用的本地图片路径(按首次出现顺序去重,忽略远程 URL)。
+
+    only_nodes=节点 id 白名单(分层装配的范围 run)时只收集这些节点
+    引用的图——范围外家族的图不进视觉通道(省墙钟与 token)。"""
     refs: list[str] = []
     seen: set[str] = set()
 
@@ -92,6 +97,10 @@ def collect_image_refs(tree: dict) -> list[str]:
                 refs.append(target)
 
     for node in _walk_nodes(tree):
+        if only_nodes is not None:
+            nid = str(node.get("id") or "")
+            if nid not in only_nodes:
+                continue
         if isinstance(node.get("description"), str):
             scan(node["description"])
         for step in _iter_step_contents(node):
@@ -281,13 +290,17 @@ def _write_sidecar(work_dir: Path, descriptions: dict[str, str],
 
 
 def apply_visual_references(tree: dict, req_dir: Path, *, log=print,
-                            work_dir: Path | None = None) -> int:
+                            work_dir: Path | None = None,
+                            only_nodes: set[str] | frozenset[str] | None = None
+                            ) -> int:
     """入口:收集参考图 → 视觉模型描述 → 原地注入需求树。
 
     必须在 fixture_manifest.extract 之后调用(夹具提取读需求原文,视觉
     描述不应混入其启发式);traceability 存档发生在更早处,保留原树。
+    only_nodes(范围 run,OCTOS_ARC_FAMILIES)只描述范围内节点引用的图,
+    范围外引用保持原样(它们没有工单,不需要视觉描述)。
     返回成功注入的描述数(0 = 无参考图或通道不可用,流程原样继续)。"""
-    refs = collect_image_refs(tree)
+    refs = collect_image_refs(tree, only_nodes=only_nodes)
     if not refs:
         return 0
     lane = visual_lane()
