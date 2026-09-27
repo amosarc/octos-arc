@@ -252,6 +252,19 @@ class SystemRowTests(unittest.TestCase):
         for d in ("d111", "d112", "d121", "d21", "d22", "d31"):
             self.assertNotIn(d, ctx)
 
+    def test_system_row_dedupes_fixture_contract(self):
+        """装配层去重:rules 内嵌的通用 FIXTURE 段裁掉,任务专属
+        fixture_rules 是唯一承载(llm.jsonl 实证裁前 ×2)。"""
+        rules = plan_envelope.HOST_STACK_RULES_GOAL_FIRST
+        fx = "FIXTURE CONTRACT (graded, not demo data): task-specific seed details."
+        ctx = main.build_system_row_context(TREE, rules, fx)
+        self.assertEqual(ctx.count("FIXTURE CONTRACT (graded"), 1)
+        # 指针行保住核心语义
+        self.assertIn("seed details bind VERBATIM", ctx)
+        self.assertIn("db.run.json never ships", ctx)
+        # RULES_MUST_NAME 路径拼写不受影响(scaffold_test 钉在常量上)
+        self.assertIn("backend/data/db.json", rules)
+
     def test_system_row_is_byte_stable(self):
         a = main.build_system_row_context(TREE, self.RULES,
                                           self.FIXTURE_RULES)

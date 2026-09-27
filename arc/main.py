@@ -1423,6 +1423,15 @@ def build_system_row_context(tree: dict, rules_text: str,
     scope=运行范围(OCTOS_ARC_FAMILIES)时追加 RUN SCOPE 段(整 run
     恒定,仍字节稳定);标题树保持全量——范围是调度决策不是需求裁剪。
     """
+    # 去重(09-28 sheet run llm.jsonl 实证 FIXTURE CONTRACT ×2):rules 内嵌
+    # 的通用段与紧随其后的 fixture_rules(任务专属超集,已覆盖 VERBATIM/
+    # never-delete/db.run.json/restart 全部语义)重复——裁通用段留一行指针。
+    # 在装配层裁而非改常量:RULES_MUST_NAME 断言钉在常量上,=0 基线不动。
+    trimmed_rules = re.sub(
+        r"FIXTURE CONTRACT \(graded[^\n]*(?:\n(?![A-Z]{2,}|$)[^\n]*)*",
+        "FIXTURE CONTRACT: see the task-specific FIXTURE section below — "
+        "seed details bind VERBATIM; runtime db.run.json never ships.\n",
+        rules_text, count=1)
     parts = [
         "ROOT CONTRACT (verbatim — global rules that bind every family):",
         render_root_contract(tree),
@@ -1431,7 +1440,7 @@ def build_system_row_context(tree: dict, rules_text: str,
         "order's dependency closure: read THAT section of "
         "requirements/requirements.yaml by heading id):",
         render_map_outline(tree),
-        rules_text,
+        trimmed_rules,
         fixture_rules,
     ]
     if scope:
