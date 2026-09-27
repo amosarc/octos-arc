@@ -1284,18 +1284,49 @@ def describe_node(node: dict,
 # 全部确定性树遍历,零 LLM,字节稳定。
 
 
+def render_root_contract(tree: dict) -> str:
+    """root description 逐字(全局规则:命名/种子/权限语义/范围外)。"""
+    return str((tree or {}).get("description") or "").strip() or "(none)"
+
+
+def render_map_outline(tree: dict) -> str:
+    """标题树:全部家族/子家族 id+name(无任何描述,~1-2KB)。
+
+    系统行常驻层与工单指针共用的"地图骨架"——模型由此知道全局有什么、
+    去哪定点读 requirements.yaml。"""
+    lines = []
+    for folder in (tree or {}).get("children") or []:
+        if not isinstance(folder, dict):
+            continue
+        lines.append(f"- {folder.get('id')}: "
+                     f"{' '.join(str(folder.get('name') or '').split())}")
+
+        def outline(folder: dict, depth: int) -> None:
+            pad = "    " * depth
+            for child in folder.get("children") or []:
+                if not isinstance(child, dict):
+                    continue
+                if str(child.get("type", "")).upper() == "ATOMIC":
+                    continue
+                lines.append(f"{pad}{child.get('id')}: "
+                             f"{' '.join(str(child.get('name') or '').split())}")
+                outline(child, depth + 1)
+
+        outline(folder, 1)
+    return "\n".join(lines)
+
+
 def render_requirements_map(tree: dict) -> str:
     """root description 逐字 + 一级标题地图 + 全部 ATOMIC 描述逐字。
 
-    用户定则(09-27):root 契约、一级标题与子标题、ATOMIC 描述一个都不能
-    丢,全部进任务会话上下文;场景(scenarios)仍随各自节点的工单正文走
-    (describe_node)。ATOMIC 叶子标题因此不再单列——其全量描述直接
-    逐字内嵌在所属家族之下。
+    全量地图(整 run 不变的完整契约)。分层装配后它不再随工单重发——
+    全局层(root+标题树+规则)常驻系统行,ATOMIC 描述随各自家族工单到达;
+    本函数保留作组合语义与测试锚点。
     """
     lines = [
         "REQUIREMENTS MAP (authoritative, complete):",
         "ROOT CONTRACT (verbatim — global rules that bind every family):",
-        str((tree or {}).get("description") or "").strip() or "(none)",
+        render_root_contract(tree),
         "",
         "APP OUTLINE (every requirement family in document order): "
         "family/sub-family headings first, then EVERY atomic "
@@ -1330,6 +1361,90 @@ def render_requirements_map(tree: dict) -> str:
             desc = str(n.get("description") or "").strip()
             lines.append(_indent_block(desc or "(no description)", "    "))
     return "\n".join(lines)
+
+
+def build_system_row_context(tree: dict, rules_text: str,
+                             fixture_rules: str) -> str:
+    """系统行常驻层(全局层,字节稳定,缓存 0 号位)。
+
+    分层装配的全局层:root 契约 + 标题树 + 契约 + 播种契约。经
+    <data_dir>/AGENTS.md 进入内核系统行(load_bootstrap_files 通道,
+    base+date 之后、memory 之前);每分段重读一次,段内逐字节稳定。
+    挥发物(进度账本/家族细节/批节点)绝不进这里——会破坏前缀缓存。
+    """
+    return "\n\n".join((
+        "ROOT CONTRACT (verbatim — global rules that bind every family):",
+        render_root_contract(tree),
+        "APP OUTLINE (every family/sub-family in document order — "
+        "locate any section here; cross-family detail beyond your work "
+        "order's dependency closure: read THAT section of "
+        "requirements/requirements.yaml by heading id):",
+        render_map_outline(tree),
+        rules_text,
+        fixture_rules,
+    ))
+
+
+def collect_dependency_context(tree: dict, batch: list[dict],
+                               family_of: dict[str, dict]) -> str:
+    """本批节点 Depends on 闭包(跨家族部分,契约块逐字)。
+
+    依赖 id 指向的节点若不在本批所属顶层家族,其 [id — name] + description
+    按文档序去重补进工单;同家族依赖剪枝(契约已在本工单家族段)。
+    确定性树遍历,零 LLM。"""
+    # 全树索引:node id → (node, 顶层家族 id)
+    node_by_id: dict[str, dict] = {}
+    fam_of_node: dict[str, str] = {}
+    for folder in (tree or {}).get("children") or []:
+        if not isinstance(folder, dict):
+            continue
+        fid = str(folder.get("id") or "")
+        stack = [(folder, fid)]
+        while stack:
+            node, fam = stack.pop()
+            nid = str(node.get("id") or "")
+            if nid:
+                node_by_id[nid] = node
+                fam_of_node[nid] = fam
+            for child in node.get("children") or []:
+                if isinstance(child, dict):
+                    stack.append((child, fam))
+    current_fam = ""
+    for n in batch:
+        fam_node = family_of.get(str(n.get("id")))
+        if fam_node is not None:
+            current_fam = str(fam_node.get("id"))
+            break
+    seen: set[str] = {str(n.get("id")) for n in batch}
+    parts: list[str] = []
+    for n in batch:
+        for dep in n.get("dependencies") or []:
+            dep_id = str(dep)
+            if dep_id in seen:
+                continue
+            seen.add(dep_id)
+            dep_node = node_by_id.get(dep_id)
+            if dep_node is None:
+                continue
+            if fam_of_node.get(dep_id) == current_fam:
+                continue
+            desc = str(dep_node.get("description") or "").strip()
+            parts.append(f"[{dep_id} — {dep_node.get('name', '')}]\n"
+                         + _indent_block(desc or "(no description)", ""))
+    return "\n\n".join(parts)
+
+
+def write_system_row_file(data_dir: Path, content: str) -> Path:
+    """稳定上下文落盘 <data_dir>/AGENTS.md(内核 bootstrap 通道)。
+
+    load_bootstrap_files 把该文件拼进系统行(base+date 之后、memory 之前,
+    无 cap);每分段新会话重建 ProfileRuntime 时重读——内容字节稳定即
+    跨段缓存前缀一致。"""
+    root = Path(data_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "AGENTS.md"
+    path.write_text(content, encoding="utf-8")
+    return path
 
 
 def _indent_block(text: str, pad: str) -> str:
@@ -2239,7 +2354,7 @@ run). Stop every server you started when done.
 GOAL_FIRST_SKELETON_PROMPT = """\
 Lay this application's skeleton — you own frontend/src. The host backend \
 is already running (host-owned backend files: do NOT rewrite them). \
-Work from the REQUIREMENTS MAP below:
+Work from the REQUIREMENTS MAP in your system prompt:
 1) backend/data/schema.json per the HOST CONTRACT (a host-written \
 starter covering the seeded collections may already exist — EXTEND it, \
 keep every entity name and seeded row; the host compiles it and mounts \
@@ -2247,15 +2362,15 @@ CRUD + auth).
 2) Fixture records the FIXTURE CONTRACT lists as still unseeded go into \
 backend/data/db.json (the host already compiled every machine-readable \
 data:/GIVEN fixture into it — NEVER delete or rename those rows).
-3) The frontend shell: src/app/App.jsx layout/routing as the map \
+3) The frontend shell: src/app/App.jsx layout/routing as the outline \
 demands, plus one self-contained feature file per requirement family \
 under frontend/src/features/<name>.jsx whose header comment lists that \
 family's REQ ids (empty components are fine — the family work orders \
 fill them).
-The map above is the app outline: when a contract spans families, read \
-THAT section of requirements/requirements.yaml by its heading — never \
-re-derive seed data from the yaml (the fixture contract rides in your \
-CONTRACT/FOCUS sections and the seeded db.json). \
+The outline is the app map: when a contract spans families, read THAT \
+section of requirements/requirements.yaml by its heading — never \
+re-derive seed data from the yaml (the fixture contract is in your \
+system prompt and the seeded db.json). \
 JavaScript/JSX only; dependencies are preinstalled — never run npm \
 install. Do not commit; the harness handles git.
 PORT DISCIPLINE: run any dev/test server ONLY on port {smoke}; NEVER \
@@ -2754,13 +2869,11 @@ def main() -> int:
         # (超大家族沿子家族边界切);=0 走兄弟批。预算随批规模放大。
         batch_n = int(os.environ.get("OCTOS_ARC_NODE_BATCH", "2"))
         family_of: dict[str, dict] = {}
-        req_map = ""
         if goal_first:
             family_batch_max = int(
                 os.environ.get("OCTOS_ARC_FAMILY_BATCH_MAX", "6"))
             node_batches = group_families(tree, family_batch_max)
             family_of = family_index(tree)
-            req_map = render_requirements_map(tree)
             log(f"[flow] goal-first family work orders: "
                 f"{len(node_batches)} batch(es) for {len(atomic_nodes)} "
                 f"nodes over "
@@ -3086,6 +3199,22 @@ def main() -> int:
         events_log_path, _ = trace_artifact_paths(runtime.paths)
         data_dir = logs_dir / "state"
         data_dir.mkdir(parents=True, exist_ok=True)
+        # 09-27 planctl 退役:envelope/系统行通道删除——契约改走工单正文;
+        # 分层装配:字节稳定的全局层(root 契约+标题树+契约+播种契约)经
+        # 内核 bootstrap 通道(<data_dir>/AGENTS.md,load_bootstrap_files
+        # 无 cap)常驻系统行 0 号位——每分段付 1 次,轮轮缓存命中;挥发物
+        # (进度/家族细节/批节点)留工单。=0 基线不注入。
+        # goal-first 契约:frontend/src 全域归模型/UI kit 降为工具箱;
+        # =0 走 host-first 契约。
+        rules_text = (plan_envelope.HOST_STACK_RULES_GOAL_FIRST
+                      if goal_first else plan_envelope.HOST_STACK_RULES)
+        if goal_first:
+            sysrow = write_system_row_file(
+                data_dir, build_system_row_context(
+                    tree, rules_text, fixture_rules))
+            log(f"[system-row] stable context injected: {sysrow} "
+                f"({sysrow.stat().st_size / 1024:.0f} KB; resident at "
+                "prefix position 0 — work orders carry only the delta)")
         config_dir = Path(tempfile.mkdtemp(prefix="octos-config-"))
         env = build_octos_env(config_dir)
         # --data-dir 只覆盖 chat 模式;stdio 模式读环境变量,双保险。
@@ -3112,13 +3241,9 @@ def main() -> int:
             octos_bin, output_dir, env, data_dir, max_iter,
             events_log=events_log_path,
         )
-        # 09-27 planctl 退役:envelope/系统行通道删除——契约印进每个
-        # 工单正文(rules_text),进度账本是宿主本地 dict(供工单进度行/
-        # 分段摘要/事件标记消费),不再下发内核。
-        # goal-first 契约:frontend/src 全域归模型/UI kit 降为工具箱;
-        # =0 走 host-first 契约。
-        rules_text = (plan_envelope.HOST_STACK_RULES_GOAL_FIRST
-                      if goal_first else plan_envelope.HOST_STACK_RULES)
+        # 09-27 planctl 退役:envelope/系统行通道删除——契约随分层装配走
+        # (全局层在系统行,模块层在工单);进度账本是宿主本地 dict(供工单
+        # 进度行/分段摘要/事件标记消费)。
         plan_statuses: dict[str, str] = {
             str(n.get("id")): "pending" for n in atomic_nodes}
         # Staged specs of every node whose batch rehearsal-greened so far —
@@ -3158,10 +3283,16 @@ def main() -> int:
                     break
                 t0 = time.time()
                 if goal_first:
+                    # 全局层(地图/契约/播种契约)已常驻系统行——骨架轮
+                    # 直接从系统行取,不再重发。
                     sk_prompt = GOAL_FIRST_SKELETON_PROMPT.format(
                         port=args.web_port, smoke=smoke_port) \
-                        + "\n" + req_map + "\n\n" + rules_text \
-                        + "\n\n" + fixture_rules
+                        + "\nSYSTEM ROW: the full requirements map, host " \
+                        "contract and fixture contract are installed in " \
+                        "your system prompt (byte-stable) — work from " \
+                        "them directly; cross-family detail: read THAT " \
+                        "section of requirements/requirements.yaml by " \
+                        "heading id."
                 else:
                     sk_prompt = HOST_SKELETON_PROMPT.format(
                         port=args.web_port, smoke=smoke_port) \
@@ -3311,24 +3442,34 @@ def main() -> int:
                 progress_line = _progress_ledger_line(
                     family_of, plan_statuses)
                 if goal_first:
-                    # 分层上下文:需求地图(root 契约逐字+全家族标题
-                    # 地图+全部 ATOMIC 描述)→ 本家族 FOLDER 契约逐字 →
-                    # 本批 REQ 逐字(scenarios)→ 契约 → 进度。
+                    # 分层装配:全局层(地图+契约+播种契约)常驻系统行;
+                    # 工单=模块层(本家族全子树)+依赖闭包+批节点+进度。
                     fam = family_of.get(batch_ids[0])
                     fam_ctx = describe_family_context(fam, batch) \
                         if fam is not None else ""
-                    node_spec = "\n\n".join(x for x in (
-                        req_map,
+                    dep_ctx = collect_dependency_context(
+                        tree, batch, family_of)
+                    spec_parts = [
                         "THIS FAMILY — folder contracts (verbatim):",
                         fam_ctx,
+                    ]
+                    if dep_ctx:
+                        spec_parts += [
+                            "CROSS-FAMILY DEPENDENCIES (Depends on "
+                            "closure, verbatim):", dep_ctx]
+                    spec_parts += [
                         "THIS BATCH — requirement nodes (verbatim):",
                         "\n\n".join(describe_node(n, fixture_seeded_scenarios)
                                    for n in batch),
-                        "HOST CONTRACT (the data-plane substrate you build "
-                        "on):",
-                        rules_text,
-                        fixture_rules,
-                        progress_line) if x)
+                        "NOTE: the full requirements map, host contract "
+                        "and fixture contract are installed in your "
+                        "system prompt (byte-stable) — they bind exactly "
+                        "as if quoted here. Cross-family detail beyond "
+                        "the closure above: read THAT section of "
+                        "requirements/requirements.yaml by heading id.",
+                        progress_line,
+                    ]
+                    node_spec = "\n\n".join(x for x in spec_parts if x)
                     base_prompt = GOAL_FIRST_NODE_PROMPT_TEMPLATE.format(
                         node_id=focus_id, node_spec=node_spec,
                         port=args.web_port, smoke=smoke_port)
@@ -3687,10 +3828,6 @@ def main() -> int:
                     final_prompt = (
                         HOST_FINAL_CHECK_PROMPT if probe_list
                         else HOST_FINAL_CHECK_UI_PROMPT)
-                    if goal_first and req_map:
-                        # goal-first:final 修复轮同样前置需求地图,保证
-                        # 修复时全局契约可及(不靠会话残留记忆)。
-                        final_prompt += "\n" + req_map
                     if tier2_run and tier2_run[1] > 0:
                         # Tier-2 ran and is RED: the failing titles are ground
                         # truth — hand them to the model instead of letting it

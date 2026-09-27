@@ -58,6 +58,13 @@ guard(自测命令放行形状/full-spec-run/trace-deny)、OCTOS_TOOL_ALLOWLIST�
 折叠/迭代治理。`plan_envelope.py` 瘦身为工具箱(契约文案常量 + specmap +
 探针 + stage_specs)。
 
+上下文分两层装配(缓存 0 号位):字节稳定的全局层(root 契约逐字+标题树
++契约+播种契约)经内核 bootstrap 通道落盘 `<data_dir>/AGENTS.md` 常驻系统行
+——每分段(会话重开)付 1 次,轮轮前缀缓存命中;模块层(当前家族完整子树
++`Depends on` 依赖闭包+批节点 scenarios+进度账本)随工单独立到达,工单从
+~87KB 瘦到 ~10KB。升级路径 C-lite(分段累积已完成家族 FOLDER 契约)已在
+`build_system_row_context` 预留参数位,触发条件=仿真显示模型反复定点重读
+已完成家族契约。
 环境开关:`OCTOS_ARC_GOAL_FIRST`(目标优先家族工单,缺省开;=0 回退
 host-first 兄弟批路径,同样无 envelope)、`OCTOS_ARC_HOST_SCAFFOLD`
 (宿主落盘基础设施,缺省开)、`OCTOS_ARC_HOST_GRADE`(final 轮 Tier-2 宿主

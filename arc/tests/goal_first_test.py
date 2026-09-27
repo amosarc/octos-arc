@@ -19,10 +19,12 @@ import plan_envelope  # noqa: E402
 from scaffold import manifest as sc  # noqa: E402
 
 
-def node(nid, ntype="ATOMIC", children=None, description="", name=None):
+def node(nid, ntype="ATOMIC", children=None, description="", name=None,
+         dependencies=None):
     return {"id": nid, "name": name or nid, "type": ntype,
             "children": children or [],
-            **({"description": description} if description else {})}
+            **({"description": description} if description else {}),
+            **({"dependencies": dependencies} if dependencies else {})}
 
 
 TREE = node("ROOT", "FOLDER", [
@@ -36,8 +38,8 @@ TREE = node("ROOT", "FOLDER", [
         ], description="sub-family contract two", name="Sub Family Two"),
     ], description="family one module contract", name="Family One"),
     node("REQ-2", "FOLDER", [
-        node("REQ-2-1", description="d21"),
-        node("REQ-2-2", description="d22"),
+        node("REQ-2-1", description="d21", dependencies=["REQ-1"]),
+        node("REQ-2-2", description="d22", dependencies=["REQ-2-1"]),
     ], description="family two module contract", name="Family Two"),
     node("REQ-3", "FOLDER", [node("REQ-3-1", description="d31")]),
 ], description="root global contract")
@@ -129,6 +131,81 @@ class FamilyContextTests(unittest.TestCase):
         ctx = main.describe_family_context(fam, main.flatten_atomic(fam))
         self.assertIn("sub-family contract one", ctx)
         self.assertIn("sub-family contract two", ctx)
+
+
+class DependencyClosureTests(unittest.TestCase):
+    def test_cross_family_dependency_included_verbatim(self):
+        fam_of = main.family_index(TREE)
+        batch = [n for n in main.flatten_atomic(TREE)
+                 if n["id"] == "REQ-2-1"]
+        ctx = main.collect_dependency_context(TREE, batch, fam_of)
+        # 依赖 REQ-1(跨家族 FOLDER)→ 契约块逐字
+        self.assertIn("[REQ-1 — Family One]", ctx)
+        self.assertIn("family one module contract", ctx)
+
+    def test_same_family_dependency_pruned(self):
+        fam_of = main.family_index(TREE)
+        batch = [n for n in main.flatten_atomic(TREE)
+                 if n["id"] == "REQ-2-2"]
+        ctx = main.collect_dependency_context(TREE, batch, fam_of)
+        # 依赖 REQ-2-1(同家族)→ 剪枝(已在本工单家族段)
+        self.assertEqual(ctx, "")
+
+    def test_no_dependencies_returns_empty(self):
+        fam_of = main.family_index(TREE)
+        batch = [n for n in main.flatten_atomic(TREE)
+                 if n["id"] == "REQ-3-1"]
+        self.assertEqual(
+            main.collect_dependency_context(TREE, batch, fam_of), "")
+
+    def test_unknown_dependency_id_ignored(self):
+        fam_of = main.family_index(TREE)
+        n = node("REQ-3-1", dependencies=["REQ-99"])
+        self.assertEqual(
+            main.collect_dependency_context(TREE, [n], fam_of), "")
+
+
+class SystemRowTests(unittest.TestCase):
+    """分层装配:全局层常驻系统行(缓存 0 号位),模块层随工单。"""
+
+    RULES = ("goal-first test rules: " + "x" * 50)
+    FIXTURE_RULES = "fixture rules: seeded rows bind verbatim"
+
+    def test_system_row_has_global_layer_not_module_detail(self):
+        ctx = main.build_system_row_context(TREE, self.RULES,
+                                            self.FIXTURE_RULES)
+        # 全局层:root 契约逐字 + 全部标题 + 规则 + 播种契约
+        self.assertIn("root global contract", ctx)
+        for nid in ("REQ-1", "REQ-2", "REQ-3", "REQ-1-1", "Sub Family One"):
+            self.assertIn(nid, ctx)
+        self.assertIn(self.RULES, ctx)
+        self.assertIn(self.FIXTURE_RULES, ctx)
+        # 模块细节(原子描述)不进系统行——随各自家族工单
+        for d in ("d111", "d112", "d121", "d21", "d22", "d31"):
+            self.assertNotIn(d, ctx)
+
+    def test_system_row_is_byte_stable(self):
+        a = main.build_system_row_context(TREE, self.RULES,
+                                          self.FIXTURE_RULES)
+        b = main.build_system_row_context(TREE, self.RULES,
+                                          self.FIXTURE_RULES)
+        self.assertEqual(a, b)
+
+    def test_system_row_is_compact(self):
+        ctx = main.build_system_row_context(TREE, self.RULES,
+                                            self.FIXTURE_RULES)
+        self.assertLess(len(ctx), 4000)
+
+    def test_write_system_row_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            path = main.write_system_row_file(
+                Path(td), "stable content")
+            self.assertEqual(path.name, "AGENTS.md")
+            self.assertEqual(path.read_text(encoding="utf-8"),
+                             "stable content")
+            # 幂等:同目录重写不炸
+            main.write_system_row_file(Path(td), "stable content")
 
 
 class GoalFirstRulesTests(unittest.TestCase):
