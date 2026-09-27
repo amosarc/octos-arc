@@ -191,6 +191,7 @@ impl Agent {
         }
         let outcome = runner.run(messages);
         if outcome.performed {
+            self.clear_file_state_cache();
             self.record_compaction(CompactionEvent {
                 path: "policy_preflight",
                 tokens_before: Some(outcome.tokens_before),
@@ -261,6 +262,7 @@ impl Agent {
                 budget_tokens: None,
                 window_tokens: self.llm.context_window(),
             });
+            self.clear_file_state_cache();
             self.enforce_preservation(messages, CompactionPhase::TurnEnd)?;
             return Ok(outcome.summary);
         }
@@ -311,6 +313,7 @@ impl Agent {
                 budget_tokens: None,
                 window_tokens: self.llm.context_window(),
             });
+            self.clear_file_state_cache();
             self.enforce_preservation(messages, CompactionPhase::TurnEnd)?;
             Ok(RetryCompactionVerdict::Compacted {
                 tokens_before: outcome.tokens_before,
@@ -345,9 +348,15 @@ impl Agent {
             provider_name: self.llm.provider_name().to_owned(),
             model_id: self.llm.model_id().to_owned(),
             context_window: self.llm.context_window(),
+            token_calibration_ratio_milli: self.token_calibration_ratio_milli(),
         };
         match manager.prepare_prompt(request, messages) {
             Ok(report) => {
+                if report.compaction_performed {
+                    // The bridge owns this compaction; the read-state stubs it
+                    // removed still live in OUR file cache (M8.5 tier-3).
+                    self.clear_file_state_cache();
+                }
                 if report.prompt_replaced || report.compaction_performed {
                     info!(
                         phase = phase.as_str(),

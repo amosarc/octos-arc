@@ -37,6 +37,11 @@ pub struct PromptContextRequest {
     pub provider_name: String,
     pub model_id: String,
     pub context_window: u32,
+    /// Session's smoothed token-estimate calibration ratio in milli-units
+    /// (1000 = neutral). Bridges with window-derived compaction thresholds
+    /// shrink them by this factor so CJK-heavy conversations compact before
+    /// the provider's rejection line, mirroring `Agent::trim_to_context_window`.
+    pub token_calibration_ratio_milli: u32,
 }
 
 /// Summary returned by a prompt context bridge invocation.

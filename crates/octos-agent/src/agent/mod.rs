@@ -438,8 +438,10 @@ impl TokenCalibration {
         ((u64::from(budget) * u64::from(Self::NEUTRAL_MILLI)) / u64::from(ratio)) as u32
     }
 
-    #[cfg(test)]
-    fn ratio_milli(&self) -> u32 {
+    /// Current smoothed ratio in milli-units (1000 = neutral). Exposed so
+    /// caller-owned prompt runtimes (OUP bridge) can calibrate their own
+    /// window-derived thresholds against the same observed drift.
+    pub(crate) fn ratio_milli(&self) -> u32 {
         self.ratio_milli.load(Ordering::Relaxed)
     }
 }
@@ -794,6 +796,27 @@ impl Agent {
     /// compaction boundaries — see M8.5 for the full integration.
     pub fn file_state_cache(&self) -> Option<&Arc<FileStateCache>> {
         self.file_state_cache.as_ref()
+    }
+
+    /// Current token-estimate calibration ratio in milli-units (1000 =
+    /// neutral; >1000 means the provider counts more tokens than the static
+    /// estimator, so window-derived budgets should shrink). Fed by clean
+    /// first-attempt usage samples on every lane; consumed by
+    /// [`Agent::trim_to_context_window`] and, via
+    /// [`crate::prompt_context::PromptContextRequest`], by caller-owned
+    /// prompt runtimes.
+    pub fn token_calibration_ratio_milli(&self) -> u32 {
+        self.token_calibration.ratio_milli()
+    }
+
+    /// Compaction boundary (M8.5 tier-3): drop read-state stubs so a
+    /// post-compaction re-read re-materialises full file content instead of
+    /// answering "[FILE_UNCHANGED]" against detail the compaction just
+    /// removed from the model's context.
+    pub fn clear_file_state_cache(&self) {
+        if let Some(cache) = self.file_state_cache.as_ref() {
+            cache.clear();
+        }
     }
 
     /// Wire an M8.7 [`crate::subagent_output::SubAgentOutputRouter`] so the

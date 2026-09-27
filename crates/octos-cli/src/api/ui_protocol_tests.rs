@@ -728,6 +728,7 @@ fn appui_prompt_context_bridge_preserves_current_user_turn() {
                 provider_name: "test".to_string(),
                 model_id: "large-context".to_string(),
                 context_window: 16_000,
+                token_calibration_ratio_milli: 1000,
             },
             &mut prompt,
         )
@@ -806,6 +807,7 @@ fn in_loop_compaction_emits_lifecycle_notifications() {
                 model_id: "tiny-context".to_string(),
                 // threshold = 70% of 300 = 210 tokens — trivially exceeded.
                 context_window: 300,
+                token_calibration_ratio_milli: 1000,
             },
             &mut prompt,
         )
@@ -833,6 +835,90 @@ fn in_loop_compaction_emits_lifecycle_notifications() {
         unreachable!()
     };
     assert!(done.context_state.semantic_head_id.is_some());
+}
+
+/// The in-loop OUP compaction must carry the deterministic file ledger: a
+/// `write_file` call inside the dropped semantic prefix lands in the
+/// installed summary's `<modified-files>` block (pi-style ledger).
+#[test]
+fn in_loop_compaction_summary_carries_file_ledger() {
+    let session_id = SessionKey::new("api", "context-inloop-ledger");
+    let mut history: Vec<Message> = Vec::new();
+    for idx in 0..16 {
+        history.push(test_message(
+            MessageRole::User,
+            format!("req {idx}: {}", "x".repeat(400)),
+        ));
+        history.push(test_message(
+            MessageRole::Assistant,
+            format!("ans {idx}: {}", "y".repeat(400)),
+        ));
+        if idx == 8 {
+            // A file-op pair in the MIDDLE of the history — inside the
+            // dropped semantic prefix, not the mandatory recent tail.
+            history.push(test_message(MessageRole::User, "please write the app file"));
+            let mut write_call = test_message(MessageRole::Assistant, "");
+            write_call.tool_calls = Some(vec![octos_core::ToolCall {
+                id: "call_w1".to_string(),
+                name: "write_file".to_string(),
+                arguments: serde_json::json!({ "path": "src/app.js" }),
+                metadata: None,
+            }]);
+            history.push(write_call);
+            let mut write_result = test_message(MessageRole::Tool, "ok");
+            write_result.tool_call_id = Some("call_w1".to_string());
+            history.push(write_result);
+        }
+    }
+
+    let manager = Arc::new(StdMutex::new(ContextManager::from_session_history(
+        session_id.to_string(),
+        None,
+        &history,
+    )));
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = AppUiPromptContextBridge::new(
+        session_id.clone(),
+        dir.path().to_path_buf(),
+        manager.clone(),
+    );
+
+    let mut prompt = vec![test_message(MessageRole::System, "runtime system")];
+    prompt.extend(history);
+    prompt.push(test_message(MessageRole::User, "current request"));
+    let report = bridge
+        .prepare_prompt(
+            PromptContextRequest {
+                phase: PromptContextPhase::TurnStart,
+                iteration: 1,
+                provider_name: "test".to_string(),
+                model_id: "mid-context".to_string(),
+                // threshold = 70% of 4000 = 2800 tokens — the padded
+                // history exceeds it while the derived summary budget stays
+                // large enough to render every dropped row.
+                context_window: 4_000,
+                token_calibration_ratio_milli: 1000,
+            },
+            &mut prompt,
+        )
+        .expect("context manager bridge should prepare prompt");
+    assert!(report.compaction_performed);
+
+    let manager = manager.lock().unwrap_or_else(|error| error.into_inner());
+    let summary = manager
+        .items()
+        .iter()
+        .find_map(|item| match &item.kind {
+            crate::context_manager::TranscriptItemKind::CompactionSummary { summary, .. } => {
+                Some(summary.clone())
+            }
+            _ => None,
+        })
+        .expect("an in-loop compaction summary must be installed");
+    assert!(
+        summary.contains("<modified-files>\nsrc/app.js\n</modified-files>"),
+        "OUP summary carries the deterministic file ledger:\n{summary}"
+    );
 }
 
 #[test]

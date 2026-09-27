@@ -591,6 +591,12 @@ pub(crate) struct ContextManager {
     /// ledger from durable history. Consumed by the first epoch reconciliation
     /// so the rotation is reported as `ledger_rebuilt`, not `initialized`.
     ledger_rebuilt: bool,
+    /// Smoothed token-estimate calibration ratio in milli-units (1000 =
+    /// neutral), mirrored from the session Agent via the prompt-context
+    /// bridge. NOT persisted — a fresh manager is neutral until the agent's
+    /// first request carries its learned ratio, mirroring the Agent-side
+    /// EWMA which also starts neutral each session.
+    token_calibration_ratio_milli: u32,
 }
 
 /// #2131: what `recall` needs to re-materialize an output after its transcript
@@ -1147,6 +1153,7 @@ impl ContextManager {
             compactions: Vec::new(),
             cache_epoch: None,
             ledger_rebuilt: false,
+            token_calibration_ratio_milli: 1000,
         }
     }
 
@@ -1214,6 +1221,7 @@ impl ContextManager {
             compactions: Vec::new(),
             cache_epoch: None,
             ledger_rebuilt: false,
+            token_calibration_ratio_milli: 1000,
         }
     }
 
@@ -1245,6 +1253,42 @@ impl ContextManager {
         !self.compactions.iter().rev().any(|record| {
             record.retry_suppressed_projection_hash.as_deref() == Some(projection_hash.as_str())
         })
+    }
+
+    /// Record the session's smoothed token-estimate calibration ratio
+    /// (milli-units, 1000 = neutral). Mirrored from the Agent on every
+    /// prompt-context bridge call; clamped to the same bounds as the
+    /// Agent-side EWMA so a corrupted sample cannot zero the threshold.
+    pub(crate) fn record_token_calibration_ratio_milli(&mut self, ratio_milli: u32) {
+        self.token_calibration_ratio_milli = ratio_milli.clamp(1000, 4000);
+    }
+
+    pub(crate) fn token_calibration_ratio_milli(&self) -> u32 {
+        self.token_calibration_ratio_milli
+    }
+
+    /// Effective window-derived threshold after token-estimate calibration.
+    ///
+    /// CJK-heavy conversations run ≈1 token/char while the ledger estimate
+    /// assumes 4 bytes/token, so the 70%-of-window threshold fires late —
+    /// right against the provider's rejection line. When observed provider
+    /// usage says the estimator under-counts (ratio > 1.0), the threshold
+    /// shrinks by the same factor `Agent::trim_to_context_window` applies,
+    /// so compaction starts before the overflow, with the retry bucket as
+    /// backstop instead of primary defense. Only ever shrinks (clamped at
+    /// neutral) and can be disabled entirely with
+    /// `OCTOS_CONTEXT_COMPACT_CALIBRATION=0`.
+    pub(crate) fn calibrated_threshold(&self, threshold_tokens: usize) -> usize {
+        if std::env::var("OCTOS_CONTEXT_COMPACT_CALIBRATION")
+            .is_ok_and(|value| value == "0")
+        {
+            return threshold_tokens;
+        }
+        let ratio = self.token_calibration_ratio_milli;
+        if ratio <= 1000 {
+            return threshold_tokens;
+        }
+        ((threshold_tokens as u64 * 1000) / u64::from(ratio)) as usize
     }
 
     fn compaction_candidate_fingerprint(&self, policy: &CompactContextPolicy) -> String {
@@ -1595,6 +1639,7 @@ impl ContextManager {
             compactions: snapshot.compactions,
             cache_epoch: snapshot.cache_epoch,
             ledger_rebuilt: false,
+            token_calibration_ratio_milli: 1000,
         }
     }
 
@@ -4194,6 +4239,32 @@ fn sha256_prefixed(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calibrated_threshold_shrinks_with_ratio_and_never_enlarges() {
+        let mut manager = ContextManager::new("calibration-test", None);
+        assert_eq!(
+            manager.calibrated_threshold(7000),
+            7000,
+            "neutral default leaves the threshold untouched"
+        );
+        manager.record_token_calibration_ratio_milli(1400);
+        assert_eq!(
+            manager.calibrated_threshold(7000),
+            5000,
+            "1.4x drift shrinks the threshold by the same factor"
+        );
+        // Clamped to the Agent-side EWMA upper bound (4.0x).
+        manager.record_token_calibration_ratio_milli(9999);
+        assert_eq!(manager.calibrated_threshold(8000), 2000);
+        // Below-neutral samples clamp up to neutral: never enlarge.
+        manager.record_token_calibration_ratio_milli(900);
+        assert_eq!(
+            manager.calibrated_threshold(7000),
+            7000,
+            "the threshold never grows beyond the raw value"
+        );
+    }
 
     /// Test replacement for the retired `Message::tool_with_thread` constructor.
     fn tool_msg(

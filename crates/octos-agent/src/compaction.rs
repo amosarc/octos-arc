@@ -55,6 +55,152 @@ pub const TOOL_RESULT_PLACEHOLDER_PREFIX: &str = "[OCTOS_TOOL_RESULT_PLACEHOLDER
 
 const TOOL_RESULT_PLACEHOLDER_SCHEMA_V1: &str = "octos.tool_result_placeholder.v1";
 
+// ---------------------------------------------------------------------------
+// Deterministic file ledger (pi-style `<read-files>`/`<modified-files>`).
+// ---------------------------------------------------------------------------
+
+/// Sentinel closing tag of the modified-files ledger block. A summary that
+/// already carries a ledger is never re-appended — install paths may rebuild
+/// the same summary twice (retry / dedupe) and double-appending would grow
+/// the block every pass.
+const FILE_LEDGER_MODIFIED_END: &str = "</modified-files>";
+
+/// File tools whose path argument marks a file as READ.
+const FILE_LEDGER_READ_TOOLS: &[&str] = &["read_file"];
+
+/// File tools whose path argument marks a file as MODIFIED (written or
+/// edited — modified wins over read in the rendered ledger).
+const FILE_LEDGER_MODIFY_TOOLS: &[&str] =
+    &["write_file", "edit_file", "apply_patch", "diff_edit"];
+
+/// Maximum entries rendered per ledger block; the overflow collapses to a
+/// `+N more` count so a huge working set cannot blow the summary budget.
+const FILE_LEDGER_MAX_ENTRIES: usize = 40;
+
+fn file_ledger_path(arguments: &serde_json::Value) -> Option<&str> {
+    arguments
+        .get("path")
+        .and_then(|value| value.as_str())
+        .or_else(|| arguments.get("file_path").and_then(|value| value.as_str()))
+        .filter(|path| !path.is_empty())
+}
+
+/// Parse ledger blocks out of a prior summary body (accumulation input).
+/// Entries are one per line; the `+N more` overflow marker is skipped.
+fn parse_file_ledger(
+    text: &str,
+) -> (std::collections::BTreeSet<String>, std::collections::BTreeSet<String>) {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Block {
+        None,
+        Read,
+        Modified,
+    }
+    let mut read = std::collections::BTreeSet::new();
+    let mut modified = std::collections::BTreeSet::new();
+    let mut block = Block::None;
+    for line in text.lines() {
+        let line = line.trim();
+        match line {
+            "<read-files>" => block = Block::Read,
+            "</read-files>" => block = Block::None,
+            "<modified-files>" => block = Block::Modified,
+            "</modified-files>" => block = Block::None,
+            _ => {
+                if line.is_empty() || line.starts_with('+') {
+                    continue;
+                }
+                match block {
+                    Block::Read => {
+                        read.insert(line.to_owned());
+                    }
+                    Block::Modified => {
+                        modified.insert(line.to_owned());
+                    }
+                    Block::None => {}
+                }
+            }
+        }
+    }
+    (read, modified)
+}
+
+fn render_file_ledger_block(tag: &str, entries: &[String]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+    let mut out = format!("<{tag}>");
+    for entry in entries.iter().take(FILE_LEDGER_MAX_ENTRIES) {
+        out.push('\n');
+        out.push_str(entry);
+    }
+    if entries.len() > FILE_LEDGER_MAX_ENTRIES {
+        out.push_str(&format!("\n+{} more", entries.len() - FILE_LEDGER_MAX_ENTRIES));
+    }
+    out.push_str(&format!("\n</{tag}>"));
+    Some(out)
+}
+
+/// Append the deterministic file ledger to a compaction summary.
+///
+/// Extracts file operations from the assistant tool calls inside the
+/// summarized range and — for accumulation across passes — re-merges the
+/// ledger blocks carried by any prior summary system row inside that same
+/// range. Modified files are removed from the read list (the model should
+/// re-read, not trust a stale read) and every list is sorted, so the block is
+/// byte-stable for the same operation history.
+pub fn append_file_ledger(summary: &mut String, summarized: &[Message]) {
+    if summary.contains(FILE_LEDGER_MODIFIED_END) {
+        return;
+    }
+    let mut read = std::collections::BTreeSet::new();
+    let mut modified = std::collections::BTreeSet::new();
+    for message in summarized {
+        match message.role {
+            MessageRole::System => {
+                // Prior compaction summaries ride in the summarized range on
+                // re-compaction; their ledger blocks accumulate forward.
+                let (prior_read, prior_modified) = parse_file_ledger(&message.content);
+                read.extend(prior_read);
+                modified.extend(prior_modified);
+            }
+            MessageRole::Assistant => {
+                let Some(calls) = message.tool_calls.as_ref() else {
+                    continue;
+                };
+                for call in calls {
+                    let Some(path) = file_ledger_path(&call.arguments) else {
+                        continue;
+                    };
+                    if FILE_LEDGER_READ_TOOLS.contains(&call.name.as_str()) {
+                        read.insert(path.to_owned());
+                    } else if FILE_LEDGER_MODIFY_TOOLS.contains(&call.name.as_str()) {
+                        modified.insert(path.to_owned());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let read: Vec<String> = read
+        .into_iter()
+        .filter(|path| !modified.contains(path))
+        .collect();
+    let modified: Vec<String> = modified.into_iter().collect();
+    let mut blocks = Vec::new();
+    if let Some(block) = render_file_ledger_block("modified-files", &modified) {
+        blocks.push(block);
+    }
+    if let Some(block) = render_file_ledger_block("read-files", &read) {
+        blocks.push(block);
+    }
+    if blocks.is_empty() {
+        return;
+    }
+    summary.push_str("\n\n");
+    summary.push_str(&blocks.join("\n"));
+}
+
 /// Find the boundary between old (compactable) and recent (kept verbatim) messages.
 ///
 /// Returns the index where the recent zone starts. Messages `[1..split]` are old,
@@ -728,13 +874,17 @@ impl CompactionRunner {
         }
 
         let dropped = old_messages.len();
-        let summary_text = match self.summarizer.summarize(&old_messages, summary_budget) {
+        let mut summary_text = match self.summarizer.summarize(&old_messages, summary_budget) {
             Ok(s) => s,
             Err(err) => {
                 warn!(error = %err, "compaction: summarizer failed, falling back to extractive");
                 compact_messages(&old_messages, summary_budget)
             }
         };
+        // Deterministic file ledger rides after the (extractive or LLM)
+        // summary regardless of summarizer kind; prior summaries inside
+        // `old_messages` accumulate their ledger blocks forward.
+        append_file_ledger(&mut summary_text, &old_messages);
 
         outcome.summary = Some(summary_text.clone());
         messages.drain(1..split);
@@ -1420,6 +1570,111 @@ mod tests {
 
     fn system_msg(content: &str) -> Message {
         make_msg(MessageRole::System, content, None, None)
+    }
+
+    fn file_op_msg(tool: &str, path: &str) -> Message {
+        make_msg(
+            MessageRole::Assistant,
+            "",
+            Some(vec![ToolCall {
+                id: format!("call_{tool}_{path}"),
+                name: tool.to_string(),
+                arguments: serde_json::json!({ "path": path }),
+                metadata: None,
+            }]),
+            None,
+        )
+    }
+
+    #[test]
+    fn file_ledger_extracts_sorted_and_modified_wins() {
+        let summarized = vec![
+            file_op_msg("read_file", "src/b.rs"),
+            file_op_msg("read_file", "docs/a.md"),
+            file_op_msg("write_file", "out/x.txt"),
+            file_op_msg("edit_file", "src/b.rs"),
+        ];
+        let mut summary = String::from("## Conversation Summary");
+        append_file_ledger(&mut summary, &summarized);
+        assert!(
+            summary.contains("<modified-files>\nout/x.txt\nsrc/b.rs\n</modified-files>"),
+            "modified = written ∪ edited, sorted:\n{summary}"
+        );
+        // Reads minus modified: only docs/a.md survives.
+        assert!(
+            summary.contains("<read-files>\ndocs/a.md\n</read-files>"),
+            "read list drops files that were later modified:\n{summary}"
+        );
+    }
+
+    #[test]
+    fn file_ledger_accumulates_from_prior_summary_blocks() {
+        let prior = system_msg(
+            "## Conversation Summary\n\n<read-files>\nold/one.rs\n+2 more\n</read-files>\
+             \n<modified-files>\nold/two.rs\n</modified-files>",
+        );
+        let summarized = vec![prior, file_op_msg("read_file", "new/three.rs")];
+        let mut summary = String::new();
+        append_file_ledger(&mut summary, &summarized);
+        assert!(
+            summary.contains("<modified-files>\nold/two.rs\n</modified-files>"),
+            "prior modified set carries forward:\n{summary}"
+        );
+        assert!(
+            summary
+                .contains("<read-files>\nnew/three.rs\nold/one.rs\n</read-files>"),
+            "prior reads merge with new reads, overflow marker skipped:\n{summary}"
+        );
+    }
+
+    #[test]
+    fn file_ledger_is_idempotent() {
+        let mut summary = String::from(
+            "s\n<read-files>\na\n</read-files>\n<modified-files>\nb\n</modified-files>",
+        );
+        let before = summary.clone();
+        append_file_ledger(&mut summary, &[file_op_msg("write_file", "c.txt")]);
+        assert_eq!(summary, before, "a summary already carrying a ledger is not re-appended");
+    }
+
+    #[test]
+    fn file_ledger_caps_entries_with_overflow_marker() {
+        let ops: Vec<Message> = (0..45)
+            .map(|idx| file_op_msg("write_file", &format!("f{idx:02}.txt")))
+            .collect();
+        let mut summary = String::new();
+        append_file_ledger(&mut summary, &ops);
+        assert!(summary.contains("+5 more"), "45 entries collapse to 40 + count:\n{summary}");
+        assert!(!summary.contains("f44.txt"), "beyond-cap entries are not rendered");
+        assert!(summary.contains("f39.txt"), "the 40th entry IS rendered");
+    }
+
+    #[test]
+    fn runner_summary_carries_file_ledger() {
+        let policy = CompactionPolicy {
+            token_budget: 600,
+            ..Default::default()
+        };
+        let runner = CompactionRunner::new(policy);
+        let mut messages = vec![system_msg("sys prompt")];
+        for idx in 0..12 {
+            messages.push(user_msg(&format!("question {idx} {}", "q".repeat(200))));
+            if idx == 2 {
+                messages.push(file_op_msg("write_file", "src/app.rs"));
+                messages.push(tool_result("call_write_file_src/app.rs", "ok"));
+            } else {
+                messages.push(assistant_msg(&format!("answer {idx} {}", "a".repeat(200))));
+            }
+        }
+        messages.push(user_msg("latest question"));
+        let outcome = runner.run(&mut messages);
+        let summary = outcome
+            .summary
+            .expect("budget 600 with a dozen padded turns must summarize");
+        assert!(
+            summary.contains("<modified-files>\nsrc/app.rs\n</modified-files>"),
+            "runner-installed summary carries the deterministic file ledger:\n{summary}"
+        );
     }
 
     #[test]

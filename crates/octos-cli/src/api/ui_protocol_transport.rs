@@ -2410,25 +2410,29 @@ fn appui_context_prompt_policy(llm_provider: &dyn octos_llm::LlmProvider) -> Pro
 /// Threshold-gated compaction body shared by the pre-turn prompt path and the
 /// session-open snapshot. Compacts `manager` IN PLACE when its estimate
 /// exceeds the provider-derived threshold and returns the lifecycle
-/// started/completed notifications describing the pass; empty when the
-/// estimate is already under threshold.
+/// started/completed notifications describing the pass plus whether a
+/// compaction was INSTALLED (false when under threshold or the pass
+/// failed/was deduped); notifications are empty when the estimate is already
+/// under threshold.
 fn appui_compact_context_if_over_threshold(
     manager: &mut ContextManager,
     session_id: &SessionKey,
     llm_provider: &Arc<dyn octos_llm::LlmProvider>,
     llm_compaction_enabled: bool,
     trigger: &str,
-) -> Vec<UiNotification> {
-    let threshold = appui_context_compact_threshold_tokens(llm_provider.as_ref());
+) -> (Vec<UiNotification>, bool) {
+    let threshold = manager.calibrated_threshold(appui_context_compact_threshold_tokens(
+        llm_provider.as_ref(),
+    ));
     let policy = appui_context_prompt_policy(llm_provider.as_ref());
     if !manager.should_auto_compact(threshold) {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let budgets = appui_compaction_budgets(threshold);
     let summary_budget = budgets.summary_budget;
     let compact_policy = appui_semantic_compact_policy(trigger, budgets);
     if !manager.should_retry_compaction(&compact_policy) {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let mut lifecycle_notifications = Vec::new();
     // UPCR-2026-026: the started event precedes the (synchronous) pass;
@@ -2451,14 +2455,21 @@ fn appui_compact_context_if_over_threshold(
         lifecycle_notifications.push(appui_context_compaction_notification(
             session_id, manager, &record,
         ));
-        return lifecycle_notifications;
+        return (lifecycle_notifications, false);
     }
-    let summary = if llm_compaction_enabled {
+    let mut summary = if llm_compaction_enabled {
         appui_compaction_summary(llm_provider, &summary_messages, summary_budget)
     } else {
         summary_messages.compact_summary(summary_budget)
     };
+    // Deterministic file ledger (read/modified) rides after the summary;
+    // prior summaries inside the dropped projection accumulate forward.
+    octos_agent::compaction::append_file_ledger(
+        &mut summary,
+        &summary_messages.messages,
+    );
     let record = manager.compact_context(summary, compact_policy);
+    let installed = record.status == ContextCompactionStatus::Installed;
     info!(
         session = %session_id.0,
         compaction_id = %record.compaction_id.as_str(),
@@ -2470,13 +2481,14 @@ fn appui_compact_context_if_over_threshold(
         target_tokens_after_compaction = ?record.target_tokens_after_compaction,
         pinned_token_estimate = ?record.pinned_token_estimate,
         budget_outcome = ?record.budget_outcome,
+        calibration_ratio = manager.token_calibration_ratio_milli() as f64 / 1000.0,
         trigger,
         "appui context manager compact_context finished before model prompt"
     );
     lifecycle_notifications.push(appui_context_compaction_notification(
         session_id, manager, &record,
     ));
-    lifecycle_notifications
+    (lifecycle_notifications, installed)
 }
 
 /// Session-open flavor of [`appui_context_inspection_snapshot`]: same
@@ -2536,13 +2548,16 @@ fn appui_context_open_snapshot(
         "appui context manager loaded for session open"
     );
     let lifecycle_notifications = match llm_provider {
-        Some(provider) => appui_compact_context_if_over_threshold(
-            &mut manager,
-            session_id,
-            provider,
-            false,
-            "appui_open",
-        ),
+        Some(provider) => {
+            let (notifications, _installed) = appui_compact_context_if_over_threshold(
+                &mut manager,
+                session_id,
+                provider,
+                false,
+                "appui_open",
+            );
+            notifications
+        }
         None => Vec::new(),
     };
     publish_appui_context_status(session_id, &manager);
@@ -2574,6 +2589,7 @@ fn appui_context_history_for_agent(
     Arc<StdMutex<ContextManager>>,
     Vec<UiNotification>,
     AppUiSessionContextRegistration,
+    bool,
 ) {
     // Load, optional compaction, persistence, and publication as the live
     // manager are one writer-locked operation for this session.
@@ -2589,13 +2605,14 @@ fn appui_context_history_for_agent(
         "appui context manager loaded for turn"
     );
     let policy = appui_context_prompt_policy(llm_provider.as_ref());
-    let mut lifecycle_notifications = appui_compact_context_if_over_threshold(
-        &mut manager,
-        session_id,
-        llm_provider,
-        llm_compaction_enabled,
-        trigger,
-    );
+    let (mut lifecycle_notifications, compaction_installed) =
+        appui_compact_context_if_over_threshold(
+            &mut manager,
+            session_id,
+            llm_provider,
+            llm_compaction_enabled,
+            trigger,
+        );
     publish_appui_context_status(session_id, &manager);
     if let Err(error) =
         persist_context_manager_snapshot(data_dir, &session_id.to_string(), &manager)
@@ -2616,6 +2633,7 @@ fn appui_context_history_for_agent(
         manager,
         lifecycle_notifications,
         registration,
+        compaction_installed,
     )
 }
 
@@ -2722,11 +2740,13 @@ fn appui_force_compact_context(
         let _ = persist_context_manager_snapshot(data_dir, &session_id.to_string(), &manager);
         return (lifecycle_notifications, result);
     }
-    let summary = if llm_compaction_enabled {
+    let mut summary = if llm_compaction_enabled {
         appui_compaction_summary(llm_provider, &summary_messages, summary_budget)
     } else {
         summary_messages.compact_summary(summary_budget)
     };
+    // Deterministic file ledger rides after the summary (manual pass).
+    octos_agent::compaction::append_file_ledger(&mut summary, &summary_messages.messages);
     let record = manager.compact_context(summary, compact_policy);
     info!(
         session = %session_id.0,
@@ -3123,18 +3143,27 @@ impl PromptContextManager for AppUiPromptContextBridge {
         } else if scratch.observed_messages > messages.len() {
             scratch.observed_messages = messages.len();
         }
+        // Mirror the session agent's learned token-estimate calibration into
+        // both manager copies so every threshold check (here and at the
+        // pre-turn/session-open sites via the persisted canonical) sees it.
+        scratch
+            .manager
+            .record_token_calibration_ratio_milli(request.token_calibration_ratio_milli);
         // Absorb durable rows committed since the last sync after recording
         // loop-local messages, allowing a durable twin to stamp an in-flight
         // row instead of being duplicated.
         {
-            let canonical = self
+            let mut canonical = self
                 .context_manager
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            canonical.record_token_calibration_ratio_milli(request.token_calibration_ratio_milli);
             self.adopt_canonical_source_rows(scratch, &canonical);
         }
 
-        let threshold = Self::threshold_tokens(&request);
+        let threshold = scratch
+            .manager
+            .calibrated_threshold(Self::threshold_tokens(&request));
         let mut compaction_performed = false;
         // UPCR-2026-026 follow-up: surface the MID-TURN pass to the client.
         // This is where compaction actually happens for a session whose
@@ -3175,12 +3204,18 @@ impl PromptContextManager for AppUiPromptContextBridge {
                     "no closed semantic prefix is safe to compact",
                 )
             } else {
-                let summary = match &self.llm_compaction_provider {
+                let mut summary = match &self.llm_compaction_provider {
                     Some(provider) => {
                         appui_compaction_summary(provider, &summary_messages, summary_budget)
                     }
                     None => summary_messages.compact_summary(summary_budget),
                 };
+                // Deterministic file ledger rides after the summary
+                // (in-loop pass — the mid-turn compaction site).
+                octos_agent::compaction::append_file_ledger(
+                    &mut summary,
+                    &summary_messages.messages,
+                );
                 let record = scratch.manager.compact_context(summary, compact_policy);
                 compaction_performed = record.output_generation.is_some();
                 record
@@ -15055,6 +15090,7 @@ async fn run_standalone_turn(
         context_manager,
         context_lifecycle_notifications,
         _appui_context_registration,
+        pre_turn_compaction_installed,
     ) = appui_context_history_for_agent(
         // Root the context ledger at the session's TRANSCRIPT root, not the
         // profile-global data dir: with `appui.sessions_in_cwd` the
@@ -15071,6 +15107,13 @@ async fn run_standalone_turn(
         session_compaction_llm_enabled(&session_id, &state),
         "appui_pre_turn",
     );
+    if pre_turn_compaction_installed {
+        // Pre-turn is the PRIMARY OUP compaction point; the read-state stubs
+        // it removed still live in the session agent's file cache (M8.5
+        // tier-3) — drop them so post-compaction re-reads re-materialise
+        // full content instead of answering "[FILE_UNCHANGED]".
+        session_runtime.agent.clear_file_state_cache();
+    }
     for notification in context_lifecycle_notifications {
         if features.context_lifecycle_available() {
             let _ = send_notification_durable(&ws, &ledger, notification);
