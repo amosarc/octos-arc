@@ -66,8 +66,6 @@ import plan_envelope  # noqa: E402
 import scaffold  # noqa: E402  (宿主脚手架包:模板/清单/schema 编译唯一公开面)
 import visual_ref  # noqa: E402  (参考图视觉预描述:VISUAL_MODEL 代看注入 tree)
 
-# 09-27 目标优先定则:宿主不制定 UI 规则、不编写验收用例——测试用例由
-# 模型根据需求原文自己生成(ui_smoke/flow_suite 宿主套件已删除)。宿主
 # 只保留:①工具链 CLI 发现(下述 _pw_* 助手);②被内核放行的自测命令
 # 形状所需的 .arc/ui-smoke/playwright.config.ts 最小骨架;③消息桥提取
 # (_REQ_MESSAGE_RE,数据面 codegen 桥的数据源,非 UI 规则)。
@@ -1922,6 +1920,10 @@ def build_octos_env(config_dir: Path) -> dict:
         "OCTOS_TOOL_ALLOWLIST",
         "bash,read_file,edit_file,write_file,grep,list_dir,update_plan",
     )
+    # 内核 context_log:每轮 LLM 请求的精确 messages 落 .octos/context-logs/
+    # llm.jsonl——分层装配的前缀缓存验证基建(逐字节比对系统行/前缀;
+    # 磁盘代价 KB 级/轮)。
+    env.setdefault("OCTOS_CONTEXT_LOG", "1")
     # Any npm/npx the model runs inside the runner goes to the China mirror;
     # npmjs.org is slow/unreliable from the ARC runner network.
     env.setdefault("npm_config_registry", "https://registry.npmmirror.com")
