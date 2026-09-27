@@ -334,8 +334,9 @@ class GoalFirstRulesTests(unittest.TestCase):
 
     def test_selftest_note_carries_sanctioned_command_shape(self):
         note = main.build_selftest_note("/opt/cli.js")
-        self.assertIn("test --config ui-smoke/playwright.config.ts",
+        self.assertIn("test --config ./ui-smoke/playwright.config.ts",
                       note)
+        self.assertNotIn(".arc", note)  # 平台命名空间不进模型提示词
         self.assertIn("scenarios ARE the test oracle", note)
         note2 = main.build_selftest_note(None)
         self.assertIn("npx --yes @playwright/test test", note2)
