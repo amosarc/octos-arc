@@ -112,7 +112,9 @@ EOF
 # 或 ARCBENCH_TESTS_DIR 优先生效;两者皆缺的任务走 no-staged-specs 的
 # "走查运行中应用"契约(main.py locate_acceptance_tests 的包内回落分支
 # 因此休眠)。仓库内 arc/public-tests 仅供本地 sim 的 --tests-dir 使用。
-cp main.py plan_envelope.py fixture_manifest.py visual_ref.py ui_smoke.py ui_smoke_spec_template.ts octos_stdio.py requirements.txt "$PKG/"
+# (flow_suite.py:description→场景流套件 FLOW RUN——main.py 顶层依赖,
+#  漏打即启动崩,09-27 曾在补清单时漏掉)
+cp main.py plan_envelope.py fixture_manifest.py visual_ref.py ui_smoke.py flow_suite.py ui_smoke_spec_template.ts octos_stdio.py requirements.txt "$PKG/"
 cp -R arcbench_agent_runtime scaffold bin "$PKG/"
 # 自验工具链零打包(2026-09-27 决策):生产/仿真 runner 镜像自带全局
 # @playwright/test@1.57.0 + chromium-1200,_ensure_host_toolchain /
