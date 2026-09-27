@@ -1168,7 +1168,8 @@ def load_requirement_tree(req_dir: Path) -> dict:
         contents = ", ".join(sorted(p.name for p in req_dir.iterdir())[:20])
         raise ValueError(
             f"requirements.yaml not found in {req_dir} (contents: {contents or 'empty'})")
-    data = yaml.safe_load(req_file.read_text(encoding="utf-8"))
+    raw = req_file.read_text(encoding="utf-8")
+    data = yaml.safe_load(raw)
     if isinstance(data, dict) and "id" not in data:
         for wrapper in ("root", "requirement"):
             if isinstance(data.get(wrapper), dict):
@@ -1176,7 +1177,39 @@ def load_requirement_tree(req_dir: Path) -> dict:
                 break
     if not isinstance(data, dict) or "id" not in data:
         raise ValueError(f"invalid requirements.yaml in {req_dir}")
+    _attach_source_lines(data, raw)
     return data
+
+
+def _attach_source_lines(tree: dict, raw: str) -> None:
+    """把每个节点的 yaml 源行号区间挂到节点("_lines")。
+
+    区间语义=整个子树(到下一个同级兄弟的 id 行之前)——"读 REQ-1 段"
+    一次拿到全家族。系统行标题树由此携带"REQ-1: ... (lines 24-479)",
+    模型定点读 requirements.yaml 一步直达,不再需要先 grep 定位
+    (仿真实测:骨架轮为定位章节自发跑了 3-4 次 grep,行号已知时纯浪费)。"""
+    id_start: dict[str, int] = {}
+    total = len(raw.splitlines())
+    for i, line in enumerate(raw.splitlines(), 1):
+        m = re.match(r"^\s*-?\s*id:\s*(\S+)\s*$", line)
+        if m:
+            id_start.setdefault(m.group(1), i)
+
+    def attach(node: dict, end: int) -> None:
+        nid = str(node.get("id") or "")
+        start = id_start.get(nid)
+        if start:
+            node["_lines"] = (start, max(start, end))
+        children = [c for c in node.get("children") or []
+                    if isinstance(c, dict)]
+        bounds = [id_start.get(str(c.get("id") or ""), start or 1)
+                  for c in children]
+        for i, child in enumerate(children):
+            child_end = (bounds[i + 1] - 1 if i + 1 < len(children)
+                         else end)
+            attach(child, child_end)
+
+    attach(tree, total)
 
 
 def flatten_atomic(node: dict, out: list | None = None) -> list[dict]:
@@ -1293,13 +1326,19 @@ def render_map_outline(tree: dict) -> str:
     """标题树:全部家族/子家族 id+name(无任何描述,~1-2KB)。
 
     系统行常驻层与工单指针共用的"地图骨架"——模型由此知道全局有什么、
-    去哪定点读 requirements.yaml。"""
+    去哪定点读 requirements.yaml;行号区间随标题给出(load 时挂在
+    节点 "_lines"),定点读一步直达无需先 grep 定位。"""
+    def tag(node: dict) -> str:
+        span = node.get("_lines")
+        return f" (lines {span[0]}-{span[1]})" if span else ""
+
     lines = []
     for folder in (tree or {}).get("children") or []:
         if not isinstance(folder, dict):
             continue
         lines.append(f"- {folder.get('id')}: "
-                     f"{' '.join(str(folder.get('name') or '').split())}")
+                     f"{' '.join(str(folder.get('name') or '').split())}"
+                     f"{tag(folder)}")
 
         def outline(folder: dict, depth: int) -> None:
             pad = "    " * depth
@@ -1309,7 +1348,8 @@ def render_map_outline(tree: dict) -> str:
                 if str(child.get("type", "")).upper() == "ATOMIC":
                     continue
                 lines.append(f"{pad}{child.get('id')}: "
-                             f"{' '.join(str(child.get('name') or '').split())}")
+                             f"{' '.join(str(child.get('name') or '').split())}"
+                             f"{tag(child)}")
                 outline(child, depth + 1)
 
         outline(folder, 1)
