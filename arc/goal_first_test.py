@@ -84,27 +84,33 @@ class RequirementsMapTests(unittest.TestCase):
         self.assertIn("root global contract", rmap)
         self.assertIn("ROOT CONTRACT", rmap)
 
-    def test_map_lists_every_level1_and_sub_heading(self):
+    def test_map_lists_headings_and_every_atomic_description(self):
         rmap = main.render_requirements_map(TREE)
-        for nid in ("REQ-1", "REQ-2", "REQ-3",
-                    "REQ-1-1", "REQ-1-2"):
+        for nid in ("REQ-1", "REQ-2", "REQ-3", "REQ-1-1", "REQ-1-2"):
             self.assertIn(nid, rmap, f"map missing {nid}")
-        # 标题名字在场;ATOMIC 叶子是工单项,不进地图
         self.assertIn("Sub Family One", rmap)
-        self.assertIn("Family One", rmap)
-        self.assertNotIn("REQ-1-1-1", rmap)
-        self.assertNotIn("REQ-2-1:", rmap)
+        # 用户定则:ATOMIC 描述一个不丢,全量逐字内嵌在所属家族之下
+        for nid, desc in (("REQ-1-1-1", "d111"), ("REQ-1-1-2", "d112"),
+                          ("REQ-1-2-1", "d121"), ("REQ-2-2", "d22"),
+                          ("REQ-3-1", "d31")):
+            self.assertIn(f"[{nid}]", rmap)
+            self.assertIn(desc, rmap, f"map lost {nid} description")
 
-    def test_real_task_maps_are_compact(self):
-        for task, budget in (("hackathon--github", 6000),
-                             ("hackathon--sheet", 6000)):
+    def test_real_task_maps_carry_every_atomic(self):
+        for task in ("hackathon--github", "hackathon--sheet"):
             req = Path(__file__).resolve().parent / "tasks" / task
             if not (req / "requirements.yaml").exists():
                 continue
             tree = main.load_requirement_tree(req)
             rmap = main.render_requirements_map(tree)
-            self.assertLess(len(rmap), budget, f"{task} map too big")
-            self.assertIn(str(tree.get("description"))[:60].strip(), rmap)
+            atomics = main.flatten_atomic(tree)
+            lost = [str(n.get("id")) for n in atomics
+                    if str(n.get("description") or "").strip()[:40]
+                    not in rmap]
+            self.assertEqual(lost, [], f"{task} map lost descriptions")
+            # 地图不含场景正文,应显著小于整份 yaml
+            yaml_size = (req / "requirements.yaml").stat().st_size
+            self.assertLess(len(rmap), yaml_size)
 
 
 class FamilyContextTests(unittest.TestCase):

@@ -1127,16 +1127,25 @@ def describe_node(node: dict,
 
 
 def render_requirements_map(tree: dict) -> str:
-    """root description 逐字 + 一级标题地图(各家族 id+name 与子标题)。"""
+    """root description 逐字 + 一级标题地图 + 全部 ATOMIC 描述逐字。
+
+    用户定则(09-27):root 契约、一级标题与子标题、ATOMIC 描述一个都不能
+    丢,全部进任务会话上下文;场景(scenarios)仍随各自节点的工单正文走
+    (describe_node)。ATOMIC 叶子标题因此不再单列——其全量描述直接
+    逐字内嵌在所属家族之下。
+    """
     lines = [
-        "REQUIREMENTS MAP (authoritative app outline):",
+        "REQUIREMENTS MAP (authoritative, complete):",
         "ROOT CONTRACT (verbatim — global rules that bind every family):",
         str((tree or {}).get("description") or "").strip() or "(none)",
         "",
-        "APP OUTLINE (every requirement family in document order, with "
-        "its sub-headings — locate any section here, then read THAT "
-        "section of requirements/requirements.yaml when a contract "
-        "spans families):",
+        "APP OUTLINE (every requirement family in document order): "
+        "family/sub-family headings first, then EVERY atomic "
+        "requirement's FULL description verbatim beneath its family — "
+        "all of it binds; each node's scenarios ride with that node's "
+        "own work order; cross-family details (scenarios, seeded "
+        "values) may be read from requirements/requirements.yaml by "
+        "the heading ids below:",
     ]
     for folder in (tree or {}).get("children") or []:
         if not isinstance(folder, dict):
@@ -1149,8 +1158,7 @@ def render_requirements_map(tree: dict) -> str:
             for child in folder.get("children") or []:
                 if not isinstance(child, dict):
                     continue
-                # 子标题=FOLDER 层级;ATOMIC 叶子是工单项,由各家族工单
-                # 逐字携带,不进地图(避免地图与工单双份)。
+                # 子标题=FOLDER 层级;ATOMIC 描述单独全量内嵌(见下)。
                 if str(child.get("type", "")).upper() == "ATOMIC":
                     continue
                 lines.append(f"{pad}{child.get('id')}: "
@@ -1158,7 +1166,19 @@ def render_requirements_map(tree: dict) -> str:
                 outline(child, depth + 1)
 
         outline(folder, 1)
+        for n in flatten_atomic(folder):
+            lines.append(f"  [{n.get('id')}] "
+                         f"{' '.join(str(n.get('name') or '').split())}:")
+            desc = str(n.get("description") or "").strip()
+            lines.append(_indent_block(desc or "(no description)", "    "))
     return "\n".join(lines)
+
+
+def _indent_block(text: str, pad: str) -> str:
+    """多段描述整体缩进,空行保平(不产生尾随空白)。"""
+    return "\n".join(
+        (pad + ln).rstrip() if ln.strip() else ""
+        for ln in text.splitlines()) or pad
 
 
 def family_index(tree: dict) -> dict[str, dict]:
