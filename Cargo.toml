@@ -88,8 +88,6 @@ ignore = "0.4"
 # planctl L1 literal layer — the ripgrep engine as library crates (same
 # origin as the `ignore` walker above; the `ripgrep` crate on crates.io is
 # the CLI binary, not the library).
-grep-searcher = "0.1"
-grep-regex = "0.1"
 # Time and IDs
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }

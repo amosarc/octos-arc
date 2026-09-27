@@ -350,17 +350,9 @@ file-reading tool. If no tool can answer it, respond with text explaining \
 what's missing.";
 
 pub(super) fn compose_system_prompt(agent: &Agent) -> String {
-    // planctl: the volatile `arc_host_plan` segment is excluded from the
-    // stable snapshot and re-appended LAST — the base + appends + skills
-    // + discipline prefix stays byte-stable for the provider cache while
-    // the (focus/report/map) tail changes. No plan installed → output is
-    // byte-identical to the pre-planctl behavior.
-    let mut content = agent.system_prompt_snapshot_excluding(&[crate::planctl::SEGMENT_NAME]);
+    // 09-27 planctl 退役:系统行回到稳定快照 + 工具纪律前缀。
+    let mut content = agent.system_prompt_snapshot();
     content.push_str(TOOL_USE_DISCIPLINE);
-    if let Some(body) = agent.arc_plan_segment_body() {
-        content.push_str("\n\n");
-        content.push_str(&body);
-    }
     content
 }
 
@@ -2790,41 +2782,6 @@ mod tests {
         build_spawn_only_produced_files_message, satisfied_completion_content,
         satisfied_delivery_is_failure,
     };
-
-    /// planctl P0 pin: without an installed `arc_host_plan` segment the
-    /// composed system row is EXACTLY snapshot + tool-use discipline —
-    /// byte-identical to the pre-planctl behavior. The plan integration
-    /// (arc_host_plan appended last) must not disturb sessions that never
-    /// carry a plan.
-    #[tokio::test]
-    async fn compose_system_prompt_is_byte_identical_when_no_plan_installed() {
-        use octos_core::AgentId;
-        use octos_llm::LlmProvider;
-        use octos_memory::EpisodeStore;
-
-        let dir = tempfile::tempdir().unwrap();
-        let memory = Arc::new(EpisodeStore::open(dir.path().join("mem")).await.unwrap());
-        let provider: Arc<dyn LlmProvider> = Arc::new(crate::test_support::InertProvider);
-        let agent = crate::agent::Agent::new(
-            AgentId::new("planctl-p0"),
-            provider,
-            crate::tools::ToolRegistry::new(),
-            memory,
-        );
-
-        let composed = super::compose_system_prompt(&agent);
-        assert_eq!(
-            composed,
-            format!(
-                "{}{}",
-                agent.system_prompt_snapshot(),
-                super::TOOL_USE_DISCIPLINE
-            ),
-            "no-plan compose must stay byte-identical to legacy"
-        );
-        assert!(!composed.contains(crate::planctl::SENTINEL_BEGIN));
-    }
-
     #[test]
     fn satisfied_contract_in_chat_mode_is_not_a_failure() {
         // P2 (tri-repo #1529): a Satisfied spawn_only contract in chat mode

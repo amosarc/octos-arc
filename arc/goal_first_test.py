@@ -151,23 +151,6 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertNotIn("SERVER-SIDE VALIDATION", rules)
         self.assertNotIn("UI CONTRACT HYGIENE", rules)
 
-    def test_envelope_rules_text_override(self):
-        env = plan_envelope.build_envelope(
-            seq=1, phase="node", task="t", atomic_nodes=[],
-            statuses={}, focus=None, ports={"grade": 1, "smoke": 2,
-                                            "extra": []},
-            spec_map={}, rules_text="CUSTOM RULES")
-        self.assertEqual(env["rules_text"], "CUSTOM RULES")
-        env2 = plan_envelope.build_envelope(
-            seq=2, phase="node", task="t", atomic_nodes=[],
-            statuses={}, focus=None, ports={}, spec_map={})
-        self.assertEqual(env2["rules_text"], plan_envelope.HOST_STACK_RULES)
-
-
-class SelfTestSkeletonTests(unittest.TestCase):
-    """09-27 定则:宿主不制定规则/不写验收用例——只保留内核放行命令
-    形状所需的最小骨架,测试用例由模型根据需求自生成。"""
-
     def test_stage_writes_config_and_example_only(self):
         import tempfile
         with tempfile.TemporaryDirectory() as td:

@@ -1410,6 +1410,37 @@ def group_families(tree: dict, max_batch: int = 6) -> list[list[dict]]:
     return batches
 
 
+def _progress_ledger_line(family_of: dict[str, dict],
+                          statuses: dict[str, str]) -> str:
+    """家族级进度账本一行(planctl 退役后全局进度的唯一载体)。
+
+    家族状态:全部节点 done → done;任一 blocked → blocked;否则任一
+    active → active;其余 pending。非 goal-first(无家族索引)时退化为
+    节点计数摘要。
+    """
+    if not family_of:
+        done = sum(1 for s in statuses.values() if s == "done")
+        blocked = sum(1 for s in statuses.values() if s == "blocked")
+        return (f"PROGRESS: {done} node(s) done, {blocked} blocked, "
+                f"{len(statuses) - done - blocked} to go (document order).")
+    fam_nodes: dict[str, list[str]] = {}
+    for nid, fam in family_of.items():
+        fam_nodes.setdefault(str(fam.get("id")), []).append(nid)
+    parts = []
+    for fid, nids in fam_nodes.items():
+        sts = [statuses.get(n, "pending") for n in nids]
+        if all(s == "done" for s in sts):
+            st = "done"
+        elif any(s == "blocked" for s in sts):
+            st = "blocked"
+        elif any(s == "active" for s in sts):
+            st = "active"
+        else:
+            st = "pending"
+        parts.append(f"{fid}:{st}")
+    return "PROGRESS (family ledger, document order): " + ", ".join(parts)
+
+
 # ---------------------------------------------------------------- octos driver
 
 OCTOS_RELEASE_URL = (
@@ -1778,47 +1809,13 @@ class OctosDriver:
         except OSError:
             pass
         self._session = None
-        # planctl: kernel capability gate (octos --version >= 2.0.3) and
-        # the current plan envelope. Every prompt passes through run() —
-        # the single throat — so marker wrapping here covers stdio, chat
-        # fallback, retries, and close-and-reopen paths alike.
-        self.plan_capable = False
-        self.envelope: dict | None = None
-        self._plan_seq = 0
+        # 09-27 planctl 退役(与 pi 对齐):内核不再有 plan 模式,宿主不再
+        # 发 [arc-plan] envelope——契约/需求地图/进度账本全部印进工单
+        # 正文(自含工单),会话分段后由 _segment_digest + 自含工单续命。
 
     @property
     def auth_exhausted(self) -> bool:
         return self.auth_fail_limit > 0 and self.auth_failures >= self.auth_fail_limit
-
-    def set_envelope(self, *, phase: str, task: str, atomic_nodes: list,
-                     statuses: dict, focus: str | None, ports: dict,
-                     spec_map: dict, host_signals: dict | None = None,
-                     extra_rules: str | None = None,
-                     fixture_given: dict | None = None,
-                     seeded_nodes: set | frozenset | None = None,
-                     shared_contract: str | None = None,
-                     specs_staged: bool = False,
-                     arrange_nodes: set | frozenset | None = None,
-                     rules_text: str | None = None) -> None:
-        """(Re)build the plan envelope; the next run() wraps it."""
-        if not self.plan_capable:
-            return
-        self._plan_seq += 1
-        self.envelope = plan_envelope.build_envelope(
-            seq=self._plan_seq, phase=phase, task=task,
-            atomic_nodes=atomic_nodes, statuses=statuses, focus=focus,
-            ports=ports, spec_map=spec_map, host_signals=host_signals,
-            extra_rules=extra_rules, fixture_given=fixture_given,
-            seeded_nodes=seeded_nodes, shared_contract=shared_contract,
-            specs_staged=specs_staged, arrange_nodes=arrange_nodes,
-            rules_text=rules_text)
-        # 防御(内核 wire.rs:174-178 精确匹配 step id):复合/越界 focus
-        # 会让内核丢弃整个 envelope(PLAN/FOCUS/validation 全不装)。
-        if self.envelope["focus"] is not None:
-            ids = {s["id"] for s in self.envelope["steps"]}
-            assert self.envelope["focus"] in ids, (
-                f"focus {self.envelope['focus']!r} matches no step id; "
-                "the kernel would drop the whole envelope")
 
     def _log_event(self, method: str, params: dict) -> None:
         if method == "core/marker":
@@ -1867,10 +1864,6 @@ class OctosDriver:
                                      self.data_dir, cap, self.max_iterations)
         else:
             fn = lambda p: self._run_stdio(p, timeout, wall, cancel)
-        if self.plan_capable and self.envelope is not None and prompt:
-            # planctl marker: the kernel strips it before the model ever
-            # sees the prompt; the plan rides the system row instead.
-            prompt = plan_envelope.render_marked_prompt(self.envelope, prompt)
         ok, text = self._run_with_heartbeat(
             lambda: self._run_with_retries(fn, prompt, cancel), wall, cancel)
         if not ok and self._orphaned_turn(text):
@@ -2509,97 +2502,7 @@ ambiguous, re-read the exact spec file under .arc/acceptance/ — it is \
 the ground truth. Where the requirement text disagrees, the spec wins.\
 """
 
-APP_SKELETON_PROMPT = """\
-You are building a full-stack web application in the current working \
-directory. First skim the requirement tree under the requirements/ directory, \
-then set up the project skeleton.
 
-Required architecture (the benchmark runner depends on this EXACT contract, \
-violation = 0 score):
-- frontend/ — web frontend with a package.json that has a working \
-`npm run build` script. A static HTML/CSS/JS frontend is fine; then \
-"build" can be a small Node script that copies the static files into \
-frontend/dist/. A Vite/React setup is also fine if you keep it minimal.
-- backend/  — Node.js, with a package.json that \
-has a `npm run start` script. ZERO NPM DEPENDENCIES is the target: use only \
-built-in modules (http, fs, path, url, crypto) — a small hand-written router \
-over `http.createServer` is enough for these apps, and package.json must then \
-have an empty "dependencies". The grading network is slow and unreliable \
-toward npmjs.org, so every dependency you add is a real risk of a failed \
-install. If a package is truly unavoidable, install it ONLY through the China \
-mirror: run `npm install --registry=https://registry.npmmirror.com <pkg>` and \
-also write `registry=https://registry.npmmirror.com` into a `.npmrc` file in \
-that folder so later installs use the mirror too. Persistence MUST be pure \
-JavaScript: a JSON \
-file (e.g. backend/data/db.json) loaded into memory at startup and written \
-back on every mutation. DO NOT use better-sqlite3, sqlite3, bcrypt, or any \
-npm package with native bindings — this sandbox cannot download prebuilt \
-binaries nor compile them, so native modules can never be smoke-tested \
-here. Hash passwords with Node's built-in crypto (scrypt). The backend \
-reads the PORT environment \
-variable (default {port}), serves the built frontend from frontend/dist/ at \
-http://localhost:{port}/ and exposes JSON APIs under /api/.
-- Seed the JSON store with every fixture record the requirement names: \
-its `data:` section and each scenario's GIVEN line are the graded seed \
-contract (roles/ownership/visibility/relationships verbatim; one fresh \
-preconfigured instance per data-modifying scenario; unlisted values get a \
-broad standard set). Demo-quality substitutes score zero.
-
-""" + UI_CONTRACT_PROMPT + """
-Verification steps the runner will perform later — make sure they ALL pass:
-1. `npm install && npm run build` in frontend/
-2. `npm install && PORT={port} npm run start` in backend/
-3. http://127.0.0.1:{port}/ serves the app.
-
-After scaffolding, run npm install for both directories, build the frontend, \
-and smoke-test that the backend serves the app. Keep \
-dependencies minimal. Do not use TypeScript.
-
-PORT SAFETY (the benchmark runner watches the grading port): during ALL of \
-your work, run servers for smoke tests ONLY on port {smoke} \
-(PORT={smoke}). NEVER bind anything to port {port} yourself — if the \
-runner observes a server on port {port} while you are still working, it \
-terminates the whole run immediately. When you finish, every server you \
-started must be stopped.
-"""
-
-NODE_PROMPT_TEMPLATE = """\
-You are implementing one requirement node of a larger full-stack web \
-application. The application skeleton in the current working directory \
-(frontend/ built with `npm run build` into frontend/dist/, Node backend \
-in backend/ with pure-JS JSON-file persistence, started with \
-`npm run start`, serving \
-everything on the port given by the PORT env var) already exists.
-
-Implement the following requirement completely — backend API, database \
-tables/queries, and the frontend UI to exercise it:
-
-{node_spec}
-
-Rules:
-- Extend the existing app; do not rewrite or break already-working features.
-- Dependencies are preinstalled (backend express included); do not add \
-new npm dependencies and never run npm install. The backend generic \
-layer (auth/validate/store/engine, see HOST CONTRACT) is host-owned — \
-extend via src/routes/index.js, backend/data/schema.json, and one \
-self-contained frontend/src/features/<name>.jsx per requirement (wired \
-in src/app/App.jsx; shared state via src/app/store.jsx).
-- Keep the architecture intact: `npm run build` in frontend/ and \
-`npm run start` in backend/ MUST keep working.
-- Operation budget: land this node in at most ~40 tool operations — \
-read each file at most once, write each NEW feature file whole in one \
-edit and make surgical edits elsewhere, verify \
-once. Re-reading what you just wrote or repeated builds starve the \
-remaining requirements.
-
-""" + UI_CONTRACT_RECAP + """
-- After implementing, run `npm run build` in frontend/ and restart the \
-backend ON PORT {smoke} (PORT={smoke} npm run start) to verify the new \
-endpoint(s) respond correctly (e.g. with curl), then stop that server. \
-NEVER bind anything to port {port} — the runner watches that port and \
-terminates the run if it sees a server there while you are still working.
-- Commit nothing yourself; the harness handles git.
-"""
 
 NUDGE_PROMPT = """\
 You ended your last turn before creating any files. Stop analyzing. In \
@@ -2681,73 +2584,7 @@ def spec_base_ports(tests_dir: Path | None) -> list[int]:
     return sorted(ports)
 
 
-def acceptance_tests_prompt(tests_dir: Path | None, web_port: int = 3000,
-                            smoke_port: int = 3100, slim: bool = False) -> str:
-    if not tests_dir:
-        return ""
-    if slim:
-        # Node/final turns: the full file list + reading guidance shipped
-        # in the skeleton prompt and lives in the session history; re-send
-        # only a pointer (the spec list block alone re-billed ~325 tok on
-        # every later turn's every LLM call).
-        text = (f"\nAcceptance specs: {tests_dir} (file list and reading "
-                "guidance were given in the first turn). Re-read the spec "
-                "files covering THIS node's flows before finishing; the "
-                "specs are ground truth. Do not modify, copy, or delete "
-                "them.\n")
-    else:
-        files = sorted(str(p.relative_to(tests_dir)) for p in tests_dir.rglob("*.ts"))
-        text = ACCEPTANCE_TESTS_PROMPT.format(tests_dir=tests_dir,
-                                              files=", ".join(files[:40]) or "(none)")
-    extra = [p for p in spec_base_ports(tests_dir) if p != web_port]
-    if extra:
-        # Run fda27f4d972e (2026-09-12): the ticket-booking specs default to
-        # http://127.0.0.1:3301 while the grader starts the app with PORT=3000;
-        # every test died with ERR_CONNECTION_REFUSED. Listen on both.
-        ports = ", ".join(map(str, extra))
-        text += (
-            f"\nPORT CONTRACT (mandatory): the specs above default to base URL "
-            f"port(s) {ports}, but the grader starts the backend with "
-            f"PORT={web_port}. The backend MUST serve the identical app on BOTH "
-            f"the PORT env value and port(s) {ports} at the same time: call "
-            f"server.listen() once per port with the same request handler. "
-            f"Bind the extra port(s) only when process.env.ARC_EXTRA_PORTS is "
-            f"not '0'. In your own smoke tests always run with "
-            f"`ARC_EXTRA_PORTS=0 PORT={smoke_port} npm run start` so that "
-            f"neither {web_port} nor {ports} is bound while you work.\n"
-        )
-    return text
 
-
-FINAL_CHECK_PROMPT = """\
-Do a final end-to-end check of the web application in the current directory:
-1. Run `npm run build` in frontend/ and fix any build errors.
-2. Kill any leftover server process, then start the backend fresh with \
-PORT={smoke} via `npm run start` in backend/. NEVER use port {port} — \
-the benchmark runner watches that port and terminates the run if it sees \
-a server there while you are still working.
-3. Verify the app loads at http://localhost:{smoke}/ and every implemented \
-API endpoint works (exercise them with curl, including error cases).
-4. Audit every form against the benchmark UI contract recap below and fix \
-violations (these silently score 0 in the automated tests):
-
-""" + UI_CONTRACT_RECAP + """
-5. STRICT-MODE SELF-TEST — mechanical, not by eye: for every value the \
-requirement echoes (city names, dates, usernames, station names), \
-enumerate EVERY element that will contain it in the rendered DOM. If your \
-pages are server-rendered, do it against the running server: `curl -s \
-<page> | grep -o '<searched value>' | wc -l` — the count must be 1. \
-If pages are client-rendered, read the render code instead and list the \
-elements each value lands in (summary line? card title? both = failure). \
-Any searched value appearing in more than one element is a strict-mode \
-failure in the real tests — round 32 passed every search test after \
-fixing this, round 35 regressed by skipping the check. Also trigger each \
-validation failure and confirm exactly ONE error element is rendered. Fix \
-duplicates by restructuring the markup, keeping the information.
-6. Fix anything else that is broken.
-Finally, STOP every server process you started — the benchmark runner starts \
-the backend itself afterwards, so port {port} must be free when you finish.\
-"""
 
 REHEARSAL_REPAIR_PROMPT = """\
 The app you built just failed its pre-grading startup rehearsal. The \
@@ -2908,46 +2745,29 @@ def main() -> int:
         runtime.git.ensure_repo()
 
         octos_bin = find_octos()
-        # planctl capability gate: marker handling needs a kernel >=2.0.3
-        # (rc prereleases count); OCTOS_ASSUME_ARC_PLAN forces the choice.
-        plan_on = False
-        try:
-            ver = subprocess.run([octos_bin, "--version"], capture_output=True,
-                                 text=True, timeout=15, errors="replace")
-            plan_on = plan_envelope.plan_capable(ver.stdout or ver.stderr or "")
-        except Exception as exc:  # noqa: BLE001
-            log(f"[plan] version probe failed ({exc}); legacy prompts")
-        log(f"[plan] host plan {'ENABLED' if plan_on else 'disabled'} "
-            f"(OCTOS_ASSUME_ARC_PLAN={os.environ.get('OCTOS_ASSUME_ARC_PLAN', '<unset>')})")
-        # goal-first 总开关(09-27 宿主优先→目标优先):默认 1;=0 完整
-        # 回退旧宿主优先路径(A/B 用)。消费点:家族调度、stub 预装配、
-        # 骨架轮跳过、工单提示词、rules_text、验收门(flow 唯一硬门)。
+        # 09-27 planctl 退役:不再有 plan 模式/版本门控——契约与需求全在
+        # 工单正文,内核只做驱动与治理(shell guard/折叠/迭代帽照旧)。
+        # goal-first 总开关(宿主优先→目标优先):默认 1;=0 回退旧宿主
+        # 优先提示词路径(A/B 用,同样无 envelope)。
         goal_first = os.environ.get("OCTOS_ARC_GOAL_FIRST", "1") != "0"
-        # P1 sibling batching: one turn implements up to N consecutive
-        # leaves of the same parent FOLDER (plan_on path only — the legacy
-        # path stays per-node). OCTOS_ARC_NODE_BATCH=1 is the rollback
-        # switch (every leaf its own turn, legacy behavior).
         # goal-first: 家族工单——一个顶层家族一次交给代理连贯深实现
-        # (超大家族沿子家族边界切),预算随批规模自动放大。
+        # (超大家族沿子家族边界切);=0 走兄弟批。预算随批规模放大。
         batch_n = int(os.environ.get("OCTOS_ARC_NODE_BATCH", "2"))
         family_of: dict[str, dict] = {}
         req_map = ""
-        if plan_on and goal_first:
+        if goal_first:
             family_batch_max = int(
                 os.environ.get("OCTOS_ARC_FAMILY_BATCH_MAX", "6"))
             node_batches = group_families(tree, family_batch_max)
             family_of = family_index(tree)
             req_map = render_requirements_map(tree)
-        elif plan_on:
-            node_batches = group_siblings(tree, batch_n)
-        else:
-            node_batches = [[n] for n in atomic_nodes]
-        if plan_on and goal_first:
             log(f"[flow] goal-first family work orders: "
                 f"{len(node_batches)} batch(es) for {len(atomic_nodes)} "
                 f"nodes over "
                 f"{len({str(f.get('id')) for f in family_of.values()})} "
                 "familie(s)")
+        else:
+            node_batches = group_siblings(tree, batch_n)
         max_batch = max((len(b) for b in node_batches), default=1)
         # Iteration-cap coupling: a healthy node needs 3-40 kernel
         # iterations (keep-25 data, median ~15), so a batch of B legitimately
@@ -3019,9 +2839,6 @@ def main() -> int:
         smoke_port = int(os.environ.get("OCTOS_SMOKE_PORT", "3100"))
         if smoke_port == args.web_port:
             smoke_port += 1
-        tests_prompt = acceptance_tests_prompt(tests_dir, args.web_port, smoke_port)
-        tests_prompt_slim = acceptance_tests_prompt(
-            tests_dir, args.web_port, smoke_port, slim=True)
         # planctl: stage specs read-only + host scaffold (E-flip) + the
         # spec→node map for the envelope.
         spec_map: dict = {}
@@ -3037,7 +2854,7 @@ def main() -> int:
         # check, filtered to the Tier-2 red tests' own spec files — see
         # final_spec_files; the unfiltered full-suite form is the host's
         # Tier-2 job and the kernel guard refuses it.)
-        if plan_on and tests_dir:
+        if tests_dir:
             stage_dir = plan_envelope.stage_specs(tests_dir, output_dir)
             log(f"[plan] staged acceptance specs at {stage_dir}")
             # 宿主尽算：自验 config 无条件落盘（内容只依赖冒烟口）——
@@ -3182,13 +2999,12 @@ def main() -> int:
         # 放行命令形状所需的最小骨架:playwright.config.ts + MY-CHECK
         # 示例。凭据前奏等由模型按各自 spec 自行 arrange。
         selftest_note = ""
-        if plan_on:
-            stage_selftest_dir(output_dir, smoke_port)
-            selftest_note = build_selftest_note(
-                str(toolchain_cli) if toolchain_cli is not None else None)
-            log("[plan] self-test skeleton staged "
-                f"({SELFTEST_SUBDIR}/playwright.config.ts + example); "
-                "tests are model-authored from the requirement text")
+        stage_selftest_dir(output_dir, smoke_port)
+        selftest_note = build_selftest_note(
+            str(toolchain_cli) if toolchain_cli is not None else None)
+        log("[plan] self-test skeleton staged "
+            f"({SELFTEST_SUBDIR}/playwright.config.ts + example); "
+            "tests are model-authored from the requirement text")
         # C1 配套:需求引号消息 sidecar——codegen 编译 schema 时确定性
         # 桥接("<X> is required"/"<X> already exists" 灌字段三态消息,
         # credential 族进 messages.loginFailure)。宿主生成 API 的错误
@@ -3296,46 +3112,22 @@ def main() -> int:
             octos_bin, output_dir, env, data_dir, max_iter,
             events_log=events_log_path,
         )
-        driver.plan_capable = plan_on
-        plan_ports = {"grade": args.web_port, "smoke": smoke_port,
-                      "extra": spec_ports_extra}
-        plan_task = str(tree.get("name") or "task")
+        # 09-27 planctl 退役:envelope/系统行通道删除——契约印进每个
+        # 工单正文(rules_text),进度账本是宿主本地 dict(供工单进度行/
+        # 分段摘要/事件标记消费),不再下发内核。
+        # goal-first 契约:frontend/src 全域归模型/UI kit 降为工具箱;
+        # =0 走 host-first 契约。
+        rules_text = (plan_envelope.HOST_STACK_RULES_GOAL_FIRST
+                      if goal_first else plan_envelope.HOST_STACK_RULES)
         plan_statuses: dict[str, str] = {
             str(n.get("id")): "pending" for n in atomic_nodes}
         # Staged specs of every node whose batch rehearsal-greened so far —
         # the post-batch regression's blast radius (NEVER the full suite:
         # unimplemented nodes' specs are legitimately red mid-run).
         completed_specs: list[str] = []
-        # The plan path fills this per batch (staged specs of its nodes);
-        # the legacy non-plan path leaves it empty, which skips the
-        # spec-first lazy gate below.
+        # The batch's own staged specs (spec-first lazy gate below); the
+        # skeleton turn leaves it empty.
         batch_specs: list[str] = []
-        # 文件夹级需求契约(ARIA 角色/可访问名/持久化纪律的唯一定义处),
-        # 确定性渲染进稳定 CONTRACT 段;以及本轮是否真有 staged specs
-        # (决定 CONTRACT 指针行与提示词的 SPEC RUN 装置)。
-        shared_contract = plan_envelope.build_shared_contract(tree) \
-            if plan_on else None
-        # goal-first 契约文案:frontend/src 全域归模型/UI kit 降为工具箱;
-        # 后端数据面/夹具/校验各段与 host-first 逐字一致。
-        rules_text = (plan_envelope.HOST_STACK_RULES_GOAL_FIRST
-                      if (plan_on and goal_first) else None)
-        specs_staged = bool(tests_dir)
-        if plan_on:
-            driver.set_envelope(
-                phase="node" if template_ready else "skeleton",
-                task=plan_task, atomic_nodes=atomic_nodes,
-                statuses=plan_statuses, focus=None, ports=plan_ports,
-                spec_map=spec_map,
-                host_signals={"rehearsal": None,
-                              "scaffolded_by_host": scaffolded,
-                              "spec_run": None} if scaffolded else None,
-                extra_rules=fixture_rules,
-                fixture_given=fixture_given,
-                seeded_nodes=fixture_seeded_nodes,
-                shared_contract=shared_contract,
-                specs_staged=specs_staged,
-                arrange_nodes=fixture_arranged_nodes,
-                rules_text=rules_text)
 
         try:
             # Step 0: orient in the starter project + shared foundations.
@@ -3365,19 +3157,17 @@ def main() -> int:
                     log("[flow] time budget exhausted before skeleton retry")
                     break
                 t0 = time.time()
-                if plan_on:
-                    if goal_first:
-                        sk_prompt = GOAL_FIRST_SKELETON_PROMPT.format(
-                            port=args.web_port, smoke=smoke_port) \
-                            + "\n" + req_map
-                    else:
-                        sk_prompt = HOST_SKELETON_PROMPT.format(
-                            port=args.web_port, smoke=smoke_port)
-                    if tests_dir:
-                        sk_prompt += "\n" + ACCEPTANCE_STAGED_NOTE
+                if goal_first:
+                    sk_prompt = GOAL_FIRST_SKELETON_PROMPT.format(
+                        port=args.web_port, smoke=smoke_port) \
+                        + "\n" + req_map + "\n\n" + rules_text \
+                        + "\n\n" + fixture_rules
                 else:
-                    sk_prompt = APP_SKELETON_PROMPT.format(
-                        port=args.web_port, smoke=smoke_port) + tests_prompt
+                    sk_prompt = HOST_SKELETON_PROMPT.format(
+                        port=args.web_port, smoke=smoke_port) \
+                        + "\n\n" + rules_text + "\n\n" + fixture_rules
+                if tests_dir:
+                    sk_prompt += "\n" + ACCEPTANCE_STAGED_NOTE
                 sk_wall = turn_wall(1)
                 skeleton_ok, skeleton_text = driver.run(
                     sk_prompt, min(node_timeout, sk_wall), sk_wall)
@@ -3513,84 +3303,75 @@ def main() -> int:
                     events.mark_implementation_started(nid)
                 log(f"[flow] batch {idx}/{len(node_batches)} {focus_id} starting")
                 t0 = time.time()
-                if plan_on:
-                    for nid in batch_ids:
-                        plan_statuses[nid] = "active"
-                    hs0 = dict(driver.envelope.get("host_signals") or {}) \
-                        if driver.envelope else {}
-                    hs0["scaffolded_by_host"] = scaffolded
-                    driver.set_envelope(
-                        phase="node", task=plan_task,
-                        atomic_nodes=atomic_nodes, statuses=plan_statuses,
-                        focus=focus_id, ports=plan_ports, spec_map=spec_map,
-                        host_signals=hs0 or None,
-                        extra_rules=fixture_rules,
-                        fixture_given=fixture_given,
-                        seeded_nodes=fixture_seeded_nodes,
-                        shared_contract=shared_contract,
-                        specs_staged=specs_staged,
-                        arrange_nodes=fixture_arranged_nodes,
-                        rules_text=rules_text)
-                    if goal_first:
-                        # 分层上下文:需求地图(root 契约逐字+全家族标题
-                        # 地图)→ 本家族 FOLDER 契约逐字 → 本批 REQ 逐字。
-                        fam = family_of.get(batch_ids[0])
-                        fam_ctx = describe_family_context(fam, batch) \
-                            if fam is not None else ""
-                        node_spec = "\n\n".join(x for x in (
-                            req_map,
-                            "THIS FAMILY — folder contracts (verbatim):",
-                            fam_ctx,
-                            "THIS BATCH — requirement nodes (verbatim):",
-                            "\n\n".join(describe_node(n, fixture_seeded_scenarios)
-                                       for n in batch)) if x)
-                        base_prompt = GOAL_FIRST_NODE_PROMPT_TEMPLATE.format(
-                            node_id=focus_id, node_spec=node_spec,
-                            port=args.web_port, smoke=smoke_port)
-                    else:
-                        node_spec = "\n\n".join(
-                            describe_node(n, fixture_seeded_scenarios)
-                            for n in batch)
-                        base_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
-                            node_id=focus_id, node_spec=node_spec,
-                            port=args.web_port, smoke=smoke_port,
-                            feature_file=_feature_file_for(batch_ids))
-                    batch_specs = sorted(
-                        {f for nid in batch_ids
-                         for f in (spec_map.get(nid) or [])})
-                    # 幻影 SPEC RUN 治理:只有本批真有 staged specs 才发
-                    # SPEC RUN 装置;requirements-only 任务(两道 hackathon
-                    # 题)改发"走查运行中应用"契约——指向从未落盘的
-                    # .arc/acceptance 只会制造不可达成的退出条件。
-                    if batch_specs:
-                        node_prompt = base_prompt + build_spec_run_cmd(
-                            str(toolchain_cli)
-                            if toolchain_cli is not None else None,
-                            batch_specs)
-                    else:
-                        node_prompt = base_prompt \
-                            + NO_STAGED_SPECS_NOTE.format(
-                                smoke=smoke_port,
-                                selftest_dir=SELFTEST_SUBDIR) \
-                            + selftest_note
-                    if len(batch) > 1:
-                        node_prompt += (
-                            BATCH_DIRECTIVE.format(
-                                count=len(batch),
-                                specs="\n".join(
-                                    f"- {nid}: " + (", ".join(spec_map.get(nid) or [])
-                                                    or "(no staged spec)")
-                                    for nid in batch_ids))
-                            if batch_specs else
-                            BATCH_DIRECTIVE_NO_SPEC.format(
-                                count=len(batch), smoke=smoke_port))
+                for nid in batch_ids:
+                    plan_statuses[nid] = "active"
+                # 进度账本行:家族级状态(全家族节点 done=done;任一
+                # blocked=blocked;否则 active/pending),随工单下发——
+                # planctl 退役后全局进度的唯一载体。
+                progress_line = _progress_ledger_line(
+                    family_of, plan_statuses)
+                if goal_first:
+                    # 分层上下文:需求地图(root 契约逐字+全家族标题
+                    # 地图+全部 ATOMIC 描述)→ 本家族 FOLDER 契约逐字 →
+                    # 本批 REQ 逐字(scenarios)→ 契约 → 进度。
+                    fam = family_of.get(batch_ids[0])
+                    fam_ctx = describe_family_context(fam, batch) \
+                        if fam is not None else ""
+                    node_spec = "\n\n".join(x for x in (
+                        req_map,
+                        "THIS FAMILY — folder contracts (verbatim):",
+                        fam_ctx,
+                        "THIS BATCH — requirement nodes (verbatim):",
+                        "\n\n".join(describe_node(n, fixture_seeded_scenarios)
+                                   for n in batch),
+                        "HOST CONTRACT (the data-plane substrate you build "
+                        "on):",
+                        rules_text,
+                        fixture_rules,
+                        progress_line) if x)
+                    base_prompt = GOAL_FIRST_NODE_PROMPT_TEMPLATE.format(
+                        node_id=focus_id, node_spec=node_spec,
+                        port=args.web_port, smoke=smoke_port)
                 else:
-                    node_spec = "\n\n".join(
-                        describe_node(n, fixture_seeded_scenarios)
-                        for n in batch)
-                    node_prompt = NODE_PROMPT_TEMPLATE.format(
+                    node_spec = "\n\n".join(x for x in (
+                        "\n\n".join(describe_node(n, fixture_seeded_scenarios)
+                                   for n in batch),
+                        "HOST CONTRACT:",
+                        rules_text,
+                        fixture_rules,
+                        progress_line) if x)
+                    base_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
+                        node_id=focus_id, node_spec=node_spec,
                         port=args.web_port, smoke=smoke_port,
-                        node_spec=node_spec) + tests_prompt_slim
+                        feature_file=_feature_file_for(batch_ids))
+                batch_specs = sorted(
+                    {f for nid in batch_ids
+                     for f in (spec_map.get(nid) or [])})
+                # 幻影 SPEC RUN 治理:只有本批真有 staged specs 才发
+                # SPEC RUN 装置;requirements-only 任务(两道 hackathon
+                # 题)改发模型自测契约。
+                if batch_specs:
+                    node_prompt = base_prompt + build_spec_run_cmd(
+                        str(toolchain_cli)
+                        if toolchain_cli is not None else None,
+                        batch_specs)
+                else:
+                    node_prompt = base_prompt \
+                        + NO_STAGED_SPECS_NOTE.format(
+                            smoke=smoke_port,
+                            selftest_dir=SELFTEST_SUBDIR) \
+                        + selftest_note
+                if len(batch) > 1:
+                    node_prompt += (
+                        BATCH_DIRECTIVE.format(
+                            count=len(batch),
+                            specs="\n".join(
+                                f"- {nid}: " + (", ".join(spec_map.get(nid) or [])
+                                                or "(no staged spec)")
+                                for nid in batch_ids))
+                        if batch_specs else
+                        BATCH_DIRECTIVE_NO_SPEC.format(
+                            count=len(batch), smoke=smoke_port))
                 if segment_digest_pending:
                     # P3:分段后首 turn 的正版记忆——逐节点完成笔记,
                     # 替代模型翻 .arc 考古(见 _segment_digest 注释)。
@@ -3728,7 +3509,7 @@ def main() -> int:
                     if written:
                         scaffolded = sorted(set(scaffolded) | set(written))
                         log(f"[codegen] host compiled {written}")
-                if plan_on and not time_up():
+                if not time_up():
                     # A-flip: the HOST verifies whatever landed (build +
                     # boot + route probes + extra ports) — once per batch.
                     # Red → ≤2 repair turns on the digest; still red → the
@@ -3853,31 +3634,7 @@ def main() -> int:
                                 log(f"[plan] regression green: "
                                     f"{g_run[0]}p/{g_run[1]}f")
 
-                    # validation_probes lives on HostSignals (next to
-                    # rehearsal), not inside RehearsalReport.
-                    r_report.pop("validation_probes", None)
-                    vrows = report_vrows
-                    if driver.envelope is not None:
-                        hs = dict(driver.envelope.get("host_signals") or {})
-                        hs["rehearsal"] = r_report
-                        hs["validation_probes"] = vrows
-                    else:
-                        hs = {"rehearsal": r_report,
-                              "validation_probes": vrows}
-                    hs["scaffolded_by_host"] = scaffolded
-                    driver.set_envelope(
-                        phase="node", task=plan_task,
-                        atomic_nodes=atomic_nodes,
-                        statuses=plan_statuses, focus=focus_id,
-                        ports=plan_ports, spec_map=spec_map,
-                        host_signals=hs,
-                        extra_rules=fixture_rules,
-                        fixture_given=fixture_given,
-                        seeded_nodes=fixture_seeded_nodes,
-                        shared_contract=shared_contract,
-                        specs_staged=specs_staged,
-                        arrange_nodes=fixture_arranged_nodes,
-                        rules_text=rules_text)
+
 
             if codegen:
                 codegen.stop()
@@ -3887,7 +3644,7 @@ def main() -> int:
             ok, text = False, "skipped: time budget"
             if time_up():
                 log("[flow] time budget exhausted; skipping final verification")
-            elif plan_on:
+            else:
                 # B-flip: the host runs the full Tier-1 probe pass itself;
                 # with OCTOS_ARC_HOST_GRADE=1 it also runs the staged
                 # Playwright suite (Tier-2) — all green skips the final LLM
@@ -3913,17 +3670,6 @@ def main() -> int:
                         if tier2_run else "[plan] Tier-2 unavailable; "
                                          "degrading to model final check")
 
-                driver.set_envelope(
-                    phase="final", task=plan_task, atomic_nodes=atomic_nodes,
-                    statuses=plan_statuses, focus=None, ports=plan_ports,
-                    spec_map=spec_map, host_signals=hs,
-                    extra_rules=fixture_rules,
-                    fixture_given=fixture_given,
-                    seeded_nodes=fixture_seeded_nodes,
-                    shared_contract=shared_contract,
-                    specs_staged=specs_staged,
-                    arrange_nodes=fixture_arranged_nodes,
-                    rules_text=rules_text)
                 _prune_acceptance_junk(output_dir, tests_dir, log)
                 # 09-27 定则:宿主不再跑自写浏览器套件——跳过 final LLM 轮
                 # 的门只剩 Tier-1 探针绿 + Tier-2 staged specs(任务自带
@@ -4040,17 +3786,7 @@ def main() -> int:
                         elif r_ok > 0:
                             log("[plan] Tier-2 re-run all green; "
                                 "fix verified by ground truth")
-            else:
-                log("[flow] final verification turn starting")
-                t0 = time.time()
-                f_wall = turn_wall(1, reserve=0)
-                ok, text = driver.run(
-                    FINAL_CHECK_PROMPT.format(port=args.web_port,
-                                              smoke=smoke_port) + tests_prompt_slim,
-                    min(node_timeout, f_wall), f_wall,
-                )
-                log(f"[flow] final check {'ok' if ok else 'FAILED'} "
-                    f"in {time.time()-t0:.0f}s: {text[-300:]!r}")
+
 
             # Startup rehearsal: run the grading sequence ourselves on the
             # smoke port and hand any failure back for repair. Round 30

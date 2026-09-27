@@ -63,8 +63,6 @@ tree-sitter-rust = { workspace = true, optional = true }
 tree-sitter-python = { workspace = true, optional = true }
 tree-sitter-javascript = { workspace = true, optional = true }
 # planctl L1 literal layer (ast-gated, alongside the tree-sitter family).
-grep-searcher = { workspace = true, optional = true }
-grep-regex = { workspace = true, optional = true }
 tree-sitter-typescript = { workspace = true, optional = true }
 pdf-extract = { workspace = true }
 tempfile = { workspace = true }
@@ -96,7 +94,7 @@ rustix = { workspace = true }
 # `code_structure` tool hard-depend on tree-sitter, and a no-ast build
 # would silently lose the ARC plan's repo-map rendering plus symbol
 # navigation.
-ast = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-python", "dep:tree-sitter-javascript", "dep:tree-sitter-typescript", "dep:grep-searcher", "dep:grep-regex"]
+ast = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-python", "dep:tree-sitter-javascript", "dep:tree-sitter-typescript"]
 default = ["ast"]
 
 [lints]

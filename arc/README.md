@@ -46,22 +46,23 @@ sh arc/pack.sh                               # 得到 octos-arc-bundle.zip
 | `octos_stdio.py` | 通过 `octos serve --stdio` 驱动内核 |
 | `public-tests/<题目>/` | 平台公开的 Playwright 验收测试（会自动喂给模型） |
 | `tasks/<题目>/` | 各题需求文件的离线副本 |
-| `run-task-local.py` / `grade-local.py` / `pack.sh` | 本机做题、打分、打包 |
+| `run-task-local.py` / `pack.sh` | 本机做题、打包 |
 
 已知平台细节：容器里 `/workspace/tests` 有验收测试；订票题的测试默认连 3301 端口而平台起在 3000，`main.py` 会要求后端两个端口都监听；容器到 npmjs 很慢，提示词要求零依赖并走 npmmirror。
 
-## 宿主 Planning 信号节点(planctl / `[arc-plan]`)
+## planctl 已退役(2026-09-27,与 pi 对齐)
 
-`plan_envelope.py` 把需求树、验收契约、端口与 host_signals 编成 envelope,经
-`[arc-plan]` marker 随 turn 下发;内核 ≥2.0.3(planctl)剥离 marker 并把计划渲染进
-系统行尾部常驻段,写类工具批次后以 `<arc-workspace>` 尾块推送增量信号。门控:
-`octos --version` 基元组 ≥(2,0,3)(rc 计入);`OCTOS_ASSUME_ARC_PLAN=0` 强制旧提示词
-(基线实测),`=1` 强制开启;旧 v2.0.2 内核自动回退旧提示词,不会裸漏 JSON。
+`[arc-plan]` envelope 通道整体移除(内核 planctl 模块 -4722 行,宿主
+set_envelope/marker 包装同删):契约、需求地图、进度账本全部印进工单正文,
+工单自包含;跨轮记忆由会话历史 + `_segment_digest` 承接。内核保留 shell
+guard(自测命令放行形状/full-spec-run/trace-deny)、OCTOS_TOOL_ALLOWLIST、
+折叠/迭代治理。`plan_envelope.py` 瘦身为工具箱(契约文案常量 + specmap +
+探针 + stage_specs)。
 
-环境开关:`OCTOS_ARC_PLAN`(内核 marker 协议,缺省开)、`OCTOS_ARC_HOST_SCAFFOLD`
-(宿主落盘基础设施五件套,缺省开)、`OCTOS_ARC_HOST_GRADE`(final 轮 Tier-2 宿主
-跑 staged Playwright,缺省关)、`OCTOS_ARC_WINDOW_TOKENS` /
-`OCTOS_ARC_PLAN_FULL_RATIO=0.50` / `OCTOS_ARC_PLAN_SKELETON_RATIO=0.62`(压力降级)。
+环境开关:`OCTOS_ARC_GOAL_FIRST`(目标优先家族工单,缺省开;=0 回退
+host-first 兄弟批路径,同样无 envelope)、`OCTOS_ARC_HOST_SCAFFOLD`
+(宿主落盘基础设施,缺省开)、`OCTOS_ARC_HOST_GRADE`(final 轮 Tier-2 宿主
+跑 staged Playwright,缺省关)。
 
 ## 宿主模板 + schema 信号驱动 codegen(2026-09-17 起;2026-09-18 迁入 scaffold/ 包)
 
@@ -127,11 +128,8 @@ shasum -a 256 ../octos-arc-bundle.zip                 # 记录 sha
 ### 验收协议(ticket-booking,§11)
 
 1. 冒烟:`python3 arc/run-task-local.py arc/tasks/smoke--counter --name smoke1`。
-2. 基线 ×3:`OCTOS_ASSUME_ARC_PLAN=0`,记录通过率/LLM 轮数/token。
-3. 新路径 ×3(全开),判据 3/3 全绿且通过率 ≥ 基线。
-4. 降级才跑开关矩阵(SCAFFOLD/GRADE/动作摘要 各 1 次)。
-5. context-logs 断言(`.octos/context-logs/*/llm.jsonl`):USER 行无 `[arc-plan]`;
-   system 行含 CONTRACT+REPO MAP+HOST REPORT;改码轮 `<arc-workspace>` 出现且
-   system 行逐字节不变;final 跳过或瘦身;节点验证 tool rounds=0。
-6. 宿主信号对账:HOST REPORT 判定 vs `grade-local.py` 实际评分,0 误报 0 误拦。
+2. goal-first ×2(缺省全开),记录通过率/LLM 轮数/每工单墙钟。
+3. `OCTOS_ARC_GOAL_FIRST=0` ×1 回退对照,确认旧路径无回归。
+4. context-logs 断言(`.octos/context-logs/*/llm.jsonl`):USER 行含需求地图
+   与契约(工单自包含);无 `[arc-plan]` 残留(通道已删)。
 7. 端口专项:grade-local 走 43300,curl 验证 3301 同 handler 在听。
