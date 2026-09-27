@@ -6,9 +6,12 @@ set -euo pipefail
 
 SIM=/Volumes/PSSD/CodeProjects/hackathon-local-simulation
 ARC=/Volumes/PSSD/CodeProjects/octos-arc
-RUN_NAME="${1:?用法: run-case.sh <run-name> <requirements-dir> <tests-dir>}"
+RUN_NAME="${1:?用法: run-case.sh <run-name> <requirements-dir> <tests-dir> [env-file]}"
 REQUIREMENTS="${2:?缺少 requirements-dir}"
 TESTS="${3:?缺少 tests-dir}"
+# 第 4 参可选:env 文件覆盖(默认模拟器 .env)。用于传 OCTOS_ARC_FAMILIES
+# 等宿主开关进容器——在副本 .env 上追加即可,不动原始配置。
+ENV_FILE="${4:-$SIM/.env}"
 WORKSPACE="$HOME/arc-sim-runs/$RUN_NAME"
 
 if ! docker image inspect arcbench-runner:local-base >/dev/null 2>&1; then
@@ -35,7 +38,7 @@ python3 "$SIM/local_submit.py" run \
   --requirements-dir "$REQUIREMENTS" \
   --tests-dir "$TESTS" \
   --workspace "$WORKSPACE" \
-  --env-file "$SIM/.env" || status=$?
+  --env-file "$ENV_FILE" || status=$?
 
 # 宿主侧消费 .arc/ 追踪工件(只读摘要, 不影响判定/退出码)。
 if [ -d "$WORKSPACE/template/.arc" ]; then
