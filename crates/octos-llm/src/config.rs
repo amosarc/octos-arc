@@ -57,6 +57,13 @@ pub struct ChatConfig {
     /// Anthropic thinking budget, Gemini thinkingConfig).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Follow-up-round reasoning effort — GLM-5.2+ first-round policy: the
+    /// first call of a conversation (history has no assistant message yet)
+    /// uses `reasoning_effort`, every later round uses this. Unset ⇒
+    /// `reasoning_effort` applies to all rounds (legacy behavior). An
+    /// explicit `Disabled` `reasoning_effort` always wins over this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_followup: Option<ReasoningEffort>,
     /// Structured output format. When set, the model will return responses
     /// conforming to the given schema (JSON mode or JSON Schema).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -170,6 +177,7 @@ impl Default for ChatConfig {
             tool_choice: ToolChoice::Auto,
             stop_sequences: Vec::new(),
             reasoning_effort: None,
+            reasoning_effort_followup: None,
             response_format: None,
             context_management: None,
             sampling_params: None,
@@ -309,6 +317,7 @@ mod tests {
             tool_choice: ToolChoice::Required,
             stop_sequences: vec!["STOP".to_string()],
             reasoning_effort: None,
+            reasoning_effort_followup: None,
             response_format: None,
             context_management: None,
             sampling_params: None,

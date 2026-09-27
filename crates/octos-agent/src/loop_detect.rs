@@ -231,7 +231,12 @@ impl LoopDetector {
         else {
             return;
         };
-        if !command.contains(".arc/acceptance") {
+        // The host's staged suites are both green-run carriers: the
+        // acceptance specs (`.arc/acceptance`) and the UI contract smoke
+        // (`.arc/ui-smoke`). The smoke suite greens too (requirements-only
+        // tasks have no acceptance specs) — without this arm the model kept
+        // re-running an already-green smoke, burning wall clock.
+        if !command.contains(".arc/acceptance") && !command.contains(".arc/ui-smoke") {
             return;
         }
         let Some(passed) = parse_green_summary(result) else {
@@ -533,6 +538,21 @@ mod tests {
         assert_eq!(parse_green_summary("  3 passed (12.4s)"), Some(3));
         assert_eq!(parse_green_summary(GREEN_OUT), Some(1));
         assert_eq!(parse_green_summary("  0 passed (2.0s)"), None);
+    }
+
+    #[test]
+    fn ui_smoke_green_arms_green_stop() {
+        // The UI contract smoke is the sanctioned suite of requirements-only
+        // tasks; an identical double green must arm the stop there too.
+        let mut detector = LoopDetector::new(10);
+        let cmd = "node local-grader/node_modules/@playwright/test/cli.js test \
+                   --config .arc/ui-smoke/playwright.config.ts contract-smoke.spec.ts";
+        record_spec(&mut detector, cmd, GREEN_OUT);
+        record_spec(&mut detector, cmd, GREEN_OUT);
+        let signal = detector
+            .take_green_stop_signal()
+            .expect("ui-smoke double green must arm");
+        assert_eq!(signal.passed, 1);
     }
 
     #[test]

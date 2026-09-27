@@ -24,9 +24,14 @@ _TASKS = Path(__file__).resolve().parent / "tasks"
 
 
 def _tree(task: str) -> dict:
-    return yaml.safe_load(
-        (_TASKS / task / "template" / "requirements" / "requirements.yaml")
-        .read_text(encoding="utf-8"))
+    # 任务目录 2026-09 更名为 hackathon--<task>;兼容两种拼写。
+    for cand in (task, f"hackathon--{task}"):
+        path = (_TASKS / cand / "template" / "requirements"
+                / "requirements.yaml")
+        if path.is_file():
+            return yaml.safe_load(path.read_text(encoding="utf-8"))
+    raise FileNotFoundError(f"requirements.yaml not found for {task!r} "
+                            f"under {_TASKS}")
 
 
 def _workbook_cells(compiled: dict, marker: str) -> dict:

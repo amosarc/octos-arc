@@ -47,7 +47,14 @@ export; the component, its local state/hooks, and its scoped styles all \
 in that one file). frontend/src/features/README.md (host-owned) carries \
 the GRID EDITOR KERNEL PATTERN — grid-like tasks must build on ONE \
 shared selection/editing state model per the README instead of \
-re-implementing it per feature. frontend/src/app/App.jsx is the ASSEMBLY layer only — \
+re-implementing it per feature. Graded UI shapes are CODE: \
+frontend/src/app/ui.jsx ships NativeSelect (dropdowns = native \
+<select>, graders use selectOption), AppDialog (modals = native \
+<dialog>), AccountTrigger (signed-in username as its OWN exact-text \
+node in an aria-labelled trigger), SingleError (one visible error \
+element) and FixedGrid (fixed-size role=grid, lettered headers, \
+coordinate-named gridcells) — use them, never hand-roll. \
+frontend/src/app/App.jsx is the ASSEMBLY layer only — \
 per feature add one import and one mount; the FIRST requirement may lay \
 out the page structure there, after that never put business logic in it. \
 Shared entities go through frontend/src/app/store.jsx \
@@ -98,8 +105,19 @@ UI CONTRACT HYGIENE (graded in a real browser by the host smoke and \
 the hidden tests): every quoted string in a requirement is a VISIBLE \
 control with that EXACT accessible name — substring variants \
 ("Delete worksheet" vs the required "Delete") fail, and hidden \
-<select> options are not visible controls (render radios/buttons \
-instead); every dialog closes on Escape AND on cancel/overlay click — \
+<select> options are not visible controls (use a native <select> the \
+grader can selectOption, or visible radios/buttons); WIDGETS are \
+NATIVE-FIRST — dropdowns are always native <select> with real <option> \
+labels (a custom div dropdown is invisible to every selector without \
+full ARIA combobox semantics), modals prefer the native <dialog> \
+element (showModal() gives Escape/backdrop close and focus trapping \
+for free), and custom is built ONLY where HTML has no native widget \
+(menus/tabs/grids) with the requirement's exact ARIA roles mandatory; a DATA GRID renders its \
+COMPLETE structure — role="grid" with visible columnheader/rowheader \
+cells and gridcells named by coordinate (A1), never the data region \
+alone; a SUBMIT/SAVE control must become enabled once required fields \
+are filled — a permanently disabled submit can never be clicked by a \
+test; every dialog closes on Escape AND on cancel/overlay click — \
 an undismissable overlay blocks every later grader step; modifier \
 clicks keep selection (Shift-click extends the range — never collapse \
 it to the clicked cell in the click handler); downloads are \

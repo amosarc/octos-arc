@@ -146,8 +146,12 @@ check("spec cmd: custom harness banned",
       "never write your own Playwright" in cmd)
 
 cmd_full = main.build_spec_run_cmd("/path/to/cli.js")
+# 5623442 起 VERIFICATION_RULES 指引提及 MY-CHECK.spec.ts(正文合法);
+# 无过滤断言只看命令行(末行)本身,不再扫整段提示词。
+cmd_full_line = cmd_full.rstrip().splitlines()[-1]
 check("spec cmd: no filter → full suite (final verification)",
-      cmd_full.rstrip().endswith("--reporter=line") and "spec.ts" not in cmd_full)
+      cmd_full_line.endswith("--reporter=line")
+      and not cmd_full_line.endswith(".spec.ts"))
 
 cmd_fallback = main.build_spec_run_cmd(None, ["A.spec.ts"])
 check("spec cmd: npx fallback carries filter",
@@ -155,7 +159,8 @@ check("spec cmd: npx fallback carries filter",
       and "npx --yes @playwright/test" in cmd_fallback)
 
 check("spec cmd: empty file entries dropped",
-      main.build_spec_run_cmd("/c", ["", "A.spec.ts"]).count("spec.ts") == 1)
+      main.build_spec_run_cmd("/c", ["", "A.spec.ts"]).rstrip()
+      .endswith("--reporter=line A.spec.ts"))
 
 print()
 print()

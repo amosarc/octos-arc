@@ -147,12 +147,17 @@ pub fn context_window_tokens(model_id: &str) -> u32 {
     // (incl. glm-5.3-flash) are 1M-context; the broader "glm" fallback below
     // is 128k, which would derive an ~90k trim line and re-trim turns nowhere
     // near capacity (the agnes-3.0 incident class).
+    // glm-5.3 (incl. -flash) is a DECIMAL 1M window per Z.ai's spec — keep it
+    // off the binary-MiB branch below so the trim line never derives 4.8%
+    // past the real capacity.
+    if m.contains("glm-5.3") {
+        return 1_000_000;
+    }
     if m.contains("deepseek-v4")
         || m.contains("minimax-m3")
         || m.contains("kimi-k3")
         || m == "k3"
         || m.starts_with("kimi-for-coding")
-        || m.contains("glm-5.3")
     {
         return 1_048_576;
     }

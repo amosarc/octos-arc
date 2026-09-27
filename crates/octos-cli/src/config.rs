@@ -755,6 +755,12 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub reasoning_effort: Option<octos_llm::ReasoningEffort>,
 
+    /// Follow-up-round reasoning effort (GLM-5.2+ first-round policy): the
+    /// first call of a conversation uses `reasoning_effort`, every later
+    /// round this. Unset ⇒ `reasoning_effort` applies to all rounds.
+    #[serde(default)]
+    pub reasoning_effort_followup: Option<octos_llm::ReasoningEffort>,
+
     /// Sampling temperature override for chat LLM calls. When unset (the
     /// default), the built-in `ChatConfig` default (`0.0`, greedy) is used and
     /// the request is byte-for-byte unchanged — so cloud providers are
@@ -789,6 +795,7 @@ impl Default for GatewayConfig {
             session_timeout_secs: None,
             max_output_tokens: None,
             reasoning_effort: None,
+            reasoning_effort_followup: None,
             llm_temperature: None,
             llm_sampling_params: None,
         }

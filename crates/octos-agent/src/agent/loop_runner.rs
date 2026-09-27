@@ -3823,6 +3823,7 @@ fn build_chat_config(config: &crate::AgentConfig, local_provider: bool) -> ChatC
         c.sampling_params = Some(sampling.clone());
     }
     c.reasoning_effort = config.reasoning_effort;
+    c.reasoning_effort_followup = config.reasoning_effort_followup;
     c
 }
 

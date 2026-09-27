@@ -537,6 +537,7 @@ async fn fetch_summary(
         tool_choice: Default::default(),
         stop_sequences: Vec::new(),
         reasoning_effort: None,
+        reasoning_effort_followup: None,
         response_format: None,
         context_management: None,
         sampling_params: None,
