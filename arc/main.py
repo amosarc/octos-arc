@@ -826,9 +826,10 @@ def build_selftest_note(cli_path: str | None) -> str:
         "\nSELF-TEST (you author the tests): derive your own Playwright "
         "specs from the requirement text — each node's scenarios ARE the "
         "test oracle (GIVEN = arrange, WHEN = act, THEN = assert, verbatim "
-        "quoted strings = exact accessible names). Write specs under "
+        "quoted strings = exact accessible names). Write specs ONLY under "
         f"{SELFTEST_SUBDIR}/ (copy MY-CHECK.spec.ts.example as a starting "
-        "point) and run them with an explicit file argument:\n"
+        "point; never inside .arc/ — host-owned, read-only) and run them "
+        "with an explicit file argument:\n"
         f"  {cmd}\n"
         "That command shape is sanctioned; raw browser scripts and "
         "browserless guessing are not. Red = the flow fails on the RUNNING "
@@ -2573,7 +2574,8 @@ after editing frontend run `npm run build --prefix frontend` — the \
 running server serves the fresh dist immediately, no restart needed.\
 VERIFICATION: after each node, turn its scenarios into YOUR OWN \
 Playwright spec (GIVEN = arrange, WHEN = act, THEN = assert; quoted \
-strings = exact accessible names) and run it via the SELF-TEST \
+strings = exact accessible names), keep it under ui-smoke/ (never \
+inside .arc/ — host-owned, read-only), and run it via the SELF-TEST \
 command against the RUNNING app (or curl the API directly) — scenario \
 flows actually walking, not string presence, are the verdict.\
 TOOLBOX (optional, unwired): frontend/src/app/ui.jsx ships proven \
@@ -2585,8 +2587,8 @@ REGRESSION SCOPE: re-check only the families you touched this turn.\
 
 NO_STAGED_SPECS_NOTE = """\
 
-VERIFICATION (no staged specs — you author the tests): this task has NO acceptance specs on disk — the graded tests are hidden and derived from the requirement text. YOU write the tests: derive Playwright specs from each node's scenarios (GIVEN = arrange, WHEN = act, THEN = assert; quoted strings are exact accessible names) under \
-{selftest_dir}/ — copy MY-CHECK.spec.ts.example as a starting point — and run them with the SELF-TEST command below against the RUNNING app (port {smoke}). Red = the real flow fails — fix the app, then rerun. \
+VERIFICATION (no staged specs — you author the tests): this task has NO acceptance specs on disk — the graded tests are hidden and derived from the requirement text. YOU write the tests: derive Playwright specs from each node's scenarios (GIVEN = arrange, WHEN = act, THEN = assert; quoted strings are exact accessible names) ONLY under \
+{selftest_dir}/ (never write inside .arc/ — host-owned, read-only) — copy MY-CHECK.spec.ts.example as a starting point — and run them with the SELF-TEST command below against the RUNNING app (port {smoke}). Red = the real flow fails — fix the app, then rerun. \
 Never spawn a raw browser or inline browser script; the sanctioned \
 command shape only. Between turns, also verify by curling the API and \
 rebuilding the frontend.\
@@ -2742,13 +2744,18 @@ Fix what is broken; do not rebuild what works. Do not commit.\
 """
 
 ACCEPTANCE_STAGED_NOTE = """\
-The official Playwright specs are staged READ-ONLY at .arc/acceptance/ \
-— never edit, copy, or delete them. Their routes, roles, labels, \
-testids, and per-test action chains are extracted into your system \
-prompt (CONTRACT + FOCUS sections) as an INDEX, not a replacement: \
-implement against them, and when anything fails or a detail is \
-ambiguous, re-read the exact spec file under .arc/acceptance/ — it is \
-the ground truth. Where the requirement text disagrees, the spec wins.\
+TEST LAYOUT (host-managed, two directories, no exceptions): the official \
+Playwright specs live READ-ONLY at .arc/acceptance/ — never edit, copy, \
+move, or delete anything there (the host re-stages them from a pristine \
+source and re-runs them itself; tampering only wastes your wall clock). \
+YOUR OWN specs live ONLY under ui-smoke/ (sanctioned config: \
+ui-smoke/playwright.config.ts). The official specs' routes, roles, \
+labels, testids, and per-test action chains are extracted into your \
+system prompt (CONTRACT + FOCUS sections) as an INDEX, not a \
+replacement: implement against them, and when anything fails or a \
+detail is ambiguous, re-read the exact spec file under .arc/acceptance/ \
+— it is the ground truth. Where the requirement text disagrees, the \
+spec wins.\
 """
 
 
@@ -3969,6 +3976,12 @@ def main() -> int:
                 tier2_run = None
                 if f_err is None and os.environ.get("OCTOS_ARC_HOST_GRADE",
                                                     "1") != "0":
+                    # 防篡改兜底(REQ-1 仿真实测:final 轮模型把自测 spec
+                    # 拷进 .arc/acceptance 并删了原始公开 spec)——Tier-2 前
+                    # 从 pristine 源重放 staged specs。Tier-2 本就跑
+                    # tests_dir 源,重放只恢复模型自己的 staged 视图。
+                    if tests_dir:
+                        plan_envelope.stage_specs(tests_dir, output_dir)
                     # 范围 run:Tier-2 判定面收窄到范围内节点的 specs
                     # (全量套件对未实现家族必然全红,会把 final 带偏)。
                     tier2_specs = (scoped_spec_files(

@@ -336,7 +336,9 @@ class GoalFirstRulesTests(unittest.TestCase):
         note = main.build_selftest_note("/opt/cli.js")
         self.assertIn("test --config ./ui-smoke/playwright.config.ts",
                       note)
-        self.assertNotIn(".arc", note)  # 平台命名空间不进模型提示词
+        # 命令形状不得指向 .arc(平台命名空间);边界句提及 .arc/ 是允许的
+        self.assertNotIn("--config .arc", note)
+        self.assertIn("never inside .arc/", note)
         self.assertIn("scenarios ARE the test oracle", note)
         note2 = main.build_selftest_note(None)
         self.assertIn("npx --yes @playwright/test test", note2)
