@@ -16,7 +16,7 @@ export OCTOS_BIN=/path/to/octos              # 不设则用 ../target/release/oc
 cargo build --release -p octos-cli --no-default-features --features api   # 编魔改版时
 
 # 2. 本机做题（约 5 分钟，不到一分钱）
-python3 arc/run-task-local.py arc/tasks/smoke--counter --name try1
+python3 arc/local/run-task-local.py arc/tasks/smoke--counter --name try1
 
 # 3. 用平台原版 Playwright 测试打分（首次会自动装 Playwright）
 python3 arc/grade-local.py arc/arc-output/try1 smoke--counter
@@ -46,7 +46,7 @@ sh arc/pack.sh                               # 得到 octos-arc-bundle.zip
 | `octos_stdio.py` | 通过 `octos serve --stdio` 驱动内核 |
 | `public-tests/<题目>/` | 平台公开的 Playwright 验收测试（会自动喂给模型） |
 | `tasks/<题目>/` | 各题需求文件的离线副本 |
-| `run-task-local.py` / `pack.sh` | 本机做题、打包 |
+| `local/run-task-local.py` / `pack.sh` | 本机做题、打包 |
 
 已知平台细节：容器里 `/workspace/tests` 有验收测试；订票题的测试默认连 3301 端口而平台起在 3000，`main.py` 会要求后端两个端口都监听；容器到 npmjs 很慢，提示词要求零依赖并走 npmmirror。
 
@@ -127,7 +127,7 @@ shasum -a 256 ../octos-arc-bundle.zip                 # 记录 sha
 
 ### 验收协议(ticket-booking,§11)
 
-1. 冒烟:`python3 arc/run-task-local.py arc/tasks/smoke--counter --name smoke1`。
+1. 冒烟:`python3 arc/local/run-task-local.py arc/tasks/smoke--counter --name smoke1`。
 2. goal-first ×2(缺省全开),记录通过率/LLM 轮数/每工单墙钟。
 3. `OCTOS_ARC_GOAL_FIRST=0` ×1 回退对照,确认旧路径无回归。
 4. context-logs 断言(`.octos/context-logs/*/llm.jsonl`):USER 行含需求地图

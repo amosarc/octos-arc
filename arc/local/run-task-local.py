@@ -9,7 +9,7 @@ import uuid
 parser = argparse.ArgumentParser()
 parser.add_argument("task", nargs="?"); parser.add_argument("--check", action="store_true"); parser.add_argument("--name", default=None)
 arguments = parser.parse_args()
-root = Path(__file__).resolve().parent
+root = Path(__file__).resolve().parent.parent
 adapter = root
 import shutil
 _cands = [os.environ.get("OCTOS_BIN"), root.parent / "target" / "release" / "octos", root.parent / "target" / "debug" / "octos", shutil.which("octos")]

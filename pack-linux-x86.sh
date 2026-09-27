@@ -41,7 +41,7 @@ cd "$(dirname "$0")"
 export OCTOS_BIN="$(pwd)/bin/octos"
 : "${ARCBENCH_WEB_PORT:=43100}" "${OCTOS_SMOKE_PORT:=43101}"
 export ARCBENCH_WEB_PORT OCTOS_SMOKE_PORT
-exec python3 run-task-local.py "$@"
+exec python3 local/run-task-local.py "$@"
 EOF
 chmod +x run-ticket.sh
 # 平台规范：zip 根需含 template/ 目录(frontend/ + backend/ + README.md + template.yaml)，
