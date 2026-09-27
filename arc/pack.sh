@@ -114,11 +114,12 @@ EOF
 # 因此休眠)。仓库内 arc/public-tests 仅供本地 sim 的 --tests-dir 使用。
 cp main.py plan_envelope.py fixture_manifest.py visual_ref.py ui_smoke.py ui_smoke_spec_template.ts octos_stdio.py requirements.txt "$PKG/"
 cp -R arcbench_agent_runtime scaffold bin "$PKG/"
-# Tier-2 评测链物料：只带清单文件，node_modules 由容器内
-# _ensure_host_toolchain 幂等安装落地（2026-09-20 漏打导致安装 ENOENT、
-# 自验命令链整体降级）。
-mkdir -p "$PKG/local-grader"
-cp local-grader/package.json local-grader/package-lock.json "$PKG/local-grader/"
+# 自验工具链零打包(2026-09-27 决策):生产/仿真 runner 镜像自带全局
+# @playwright/test@1.57.0 + chromium-1200,_ensure_host_toolchain /
+# ui_smoke._lg_cli 直接解析全局 cli(与评测引擎同一份二进制,零安装
+# 零网络);平台评测只用镜像全局工具链,与提交包零交互——local-grader
+# 彻底移出比赛包(2026-09-20 的 ENOENT 教训随之失效:兜底路径改为
+# tmpdir + 钉死 PLATFORM_PW_VERSION 安装,不再依赖包内清单)。
 cp -R template "$PKG/template"
 cp -R arc-template "$PKG/arc-template"
 

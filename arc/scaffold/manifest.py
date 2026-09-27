@@ -13,7 +13,13 @@ import json
 from . import backend, frontend
 
 STACK_ID = "web-react-express"
-NPM_REGISTRY = "https://registry.npmmirror.com"
+# 09-27 版本对齐(镜像取证):runner 基础镜像默认 registry=npmjs.org——
+# 船载 .npmrc 只在评测期被消费,必须与镜像一致;agent 期安装走
+# prewarm/toolchain 的 env 覆盖(下方 INSTALL_REGISTRY,国内/本地提速),
+# 不受船载 .npmrc 影响。
+NPM_REGISTRY = "https://registry.npmjs.org/"
+# agent 期安装(prewarm/toolchain/npm 探活)的 env 覆盖源
+INSTALL_REGISTRY = "https://registry.npmmirror.com"
 NPMRC = f"registry={NPM_REGISTRY}\n"
 COOKIE_NAME = "arc_session"
 

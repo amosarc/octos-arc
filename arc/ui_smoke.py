@@ -173,7 +173,8 @@ export default defineConfig({
   // 与隐藏评测配置同构(10s 断言墙):爬虫自设 test.setTimeout 拉长整测
   // 时限,但每条 expect 必须在评测同款 10s 内成立。
   expect: { timeout: 10_000 },
-  use: { baseURL: process.env.E2E_BASE_URL || '__BASE_URL__' },
+  use: { baseURL: process.env.E2E_BASE_URL || '__BASE_URL__',
+    headless: true, screenshot: 'off', trace: 'off' },
 });
 """
 
@@ -202,10 +203,10 @@ dialog names, aria-labels). Rendering the string as static text (a
 span/chip "tour" listing) clears NOTHING — fix the real control.
 
 Sanctioned self-check command (runs against the dev server as-is; the host
-suite always filters to contract-smoke.spec.ts, so MY-CHECK never pollutes
+suite always filters to zz-contract-smoke.spec.ts, so MY-CHECK never pollutes
 it):
 
-    node __CLI__ test --config .arc/ui-smoke/playwright.config.ts contract-smoke.spec.ts
+    node __CLI__ test --config .arc/ui-smoke/playwright.config.ts zz-contract-smoke.spec.ts
 
 For a ONE-OFF custom check: copy MY-CHECK.spec.ts.example to MY-CHECK.spec.ts,
 edit it, and run it with the explicit file argument appended to the command
@@ -227,7 +228,7 @@ _MY_CHECK_EXAMPLE = """\
 //   node <cli> test --config .arc/ui-smoke/playwright.config.ts MY-CHECK.spec.ts
 // That form is allowed (inline `node -e` browser scripts are not),
 // re-runnable, and green-stop-visible. The host contract suite never runs
-// this file (it filters to contract-smoke.spec.ts).
+// this file (it filters to zz-contract-smoke.spec.ts).
 import { test, expect } from '@playwright/test';
 
 test('my check - name what this verifies', async ({ page }) => {
@@ -279,7 +280,10 @@ def stage_ui_smoke(output_dir: Path, entries: list, smoke_port: int,
     """
     stage = Path(output_dir) / UI_SMOKE_SUBDIR
     stage.mkdir(parents=True, exist_ok=True)
-    (stage / "contract-smoke.spec.ts").write_text(
+    # zz- 前缀 = 字母序殿后:权威流套件(flow-suite)先跑在 pristine 种子
+    # 上;爬虫有交互副作用(归档交付实测:它会清空格子,毒化流套件的
+    # 值级断言),advisory 层殿后承受自己与流的残留。
+    (stage / "zz-contract-smoke.spec.ts").write_text(
         generate_spec(entries, auth), encoding="utf-8")
     (stage / "playwright.config.ts").write_text(generate_config(smoke_port), encoding="utf-8")
     (stage / "README.md").write_text(_README.replace("__CLI__", cli_hint), encoding="utf-8")
@@ -349,14 +353,14 @@ def auth_from_compiled(fixture_compiled: dict | None, entries: list | None = Non
 def build_ui_smoke_cmd(cli_path: str | None) -> str:
     """节点/收尾提示词附带的被批准自检命令(与 SPEC RUN 同构)。
 
-    显式限定 contract-smoke.spec.ts:模型自建的同目录 MY-CHECK.spec.ts
+    显式限定 zz-contract-smoke.spec.ts:模型自建的同目录 MY-CHECK.spec.ts
     不会混进权威自检;一次性检查走"MY-CHECK + 显式文件参数"正路。"""
     if cli_path:
         cmd = (f"node {cli_path} test --config "
-               f".arc/ui-smoke/playwright.config.ts contract-smoke.spec.ts")
+               f".arc/ui-smoke/playwright.config.ts zz-contract-smoke.spec.ts")
     else:
         cmd = ("npx --yes @playwright/test test --config "
-               ".arc/ui-smoke/playwright.config.ts contract-smoke.spec.ts")
+               ".arc/ui-smoke/playwright.config.ts zz-contract-smoke.spec.ts")
     return (
         "\nUI SMOKE RUN (sanctioned, host-authored contract suite): run this "
         "any time to self-check the UI contract in a real browser — contract "
@@ -385,6 +389,9 @@ def parse_report(json_stdout: str, last_run: Path | None) -> dict:
     passed = failed = 0
     titles: list[str] = []
     fails: list[str] = []
+    # 执行序结果(workers=1 时报告序=执行序):止损模拟(breaker_view)
+    # 的输入——平台 runner 连败即弃测,本地要能算"修哪条解锁多少"。
+    order: list[dict] = []
 
     try:
         payload = json.loads(json_stdout[json_stdout.find("{"):])
@@ -403,6 +410,8 @@ def parse_report(json_stdout: str, last_run: Path | None) -> dict:
                               and any(r.get("status") == "passed" for r in results)))
                     title = str(t.get("title")
                                 or spec.get("title") or "untitled")[:160]
+                    order.append({"file": str(spec.get("file") or ""),
+                                  "title": title, "ok": bool(ok)})
                     if ok:
                         passed += 1
                     else:
@@ -430,11 +439,64 @@ def parse_report(json_stdout: str, last_run: Path | None) -> dict:
         except (json.JSONDecodeError, OSError, ValueError):
             reds = []
     return {"passed": passed, "failed": failed,
-            "titles": " | ".join(titles), "fails": fails, "reds": reds}
+            "titles": " | ".join(titles), "fails": fails, "order": order,
+            "reds": reds}
+
+
+# 平台引擎版本(镜像取证 09-27):生产 runner 镜像全局 @playwright/test
+# 1.57.0 + chromium-1200。裸环境兜底安装钉此版本,绝不装 latest。
+PLATFORM_PW_VERSION = "1.57.0"
+
+
+def _browsers_dir() -> Path | None:
+    """镜像浏览器目录($PLAYWRIGHT_BROWSERS_PATH 或 /ms-playwright)。
+    存在即意味着身处真实/仿真 runner 容器——全局工具链可直用。"""
+    for candidate in (os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
+                      "/ms-playwright"):
+        if candidate and Path(candidate).is_dir() \
+                and any(Path(candidate).glob("chromium-*")):
+            return Path(candidate)
+    return None
+
+
+def resolve_global_cli() -> Path | None:
+    """镜像全局 @playwright/test 的 cli.js——与评测引擎同一份二进制
+    (identity 优于 alignment),零安装零网络。
+
+    仅当镜像浏览器目录存在时采信:开发机的 host-global playwright 版本
+    不受控,不进此路径。候选:镜像实测路径 → npm root -g → which
+    playwright 反推(bin 的祖先树上的 lib/node_modules)。"""
+    if _browsers_dir() is None:
+        return None
+    cands = [Path("/usr/local/node/lib/node_modules/@playwright/test/cli.js")]
+    try:
+        r = subprocess.run(["npm", "root", "-g"], capture_output=True,
+                           text=True, timeout=30, errors="replace")
+        root = (r.stdout or "").strip().splitlines()[-1].strip() \
+            if (r.stdout or "").strip() else ""
+        if root:
+            cands.append(Path(root) / "@playwright" / "test" / "cli.js")
+    except (OSError, subprocess.SubprocessError, IndexError):
+        pass
+    pw_bin = shutil.which("playwright")
+    if pw_bin:
+        for anc in Path(pw_bin).resolve().parents:
+            cands.append(anc / "lib" / "node_modules" / "@playwright"
+                         / "test" / "cli.js")
+    for c in cands:
+        if c.is_file():
+            return c.resolve()
+    return None
 
 
 def _lg_cli() -> Path | None:
-    """local-grader 的 @playwright/test cli.js(容器内 _ensure_host_toolchain 装好)。"""
+    """自验工具链 cli:镜像全局优先(评测同引擎,零安装——09-27 定论:
+    local-grader 已移出比赛包,容器内不再装私有副本);开发机兜底 repo
+    的 local-grader 安装(node_modules 由 _ensure_host_toolchain/开发者
+    自建)。"""
+    g = resolve_global_cli()
+    if g is not None:
+        return g
     here = Path(__file__).resolve().parent
     for root in (here / "local-grader", here.parent / "local-grader"):
         cli = root / "node_modules" / "@playwright" / "test" / "cli.js"
@@ -565,7 +627,8 @@ def run_smoke(output_dir: Path, smoke_port: int, entries: list,
         # 权威判定跑契约爬虫 + 场景流套件(flow_suite 生成,平台同构的
         # 交互级走查);模型自建的 MY-CHECK.spec.ts 不进宿主判定。
         # grep(批后流回归):只跑已完成节点的流,未实现节点不产噪音。
-        targets = ["contract-smoke.spec.ts"]
+        # 顺序即字母序:flow-suite(权威)先,crawler(advisory)后
+        targets = ["zz-contract-smoke.spec.ts"]
         if (run_dir / "flow-suite.spec.ts").is_file():
             targets.append("flow-suite.spec.ts")
         args = [node_bin, str(cli), "test",

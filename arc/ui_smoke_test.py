@@ -192,7 +192,7 @@ class SpecGenTests(unittest.TestCase):
             readme = (stage / "README.md").read_text()
             self.assertIn("HOST-OWNED", readme)
             self.assertIn("/x/cli.js", readme)
-            self.assertIn("contract-smoke.spec.ts", readme)
+            self.assertIn("zz-contract-smoke.spec.ts", readme)
             gi = (stage / ".gitignore").read_text()
             self.assertIn("node_modules", gi)
             self.assertIn("last-run.json", gi)
@@ -243,13 +243,13 @@ class CmdTests(unittest.TestCase):
                                           "@playwright/test/cli.js")
         self.assertIn("--config .arc/ui-smoke/playwright.config.ts", cmd)
         # 显式过滤到权威契约套件:模型自建 MY-CHECK 不混进自检。
-        self.assertIn("contract-smoke.spec.ts", cmd)
+        self.assertIn("zz-contract-smoke.spec.ts", cmd)
         self.assertNotIn("node -e", cmd)
         self.assertNotIn(".arc/acceptance", cmd)
         self.assertIn("MY-CHECK.spec.ts.example", cmd)  # 一次性检查正路
         fallback = ui_smoke.build_ui_smoke_cmd(None)
         self.assertIn("npx --yes @playwright/test", fallback)
-        self.assertIn("contract-smoke.spec.ts", fallback)
+        self.assertIn("zz-contract-smoke.spec.ts", fallback)
 
 
 class RedShotVisualTests(unittest.TestCase):

@@ -122,6 +122,8 @@ _WORKSHEET_NAMED_RE = re.compile(
 _GRID_NAME_RE = re.compile(r"grid[^.]{0,80}?accessible name\s+\"([^\"]+)\"")
 _SEED_WORKBOOK_RE = re.compile(r"seeded workbook\s+`([^`\n]+)`")
 _SEED_WORKSHEET_RE = re.compile(r"worksheet\s+`([^`\n]+)`")
+# 种子 A1 值(GIVEN 反引号):值级断言的数据源——黑盒最爱断言的一层
+_SEED_A1_RE = re.compile(r"cell A1 value\s+`([^`\n]+)`")
 
 _TAB_MENU_RE = re.compile(r"tab menu|worksheet tab|Worksheet options", re.I)
 _ROW_MENU_RE = re.compile(r"row[- ]number menu|row menu", re.I)
@@ -216,7 +218,7 @@ def _seed_info(tree: dict) -> dict:
     """入口态:种子工作簿/工作表名(场景 GIVEN 反引号)、网格可访问名
     ——全部来自需求原文,确定性。"""
     info = {"workbook": None, "worksheet": None, "worksheet2": None,
-            "grid": None, "menu_opener": None}
+            "grid": None, "menu_opener": None, "a1": None}
     texts: list[str] = []
 
     def visit(node) -> None:
@@ -243,6 +245,9 @@ def _seed_info(tree: dict) -> dict:
         info["worksheet"] = uniq[0]
         if len(uniq) > 1:
             info["worksheet2"] = uniq[1]
+    m = _SEED_A1_RE.search(joined)
+    if m:
+        info["a1"] = m.group(1).strip()
     m = _GRID_NAME_RE.search(joined)
     if m:
         info["grid"] = m.group(1).strip()
@@ -338,9 +343,11 @@ _HEADER = """\
 // self-checks were green. Destructive submits are asserted visible, never
 // clicked (one shared app instance, platform-isomorphic).
 import { expect, test } from '@playwright/test';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const AUTH = __AUTH_JSON__ as { username: string; passwords: string[] } | null;
-const SEED = __SEED_JSON__ as { workbook: string | null; worksheet: string | null; worksheet2: string | null; grid: string | null };
+const SEED = __SEED_JSON__ as { workbook: string | null; worksheet: string | null; worksheet2: string | null; grid: string | null; a1: string | null };
 
 async function openHome(page: any) {
   await page.goto('/');
@@ -719,6 +726,97 @@ def _gen_signin_roundtrip(node: dict) -> list[str]:
     ]
 
 
+def _gen_export(node: dict, seed: dict) -> list[str]:
+    """导出流:点导出按钮 → download 事件 → 文件名 .csv → 无 BOM →
+    内容含种子值 → 导出后界面状态不变。REQ-1-3-2 类。"""
+    name = str(node.get("name") or node.get("id") or "")
+    desc = str(node.get("description") or "")
+    if not re.search(r"\bexport\b", name + " " + desc, re.I):
+        return []
+    btn = next((n for _, r, n in _finditer_role(desc)
+                if r == "button" and re.search(r"export", n, re.I)), None)
+    if not btn:
+        return []
+    nid = str(node.get("id") or "")
+    lines = [
+        f"test('{nid} flow: {name.lower()}', async ({{ page }}) => {{",
+        "  await openWorkbook(page);",
+    ]
+    if seed.get("grid"):
+        lines.append("  const grid = page.getByRole('grid', "
+                     "{ name: SEED.grid! });")
+        lines.append("  await expect(grid).toBeVisible();")
+    lines += [
+        "  const dlPromise = page.waitForEvent('download');",
+        f"  await page.getByRole('button', {{ name: {_ts(btn)}, exact: true }}).click();",
+        "  const dl = await dlPromise;",
+        "  expect(dl.suggestedFilename()).toMatch(/\\.csv$/i);",
+        "  const buf = fs.readFileSync((await dl.path())!, 'utf8');",
+        "  expect(buf.startsWith('\\uFEFF')).toBe(false);",
+    ]
+    if seed.get("a1"):
+        lines.append("  expect(buf).toContain(SEED.a1!);")
+    if seed.get("grid"):
+        lines.append("  await expect(grid).toBeVisible();")
+    lines.append("});")
+    return lines
+
+
+def _gen_import(node: dict, seed: dict) -> list[str]:
+    """导入流:宿主生成小 CSV(含引号转义) → setInputFiles → 确认 →
+    新工作簿打开且网格逐格匹配。REQ-1-3-1 类(文件控件此前只能看不能
+    驱动,setInputFiles 补上平台同构的交互)。"""
+    name = str(node.get("name") or node.get("id") or "")
+    desc = str(node.get("description") or "")
+    if not re.search(r"\bimport\b", name + " " + desc, re.I):
+        return []
+    ctrls = _finditer_role(desc)
+    btn = next((n for _, r, n in ctrls
+                if r == "button" and re.search(r"import", n, re.I)), None)
+    file_field = next((n for _, r, n in ctrls
+                       if r == "textbox" and
+                       _is_file_field(desc, _field_offset(desc, n))), None)
+    if not btn or not file_field:
+        return []
+    dialog_name = next((n for _, r, n in ctrls if r == "dialog"), None)
+    confirm = next((n for _, r, n in ctrls
+                    if r == "button" and
+                    re.search(r"confirm|import", n, re.I) and n != btn), None)
+    nid = str(node.get("id") or "")
+    opener = _role_expr("page", "button", btn)
+    lines = [
+        f"test('{nid} flow: {name.lower()}', async ({{ page }}) => {{",
+        "  await openHome(page);",
+        "  const tmp = path.join(__dirname, 'flow-import.csv');",
+        "  fs.writeFileSync(tmp, 'H1,H2\\nAlpha,\"quoted, comma\"\\n');",
+        f"  await {opener}.click();",
+    ]
+    scope = "page"
+    if dialog_name:
+        lines.append(f"  const dlg = {_role_expr('page', 'dialog', dialog_name)};")
+        lines.append("  await expect(dlg).toBeVisible();")
+        scope = "dlg"
+    lines.append(f"  await {scope}.getByLabel({_ts(file_field)})"
+                 ".setInputFiles(tmp);")
+    if confirm:
+        lines.append(f"  await {_role_expr(scope, 'button', confirm)}.click();")
+    if seed.get("grid"):
+        lines.append("  const grid = page.getByRole('grid', "
+                     "{ name: SEED.grid! });")
+        lines.append("  await expect(grid).toBeVisible();")
+        lines.append("  await expect(grid.getByRole('gridcell', "
+                     "{ name: 'A1', exact: true })).toHaveText('H1');")
+        lines.append("  await expect(grid.getByRole('gridcell', "
+                     "{ name: 'A2', exact: true })).toHaveText('Alpha');")
+    lines.append("});")
+    return lines
+
+
+def _field_offset(desc: str, name: str) -> int:
+    m = re.search(re.escape(name), desc)
+    return m.start() if m else 0
+
+
 def _gen_grid(tree: dict, seed: dict) -> list[str]:
     """网格编辑流(表格式任务地基):A1 选中 → 空 A5(固定网格) →
     直接键入 → 值在场 → reload 持久。
@@ -740,7 +838,7 @@ def _gen_grid(tree: dict, seed: dict) -> list[str]:
     if target is None:
         return []
     nid = str(target.get("id") or "")
-    return [
+    lines = [
         f"test('{nid} flow: grid cell select-type-persist', "
         "async ({ page }) => {",
         "  await openWorkbook(page);",
@@ -749,14 +847,31 @@ def _gen_grid(tree: dict, seed: dict) -> list[str]:
         "{ name: c, exact: true });",
         "  await cell('A1').click();",
         "  await expect(cell('A1')).toHaveAttribute('aria-selected', 'true');",
+    ]
+    if seed.get("a1"):
+        lines.append("  await expect(cell('A1')).toHaveText(SEED.a1!);")
+    lines += [
         "  await cell('A5').click();",
         "  await page.keyboard.type('Flow123');",
         "  await page.keyboard.press('Enter');",
         "  await expect(cell('A5')).toHaveText('Flow123');",
+        "  // formula leg: REQ-4 family smoke (computed value shown, "
+        "persists)",
+        "  await cell('A6').click();",
+        "  await page.keyboard.type('=1+2');",
+        "  await page.keyboard.press('Enter');",
+        "  await expect(cell('A6')).toHaveText('3');",
         "  await page.reload();",
         "  await expect(cell('A5')).toHaveText('Flow123');",
+        "  await expect(cell('A6')).toHaveText('3');",
         "});",
     ]
+    return lines
+
+
+def _is_rename_block(block: str) -> bool:
+    first = block.splitlines()[0] if block else ""
+    return " flow: " in first and "rename" in first.lower()
 
 
 def _title_of(block_first_line: str) -> str:
@@ -784,6 +899,8 @@ def generate_spec(tree: dict, auth: dict | None = None,
         if not block and _signin_is_node(node):
             block = _gen_signin_roundtrip(node)
         if not block:
+            block = _gen_import(node, seed) or _gen_export(node, seed)
+        if not block:
             block = _gen_walk(node, seed, signin)
         if block:
             tests.append("\n".join(block))
@@ -795,6 +912,12 @@ def generate_spec(tree: dict, auth: dict | None = None,
         tests.append("\n".join(grid_block))
         node_map[gid] = _title_of(grid_block[0])
 
+    # 执行序:改名族排最后——其还原腿在被测应用的"Save 用后禁用"缺陷
+    # 上会失败,残留的改名状态会毒化后续流的入口(openWorkbook 点不到
+    # 种子链接),把归因从"该流缺陷"污染成"入口消失"。平台同构地承受
+    # 残留(run2 取证),但我们的排序可以自主选择。
+    tests.sort(key=lambda block: 0 if not _is_rename_block(block) else 1)
+
     if not tests:
         return "", {}
     text = _emit_common(signin)
@@ -802,6 +925,11 @@ def generate_spec(tree: dict, auth: dict | None = None,
             .replace("__AUTH_JSON__", json.dumps(auth, ensure_ascii=False))
             .replace("__SEED_JSON__", json.dumps(seed, ensure_ascii=False)))
     text += "\n\n" + "\n\n".join(tests) + "\n"
+    # 平台同构超时:评测每 test 10s 墙——本地 90s 熬过的慢流在平台必死
+    # (greenButRed 原始形态),流级红必须本地就暴露。
+    text = text.replace(
+        "async ({ page }) => {\n",
+        "async ({ page }) => {\n  test.setTimeout(10_000);\n")
     return text, node_map
 
 
@@ -820,6 +948,40 @@ def _emit_common(signin: tuple | None) -> str:
                  .replace("__SIGNIN_PASS__", _ts(pass_label))
                  .replace("__SIGNIN_BUTTON__", _ts(button)))
     return text
+
+
+def breaker_view(report: dict, consecutive_limit: int = 8) -> dict | None:
+    """止损模拟:按执行序走一遍,连败达限即截断(github 二跑铁证:
+    8 连败后 ~39 测未执行)。返回平台有效得分的近似与解锁算术。
+
+    order 来自 ui_smoke.parse_report(workers=1 时 JSON 报告序=执行序)。"""
+    order = [o for o in (report.get("order") or []) if o.get("title")]
+    if not order:
+        return None
+    streak = 0
+    chain: list[str] = []
+    passed = 0
+    cut_idx = None
+    for i, t in enumerate(order):
+        if t.get("ok"):
+            passed += 1
+            streak = 0
+            chain = []
+        else:
+            streak += 1
+            chain.append(str(t["title"]))
+            if streak >= consecutive_limit:
+                cut_idx = i
+                break
+    total = len(order)
+    if cut_idx is None:
+        return {"cut": False, "simulated_pass": passed, "total": total,
+                "blocked": 0}
+    return {"cut": True, "simulated_pass": passed, "total": total,
+            "blocked": total - (cut_idx + 1),
+            "cut_after": str(order[cut_idx]["title"]),
+            "failing_chain": chain,
+            "first_fail": chain[0] if chain else None}
 
 
 def grep_for(nodes: list[str]) -> str | None:

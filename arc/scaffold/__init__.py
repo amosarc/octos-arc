@@ -26,6 +26,7 @@ from .manifest import (  # noqa: F401
     CODEGEN_STATE_REL,
     COMPLETE_KEYS,
     COOKIE_NAME,
+    INSTALL_REGISTRY,
     MODEL_FILES,
     NPM_REGISTRY,
     READY_KEYS,
@@ -40,7 +41,8 @@ __all__ = [
     "task_stubs", "scaffold_task_features",
     "Watcher", "compile_schema", "load_schema", "schema_path",
     "SCAFFOLD_FILES", "READY_KEYS", "COMPLETE_KEYS", "SCHEMA_JSON_REL",
-    "COOKIE_NAME", "NPM_REGISTRY", "STACK_ID", "RULES_MUST_NAME",
+    "COOKIE_NAME", "NPM_REGISTRY", "INSTALL_REGISTRY", "STACK_ID",
+    "RULES_MUST_NAME",
     "backend", "frontend", "manifest",
 ]
 
@@ -100,8 +102,8 @@ def prewarm_deps(output_dir: Path, log=print) -> None:
     非致命:失败只告警,rehearsal 与模型轮仍可重试。
     """
     env = dict(os.environ,
-               npm_config_registry=NPM_REGISTRY,
-               NPM_CONFIG_REGISTRY=NPM_REGISTRY)
+               npm_config_registry=INSTALL_REGISTRY,
+               NPM_CONFIG_REGISTRY=INSTALL_REGISTRY)
     for sub in ("backend", "frontend"):
         d = Path(output_dir) / sub
         if not (d / "package.json").is_file():

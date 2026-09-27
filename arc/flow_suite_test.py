@@ -52,6 +52,20 @@ SHEET_TREE = _node(
                   'button. An empty name must be rejected with '
                   '"Workbook name cannot be empty". Reopening the '
                   'workbook shows the most recently saved name.'),
+            _node("REQ-1-3-1", "Import CSV to Create a Workbook",
+                  'Users start an import by clicking the "Import CSV" '
+                  'button on the workbook home page. A dialog named '
+                  '"Import CSV" provides a file control labeled '
+                  '"CSV file" and a "Confirm import" button. After a '
+                  'successful import, a new workbook is created whose '
+                  'name is the file name.'),
+            _node("REQ-1-3-2", "Export the Current Worksheet as CSV",
+                  'Users can export the current active worksheet using '
+                  'the button with the accessible name "Export CSV" on '
+                  'the workbook editor toolbar. Clicking it starts a '
+                  'browser download; the suggested filename ends with '
+                  '".csv". Before and after export, the grid values '
+                  'remain unchanged.'),
         ]),
         _node("REQ-2", "Worksheets", SHEET_FOLDER_DESC, ntype="FOLDER", children=[
             _node("REQ-2-1-3", "Rename a Worksheet",
@@ -183,6 +197,45 @@ class GenerationTests(unittest.TestCase):
         self.assertIn("cell('A5').click();", text)
         self.assertIn("toHaveText('Flow123')", text)
 
+    def test_timeout_import_export_and_breaker(self):
+        text, nmap = flow_suite.generate_spec(SHEET_TREE, None)
+        # 平台同构 10s 墙
+        self.assertEqual(text.count("test.setTimeout(10_000);"),
+                         len(nmap))
+        # 导出流:下载事件/文件名/BOM/种子内容/状态不变
+        self.assertIn("REQ-1-3-2", nmap)
+        self.assertIn("waitForEvent('download')", text)
+        self.assertIn(r"/\.csv$/i", text)
+        self.assertIn(r"startsWith('\uFEFF')", text)
+        # 导入流:setInputFiles 往返 + 逐格断言
+        self.assertIn("REQ-1-3-1", nmap)
+        self.assertIn("setInputFiles(tmp)", text)
+        self.assertIn("toHaveText('H1')", text)
+        # 网格流:种子 A1 值 + 公式腿
+        self.assertIn("toHaveText(SEED.a1!)", text)
+        self.assertIn("toHaveText('3')", text)
+
+    def test_breaker_view_math(self):
+        rep = {"order": [
+            {"title": "A", "ok": True},
+            {"title": "C1", "ok": False},
+            {"title": "B", "ok": True},
+            {"title": "C2", "ok": False},
+            *({"title": f"E{i}", "ok": False} for i in range(1, 9)),
+            {"title": "Z", "ok": True}]}
+        bk = flow_suite.breaker_view(rep)
+        self.assertTrue(bk["cut"])
+        self.assertEqual(bk["simulated_pass"], 2)
+        self.assertEqual(bk["blocked"], 2)  # E8 + Z
+        self.assertEqual(bk["first_fail"], "C2")
+        self.assertEqual(bk["failing_chain"][0], "C2")
+        # 中途通过会重置连败链
+        self.assertEqual(bk["failing_chain"][-1], "E7")
+        self.assertIsNone(flow_suite.breaker_view({}))
+        no_cut = flow_suite.breaker_view(
+            {"order": [{"title": "x", "ok": False}]})
+        self.assertFalse(no_cut["cut"])
+
     def test_github_register_and_signin(self):
         auth = {"username": "alice-dev", "passwords": ["Valid-password-123!"]}
         text, nmap = flow_suite.generate_spec(GITHUB_TREE, auth)
@@ -214,7 +267,9 @@ class GenerationTests(unittest.TestCase):
     def test_spec_is_playwright_shaped(self):
         text, _ = flow_suite.generate_spec(SHEET_TREE, None)
         self.assertIn("import { expect, test } from '@playwright/test';", text)
-        self.assertNotIn("__", text.replace("__proto__", ""))  # 模板占位符全替换
+        # 模板占位符全替换(允许 __dirname/__proto__ 这类 TS 合法双下划线)
+        for ph in ("__AUTH_JSON__", "__SEED_JSON__", "__SIGNIN_"):
+            self.assertNotIn(ph, text)
 
 
 class MergeTests(unittest.TestCase):

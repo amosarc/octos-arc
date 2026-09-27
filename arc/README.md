@@ -90,8 +90,10 @@ tree-sitter repomap 每个 marker turn 全量重扫,宿主直写文件自动进�
 并列入 `scaffolded_by_host`(do NOT rewrite 清单)。开关:
 `OCTOS_ARC_HOST_CODEGEN=0` 关 codegen,`OCTOS_ARC_HOST_SCAFFOLD=0` 回退
 模型自建骨架(保留 skeleton 重试老路径),`OCTOS_ARC_HOST_GRADE=0` 关
-Tier-2(缺省开:final 阶段宿主跑 staged Playwright——复用 local-grader 的
-@playwright/test 安装,node_modules 软链进临时 run 目录;E2E_BASE_URL 指向
+Tier-2(缺省开:final 阶段宿主跑 staged Playwright——容器内直用镜像
+全局 @playwright/test(与评测引擎同一份二进制,零安装;09-27 起
+local-grader 不再进比赛包),开发机兜底 repo 的 local-grader 安装,
+node_modules 软链进临时 run 目录;E2E_BASE_URL 指向
 smoke 端口并双听 spec 基端口;全绿跳过 final LLM 轮,红则把失败清单喂给
 final 轮;环境跑不了自动降级为模型自查)。教训:JSON reporter 的结果状态
 是 `passed`,`expected` 是 outcome 字段,分类要两者都认。

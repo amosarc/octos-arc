@@ -686,14 +686,12 @@ def _boot_dev_server(output_dir: Path, smoke_port: int,
 
 
 def _local_grader_root() -> Path:
-    """Single resolver for the Tier-2 toolchain location, shared by the
-    install path and the grader path (they used to each compute
-    `Path(__file__).parent / "local-grader"` independently). Prefers the
-    local-grader/ shipped next to main.py (pack.sh); falls back to a
-    scratch dir when the bundle lacks it — 2026-09-20: the platform
-    package omitted local-grader/ and npm install died on ENOENT, which
-    cascaded into a missing playwright.config.ts, an empty SPEC RUN
-    command, and the model hand-rolling its own Playwright verification."""
+    """开发机兜底工具链位置(镜像全局解析失败后的第二级,见
+    _ensure_host_toolchain):repo 的 arc/local-grader(gitignored,
+    开发者/lock 钉 1.57.0 自建);无清单环境落 tmpdir 兜底目录并按
+    PLATFORM_PW_VERSION 钉版本安装。历史:2026-09-20 包内漏清单导致
+    ENOENT→playwright.config 缺席→SPEC RUN 空命令→模型自编浏览器验证
+    ——09-27 起容器主路径=镜像全局直用,该故障形态结构性消失。"""
     lg = Path(__file__).resolve().parent / "local-grader"
     if (lg / "package.json").is_file():
         return lg
@@ -703,81 +701,53 @@ def _local_grader_root() -> Path:
 
 
 def _ensure_host_toolchain(log) -> Path | None:
-    """宿主尽算原则：Tier-2 评测链(@playwright/test + chromium)由 main 在
-    启动时装好——模型零安装。装好后返回 local-grader 的 @playwright/test
-    cli 路径(供给模型一条可直接自验的命令)；失败返回 None(不致命，
-    Tier-2 自会降级为 model final check)。"""
+    """宿主尽算原则：自验工具链(Tier-2/ui-smoke/SPEC RUN)三级解析——
+
+    ① 镜像全局直用(真实/仿真容器的主路径)：runner 镜像自带全局
+       @playwright/test@1.57.0 + chromium-1200,与评测引擎是同一份
+       二进制(identity 优于 alignment),零安装零网络。09-27 定论:
+       local-grader 已移出比赛包,容器内不再 npm install 私有副本,
+       run5 的 CDN 不可达风险在容器内结构性消失。
+    ② 开发机兜底：repo 的 arc/local-grader(node_modules 就直接用;
+       只有清单则 npm install,lock 已钉 1.57.0)。
+    ③ 裸环境兜底：无清单的 tmpdir 装 @playwright/test@PLATFORM_PW_
+       VERSION(钉版本,绝不装 latest——npx latest 的浏览器漂移是
+       run4/run5 的旧伤)。
+    失败返回 None(不致命,Tier-2 自会降级为 model final check)。"""
+    global_cli = ui_smoke.resolve_global_cli()
+    if global_cli is not None:
+        log(f"[toolchain] using the image-global @playwright/test "
+            f"(the evaluator's own engine, zero install): {global_cli}")
+        return global_cli
     lg = _local_grader_root()
     lg_cli = lg / "node_modules" / "@playwright" / "test" / "cli.js"
-    env = dict(os.environ, npm_config_registry=scaffold.NPM_REGISTRY)
+    env = dict(os.environ, npm_config_registry=scaffold.INSTALL_REGISTRY)
     quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    # Version alignment (2026-09-21 keep-25-run5): the runner image ships a
-    # GLOBAL @playwright/test plus its matching chromium build under
-    # PLAYWRIGHT_BROWSERS_PATH=/ms-playwright, but local-grader's manifest
-    # pins ^1.63 — a version-skewed install demands a browser DOWNLOAD for
-    # the newer build, and when the CDN is unreachable the in-turn SPEC RUN
-    # dies for the whole run (run4 downloaded fine; run5 did not). Install
-    # the image's exact version instead and reuse its browsers: zero
-    # network dependency for the verification chain.
-    image_pw = shutil.which("playwright")
-    image_version = None
-    if image_pw:
-        try:
-            probe = subprocess.run([image_pw, "--version"], capture_output=True,
-                                   text=True, timeout=60, errors="replace")
-            m = re.search(r"(\d+\.\d+\.\d+)", probe.stdout or "")
-            image_version = m.group(1) if m else None
-        except (OSError, subprocess.SubprocessError):
-            image_version = None
-    browsers_dir = None
-    for candidate in (os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
-                      "/ms-playwright"):
-        if candidate and Path(candidate).is_dir() \
-                and any(Path(candidate).glob("chromium-*")):
-            browsers_dir = Path(candidate)
-            break
-
-    # Align ONLY when we can reuse the image's browsers; on a dev host
-    # (no browsers_dir) the manifest install + user-cache download is the
-    # proven path and a host-global playwright version need not match it.
-    image_version = image_version if browsers_dir is not None else None
+    browsers_dir = ui_smoke._browsers_dir()
     if not lg_cli.is_file():
-        if image_version:
-            log(f"[toolchain] installing @playwright/test@{image_version} "
-                f"(image-aligned) ...")
-            try:
-                subprocess.run(
-                    ["npm", "install", "--no-save", "--no-audit", "--no-fund",
-                     "--loglevel", "error", f"@playwright/test@{image_version}"],
-                    cwd=lg, env=env, timeout=600, check=True, **quiet)
-                log("[toolchain] @playwright/test installed")
-            except (OSError, subprocess.SubprocessError) as exc:
-                log(f"[toolchain] aligned install failed ({exc}); "
-                    "falling back to manifest install")
-                image_version = None
-        if not image_version:
-            log("[toolchain] installing @playwright/test into local-grader ...")
-            try:
-                if (lg / "package.json").is_file():
-                    subprocess.run(["npm", "install", "--no-audit", "--no-fund",
-                                    "--loglevel", "error"], cwd=lg, env=env,
-                                   timeout=600, check=True, **quiet)
-                else:
-                    # Fallback dir has no manifest; install without touching one.
-                    subprocess.run(["npm", "install", "--no-save", "--no-audit",
-                                    "--no-fund", "--loglevel", "error",
-                                    "@playwright/test"], cwd=lg, env=env,
-                                   timeout=600, check=True, **quiet)
-                log("[toolchain] @playwright/test installed")
-            except (OSError, subprocess.SubprocessError) as exc:
-                log(f"[toolchain] @playwright/test install failed (non-fatal, "
-                    f"Tier-2 will degrade): {exc}")
-                return None
+        log("[toolchain] installing @playwright/test into local-grader ...")
+        try:
+            if (lg / "package.json").is_file():
+                subprocess.run(["npm", "install", "--no-audit", "--no-fund",
+                                "--loglevel", "error"], cwd=lg, env=env,
+                               timeout=600, check=True, **quiet)
+            else:
+                # Fallback dir has no manifest; install the PINNED platform
+                # version without touching one.
+                subprocess.run(["npm", "install", "--no-save", "--no-audit",
+                                "--no-fund", "--loglevel", "error",
+                                f"@playwright/test@"
+                                f"{ui_smoke.PLATFORM_PW_VERSION}"],
+                               cwd=lg, env=env, timeout=600, check=True,
+                               **quiet)
+            log("[toolchain] @playwright/test installed")
+        except (OSError, subprocess.SubprocessError) as exc:
+            log(f"[toolchain] @playwright/test install failed (non-fatal, "
+                f"Tier-2 will degrade): {exc}")
+            return None
     pw_bin = lg / "node_modules" / ".bin" / "playwright"
     if browsers_dir is not None:
-        # Image browsers already match the aligned install — skip the
-        # download entirely (this is the whole point of aligning).
+        # Image browsers already match — skip the download entirely.
         log(f"[toolchain] chromium present at {browsers_dir}; no download")
     else:
         cache = ((Path.home() / "Library" / "Caches" / "ms-playwright")
@@ -809,25 +779,28 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
     if tests_dir is None or not tests_dir.is_dir():
         return None
     import urllib.request
-    grader = output_dir / "local-grader" / "host-tier2"
-    if grader.exists():
-        shutil.rmtree(grader, ignore_errors=True)
+    # 09-27:run 目录移出交付工作区(旧路径 output_dir/local-grader/
+    # host-tier2 会把宿主 scratch 留给评测看到)——纯 host scratch,
+    # tempdir 承载,finally 清理。
+    grader = Path(tempfile.mkdtemp(prefix="octos-tier2-"))
     run_dir = grader / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
     shutil.copytree(tests_dir, run_dir / "tests", dirs_exist_ok=True)
+    # config 与 runner 亲写版逐字段同构(镜像取证:10s/10s/workers1/
+    # retries0/headless/screenshot off/trace off)。
     cfg = ("import { defineConfig } from '@playwright/test';\n"
            "export default defineConfig({ testDir: './tests',\n"
            "  fullyParallel: false, workers: 1,\n"
            "  retries: 0,\n"
+           "  timeout: 10_000, expect: { timeout: 10_000 },\n"
            "  use: { baseURL: process.env.E2E_BASE_URL || "
-           f"'http://127.0.0.1:{smoke_port}' }} }});\n")
+           f"'http://127.0.0.1:{smoke_port}', "
+           "headless: true, screenshot: 'off', trace: 'off' } });\n")
     (run_dir / "playwright.config.ts").write_text(cfg, encoding="utf-8")
-    # Prefer the bundled local-grader install (version-matched browsers are
-    # already cached); npx --yes pulls latest, which may need a browser
-    # build the sandbox cannot download.
-    lg_cli = (_local_grader_root() / "node_modules" / "@playwright" / "test"
-              / "cli.js")
-    if lg_cli.is_file():
+    # 镜像全局优先(评测同引擎);开发机兜底 local-grader;npx --yes 拉
+    # latest 的浏览器漂移是 run4/run5 旧伤,只作最后兜底。
+    lg_cli = ui_smoke._lg_cli()
+    if lg_cli is not None:
         cmd = [shutil.which("node") or "node", str(lg_cli),
                "test", "--reporter=json"]
         if spec_files:
@@ -930,6 +903,7 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
                 pass
+        shutil.rmtree(grader, ignore_errors=True)
         _free_web_port(smoke_port)
 
 
@@ -2226,6 +2200,21 @@ flow, REQ-1 family items first (the grader aborts the suite after \
 consecutive failures).\
 """
 
+def _breaker_line(ui_run: dict | None) -> str:
+    """止损模拟一行(github 二跑铁证:runner 连败即弃测)——把"修哪条
+    最值钱"变成算术,写进 final prompt。"""
+    bk = (ui_run or {}).get("breaker")
+    if not bk or not bk.get("cut"):
+        return ""
+    return ("\nBREAKER SIMULATION (the grader aborts the suite after ~8 "
+            f"consecutive failures): as-is ~{bk['simulated_pass']}/"
+            f"{bk['total']} tests would run before the cutoff after "
+            f"\"{bk['cut_after']}\"; ~{bk['blocked']} more tests are "
+            "blocked behind that failing chain — fixing its head \""
+            f"{bk.get('first_fail')}\" FIRST unlocks them. Entry-family "
+            "chains gate everything behind them.")
+
+
 def _ui_smoke_red_lines(ui_run: dict, limit: int = 12) -> str:
     """红项 → 提示词用的一行一证据清单(去重、限长)。"""
     seen: set = set()
@@ -2787,10 +2776,13 @@ def main() -> int:
             (stage_dir / "playwright.config.ts").write_text(
                 "import { defineConfig } from '@playwright/test';\n"
                 "export default defineConfig({ testDir: '.',\n"
-                "  fullyParallel: false, workers: 1,\n"
+                "  fullyParallel: false, workers: 1, retries: 0,\n"
                 "  timeout: 10_000, expect: { timeout: 10_000 },\n"
+                # 09-27 镜像取证:生产 runner 亲写 config 的 use 段逐字段
+                # 对齐(headless/screenshot/trace)——同构到字段级。
                 "  use: { baseURL: "
-                f"'http://127.0.0.1:{smoke_port}' }} }});\n",
+                f"'http://127.0.0.1:{smoke_port}', "
+                "headless: true, screenshot: 'off', trace: 'off' } });\n",
                 encoding="utf-8")
             if toolchain_cli is not None:
                 try:
@@ -2938,10 +2930,13 @@ def main() -> int:
                 auth=ui_smoke_auth)
             ui_smoke_cmd = ui_smoke.build_ui_smoke_cmd(
                 str(toolchain_cli) if toolchain_cli is not None else None)
+            # 3.11 兼容:括号内跨行的 f-string 表达式要 PEP 701(3.12+),
+            # runner/测试的 3.11 解析器直接 SyntaxError,提到括号外拼。
+            auth_desc = ("on (" + ui_smoke_auth["username"] + ")"
+                         if ui_smoke_auth else "off")
             log(f"[plan] UI contract smoke staged: "
                 f"{len(ui_smoke_entries)} contract strings, "
-                f"auth={'on (' + ui_smoke_auth['username'] + ')'
-                       if ui_smoke_auth else 'off'}")
+                f"auth={auth_desc}")
         # 场景流套件(FLOW RUN,09-27 契合度定论的主杠杆):从 ATOMIC
         # description 确定性生成平台同构的交互级走查 spec——契约串
         # presence 级探针看不见"控件存在但流走不通"类缺陷(sheet 二跑
@@ -3722,6 +3717,7 @@ def main() -> int:
                         fixture_password=fixture_manifest.FIXTURE_PASSWORD)
                     if ui_run is not None:
                         flow_suite.merge_flow_fails(ui_run, flow_node_map)
+                        ui_run["breaker"] = flow_suite.breaker_view(ui_run)
                         log(f"[plan] UI contract smoke: "
                             f"{ui_run['passed']}p/{ui_run['failed']}f "
                             f"({len(ui_run['reds'])} red item(s)"
@@ -3753,6 +3749,8 @@ def main() -> int:
                             if ui_run is not None:
                                 flow_suite.merge_flow_fails(
                                     ui_run, flow_node_map)
+                                ui_run["breaker"] = flow_suite.breaker_view(
+                                    ui_run)
                             log(f"[plan] ui-smoke repair {fix_attempt}: "
                                 f"{ui_run['failed']}f"
                                 if ui_run else
@@ -3825,6 +3823,7 @@ def main() -> int:
                             "rerun the UI SMOKE RUN command with "
                             "flow-suite.spec.ts appended to its file "
                             "arguments."
+                            + _breaker_line(ui_run)
                             + _ui_smoke_visual_lines(ui_run))
                     elif ui_green and not tests_dir:
                         final_prompt += (

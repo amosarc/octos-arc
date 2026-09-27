@@ -18,8 +18,7 @@ cp -R arc/. "$STAGE/octos-arc-linux-x86/"
 cd "$STAGE/octos-arc-linux-x86"
 find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 find . -name '*.pyc' -delete
-rm -rf arc-output local-grader/node_modules local-grader/run \
-       local-grader/test-results .env octos-arc-bundle.zip
+rm -rf arc-output local-grader .env octos-arc-bundle.zip
 # arc/template/ 是 pack.sh「打包即物化」留在仓库的可浏览副本，随 cp -R
 # 进了暂存区；scaffold 只写不删，先清空再生成（与 pack.sh 同一语义），
 # 否则 copytree 撞上已存在的 template/frontend 直接 FileExistsError。

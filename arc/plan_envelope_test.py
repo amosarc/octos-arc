@@ -331,7 +331,10 @@ class HostScaffoldTests(unittest.TestCase):
             self.assertNotIn("vitest", json.dumps(pkg))
             fpkg = json.loads((out / "frontend" / "package.json").read_text())
             self.assertEqual(fpkg["scripts"]["build"], "vite build")
-            self.assertIn("npmmirror", (out / "backend" / ".npmrc").read_text())
+            # 09-27 镜像对齐:船载 .npmrc 与 runner 镜像默认 registry 一致
+            # (npmjs.org);agent 期安装走 INSTALL_REGISTRY env 覆盖。
+            self.assertIn("registry.npmjs.org",
+                          (out / "backend" / ".npmrc").read_text())
 
             # idempotent: second call writes nothing
             self.assertEqual(sc.scaffold(out), [])
