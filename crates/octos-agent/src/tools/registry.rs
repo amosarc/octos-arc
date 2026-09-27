@@ -211,6 +211,15 @@ pub struct ToolRegistry {
     /// (`0` restores the full array); snapshots inherit the parent's value so
     /// a session never changes spec shape mid-stream (prompt-cache prefix).
     spec_slim: bool,
+    /// Opt-in LLM-visibility allowlist (ARC lane): when `Some`, ONLY these
+    /// tool names pass `specs()` / `catalog_snapshot()` / the visibility
+    /// predicates — everything else stays registered and executable
+    /// (`get()`/`execute*` resolve from [`Self::tools`], so a model that
+    /// calls a hidden name anyway still succeeds) but is no longer
+    /// advertised. Parsed from `OCTOS_TOOL_ALLOWLIST` in
+    /// `with_builtins_and_permissions`; `None` (the default) imposes no
+    /// restriction. Composes with `spec_slim`: both gates apply.
+    tool_allowlist: Option<HashSet<String>>,
 }
 
 /// Alias tools hidden from `specs()` while spec-slim is active.
@@ -239,6 +248,24 @@ pub const SPEC_SLIM_EXCLUDED: &[&str] = &[
 /// `OCTOS_SPEC_SLIM=0`.
 fn spec_slim_default() -> bool {
     !std::env::var("OCTOS_SPEC_SLIM").is_ok_and(|value| value == "0")
+}
+
+/// Parse `OCTOS_TOOL_ALLOWLIST` (comma-separated tool names) into an
+/// allowlist set. Returns `None` when the variable is unset or parses to
+/// nothing, meaning "no restriction". Names are trimmed and lowercased to
+/// match the registry's snake_case tool names.
+fn parse_tool_allowlist_env() -> Option<HashSet<String>> {
+    let raw = std::env::var("OCTOS_TOOL_ALLOWLIST").ok()?;
+    let set: HashSet<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if set.is_empty() {
+        tracing::warn!("OCTOS_TOOL_ALLOWLIST is set but empty after parsing; ignoring");
+        return None;
+    }
+    Some(set)
 }
 
 /// Default per-tool execution-timeout backstop (seconds) for the registry
@@ -281,6 +308,7 @@ impl ToolRegistry {
             sandbox: Arc::new(NoSandbox),
             context_log: std::sync::OnceLock::new(),
             spec_slim: spec_slim_default(),
+            tool_allowlist: None,
         }
     }
 
@@ -601,6 +629,9 @@ impl ToolRegistry {
         let Some(tool) = self.tools.get(name) else {
             return false;
         };
+        if !self.allowlist_allows(name) {
+            return false;
+        }
         if let Some(ref policy) = self.provider_policy {
             if !provider_policy_allows_equivalent_with_tags(policy, name, tool.tags()) {
                 return false;
@@ -626,6 +657,28 @@ impl ToolRegistry {
                 .active_context
                 .as_ref()
                 .is_some_and(|active| contexts.iter().any(|allowed| allowed == active))
+    }
+
+    /// Set the LLM-visibility allowlist. `None` clears it. Hidden tools
+    /// stay registered and executable; only the LLM-facing surface
+    /// (`specs()` / `catalog_snapshot()` / visibility predicates) is
+    /// narrowed. See the `tool_allowlist` field docs.
+    pub fn set_tool_allowlist(&mut self, names: Option<HashSet<String>>) {
+        self.tool_allowlist = names;
+        self.invalidate_cache();
+    }
+
+    /// Current allowlist, if one is active.
+    pub fn tool_allowlist(&self) -> Option<&HashSet<String>> {
+        self.tool_allowlist.as_ref()
+    }
+
+    /// Allowlist gate shared by `specs()`, `catalog_snapshot()` and the
+    /// visibility predicates. `None` = everything passes.
+    fn allowlist_allows(&self, name: &str) -> bool {
+        self.tool_allowlist
+            .as_ref()
+            .is_none_or(|set| set.contains(name))
     }
 
     /// Get the provider-facing tool specs.
@@ -664,6 +717,7 @@ impl ToolRegistry {
             })
             .filter(|t| self.active_context_allows(t.as_ref()))
             .filter(|t| !(self.spec_slim && SPEC_SLIM_EXCLUDED.contains(&t.name())))
+            .filter(|t| self.allowlist_allows(t.name()))
             .map(|t| ToolSpec {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
@@ -882,6 +936,7 @@ impl ToolRegistry {
             sandbox: self.sandbox.clone(),
             context_log: self.context_log.clone(),
             spec_slim: self.spec_slim,
+            tool_allowlist: self.tool_allowlist.clone(),
         };
         // #1148 codex P2: the cloned `tool_search` / `tool_suggest`
         // Arcs still point to the PARENT's catalog cell. Re-register
@@ -1238,6 +1293,37 @@ impl ToolRegistry {
         let catalog_cell = registry.live_catalog_handle();
         registry.register(ToolSearchTool::new(catalog_cell.clone()));
         registry.register(ToolSuggestTool::new(catalog_cell));
+        // Opt-in LLM-visibility allowlist (env-driven; the ARC lane runs a
+        // 7-tool spec). Applied after ALL builtin registration so the
+        // unknown-name warning below sees the full surface; later
+        // registrations (MCP/plugin/memory) are filtered at specs() time
+        // because the gate lives on the registry, not on this list.
+        if let Some(allow) = parse_tool_allowlist_env() {
+            let unknown = allow
+                .iter()
+                .filter(|n| !registry.tools.contains_key(*n))
+                .count();
+            if unknown > 0 {
+                for name in allow
+                    .iter()
+                    .filter(|n| !registry.tools.contains_key(*n))
+                {
+                    tracing::warn!(
+                        tool = %name,
+                        "OCTOS_TOOL_ALLOWLIST names a tool that is not registered"
+                    );
+                }
+            }
+            let total = registry.tools.len();
+            let visible = registry.tools.keys().filter(|n| allow.contains(*n)).count();
+            registry.tool_allowlist = Some(allow);
+            tracing::info!(
+                visible,
+                total,
+                unknown,
+                "OCTOS_TOOL_ALLOWLIST active: LLM-visible tool set narrowed"
+            );
+        }
         // Final refresh so the catalog reflects the just-registered
         // search/suggest tools too (cosmetic — they show up in their
         // own search results).
@@ -1264,6 +1350,7 @@ impl ToolRegistry {
                 })
             })
             .filter(|tool| self.active_context_allows(tool.as_ref()))
+            .filter(|tool| self.allowlist_allows(tool.name()))
             .map(|tool| {
                 ToolCatalogEntry::new(
                     tool.name(),
@@ -1548,6 +1635,66 @@ mod registry_dispatch_tests {
     // longer carries the old `(max_active, idle_threshold)` tuning knobs.
     fn make_registry() -> ToolRegistry {
         ToolRegistry::with_builtins(PathBuf::from("/tmp"))
+    }
+
+    #[test]
+    fn tool_allowlist_narrows_llm_visible_surface() {
+        let mut reg = make_registry();
+        let all: Vec<String> = reg.specs().iter().map(|s| s.name.clone()).collect();
+        assert!(all.len() > 5, "builtins should register far more tools than the allowlist");
+
+        let allow: HashSet<String> = [
+            "bash",
+            "read_file",
+            "edit_file",
+            "write_file",
+            "grep",
+            "list_dir",
+            "update_plan",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        reg.set_tool_allowlist(Some(allow.clone()));
+
+        let visible: Vec<String> = reg.specs().into_iter().map(|s| s.name).collect();
+        assert_eq!(
+            visible.len(),
+            allow.len(),
+            "specs() must contain exactly the allowlisted tools"
+        );
+        for name in &visible {
+            assert!(allow.contains(name), "unexpected tool in specs(): {name}");
+        }
+        assert!(reg.is_tool_visible("bash"));
+        assert!(!reg.is_tool_visible("view_image"));
+        assert!(!reg.is_tool_visible("spawn_agent"));
+
+        // Hidden tools remain registered and executable — the allowlist
+        // narrows visibility, it must not unregister anything.
+        assert!(reg.get("view_image").is_some());
+
+        // The tool_search/tool_suggest discovery surface obeys the same gate.
+        let catalog: Vec<String> = reg
+            .catalog_snapshot()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(
+            catalog.iter().all(|n| allow.contains(n)),
+            "catalog_snapshot must respect the allowlist"
+        );
+    }
+
+    #[test]
+    fn tool_allowlist_none_is_unrestricted_and_clearable() {
+        let mut reg = make_registry();
+        let before = reg.specs().len();
+        assert!(before > 1);
+        reg.set_tool_allowlist(Some(["bash".to_string()].into_iter().collect()));
+        assert_eq!(reg.specs().len(), 1);
+        reg.set_tool_allowlist(None);
+        assert_eq!(reg.specs().len(), before);
     }
 
     #[test]
