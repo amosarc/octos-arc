@@ -8,10 +8,23 @@ import path from 'node:path';
 
 const CONTRACT = __CONTRACT_JSON__ as { exact: string[]; anchors: { kind: string; value: string }[]; auth: { username: string; passwords: string[] } | null };
 const OUT = path.join(__dirname, 'last-run.jsonl');
+// red-shots: the spec screenshots the page the moment a red fires (capped);
+// the host pipes these through its visual lane so the fix turn can SEE the
+// failing page instead of guessing from an abstract message.
+const SHOT_DIR = path.join(__dirname, 'red-shots');
+try { fs.mkdirSync(SHOT_DIR, { recursive: true }); } catch { /* best effort */ }
+let page0: any = null;
+let shots = 0;
 // jsonl append per red: module state may reload between tests, so reds are
 // never buffered in memory — every red lands on disk the moment it fires.
 function red(probe: string, s: string, detail: string) {
   try { fs.appendFileSync(OUT, JSON.stringify({ probe, string: s, detail }) + '\n'); } catch { /* best effort */ }
+  if (page0 && shots < 6) {
+    shots += 1;
+    const safe = `${String(shots).padStart(2, '0')}-${probe}-${s}`
+      .replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 70);
+    try { page0.screenshot({ path: path.join(SHOT_DIR, safe + '.png') }); } catch { /* best effort */ }
+  }
 }
 function redsOnDisk(): any[] {
   try {
@@ -26,35 +39,81 @@ function failIfReds(scope: string) {
   }
 }
 
-const CLICK_ROLES = ['button', 'menuitem', 'link', 'tab', 'option'] as const;
-const NAME_SELECTOR = 'button, a, select, input, span, [role="menuitem"], ' +
-  '[role="menu"], [role="dialog"], [role="grid"], [role="region"], ' +
-  '[role="tab"], [role="option"], [role="textbox"], [role="columnheader"], ' +
-  '[role="rowheader"], [role="gridcell"], h1, h2, h3, label, legend, th, td';
+const CLICK_ROLES = ['button', 'menuitem', 'link', 'tab', 'option', 'combobox'] as const;
+// Carriers split (2026-09-27, sheet/github 二跑教训):
+//  - INTERACTIVE: controls graders operate (click/selectOption). Native
+//    <option> included — a closed <select>'s options have no client rects,
+//    so they get a parent-visibility exemption. The sheet run's "hidden
+//    option" reds pushed the model into a custom div combo that broke every
+//    selectOption grader — options ARE satisfiable carriers.
+//  - STRUCTURAL: headings/labels/table cells/dialog names/aria-labels on any
+//    element. aria-label counts as a name (the github run's text-only scan
+//    pushed "Account menu" from aria-label+username to literal text).
+//  - Deliberately EXCLUDED: bare spans/divs/p. A contract string surfaced as
+//    static text (the github run's 35-chip "tour panel") clears NOTHING.
+const INTERACTIVE_SELECTOR = 'button, a, select, input, textarea, option, ' +
+  '[role="menuitem"], [role="tab"], [role="option"], [role="combobox"]';
+const STRUCTURAL_SELECTOR = 'h1, h2, h3, label, legend, th, td, ' +
+  '[role="columnheader"], [role="rowheader"], [role="gridcell"], ' +
+  '[role="dialog"], [aria-label], [aria-labelledby]';
 
-// Name = aria-label, else the element's OWN text nodes, else full textContent.
-// Own-text-first matters for labels wrapping a <select>: their full
-// textContent concatenates every option ("Sort byAscendingDescending"), which
-// would hide the exact string "Sort by" AND fake-show hidden options.
-async function visibleNames(page: any): Promise<Record<string, number>> {
-  return page.evaluate((sel: string) => {
+// Counts per carrier selector. Options ride their parent <select>'s
+// visibility (a closed select hides its options off-DOM-wise; they are still
+// selectable via selectOption — the only legitimate reading of an option).
+async function carrierCounts(page: any, sel: string): Promise<Record<string, number>> {
+  return page.evaluate((s: string) => {
     const counts: Record<string, number> = {};
-    for (const el of document.querySelectorAll(sel)) {
-      const cs = getComputedStyle(el);
-      if (cs.display === 'none' || cs.visibility === 'hidden') continue;
-      if (!el.getClientRects().length) continue;
+    for (const el of document.querySelectorAll(s)) {
+      const doc = el.ownerDocument;
+      let visible = true;
+      if (el.tagName === 'OPTION') {
+        const sel = el.closest('select');
+        visible = !!sel && !!sel.getClientRects().length;
+      } else {
+        const cs = getComputedStyle(el);
+        visible = cs.display !== 'none' && cs.visibility !== 'hidden'
+          && !!el.getClientRects().length;
+      }
+      if (!visible) continue;
+      const name = nameOf(el, doc);
+      if (!name || name.length > 120) continue;
+      counts[name] = (counts[name] ?? 0) + 1;
+    }
+    function nameOf(el: any, doc: Document): string {
       let name = el.getAttribute('aria-label') ?? '';
+      if (!name) {
+        const labelledby = el.getAttribute('aria-labelledby');
+        if (labelledby) {
+          name = labelledby.split(/\s+/).map((id: string) =>
+            doc.getElementById(id)?.textContent ?? '').join(' ');
+        }
+      }
+      if (!name) name = el.getAttribute('title') ?? '';
       if (!name) {
         const own = [...el.childNodes].filter((n) => n.nodeType === 3)
           .map((n) => n.textContent).join(' ');
         name = own.trim() || (el.textContent ?? '');
       }
-      name = name.replace(/\s+/g, ' ').trim();
-      if (!name || name.length > 120) continue;
-      counts[name] = (counts[name] ?? 0) + 1;
+      return name.replace(/\s+/g, ' ').trim();
     }
     return counts;
-  }, NAME_SELECTOR);
+  }, sel);
+}
+
+// Contract strings are cleared only by carriers: interactive controls or
+// structural name elements. Static text (spans/divs) proves nothing — the
+// github run rendered 35 contract strings as chips on the signed-out home
+// page just to silence this crawler; that path must stay dead.
+async function visibleNames(page: any): Promise<Record<string, number>> {
+  const a = await carrierCounts(page, INTERACTIVE_SELECTOR);
+  const b = await carrierCounts(page, STRUCTURAL_SELECTOR);
+  return { ...a, ...b };
+}
+
+// Clickable-only name counts: strict-mode violations are about controls the
+// graders address by role (button/link/tab/option/menuitem/combobox/select).
+async function clickableCounts(page: any): Promise<Record<string, number>> {
+  return carrierCounts(page, INTERACTIVE_SELECTOR);
 }
 
 async function openerLocator(page: any, name: string) {
@@ -76,6 +135,45 @@ async function anchorLocator(page: any, anchor: { kind: string; value: string })
   return null;
 }
 
+// Generic sign-in for the seeded fixture account. Returns true when a
+// password box is gone after submit (= authenticated, best effort).
+async function trySignIn(page: any, auth: { username: string; passwords: string[] }): Promise<boolean> {
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.mouse.click(5, 5).catch(() => {});
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(300);
+  try {
+    // The sign-in form often sits behind a header "Sign in" button or link.
+    let pw = page.locator('input[type="password"]').filter({ visible: true }).first();
+    if (!(await pw.count())) {
+      const openerBtn = page.getByRole('button', { name: /^sign in$/i }).filter({ visible: true }).first();
+      const openerLink = page.getByRole('link', { name: /^sign in$/i }).filter({ visible: true }).first();
+      const opener = (await openerBtn.count()) ? openerBtn : openerLink;
+      if (await opener.count()) {
+        await opener.click({ timeout: 2000 });
+        await page.waitForTimeout(500);
+      }
+      pw = page.locator('input[type="password"]').filter({ visible: true }).first();
+    }
+    if (!(await pw.count())) return false;
+    const userBox = page.getByRole('textbox', { name: /user|email/i }).filter({ visible: true }).first();
+    const submit = page.locator('button[type="submit"], input[type="submit"]')
+      .filter({ visible: true }).last();
+    const named = page.getByRole('button', { name: /sign in|log ?in/i }).filter({ visible: true }).last();
+    const go = (await named.count()) ? named : submit;
+    for (const candidate of auth.passwords) {
+      if (await userBox.count()) await userBox.fill(auth.username, { timeout: 2000 }).catch(() => {});
+      await pw.fill(candidate, { timeout: 2000 }).catch(() => {});
+      if (!(await go.count())) break;
+      await go.click({ timeout: 2000 }).catch(() => {});
+      await page.waitForTimeout(900);
+      const stillPw = page.locator('input[type="password"]').filter({ visible: true }).first();
+      if (!(await stillPw.count())) return true;
+    }
+  } catch { /* best effort */ }
+  return false;
+}
+
 test('boot - no pageerror, page not blank', async ({ page }) => {
   const errs: string[] = [];
   page.on('pageerror', (e) => errs.push(String(e).slice(0, 160)));
@@ -87,12 +185,59 @@ test('boot - no pageerror, page not blank', async ({ page }) => {
   failIfReds('boot');
 });
 
+// Auth-gate (2026-09-26 github 6-point run): the platform e2e signed in fine
+// (residue: 3 users + 8 sessions) then EVERY test died at its first
+// signed-in assertion and the runner bailed — ~39 tests never executed. The
+// literal contract ("the resulting signed-in username remains visible after
+// reload") requires the username as its OWN visible element. This probe is
+// the single highest-leverage check for any auth-gated app.
+test('auth-gate - signed-in username exact-visible across reload', async ({ page }) => {
+  test.setTimeout(60_000);
+  page0 = page;
+  if (!(CONTRACT.auth && CONTRACT.auth.username)) return; // no auth gate
+  const u = CONTRACT.auth.username;
+  const signedIn = await trySignIn(page, CONTRACT.auth);
+  if (!signedIn) {
+    red('auth-gate', 'sign-in', `fixture account ${u} could not sign in (tried ${CONTRACT.auth.passwords.length} password candidates) — every gated contract string is unreachable; fix the sign-in flow first`);
+    failIfReds('auth-gate');
+    return;
+  }
+  const exactVisible = async (): Promise<number> =>
+    (await page.getByText(u, { exact: true }).filter({ visible: true }).count());
+  if (!(await exactVisible())) {
+    red('auth-gate', u, `signed in as ${u} but NO element carries the username as its own visible exact text — graders assert the signed-in username (and often click it to open the account menu); render it as its own element, e.g. <button aria-label="Account menu"><span class="...">{username}</span></button>; a heading like "Welcome, {username}" does NOT satisfy exact-text locators`);
+  } else {
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(800);
+    if (!(await exactVisible())) {
+      red('auth-gate', u, `username visible after sign-in but GONE after reload — the session must restore AND keep the username exactly visible (literal contract: "the signed-in username remains visible after reload")`);
+    }
+  }
+  failIfReds('auth-gate');
+});
+
 test('contract crawler - openable, exact-named, closable, page stays alive', async ({ page }) => {
   test.setTimeout(240_000);
+  page0 = page;
   const found = new Set<string>();
   const visited = new Set<string>();
   let interactions = 0;
   const crawlStart0 = Date.now();
+
+  // strict-mode: a contract string may match exactly ONE visible clickable;
+  // two simultaneous matches break every strict-mode locator (round 31/32
+  // scoring family). Flagged once per string per crawl.
+  const strictFlagged = new Set<string>();
+  const strictCheck = async () => {
+    const counts = await clickableCounts(page);
+    for (const s of CONTRACT.exact) {
+      if (strictFlagged.has(s) || !found.has(s)) continue;
+      if ((counts[s] ?? 0) > 1) {
+        strictFlagged.add(s);
+        red('strict-mode', s, `string matches ${counts[s]} visible clickable controls — Playwright strict mode fails with ${counts[s]} matches; keep exactly ONE visible element per value`);
+      }
+    }
+  };
 
   const scan = async () => {
     for (const n of Object.keys(await visibleNames(page))) found.add(n);
@@ -156,41 +301,7 @@ test('contract crawler - openable, exact-named, closable, page stays alive', asy
   // signed-in state.
   const authPrelude = async () => {
     if (!(CONTRACT.auth && CONTRACT.auth.username)) return;
-    // Sweep 0 may have left a modal/overlay open — dismiss before login.
-    await page.keyboard.press('Escape').catch(() => {});
-    await page.mouse.click(5, 5).catch(() => {});
-    await gotoHome();
-    await page.waitForTimeout(300);
-    try {
-      // The sign-in form often sits behind a header "Sign in" button/modal.
-      let pw = page.locator('input[type="password"]').filter({ visible: true }).first();
-      if (!(await pw.count())) {
-        const opener = page.getByRole('button', { name: /^sign in$/i }).filter({ visible: true }).first();
-        if (await opener.count()) {
-          await opener.click({ timeout: 2000 });
-          await page.waitForTimeout(500);
-        }
-        pw = page.locator('input[type="password"]').filter({ visible: true }).first();
-      }
-      if (await pw.count()) {
-        const userBox = page.getByRole('textbox', { name: /user|email/i }).filter({ visible: true }).first();
-        const submit = page.locator('button[type="submit"], input[type="submit"]')
-          .filter({ visible: true }).last();
-        const named = page.getByRole('button', { name: /sign in|log ?in/i }).filter({ visible: true }).last();
-        const go = (await named.count()) ? named : submit;
-        // Try each seeded password candidate until one sticks (the failure
-        // banner disappears).
-        for (const candidate of CONTRACT.auth.passwords) {
-          if (await userBox.count()) await userBox.fill(CONTRACT.auth.username, { timeout: 2000 }).catch(() => {});
-          await pw.fill(candidate, { timeout: 2000 }).catch(() => {});
-          if (!(await go.count())) break;
-          await go.click({ timeout: 2000 }).catch(() => {});
-          await page.waitForTimeout(900);
-          const stillPw = page.locator('input[type="password"]').filter({ visible: true }).first();
-          if (!(await stillPw.count())) break;
-        }
-      }
-    } catch { /* best effort */ }
+    await trySignIn(page, CONTRACT.auth);
   };
   await enterRichestView();
 
@@ -267,6 +378,66 @@ test('contract crawler - openable, exact-named, closable, page stays alive', asy
     catch { red('page-alive', via, 'page stopped accepting clicks after this interaction (stuck overlay)'); }
   };
 
+  // Grid completeness (sheet run 2: a grid that renders ONLY the data region
+  // destroyed ~7 requirements): a role="grid" must expose visible column and
+  // row headers, and its cells must carry coordinate accessible names.
+  const gridProbe = async () => {
+    const grid = page.locator('[role="grid"]').first();
+    if (!(await grid.count())) return;
+    const colHeads = grid.getByRole('columnheader').filter({ visible: true });
+    const rowHeads = grid.getByRole('rowheader').filter({ visible: true });
+    if (!(await colHeads.count()) || !(await rowHeads.count())) {
+      red('grid-structure', 'grid', 'a role="grid" is present but lacks visible columnheader and/or rowheader cells — render the complete grid (column letters, row numbers), a data-only region fails every structural grader step');
+      return;
+    }
+    const cells = grid.getByRole('gridcell').filter({ visible: true });
+    const n = Math.min(await cells.count(), 8);
+    for (let i = 0; i < n; i++) {
+      const label = await cells.nth(i).getAttribute('aria-label').catch(() => null);
+      if (label && /^[A-Z]{1,3}\d+$/.test(label.trim())) return; // one is enough
+    }
+    if (n > 0) {
+      red('grid-structure', 'gridcell', 'gridcells carry no coordinate accessible name (aria-label like "A1") — graders locate cells by coordinate');
+    }
+  };
+  // Spreadsheet grids (column headers are coordinate letters A/B/C…) must
+  // render a FIXED-SIZE empty grid, not just the data extent (sheet run 2:
+  // a 4×3 data-only grid made A5/D5/A9 unselectable and killed ~8
+  // requirements at their first click).
+  const gridExtentProbe = async () => {
+    const grid = page.locator('[role="grid"]').first();
+    if (!(await grid.count())) return;
+    const heads = grid.getByRole('columnheader').filter({ visible: true });
+    const cnt = Math.min(await heads.count(), 3);
+    let letters = 0;
+    for (let i = 0; i < cnt; i++) {
+      const t = ((await heads.nth(i).textContent()) ?? '').trim();
+      if (/^[A-Z]{1,3}$/.test(t)) letters += 1;
+    }
+    if (letters < Math.min(cnt, 2)) return; // not a spreadsheet grid
+    const rows = grid.getByRole('rowheader').filter({ visible: true });
+    if ((await heads.count()) < 8 || (await rows.count()) < 15) {
+      red('grid-structure', 'grid-extent',
+        `spreadsheet grid renders only ${await heads.count()} columns × ${await rows.count()} rows — render a FIXED-SIZE empty grid (≥8 columns × ≥15 rows) so graders can select and type into EMPTY cells beyond the seeded data`);
+    }
+  };
+  // Custom dropdown widgets are invisible to graders (sheet run 2 REQ-5
+  // family): a non-native combobox without aria-expanded cannot be opened by
+  // getByRole('combobox') flows; the fix is a native <select>.
+  const comboboxProbe = async () => {
+    const boxes = page.locator('[role="combobox"]').filter({ visible: true });
+    const n = Math.min(await boxes.count(), 4);
+    for (let i = 0; i < n; i++) {
+      const b = boxes.nth(i);
+      const tag = (await b.evaluate((el: any) => el.tagName)).toUpperCase();
+      if (tag === 'SELECT') continue; // native select = the correct pattern
+      const expanded = await b.getAttribute('aria-expanded').catch(() => null);
+      if (expanded === null) {
+        red('combobox', 'dropdown', 'a custom dropdown widget lacks aria-expanded — without full ARIA combobox semantics graders cannot open or select it; use a native <select> with real <option> labels');
+      }
+    }
+  };
+
   // Context menus (row/column headers) carry their own contract menu items.
   // Skip the unlabeled corner cell — right-clicking it is a no-op.
   const contextProbe = async () => {
@@ -288,6 +459,9 @@ test('contract crawler - openable, exact-named, closable, page stays alive', asy
     }
   };
   await contextProbe();
+  await gridProbe();
+  await gridExtentProbe();
+  await comboboxProbe();
 
   // Destructive dialog confirms stay unclicked; everything else (Sort,
   // Apply, Create, Save) is safe on this throwaway instance and unlocks the
@@ -411,8 +585,10 @@ test('contract crawler - openable, exact-named, closable, page stays alive', asy
   const crawlStart = Date.now();
   // Auth-gated apps: log in BEFORE the crawl — the signed-in state carries
   // the overwhelming majority of contract strings and gets the clean first
-  // sweep. Signed-out-only strings (registration/reset forms) become known
-  // noise-reds; the static layer still covers them verbatim.
+  // sweep. Signed-out-only strings are re-seeked after the sweeps. The
+  // queue stays document-order: found strings are still CLICKED (their
+  // dialogs reveal nested strings — deferring them breaks the opener chain,
+  // tried 2026-09-27 and reverted).
   await authPrelude();
   for (let sweep = 0; sweep < 2; sweep++) {
   if (sweep > 0) { await enterBest(); }
@@ -446,11 +622,18 @@ test('contract crawler - openable, exact-named, closable, page stays alive', asy
     const loc = await locateAnywhere(s);
     if (!loc) {
       if (!found.has(s) && !(await deepSeek(s))) red('affordance', s,
-        'no visible element carries this exact name and no control opens it — the chain is missing (or it only exists as a hidden <option>/inner tab)');
+        'no interactive/structural carrier exposes this exact name and no control opens it — the chain is missing. Fix by making the REAL control reachable; static text (a span/chip listing the string) does NOT clear reds');
       continue;
     }
     if (!(await loc.isEnabled().catch(() => true))) {
-      found.add(s); // disabled (e.g. Undo with empty stack) still proves presence
+      found.add(s); // presence proven either way …
+      // … but a PERMANENTLY disabled control can never be clicked by a test
+      // (sheet run 2: Save stayed disabled forever). Genuinely conditional
+      // controls (Undo/Redo with empty stack, destructive confirms) are the
+      // exempt classes.
+      if (!DESTRUCTIVE.test(s) && !/^(undo|redo)/i.test(s)) {
+        red('disabled-only', s, 'control exists but is DISABLED at rest — if it is a submit that should enable once required inputs are filled, fix the enablement logic (conditionally-disabled controls like Undo/Delete-when-unselected are exempt)');
+      }
       continue;
     }
     interactions += 1;
@@ -482,6 +665,7 @@ test('contract crawler - openable, exact-named, closable, page stays alive', asy
       await page.keyboard.press('Escape').catch(() => {});
     }
   }
+  await strictCheck();
   await trackAnchors();
   for (const anchor of CONTRACT.anchors) {
     if (anchorEver.has(anchor.value)) continue;
@@ -512,15 +696,103 @@ test('contract crawler - openable, exact-named, closable, page stays alive', asy
     }
   }
   }
+
+  // Signed-out re-sweep (2026-09-27): registration / sign-in / password-reset
+  // contract strings live ONLY in the signed-out state; the crawl above ran
+  // signed-in, so without this pass every one of them false-reds and the fix
+  // loop gets pushed at phantom defects. Drop the session, walk the classic
+  // signed-out entry pages, then re-scan and re-seek what is still missing.
+  if (CONTRACT.auth && CONTRACT.auth.username) {
+    try { await page.context().clearCookies(); } catch { /* best effort */ }
+    await page.evaluate(() => {
+      try { localStorage.clear(); sessionStorage.clear(); } catch { /* best effort */ }
+    }).catch(() => {});
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(500);
+    await scan();
+    await trackAnchors();
+    // Mini-walk over the classic signed-out entry chain (home → sign-in →
+    // "Create an account" → registration form; → "Forgot password" → reset
+    // form → code form): each page reveals further entries, so each hop
+    // clicks one not-yet-clicked entry-named control, returning home when
+    // the current page is exhausted (bounded). One email-form submit is
+    // included: reset/code forms sit behind a submitted email.
+    const ENTRY_RE = /create an account|sign in|log ?in|sign up|forgot|reset/i;
+    const soClicked = new Set<string>();
+    let emailSubmitted = false;
+    for (let hop = 0; hop < 10; hop++) {
+      const pick = async (): Promise<any> => {
+        const cands = page.locator('a, button').filter({ visible: true, hasText: ENTRY_RE });
+        const n = await cands.count();
+        for (let i = 0; i < n; i++) {
+          const c = cands.nth(i);
+          const t = (((await c.textContent().catch(() => '')) ?? '').trim());
+          if (t && !soClicked.has(t)) { soClicked.add(t); return c; }
+        }
+        return null;
+      };
+      let target = await pick();
+      if (!target) {
+        // On the CURRENT page first: a visible email form (reset step 1)
+        // submits once — the code/verification form sits behind it.
+        if (!emailSubmitted) {
+          const email = page.getByRole('textbox', { name: /email/i }).filter({ visible: true }).first();
+          const go = page.locator('button[type="submit"], button').filter({ visible: true }).last();
+          if ((await email.count()) && (await go.count())) {
+            emailSubmitted = true;
+            await email.fill('smoke@example.test', { timeout: 1500 }).catch(() => {});
+            await go.click({ timeout: 1500 }).catch(() => {});
+            await page.waitForTimeout(600);
+            await scan();
+            await trackAnchors();
+            continue;
+          }
+        }
+        await page.goto('/', { waitUntil: 'domcontentloaded' });
+        await page.waitForTimeout(400);
+        target = await pick();
+        if (!target) break;
+      }
+      await target.click({ timeout: 2000 }).catch(() => {});
+      await page.waitForTimeout(400);
+      await scan();
+      await trackAnchors();
+      if (await dialogOpen()) await closeAttempt('signed-out re-sweep');
+    }
+    for (const s of CONTRACT.exact) {
+      if (!found.has(s)) await deepSeek(s);
+    }
+    // A dialog opened during the re-seek must not linger.
+    if (await dialogOpen()) await closeAttempt('signed-out re-sweep');
+  }
+  // Reconcile: an affordance red fired at dequeue time, before a later pass
+  // (signed-out re-sweep, edit-mode anchors) satisfied its string. Strings
+  // now found must not stay red — the fix loop must only see REAL gaps.
+  {
+    const all = redsOnDisk();
+    const stale = all.filter((r: any) =>
+      r.probe === 'affordance' && found.has(String(r.string)));
+    if (stale.length) {
+      const keep = all.filter((r: any) => !stale.includes(r));
+      try {
+        fs.writeFileSync(OUT, keep.map((r: any) => JSON.stringify(r)).join('\n') + '\n');
+      } catch { /* best effort */ }
+    }
+  }
   failIfReds('affordance');
   failIfReds('click');
   failIfReds('exact-name');
   failIfReds('escape-close');
   failIfReds('page-alive');
   failIfReds('shift-select');
+  failIfReds('strict-mode');
+  failIfReds('grid-structure');
+  failIfReds('combobox');
+  failIfReds('disabled-only');
 });
 
 test('downloads - non-empty, no BOM', async ({ page }) => {
+  page0 = page;
   await page.goto('/', { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(600);
   const exportish = CONTRACT.exact.filter((s) => /export|download|csv/i.test(s));

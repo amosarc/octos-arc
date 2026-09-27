@@ -148,6 +148,31 @@ class SpecGenTests(unittest.TestCase):
                        "downloads - non-empty, no BOM", "0xef"):
             self.assertIn(marker, self.spec)
 
+    def test_new_probe_markers_present(self):
+        # 2026-09-27 四类新探针 + 红项截图钩子(sheet 二跑/round31-32 败因)。
+        for marker in ("'strict-mode'", "red('grid-structure'",
+                       "red('combobox'", "red('disabled-only'",
+                       "red-shots", "page0.screenshot", "'combobox'"):
+            self.assertIn(marker, self.spec, marker)
+
+    def test_run2_probes_present(self):
+        # 2026-09-27 github 6 分/sheet 3 分二跑败因的探针:auth-gate(登录态
+        # 用户名精确可见+reload 持久)、grid-extent(固定尺寸网格)、
+        # option 载体(原生 select)、静态文本不计分(anti tour-chips)。
+        for marker in ("auth-gate - signed-in username",
+                       "red('auth-gate'", "gridExtentProbe",
+                       "'grid-extent'", "INTERACTIVE_SELECTOR",
+                       "STRUCTURAL_SELECTOR", "trySignIn"):
+            self.assertIn(marker, self.spec, marker)
+        # 载体选择器不得再包含裸 span(div 也无)——静态铺字符串不算绿。
+        self.assertNotIn("'button, a, select, input, span,", self.spec)
+
+    def test_config_aligns_eval_timeouts(self):
+        # 与隐藏评测配置同构:断言墙 10s(整测时限仍 90s,爬虫自设更长)。
+        cfg = ui_smoke.generate_config(3100)
+        self.assertIn("expect: { timeout: 10_000 }", cfg)
+        self.assertIn("timeout: 90_000", cfg)
+
     def test_messages_not_in_crawler_exact(self):
         # 消息类串只在静态层查(不要求可见可点),爬虫 exact 清单只收控件。
         contract = ui_smoke._contract_for_spec([
@@ -167,9 +192,14 @@ class SpecGenTests(unittest.TestCase):
             readme = (stage / "README.md").read_text()
             self.assertIn("HOST-OWNED", readme)
             self.assertIn("/x/cli.js", readme)
+            self.assertIn("contract-smoke.spec.ts", readme)
             gi = (stage / ".gitignore").read_text()
             self.assertIn("node_modules", gi)
             self.assertIn("last-run.json", gi)
+            # 一次性自定义检查正路模板(带 .example 后缀,Playwright 不收集)。
+            example = (stage / "MY-CHECK.spec.ts.example").read_text()
+            self.assertIn("MY-CHECK.spec.ts", example)
+            self.assertIn("explicit file argument", example)
 
 
 class ReportTests(unittest.TestCase):
@@ -212,10 +242,105 @@ class CmdTests(unittest.TestCase):
         cmd = ui_smoke.build_ui_smoke_cmd("/w/local-grader/node_modules/"
                                           "@playwright/test/cli.js")
         self.assertIn("--config .arc/ui-smoke/playwright.config.ts", cmd)
+        # 显式过滤到权威契约套件:模型自建 MY-CHECK 不混进自检。
+        self.assertIn("contract-smoke.spec.ts", cmd)
         self.assertNotIn("node -e", cmd)
         self.assertNotIn(".arc/acceptance", cmd)
+        self.assertIn("MY-CHECK.spec.ts.example", cmd)  # 一次性检查正路
         fallback = ui_smoke.build_ui_smoke_cmd(None)
         self.assertIn("npx --yes @playwright/test", fallback)
+        self.assertIn("contract-smoke.spec.ts", fallback)
+
+
+class RedShotVisualTests(unittest.TestCase):
+    """红项截图 → 视觉模型描述回填(通道 best-effort,未配置即跳过)。"""
+
+    def test_visuals_backfilled_when_lane_configured(self):
+        import visual_ref
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            shots = run_dir / "red-shots"
+            shots.mkdir()
+            (shots / "01-affordance-Save.png").write_bytes(b"png")
+            (shots / "02-exact-name-Delete.png").write_bytes(b"png2")
+            report = {"reds": [{"probe": "affordance", "string": "Save"}]}
+            saved_lane = visual_ref.visual_lane
+            saved_describe = visual_ref._describe_image
+            try:
+                visual_ref.visual_lane = lambda: ("m", "https://v", "k")
+                visual_ref._describe_image = \
+                    lambda model, base, key, path, **kw: f"desc of {path.name}"
+                ui_smoke._describe_red_shots(run_dir, report, log=lambda *_: None)
+            finally:
+                visual_ref.visual_lane = saved_lane
+                visual_ref._describe_image = saved_describe
+        self.assertEqual(len(report["visuals"]), 2)
+        self.assertIn("01-affordance-Save", report["visuals"][0]["text"])
+
+    def test_noop_when_lane_unconfigured(self):
+        import visual_ref
+        with tempfile.TemporaryDirectory() as td:
+            shots = Path(td) / "red-shots"
+            shots.mkdir()
+            (shots / "01-x.png").write_bytes(b"png")
+            report = {}
+            saved_lane = visual_ref.visual_lane
+            try:
+                visual_ref.visual_lane = lambda: None
+                ui_smoke._describe_red_shots(Path(td), report,
+                                             log=lambda *_: None)
+            finally:
+                visual_ref.visual_lane = saved_lane
+        self.assertNotIn("visuals", report)
+
+
+class MainPromptTests(unittest.TestCase):
+    """main.py 侧与 Playwright 评测同构的装配断言。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import main as main_mod
+        cls.main = main_mod
+
+    def test_spec_run_cmd_carries_cold_start_prefix(self):
+        cmd = self.main.build_spec_run_cmd("/x/cli.js", ["REQ-1.spec.ts"])
+        self.assertIn("rm -f backend/data/db.run.json", cmd)
+        self.assertIn("npm run build --prefix frontend", cmd)
+        self.assertIn("restart-server.sh", cmd)
+        self.assertIn("REQ-1.spec.ts", cmd)
+        # build 失败必须挡住 spec run(链式 &&),restart 失败容忍(2>&1; )。
+        self.assertIn("frontend && sh", cmd)
+        self.assertIn("restart-server.sh >/dev/null 2>&1; ", cmd)
+
+    def test_staged_config_aligns_eval_timeouts(self):
+        # 2655 落盘的 config:timeout 10s + expect 10s(隐藏评测同构)。
+        source = Path(self.main.__file__).read_text(encoding="utf-8")
+        self.assertIn('"  timeout: 10_000, expect: { timeout: 10_000 },\\n"',
+                      source)
+
+    def test_ui_contract_prompt_has_new_rules(self):
+        for marker in ("- NATIVE-FIRST WIDGETS:", "- DATA GRIDS:",
+                       "- SUBMIT ENABLEMENT:", "native <dialog>",
+                       "showModal()"):
+            self.assertIn(marker, self.main.UI_CONTRACT_PROMPT)
+        for marker in ("widgets are native-first", "native <select>",
+                       "native <dialog>",
+                       "custom widgets only where HTML has none",
+                       "coordinate-named gridcells",
+                       "submits enable once required fields are"):
+            self.assertIn(marker, self.main.UI_CONTRACT_RECAP)
+
+    def test_repair_prompt_covers_new_probes_and_visuals(self):
+        p = self.main.UI_SMOKE_REPAIR_PROMPT
+        for marker in ("strict-mode =", "grid-structure =", "combobox =",
+                       "disabled-only =", "{visual}"):
+            self.assertIn(marker, p)
+        lines = self.main._ui_smoke_visual_lines(
+            {"visuals": [{"label": "01-affordance-Save",
+                          "text": "a toolbar with a disabled Save button"}]})
+        self.assertIn("visual model descriptions", lines)
+        self.assertIn("disabled Save button", lines)
+        self.assertEqual(self.main._ui_smoke_visual_lines({}), "")
 
 
 class GithubStyleTests(unittest.TestCase):
@@ -263,6 +388,31 @@ class GithubStyleTests(unittest.TestCase):
             self.assertEqual(auth["passwords"][0], "Valid-password-123!")
             self.assertIn("Fixture-password-123!", auth["passwords"])
             self.assertNotIn("not-a-pw", auth["passwords"])
+
+    def test_auth_from_compiled_and_login_users(self):
+        # 2026-09-27 github 6 分根因:staging 早于 fixture 播种 → db.json 无
+        # users → auth=None → 爬虫未登录扫门控应用全量误报。回退源 =
+        # materialize 的编译结果(db.users),存在性判定 = db_login_users。
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            (out / "backend" / "data").mkdir(parents=True)
+            compiled = {"db": {"users": [
+                {"username": "seed-user", "email": "s@x.test"}]}}
+            auth = ui_smoke.auth_from_compiled(compiled, [])
+            self.assertEqual(auth["username"], "seed-user")
+            self.assertEqual(auth["passwords"],
+                             ["Fixture-password-123!"])
+            self.assertIsNone(ui_smoke.auth_from_compiled(None, []))
+            # db_login_users: db 缺失/无 users → 空表;有 → 行列表
+            self.assertEqual(ui_smoke.db_login_users(out), [])
+            (out / "backend" / "data" / "db.json").write_text(json.dumps(
+                {"collections": {"users": [{"username": "u1"}]}}),
+                encoding="utf-8")
+            self.assertEqual(len(ui_smoke.db_login_users(out)), 1)
+            # fixture_auth 不再依赖 import fixture_manifest(sys.path 无关)
+            self.assertEqual(
+                ui_smoke.fixture_auth(out, [], fixture_password="X")["passwords"],
+                ["X"])
 
 
 if __name__ == "__main__":

@@ -159,6 +159,7 @@ APP_JS = """\
 // app.js — express 装配:健康检查、auth、schema CRUD、业务 routes、静态 frontend/dist。
 const path = require('path'); const fs = require('fs'); const express = require('express'); const U = require('./lib/util');
 const app = express();
+try { require('./lib/eval-telemetry').mount(app); } catch { /* telemetry best-effort, never blocks the app */ }
 app.use(express.json({ limit: '64kb' }));
 app.use((req, res, next) => { req.cookies = U.cookies(req); next(); });
 app.get('/api/health', (req, res) => U.json(res, 200, { ok: true }));
@@ -170,6 +171,86 @@ require('./database/engine').mount(app, schema);
 const dist = path.join(__dirname, '..', '..', 'frontend', 'dist');
 if (fs.existsSync(dist)) { app.use(express.static(dist)); app.get(/^(?!\\/api(\\/|$)).*/, (req, res) => res.sendFile(path.join(dist, 'index.html'))); }
 module.exports = app;
+"""
+
+# backend/src/lib/eval-telemetry.js — 评测期遥测(2026-09-27)。
+# 平台 func/e2e 评测在 agent 退出后于同一 workspace 跑分,失败明细平台不下发;
+# 应用自身把全量 /api 流量 + 前端异常逐行追加到 workspace 根的
+# octos-logs/eval-traffic.jsonl,随工作区 zip 带回做赛后取证
+# (2026-09-26 github:8 会话后零写入的死因、func 失败的响应体,都靠这层还原)。
+# 约束:零依赖 CommonJS;所有写入 try/catch best-effort——遥测永远不能
+# 影响应用行为;>4MB 轮转保留一代;agent 阶段流量与评测流量同文件,
+# 由 postflight 写入的 marker 行切分。
+EVAL_TELEMETRY_JS = """\
+// eval-telemetry.js — host-owned runtime telemetry (best-effort, never throws).
+// Appends one JSON line per /api request (and frontend error reports) to
+// <workspace>/octos-logs/eval-traffic.jsonl. Pure fs, no dependencies.
+const fs = require('fs');
+const path = require('path');
+const LOG = path.join(__dirname, '..', '..', '..', 'octos-logs', 'eval-traffic.jsonl');
+const MAX_BYTES = 4 * 1024 * 1024;
+function line(obj) {
+  try {
+    if (!fs.existsSync(path.dirname(LOG))) fs.mkdirSync(path.dirname(LOG), { recursive: true });
+    try {
+      if (fs.statSync(LOG).size > MAX_BYTES) {
+        fs.copyFileSync(LOG, LOG + '.1');
+        fs.writeFileSync(LOG, '');
+      }
+    } catch { /* fresh file */ }
+    fs.appendFileSync(LOG, JSON.stringify(obj) + '\\n');
+  } catch { /* telemetry must never break the app */ }
+}
+const clip = (v, n) => {
+  try {
+    const s = typeof v === 'string' ? v : JSON.stringify(v);
+    return s.length > n ? s.slice(0, n) + '…' : s;
+  } catch { return undefined; }
+};
+exports.mount = (app) => {
+  line({ t: new Date().toISOString(), kind: 'boot', port: process.env.PORT || 3000 });
+  // Frontend error reports (sendBeacon with an application/json Blob).
+  app.post('/api/__telemetry',
+    require('express').json({ type: ['application/json', 'text/plain'] }),
+    (req, res) => {
+    const body = req.body;
+    const events = Array.isArray(body) ? body : [body];
+    for (const e of events) {
+      if (e && typeof e === 'object') {
+        line({ t: new Date().toISOString(), kind: String(e.kind || 'console'),
+               msg: clip(e.msg, 300), href: clip(e.href, 120) });
+      }
+    }
+    res.status(204).end();
+  });
+  // Traffic log: mounted FIRST so it sees every /api exchange. Mutation
+  // request bodies (<=200 chars) and 4xx/5xx response bodies (<=300 chars,
+  // via a res.json wrapper) carry the "why" of func failures.
+  app.use((req, res, next) => {
+    const started = Date.now();
+    const isApi = String(req.originalUrl || req.url || '').startsWith('/api');
+    let resClip;
+    if (isApi) {
+      const origJson = res.json.bind(res);
+      res.json = (payload) => {
+        try { if (res.statusCode >= 400) resClip = clip(payload, 300); } catch { /* best effort */ }
+        return origJson(payload);
+      };
+    }
+    res.on('finish', () => {
+      if (!isApi) return;
+      const rec = { t: new Date().toISOString(), kind: 'http', method: req.method,
+                    path: clip(req.originalUrl || req.url, 160), status: res.statusCode,
+                    ms: Date.now() - started };
+      try {
+        if (!/^GET$/i.test(req.method) && req.body !== undefined) rec.reqBody = clip(req.body, 200);
+      } catch { /* best effort */ }
+      if (res.statusCode >= 400 && resClip !== undefined) rec.resBody = resClip;
+      line(rec);
+    });
+    next();
+  });
+};
 """
 
 INDEX_JS = """\
