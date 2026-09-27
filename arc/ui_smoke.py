@@ -55,18 +55,25 @@ _QUOTED_RE = re.compile(
 _PLACEHOLDER_RE = re.compile(r"<[^<>]{1,60}>")
 # 错误消息启发:标点结尾,或祈使/拒绝句式。消息类串只在静态层查(展示
 # 时机在失败路径上,通用爬虫无法触发),爬虫只追控件类。
+# 2026-09-27 补:①纯数字/数字为主的短串(验证码形 "123456"/"000000")是
+# 展示值不是控件可访问名——按控件猎捕必然误报红(github 二跑实测);
+# ②"Password updated"类成功态文案("updated/created/saved")同理。
 _MESSAGE_HINT_RE = re.compile(
     r"[.!?:]$|^(Please|Invalid|Error|Could not|Cannot|Must)"
     r"|\bmust\b|\bcannot\b|already exists|failed to|is required"
     r"|is invalid|not satisfied|does not match|not found|not allowed"
-    r"|\bdenied\b|already a member|is incorrect")
+    r"|\bdenied\b|already a member|is incorrect"
+    r"|\bupdated\b|\bcreated\b|\bsaved\b|\bdeleted\b")
+_NUMERIC_CODE_RE = re.compile(r"^[0-9][0-9A-Za-z_-]{3,15}$")
 
 
 def _classify(quoted: str) -> dict | None:
     """单条引号串 → 契约条目;纯占位符模板返回 None(无静态锚点)。"""
     text = quoted.strip()
     if not text or _PLACEHOLDER_RE.search(text) is None:
-        return {"value": text, "kind": "exact", "message": bool(_MESSAGE_HINT_RE.search(text))}
+        return {"value": text, "kind": "exact",
+                "message": bool(_MESSAGE_HINT_RE.search(text))
+                or bool(_NUMERIC_CODE_RE.fullmatch(text))}
     # 含 <占位符>:取首个占位符前的文本作前缀锚点("Filter <header text>"
     # → "Filter");前缀为空则尝试尾后缀;两头都是占位符的纯模板放弃。
     parts = _PLACEHOLDER_RE.split(text, maxsplit=1)
@@ -163,6 +170,9 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   timeout: 90_000,
+  // 与隐藏评测配置同构(10s 断言墙):爬虫自设 test.setTimeout 拉长整测
+  // 时限,但每条 expect 必须在评测同款 10s 内成立。
+  expect: { timeout: 10_000 },
   use: { baseURL: process.env.E2E_BASE_URL || '__BASE_URL__' },
 });
 """
@@ -174,17 +184,60 @@ _README = """\
 # .arc/ui-smoke — HOST-OWNED (read-only)
 
 Host-generated UI contract smoke for this task (arc/ui_smoke.py). The suite
-asserts, in a real headless browser: quoted contract strings are openable and
-carry their EXACT accessible name, dialogs close on Escape/Cancel, the page
-never gets stuck behind an overlay, Shift-click does not collapse selection,
-and downloads are non-empty without a UTF-8 BOM.
+asserts, in a real headless browser: quoted contract strings are openable,
+carry their EXACT accessible name, and match exactly ONE visible clickable
+(strict mode); a role="grid" renders visible column/row headers plus
+coordinate-named gridcells, and a spreadsheet grid is FIXED-SIZE (empty
+cells beyond the data region are selectable); dropdowns are native selects
+or full ARIA comboboxes (aria-expanded; native <option> labels count as
+carriers); named controls are not permanently disabled; dialogs close on
+Escape/Cancel; the page never gets stuck behind an overlay; Shift-click
+does not collapse selection; downloads are non-empty without a UTF-8 BOM;
+and for auth-gated apps the signed-in username is its OWN visible exact
+text element and survives reload.
 
-Sanctioned self-check command (runs against the dev server as-is):
+Carrier rule (anti-gaming): a contract string is credited ONLY on
+interactive controls or structural name carriers (headings, table cells,
+dialog names, aria-labels). Rendering the string as static text (a
+span/chip "tour" listing) clears NOTHING — fix the real control.
 
-    node __CLI__ test --config .arc/ui-smoke/playwright.config.ts
+Sanctioned self-check command (runs against the dev server as-is; the host
+suite always filters to contract-smoke.spec.ts, so MY-CHECK never pollutes
+it):
 
-Reds are host-authored contract failures — fix the app, rerun. Do not edit
-anything in this directory; the host regenerates it.
+    node __CLI__ test --config .arc/ui-smoke/playwright.config.ts contract-smoke.spec.ts
+
+For a ONE-OFF custom check: copy MY-CHECK.spec.ts.example to MY-CHECK.spec.ts,
+edit it, and run it with the explicit file argument appended to the command
+above. That form is allowed, re-runnable, and green-stop-visible; inline
+`node -e` browser scripts stay forbidden.
+
+Reds are host-authored contract failures — fix the app, rerun. If you have
+positive evidence a red is a crawler-state artifact (the control works but
+needs a state the crawler cannot reach), state that with evidence in your
+completion note instead of restructuring correct UI. Do not edit
+anything in this directory except your own MY-CHECK file; the host
+regenerates the rest.
+"""
+
+# 一次性自定义检查的正路模板:改名即用(带 .example 后缀,Playwright 不收集)。
+_MY_CHECK_EXAMPLE = """\
+// MY-CHECK.spec.ts.example — one-off custom checks belong in THIS form.
+// Copy to MY-CHECK.spec.ts, edit, then run with an explicit file argument:
+//   node <cli> test --config .arc/ui-smoke/playwright.config.ts MY-CHECK.spec.ts
+// That form is allowed (inline `node -e` browser scripts are not),
+// re-runnable, and green-stop-visible. The host contract suite never runs
+// this file (it filters to contract-smoke.spec.ts).
+import { test, expect } from '@playwright/test';
+
+test('my check - name what this verifies', async ({ page }) => {
+  await page.goto('/');
+  // Example: walk one form chain end to end.
+  // await page.getByLabel('Workbook name').fill('Q3 Sales');
+  // await page.getByRole('button', { name: 'Create', exact: true }).click();
+  // await expect(page.getByText('Q3 Sales')).toBeVisible();
+  expect(true).toBe(true);
+});
 """
 
 
@@ -230,53 +283,94 @@ def stage_ui_smoke(output_dir: Path, entries: list, smoke_port: int,
         generate_spec(entries, auth), encoding="utf-8")
     (stage / "playwright.config.ts").write_text(generate_config(smoke_port), encoding="utf-8")
     (stage / "README.md").write_text(_README.replace("__CLI__", cli_hint), encoding="utf-8")
+    (stage / "MY-CHECK.spec.ts.example").write_text(
+        _MY_CHECK_EXAMPLE, encoding="utf-8")
     (stage / ".gitignore").write_text(_GITIGNORE, encoding="utf-8")
-    for junk in ("test-results", ".playwright-report"):
+    for junk in ("test-results", ".playwright-report", "red-shots"):
         shutil.rmtree(stage / junk, ignore_errors=True)
     return stage
 
 
-def fixture_auth(output_dir: Path, entries: list | None = None) -> dict | None:
+def _auth_from_users(users: list, entries: list | None,
+                     fixture_password: str) -> dict | None:
+    """users 行列表 → {"username","passwords"};空表 → None。"""
+    if not users:
+        return None
+    first = users[0]
+    candidates = [fixture_password]
+    for e in entries or []:
+        v = e["value"]
+        if (len(v) >= 8 and any(c.isdigit() for c in v)
+                and any(c.isalpha() for c in v) and " " not in v
+                and v not in candidates):
+            candidates.insert(0, v)
+    return {"username": str(first.get("username") or first.get("email") or ""),
+            "passwords": candidates[:4]}
+
+
+def db_login_users(output_dir: Path) -> list:
+    """db.json 里的 users 行(登录门存在性判定;读不到返回空表)。"""
+    try:
+        db = json.loads((Path(output_dir) / "backend" / "data" / "db.json")
+                        .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return (db.get("collections") or {}).get("users") or []
+
+
+def fixture_auth(output_dir: Path, entries: list | None = None,
+                 fixture_password: str = "Fixture-password-123!") -> dict | None:
     """db.json 首个种子账号 + 登录候选密码表。
 
     候选序:①需求文本逐字引用的密码形串(hackathon--github 实测:种子
     密码是 “Valid-password-123!”,不是 FIXTURE_PASSWORD——那次 run 的
     播种用需求引号值);②fixture 链统一 FIXTURE_PASSWORD。爬虫逐个试,
     密码形判定:长度≥8 且含字母数字。
+
+    2026-09-27:不再 `import fixture_manifest`(staging 时机早于 sys.path
+    就绪时 ImportError 直接吞成 None);密码经参数传入,users 读不到时
+    由调用方用 auth_from_compiled(宿主播种结果)回退。
     """
-    try:
-        import fixture_manifest
-        db = json.loads((Path(output_dir) / "backend" / "data" / "db.json")
-                        .read_text(encoding="utf-8"))
-        users = (db.get("collections") or {}).get("users") or []
-        first = users[0]
-        candidates = [fixture_manifest.FIXTURE_PASSWORD]
-        for e in entries or []:
-            v = e["value"]
-            if (len(v) >= 8 and any(c.isdigit() for c in v)
-                    and any(c.isalpha() for c in v) and " " not in v
-                    and v not in candidates):
-                candidates.insert(0, v)
-        return {"username": str(first.get("username") or first.get("email") or ""),
-                "passwords": candidates[:4]}
-    except (OSError, ValueError, IndexError, KeyError, ImportError):
-        return None
+    return _auth_from_users(db_login_users(output_dir), entries,
+                            fixture_password)
+
+
+def auth_from_compiled(fixture_compiled: dict | None, entries: list | None = None,
+                       fixture_password: str = "Fixture-password-123!"
+                       ) -> dict | None:
+    """宿主播种结果(fixture_manifest.materialize 的返回值)→ 登录前奏。
+
+    db.json 尚未落盘/读取失败时的第二来源:materialize 的 db.users 就是
+    即将写入的种子行,时序上永远可用。"""
+    users = ((fixture_compiled or {}).get("db") or {}).get("users") or []
+    return _auth_from_users(users, entries, fixture_password)
 
 
 def build_ui_smoke_cmd(cli_path: str | None) -> str:
-    """节点/收尾提示词附带的被批准自检命令(与 SPEC RUN 同构)。"""
+    """节点/收尾提示词附带的被批准自检命令(与 SPEC RUN 同构)。
+
+    显式限定 contract-smoke.spec.ts:模型自建的同目录 MY-CHECK.spec.ts
+    不会混进权威自检;一次性检查走"MY-CHECK + 显式文件参数"正路。"""
     if cli_path:
-        cmd = f"node {cli_path} test --config .arc/ui-smoke/playwright.config.ts"
+        cmd = (f"node {cli_path} test --config "
+               f".arc/ui-smoke/playwright.config.ts contract-smoke.spec.ts")
     else:
         cmd = ("npx --yes @playwright/test test --config "
-               ".arc/ui-smoke/playwright.config.ts")
+               ".arc/ui-smoke/playwright.config.ts contract-smoke.spec.ts")
     return (
         "\nUI SMOKE RUN (sanctioned, host-authored contract suite): run this "
         "any time to self-check the UI contract in a real browser — contract "
-        "strings openable and exact-named, dialogs closable, page never "
-        "stuck, Shift-click keeps selection, downloads BOM-free. Reds are "
-        "host-authored failures: fix the app, then rerun. Writing your own "
-        "browser scripts stays forbidden.\n  " + cmd + "\n")
+        "strings openable, exact-named and STRICT-mode-unique (interactive/"
+        "structural carriers only — static text clears nothing); grids "
+        "complete AND fixed-size; dropdowns native <select>; named controls "
+        "not permanently disabled; dialogs closable; page never stuck; "
+        "Shift-click keeps selection; downloads BOM-free; signed-in username "
+        "exact-visible across reload (auth-gated apps). Reds are host-"
+        "authored failures: fix the real control, then rerun — never surface "
+        "contract strings as static text. For a one-off custom check, copy "
+        ".arc/ui-smoke/MY-CHECK.spec.ts.example to MY-CHECK.spec.ts and run "
+        "it with an explicit file argument — writing your own browser "
+        "scripts stays forbidden.\n  " + cmd + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -284,9 +378,13 @@ def build_ui_smoke_cmd(cli_path: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 def parse_report(json_stdout: str, last_run: Path | None) -> dict:
-    """JSON reporter stdout + last-run.jsonl → {passed, failed, titles, reds}。"""
+    """JSON reporter stdout + last-run.jsonl → {passed, failed, titles, reds}。
+
+    fails=全部失败标题(flow_suite 据此映射回 REQ 节点;titles 仍是
+    截断的展示串)。"""
     passed = failed = 0
     titles: list[str] = []
+    fails: list[str] = []
 
     try:
         payload = json.loads(json_stdout[json_stdout.find("{"):])
@@ -303,13 +401,15 @@ def parse_report(json_stdout: str, last_run: Path | None) -> dict:
                               r.get("status") in ("passed", "skipped")
                               for r in results)
                               and any(r.get("status") == "passed" for r in results)))
+                    title = str(t.get("title")
+                                or spec.get("title") or "untitled")[:160]
                     if ok:
                         passed += 1
                     else:
                         failed += 1
+                        fails.append(title)
                         if len(titles) < 8:
-                            titles.append(str(t.get("title")
-                                              or spec.get("title") or "untitled")[:120])
+                            titles.append(title[:120])
             for sub in suite.get("suites") or []:
                 walk(sub)
         for suite in payload.get("suites") or []:
@@ -330,7 +430,7 @@ def parse_report(json_stdout: str, last_run: Path | None) -> dict:
         except (json.JSONDecodeError, OSError, ValueError):
             reds = []
     return {"passed": passed, "failed": failed,
-            "titles": " | ".join(titles), "reds": reds}
+            "titles": " | ".join(titles), "fails": fails, "reds": reds}
 
 
 def _lg_cli() -> Path | None:
@@ -343,15 +443,58 @@ def _lg_cli() -> Path | None:
     return None
 
 
+def _describe_red_shots(run_dir: Path, report: dict, log=print) -> None:
+    """红项截图 → VISUAL_MODEL 描述,回填 report["visuals"](best-effort)。
+
+    模型修红项时"看不见"页面;spec 模板在红项命中时截了 red-shots/*.png,
+    这里用视觉通道转述成可行动文字。视觉通道未配置/失败 → 静默跳过
+    (红项本身已可行动)。上限 2 张、单张 120s(实测带 max 思考的单张
+    8-96s,2 张封顶避免挤压 final 修复轮的预算),复用 visual_ref 的通道
+    解析与 (sha256, model) 缓存(缓存键即截图相对路径,同图重跑不付费)。
+    """
+    try:
+        import visual_ref
+    except ImportError:
+        return
+    lane = visual_ref.visual_lane()
+    if lane is None:
+        return
+    shots_dir = run_dir / "red-shots"
+    if not shots_dir.is_dir():
+        return
+    model, base_url, api_key = lane
+    visuals: list[dict] = []
+    for shot in sorted(shots_dir.glob("*.png"))[:2]:
+        text = visual_ref._describe_image(
+            model, base_url, api_key, shot, timeout=120, log=log)
+        if text:
+            label = shot.stem[:60]
+            visuals.append({"label": label, "text": text})
+    if visuals:
+        report["visuals"] = visuals
+        log(f"[ui-smoke] described {len(visuals)} red screenshot(s) "
+            "via the visual lane")
+
+
 def run_smoke(output_dir: Path, smoke_port: int, entries: list,
-              extra_ports: list | None = None, timeout: int = 300) -> dict | None:
+              extra_ports: list | None = None, timeout: int = 300,
+              auth: dict | None = None,
+              fixture_password: str = "Fixture-password-123!",
+              grep: str | None = None) -> dict | None:
     """宿主权威执行:从种子起跑自起服务器 → 跑契约爬虫 → 红绿+红项明细。
 
+    auth=None 时自动从 db.json/需求密码串推导(2026-09-26 github 教训:
+    本函数曾硬编码重落盘 auth=None 的 spec,final 权威轮退化为未登录爬取,
+    33 条登录态字符串全部误报红,把收尾修复循环带偏)。显式传 auth=None
+    且 db 无 users 才是"无登录门应用"。
     返回 None = 未尝试(工具链/启动不可用),调用方不得当作失败。
     需要 import 方提供 plan_envelope.rehearsal_boot_env(惰性 import,
     避免包内循环依赖)。
     """
     import plan_envelope  # 惰性:main.py 顶层已 import,这里拿引用
+
+    if auth is None:
+        auth = fixture_auth(output_dir, entries, fixture_password)
 
     cli = _lg_cli()
     if cli is None:
@@ -362,7 +505,7 @@ def run_smoke(output_dir: Path, smoke_port: int, entries: list,
     # 本地联调是软链——统一 realpath 消除这类差异。
     cli = cli.resolve()
     output_dir = Path(output_dir)
-    stage_ui_smoke(output_dir, entries, smoke_port, str(cli))
+    stage_ui_smoke(output_dir, entries, smoke_port, str(cli), auth=auth)
     run_dir = output_dir / UI_SMOKE_SUBDIR
     # config/spec import '@playwright/test' —— 从 run_dir 解析,把
     # local-grader 的 node_modules 链过来(Tier-2 同款手法,.gitignore 兜住)。
@@ -419,12 +562,25 @@ def run_smoke(output_dir: Path, smoke_port: int, entries: list,
                     time.sleep(1)
             else:
                 return None
+        # 权威判定跑契约爬虫 + 场景流套件(flow_suite 生成,平台同构的
+        # 交互级走查);模型自建的 MY-CHECK.spec.ts 不进宿主判定。
+        # grep(批后流回归):只跑已完成节点的流,未实现节点不产噪音。
+        targets = ["contract-smoke.spec.ts"]
+        if (run_dir / "flow-suite.spec.ts").is_file():
+            targets.append("flow-suite.spec.ts")
+        args = [node_bin, str(cli), "test",
+                "--config", "playwright.config.ts", *targets,
+                "--reporter=json"]
+        if grep:
+            args += ["--grep", grep]
         r = subprocess.run(
-            [node_bin, str(cli), "test",
-             "--config", "playwright.config.ts", "--reporter=json"],
+            args,
             cwd=run_dir, capture_output=True, text=True, timeout=timeout,
             errors="replace")
         report = parse_report(r.stdout, last_run)
+        # 红项截图 → 视觉描述(有通道才做;失败不影响红项本体)。
+        # log 用 print 兜底:run_smoke 无宿主 log 上下文(NameError 教训)。
+        _describe_red_shots(run_dir, report, log=print)
         # 红项回填来源节点(修复提示词要指名 REQ)。
         by_value = {}
         for e in entries:

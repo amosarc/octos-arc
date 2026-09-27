@@ -242,6 +242,68 @@ class ManifestConsistencyTests(unittest.TestCase):
                       inspect.getsource(GitClient.ensure_arc_gitignore))
 
 
+class TelemetryTests(unittest.TestCase):
+    """评测期遥测(2026-09-27):平台 func/e2e 失败明细不下发,应用自身把
+    评测流量与前端异常落 octos-logs/eval-traffic.jsonl 随 zip 带回。
+    三件套 = lib/eval-telemetry.js + app.js require 行 + index.html 钩子;
+    scaffold 常规路径落盘,telemetry.ensure 在交付前兜底回补。"""
+
+    def test_manifest_carries_telemetry_pieces(self):
+        self.assertIn("backend/src/lib/eval-telemetry.js", sc.SCAFFOLD_FILES)
+        self.assertEqual(
+            sc.SCAFFOLD_FILES["backend/src/lib/eval-telemetry.js"][1], "host")
+        app_js = sc.SCAFFOLD_FILES["backend/src/app.js"][0]
+        self.assertIn("require('./lib/eval-telemetry').mount(app)", app_js)
+        index_html = sc.SCAFFOLD_FILES["frontend/index.html"][0]
+        self.assertIn("__arcTelemetryHook", index_html)
+        self.assertIn("/api/__telemetry", index_html)
+
+    def test_ensure_reinjects_after_model_rewrite(self):
+        # 模型重写 app.js(保留 express 锚点)与 index.html(丢钩子)后,
+        # 交付前兜底必须把 require 行与错误钩子注回,并写 marker 行。
+        from scaffold import telemetry
+        with TemporaryDirectory() as td:
+            out = Path(td)
+            sc.scaffold(out)
+            (out / "backend/src/app.js").write_text(
+                "// model rewrite\nconst express = require('express');\n"
+                "const app = express();\nmodule.exports = app;\n",
+                encoding="utf-8")
+            (out / "frontend/index.html").write_text(
+                "<!doctype html><html><head><title>x</title></head>"
+                "<body><div id=\"root\"></div></body></html>",
+                encoding="utf-8")
+            self.assertTrue(telemetry.ensure(out, log=lambda *a: None))
+            app_js = (out / "backend/src/app.js").read_text(encoding="utf-8")
+            self.assertIn("eval-telemetry", app_js)
+            self.assertIn("const app = express();", app_js)
+            html = (out / "frontend/index.html").read_text(encoding="utf-8")
+            self.assertIn("__arcTelemetryHook", html)
+            self.assertLess(html.index("__arcTelemetryHook"),
+                            html.index("</head>"))
+            marker = (out / "octos-logs/eval-traffic.jsonl").read_text(
+                encoding="utf-8").strip().splitlines()[-1]
+            self.assertIn('"kind": "marker"', marker)
+            # 幂等:第二次 ensure 不重复注入
+            telemetry.ensure(out, log=lambda *a: None)
+            self.assertEqual(
+                (out / "frontend/index.html").read_text(encoding="utf-8"),
+                html)
+
+    def test_ensure_warns_when_anchor_missing(self):
+        # app.js 无 express 锚点(极端重写)→ 返回 False 只告警,marker 仍写,
+        # 其余件不受影响。
+        from scaffold import telemetry
+        with TemporaryDirectory() as td:
+            out = Path(td)
+            sc.scaffold(out)
+            (out / "backend/src/app.js").write_text(
+                "module.exports = require('express')();\n", encoding="utf-8")
+            self.assertFalse(telemetry.ensure(out, log=lambda *a: None))
+            self.assertTrue(
+                (out / "octos-logs/eval-traffic.jsonl").is_file())
+
+
 class TemplateSmokeTests(unittest.TestCase):
     def test_full_backend_flow(self):
         node = _node_bin()

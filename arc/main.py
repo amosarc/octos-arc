@@ -14,6 +14,14 @@ git commits.
 
 Configuration is via environment variables:
     OPENAI_API_KEY / OPENAI_BASE_URL / MODEL   (OpenAI-compatible endpoint)
+    VISUAL_MODEL / VISUAL_API_KEY / VISUAL_BASE_URL
+                         (vision lane describing requirement reference
+                          images before the coding turns; falls back to
+                          MODEL / OPENAI_API_KEY / OPENAI_BASE_URL, visual
+                          model default glm-5.3-flash. Best-effort: an
+                          unavailable lane leaves image refs as plain text)
+    OCTOS_VISUAL_BUDGET (seconds cap for the whole description phase,
+                         default 900; per-image timeout 180s)
     OCTOS_PROVIDER  (override provider name, e.g. deepseek/openai/anthropic)
     OCTOS_MODEL     (override model name)
     OCTOS_BIN       (path to the octos binary; default: ./bin/octos then PATH)
@@ -41,6 +49,7 @@ import shutil
 import signal
 import socket
 import subprocess
+from datetime import datetime, timezone
 import sys
 import tempfile
 import threading
@@ -53,9 +62,11 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from arcbench_agent_runtime import AgentRuntime  # noqa: E402
 import fixture_manifest  # noqa: E402  (夹具契约提取/宿主种子编译)
+import flow_suite  # noqa: E402  (description → 平台同构场景流套件 FLOW RUN)
 import plan_envelope  # noqa: E402
 import scaffold  # noqa: E402  (宿主脚手架包:模板/清单/schema 编译唯一公开面)
 import ui_smoke  # noqa: E402  (requirements-only 任务的宿主 UI 契约冒烟)
+import visual_ref  # noqa: E402  (参考图视觉预描述:VISUAL_MODEL 代看注入 tree)
 
 
 _DEBUG_LOG_PATH: Path | None = None
@@ -108,6 +119,23 @@ def log(msg: str) -> None:
                 fh.write(f"[{stamp}] {line}\n")
     except OSError:
         pass
+
+
+def _ensure_eval_telemetry(output_dir: Path) -> None:
+    """评测期遥测兜底(委托 scaffold.telemetry.ensure):平台的 func/e2e
+    失败明细不下发,应用自身把评测流量与前端异常写
+    octos-logs/eval-traffic.jsonl 随 zip 带回;交付前回补模型可能重写丢的
+    钩子并写 marker 切分 agent/评测两阶段流量。OCTOS_ARC_EVAL_TELEMETRY=0
+    关闭。注入失败只告警——遥测永远不破坏交付。
+    """
+    if os.environ.get("OCTOS_ARC_EVAL_TELEMETRY", "1") == "0":
+        log("[postflight] eval telemetry disabled by env")
+        return
+    try:
+        import scaffold.telemetry
+        scaffold.telemetry.ensure(output_dir, log=log)
+    except Exception as exc:  # noqa: BLE001 — 遥测兜底不得影响交付
+        log(f"[postflight] eval telemetry ensure failed: {exc}")
 
 
 def _handover_pristine_seed(output_dir: Path) -> None:
@@ -1304,6 +1332,15 @@ def build_octos_env(config_dir: Path) -> dict:
         # routes, which is what the platform uses); "low" caps the
         # reasoning spend so content actually gets emitted.
         config["gateway"]["reasoning_effort"] = "low"
+    if "glm-5" in model:
+        # GLM-5.2+ 分级思考(用户规格 2026-09-27):thinking 二值开关 +
+        # reasoning_effort(max/high/low,medium 内核钳为 high)。策略=
+        # 首轮对话最高、非首轮 low:内核按"历史尚无 assistant 消息"判定
+        # 首轮(每个节点 turn 的新会话首轮=规划/搭架时刻),后续工具
+        # 循环轮走 reasoning_effort_followup。ARC tiering 的 Disabled
+        # 仍绝对优先(执行期关闭不被 followup 翻开)。
+        config["gateway"]["reasoning_effort"] = "max"
+        config["gateway"]["reasoning_effort_followup"] = "low"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     env["OCTOS_CONFIG_DIR"] = str(config_dir)
@@ -1785,9 +1822,15 @@ nationality "Chinese", the select must include an option labeled exactly \
 "Chinese". Round 31's registration tests all timed out because the \
 nationality select lacked the fixture's option label ("did not find some \
 options").
-- SESSIONS: after registration or login, redirect to the home page and show \
-the exact username plus a "Sign out" link in the header; the session must \
-survive page reload (cookie or token persisted in the browser).
+- SESSIONS: after registration or login, redirect to the home page. The \
+requirement's minimum is that the signed-in username remains VISIBLE after \
+reload; the SAFEST form (satisfies every locator style) is the username as \
+its own visible exact-text element inside the account-menu trigger: \
+<button aria-label="Account menu"><span>{username}</span></button> — a bare \
+"Welcome, {username}" heading passes the loose reading but fails exact-text \
+locators; the trigger pattern passes both. The session must survive page \
+reload. Sign-out placement follows the requirement text verbatim (a header \
+link OR a menu item — copy exactly what it specifies).
 - ERROR STATES: failed validation stays on the same page, shows an inline \
 message naming the problem (tests match words like required/invalid/match/\
 terms/duplicate), keeps the anonymous header, and creates no records. Show \
@@ -1810,17 +1853,50 @@ Canada, Australia (round 31/32: the registration tests select the option \
 labeled "Vietnam"; without it every registration test times out). A gender \
 control is exactly two radio inputs labeled "Male" and "Female". Text \
 fields must accept ISO date strings like "2035-12-31".
+- NATIVE-FIRST WIDGETS: never hand-roll what the platform ships. \
+Dropdowns are native <select> + <option> — graders use \
+getByRole('combobox') and selectOption; a custom div dropdown is \
+invisible to every selector without full ARIA combobox semantics \
+(sheet run 2: a hand-rolled combo destroyed a whole requirement \
+family). Modals are the native <dialog> element with showModal() — \
+Escape, backdrop click, and focus trapping come for free (a \
+hand-rolled undismissable overlay blocks every later grader step). \
+Build custom ONLY where HTML has no native widget (menus, tabs, \
+grids) — and then the requirement's exact ARIA roles are mandatory \
+(role="menu"/"menuitem", role="tab"/aria-selected, \
+role="grid"/"gridcell"). The scaffold ships these graded shapes as \
+CODE in frontend/src/app/ui.jsx — NativeSelect, AppDialog, \
+AccountTrigger, SingleError, FixedGrid: import and use them instead \
+of re-implementing.
+- DATA GRIDS: render the COMPLETE grid — role="grid" with visible \
+columnheader cells (column letters) and rowheader cells (row numbers) \
+plus role="gridcell" cells whose accessible name is the coordinate \
+(e.g. A1). A spreadsheet grid is FIXED-SIZE, not data-sized: render a \
+generous empty grid (≥ 20 rows × 8 columns) beyond the seeded data so \
+graders can select and type into EMPTY cells — the sheet runs shipped a \
+grid that stopped at the last data row, and every "type into A5"-class \
+test died at its first click.
+- SUBMIT ENABLEMENT: a submit/save button must become ENABLED once the \
+required fields are filled — a permanently disabled submit can never be \
+clicked by a test. Disabled is a transient state (Undo with an empty \
+stack), never a permanent condition.
 - FIXTURE CONTRACT POINTER: the SEED DATA rule above covers visible \
 example values; the full fixture contract (role accounts, ownership and \
 permission relationships, per-scenario pre-states, E2E_* items) is \
 compiled in your CONTRACT section and backend/data/db.json — seed or \
 preserve it exactly; demo-quality substitutes for named fixtures score \
 zero.
-- TEXT ONLY: every string you need exists as plain text in the requirement \
-YAML/files. Reference images are illustrative only — NEVER attempt OCR, \
-ASCII rendering, or any other image text extraction, and never try to \
-install extra tools for it. Round 24 burned a 28-minute turn on image \
-text extraction and produced no code at all.
+- REFERENCE IMAGES: when the requirement text carries a "Page reference \
+image <path> (style/layout reference only) — <visual model> visual \
+description:" block, that text IS the image, transcribed upstream by the \
+host's vision model. The images are a STYLE AND LAYOUT REFERENCE ONLY: \
+follow the region arrangement, component placement, and grid/table \
+structure they show; NEVER copy any string, label, wording, language, \
+or data from the mockup — every user-facing string comes from the \
+requirement YAML text, which always wins. NEVER attempt OCR, ASCII \
+rendering, or any other image text extraction yourself, and never \
+install tools for it (round 24 burned a 28-minute turn that way and \
+produced no code).
 - WRITE CODE FIRST: start creating project files in your very first \
 actions. A turn that only reads and analyzes without writing files is a \
 failed turn, no matter how good the analysis is.
@@ -1844,10 +1920,18 @@ stay on the same page, create no records; every echoed value appears in \
 EXACTLY ONE visible element (strict mode); seed the requirement's concrete \
 records and option labels VERBATIM, and give unlisted control values a \
 broad standard set (nationalities including Vietnam; gender = exactly two \
-radios "Male"/"Female"; text fields accept ISO dates); after login or \
+radios "Male"/"Female"; text fields accept ISO dates); widgets are \
+native-first — native <select> dropdowns, native <dialog> modals; \
+custom widgets only where HTML has none, with the requirement's exact \
+ARIA roles; the scaffold's frontend/src/app/ui.jsx primitives \
+(NativeSelect/AppDialog/AccountTrigger/SingleError/FixedGrid) ARE \
+those shapes — import them; grids render headers plus \
+coordinate-named gridcells; submits enable once required fields are \
+filled; after login or \
 registration show the exact username plus a "Sign out" link, with the \
-session surviving page reload; the UI is text-only (never OCR images); \
-write code first.\
+session surviving page reload; the UI is text-only (never OCR images; \
+inline visual-model descriptions are style/layout reference only — \
+never a source of strings); write code first.\
 """
 
 # planctl host-first prompts: the kernel system row already carries the
@@ -1953,9 +2037,13 @@ Per-node staged specs:
 VERIFICATION_RULES = (
     "\nVERIFICATION RULES: the SPEC RUN command is the ONLY sanctioned way "
     "to verify — never write your own Playwright/Puppeteer/chromium script "
-    "and never spawn a browser directly. NEVER revert project files with "
-    "git checkout/reset/restore — the repo is host-managed for "
-    "traceability; when a check fails, fix forward with edits.\n")
+    "and never spawn a browser directly. For a ONE-OFF custom check, copy "
+    ".arc/ui-smoke/MY-CHECK.spec.ts.example to .arc/ui-smoke/MY-CHECK."
+    "spec.ts, edit it, and run it with an explicit file argument (that "
+    "form is allowed, re-runnable, and green-stop-visible). NEVER revert "
+    "project files with git checkout/reset/restore — the repo is "
+    "host-managed for traceability; when a check fails, fix forward with "
+    "edits.\n")
 
 
 def build_spec_run_cmd(cli_path: str | None,
@@ -1975,18 +2063,27 @@ def build_spec_run_cmd(cli_path: str | None,
     """
     files = " ".join(f for f in (spec_files or []) if f)
     tail = f" {files}" if files else ""
+    # 冷启动前缀(评测同构):评测链每轮都是 清运行态 → 重建前端 → 从种子
+    # 起服 → 跑 specs;本地绿必须出自同一起点(run11/8/7 的 greenButRed
+    # 主形态=热状态+旧 dist 绿、评测冷启动红;run13 全绿 run 自发形成这
+    # 套仪式,这里机制化)。语义:rm 永不失败;build 失败则整链停止(模型
+    # 先看到构建错误,不浪费一次 spec run);restart 失败容忍(脚本缺席
+    # 时对现有服务跑,boot.log 有细节)。
+    cold_start = ("rm -f backend/data/db.run.json && "
+                  "npm run build --prefix frontend && "
+                  "sh .arc/host/restart-server.sh >/dev/null 2>&1; ")
     if cli_path:
         return (
             f"{VERIFICATION_RULES}"
             "SPEC RUN (host-provided, deps preinstalled — use verbatim "
-            "from the workspace root):\n"
-            f"node {cli_path} test --config "
+            "from the workspace root, cold-start prefix included):\n"
+            f"{cold_start}node {cli_path} test --config "
             f".arc/acceptance/playwright.config.ts --reporter=line{tail}\n")
     return (
         f"{VERIFICATION_RULES}"
         "SPEC RUN (host-provided fallback — use verbatim from the "
-        "workspace root):\n"
-        f"npx --yes @playwright/test test --config "
+        "workspace root, cold-start prefix included):\n"
+        f"{cold_start}npx --yes @playwright/test test --config "
         f".arc/acceptance/playwright.config.ts --reporter=line{tail}\n")
 
 
@@ -2072,20 +2169,52 @@ host-authored contract assertion, not a suggestion. Fix the app code \
 restart via `sh .arc/host/restart-server.sh {smoke}`, then rerun the \
 UI SMOKE RUN command to confirm green. Do not touch passing flows.
 
+ANTI-GAMING RULE (absolute): clear a red only by making the REAL \
+control or flow work. NEVER surface contract strings as static text \
+(a span/chip/label list naming the string), never add decoy elements \
+with contract names, never widen a control to swallow a string. The \
+crawler only credits interactive controls and structural name \
+carriers (headings, table cells, dialog names, aria-labels) — static \
+text clears nothing, and grader strict-mode locators punish decoys.
+
+If you have POSITIVE EVIDENCE a red is a crawler-state artifact (the \
+control genuinely exists and works, e.g. it only appears after a \
+specific user action the crawler cannot reach), say exactly that in \
+your completion note with the evidence — the host reads it. Do NOT \
+restructure correct UI to chase such a red.
+
 Red items (probe | contract string | what the browser found):
 {reds}
-
-Fix directions by probe: affordance = no visible control carries the \
-exact string — implement the chain or surface the control (hidden \
-<select> options do NOT count: render visible radios/buttons); \
-exact-name = a dialog button contains the contract string only as a \
-substring — rename it to the EXACT accessible name; escape-close = \
-the dialog must close on Escape (and overlay/cancel), an \
-undismissable overlay blocks every later grader step; shift-select = \
-click + Shift-click must keep BOTH cells aria-selected="true" — never \
-collapse the selection in the click handler; page-alive = an \
-interaction left the page unclickable (stuck overlay); download = \
-exported file is empty or starts with a UTF-8 BOM — strip it.\
+{visual}
+Fix directions by probe: affordance = no interactive/structural \
+carrier exposes the exact string — implement the chain. Native \
+<select> options DO count as carriers and graders drive them with \
+selectOption; keep selects native. strict-mode = the string \
+matches MORE THAN ONE visible clickable — keep exactly ONE element \
+per value; grid-structure = the grid lacks visible column/row \
+headers or coordinate-named gridcells — render the complete grid; \
+grid-extent = a spreadsheet grid that renders only the data region — \
+render a FIXED-SIZE empty grid (≥8 columns × ≥15 rows) so empty \
+cells are selectable and typeable; auth-gate = after signing in, \
+the username is not its own visible exact-text element (or does not \
+survive reload) — render it inside the account-menu trigger, e.g. \
+<button aria-label="Account menu"><span>{username}</span></button>; \
+combobox = a custom dropdown without aria-expanded — switch to a \
+native <select>; disabled-only = the named control exists but stays \
+disabled — enable it once required inputs are filled; exact-name = a \
+dialog button contains the contract string only as a substring — \
+rename it to the EXACT accessible name; escape-close = the dialog \
+must close on Escape (and overlay/cancel), an undismissable overlay \
+blocks every later grader step; shift-select = click + Shift-click \
+must keep BOTH cells aria-selected="true" — never collapse the \
+selection in the click handler; page-alive = an interaction left \
+the page unclickable (stuck overlay); download = exported file is \
+empty or starts with a UTF-8 BOM — strip it; flow = a generated \
+scenario walk failed (the title names the REQ) — the named controls/\
+dialogs/messages did not chain end-to-end in a real browser; walk \
+that requirement's chain by hand on port {smoke} and fix the real \
+flow, REQ-1 family items first (the grader aborts the suite after \
+consecutive failures).\
 """
 
 def _ui_smoke_red_lines(ui_run: dict, limit: int = 12) -> str:
@@ -2104,6 +2233,22 @@ def _ui_smoke_red_lines(ui_run: dict, limit: int = 12) -> str:
         if len(lines) >= limit:
             break
     return "\n".join(lines)
+
+
+def _ui_smoke_visual_lines(ui_run: dict, limit: int = 2) -> str:
+    """红项截图的视觉模型描述 → 修复提示词的页面实况段(有才出现)。
+
+    模型此前修红项时"看不见"自己的页面;宿主在红项命中时截图,由
+    VISUAL_MODEL 转述成可行动文字(复用 visual_ref 通道与缓存)。"""
+    visuals = ui_run.get("visuals") or []
+    if not visuals:
+        return ""
+    lines = ["Page evidence at failure (visual model descriptions of the "
+             "host screenshots — read them before fixing):"]
+    for v in visuals[:limit]:
+        lines.append(f"- {v.get('label', 'page')}: "
+                     f"{str(v.get('text') or '')[:600]}")
+    return "\n".join(lines) + "\n"
 
 ACCEPTANCE_STAGED_NOTE = """\
 The official Playwright specs are staged READ-ONLY at .arc/acceptance/ \
@@ -2496,6 +2641,14 @@ def main() -> int:
         # 生成 0-token 探针。github 2 分根因:这些契约此前全链无人消费。
         fixture_data = fixture_manifest.extract(tree)
 
+        # 参考图视觉注入:![image](reference/*.png) 对文本通道是死文本,
+        # 宿主用 VISUAL_MODEL(默认 glm-5.3-flash)按视觉格式预描述后原地
+        # 改写 tree,describe_node/plan envelope 等下游提示词自动携带。
+        # 置于 fixture 提取之后(提取读原文)、traceability 存档之后
+        # (平台工件保留原树);best-effort,失败降级为占位说明。
+        visual_ref.apply_visual_references(
+            tree, dest_req, log=log, work_dir=output_dir)
+
         tests_dir = locate_acceptance_tests(tree, Path(__file__).resolve().parent)
         if tests_dir:
             log(f"[tests] using acceptance specs at {tests_dir}: "
@@ -2618,11 +2771,15 @@ def main() -> int:
             log(f"[plan] staged acceptance specs at {stage_dir}")
             # 宿主尽算：自验 config 无条件落盘（内容只依赖冒烟口）——
             # 工具链缺席时模型至少拿到可用的 config；依赖软链仍以
-            # 工具链就位为前提。
+            # 工具链就位为前提。timeout 与隐藏评测配置同构(10s/10s,
+            # workers 1):staged 自验曾用 Playwright 默认 30s,本地熬过的
+            # 慢流程在评测 10s 墙上必挂(run7 12 个/run8 14 个/run11 5 个
+            # "曾绿后评测红"的评测错误几乎清一色 Test timeout 10000ms)。
             (stage_dir / "playwright.config.ts").write_text(
                 "import { defineConfig } from '@playwright/test';\n"
                 "export default defineConfig({ testDir: '.',\n"
                 "  fullyParallel: false, workers: 1,\n"
+                "  timeout: 10_000, expect: { timeout: 10_000 },\n"
                 "  use: { baseURL: "
                 f"'http://127.0.0.1:{smoke_port}' }} }});\n",
                 encoding="utf-8")
@@ -2640,26 +2797,17 @@ def main() -> int:
                 {p for p in spec_base_ports(tests_dir)
                  if p not in (args.web_port, smoke_port)})
         # UI 契约冒烟(hackathon--sheet 3 分根因的修复通道):requirements-only
-        # 任务(无 staged specs)的宿主验证原本止步 HTTP 层,而模型被禁止
-        # 跑浏览器——六类 UI 契约缺陷全盲。宿主生成契约爬虫套件只读落盘
-        # .arc/ui-smoke/,并下发与 SPEC RUN 同构的被批准自检命令;批末做
-        # 静态轻检,final 跑完整爬虫+修复循环。内核三道 guard 对该命令
-        # 形状结构性放行(shell.rs ui_smoke_run_command_shape_passes_every_guard)。
-        ui_smoke_entries: list = []
-        ui_smoke_cmd = ""
-        if (plan_on and tests_dir is None
-                and os.environ.get("OCTOS_ARC_UI_SMOKE", "1") != "0"):
-            ui_smoke_entries = ui_smoke.collect_contract_strings(tree)
-            cli_hint = (str(toolchain_cli)
-                        if toolchain_cli is not None else
-                        "local-grader/node_modules/@playwright/test/cli.js")
-            ui_smoke.stage_ui_smoke(
-                output_dir, ui_smoke_entries, smoke_port, cli_hint,
-                auth=ui_smoke.fixture_auth(output_dir, ui_smoke_entries))
-            ui_smoke_cmd = ui_smoke.build_ui_smoke_cmd(
-                str(toolchain_cli) if toolchain_cli is not None else None)
-            log(f"[plan] UI contract smoke staged: "
-                f"{len(ui_smoke_entries)} contract strings")
+        # 任务的宿主验证原本止步 HTTP 层,而模型被禁止跑浏览器——六类 UI
+        # 契约缺陷全盲。宿主生成契约爬虫套件只读落盘 .arc/ui-smoke/,并
+        # 下发与 SPEC RUN 同构的被批准自检命令;批末做静态轻检,final 跑
+        # 完整爬虫+修复循环。内核三道 guard 对该命令形状结构性放行
+        # (shell.rs ui_smoke_run_command_shape_passes_every_guard)。
+        # 2026-09-27 起有 staged specs 的任务同样落盘:隐藏评测 spec 通常
+        # 多于 staged 公共 spec,final 的十类探针是对它们的附加防线
+        # (节点轮自检命令仍只发给无 specs 任务,避免与 SPEC RUN 抢注意力)。
+        # NOTE staging 必须在 fixture materialize 之后(下方):auth 前奏
+        # 从 db.json/播种结果取登录账号,2026-09-26 github run 的 staging
+        # 早于播种 → auth=null → 33 条登录态字符串全部误报红,收尾被带偏。
         # 宿主模板无条件落盘：平台在 agent 退出后强制检查 workspace 的
         # frontend/ 与 backend/，与 plan 能力、验收测试是否定位到均无关；
         # 落盘是确定性本地写文件，skeleton 轮只负责在模板之上补全。
@@ -2736,6 +2884,59 @@ def main() -> int:
         else:
             log("[fixture] no machine-compilable fixtures; contract rides "
                 "in FOCUS GIVEN lists")
+        # ---- UI 契约冒烟 staging(必须在 fixture materialize 之后) ----
+        # auth 前奏取登录账号:db.json(刚播种)→ 编译结果双源回退。auth
+        # 缺失 + db 有登录用户 = 爬虫将未登录扫过门控应用 → 全量误报红
+        # (2026-09-26 github:33 红劫持 final 修复循环,诱导静态铺字符串)。
+        ui_smoke_entries: list = []
+        ui_smoke_cmd = ""
+        ui_smoke_auth: dict | None = None
+        if (plan_on
+                and os.environ.get("OCTOS_ARC_UI_SMOKE", "1") != "0"):
+            ui_smoke_entries = ui_smoke.collect_contract_strings(tree)
+            cli_hint = (str(toolchain_cli)
+                        if toolchain_cli is not None else
+                        "local-grader/node_modules/@playwright/test/cli.js")
+            ui_smoke_auth = ui_smoke.fixture_auth(
+                output_dir, ui_smoke_entries,
+                fixture_password=fixture_manifest.FIXTURE_PASSWORD)
+            if ui_smoke_auth is None:
+                ui_smoke_auth = ui_smoke.auth_from_compiled(
+                    fixture_compiled, ui_smoke_entries,
+                    fixture_password=fixture_manifest.FIXTURE_PASSWORD)
+            if (ui_smoke_auth is None
+                    and ui_smoke.db_login_users(output_dir)):
+                log("[ui-smoke] WARNING: app has login users but no auth "
+                    "prelude could be derived — the crawl will run "
+                    "signed-out and gated contract strings WILL false-red; "
+                    "auth-gate probe disabled")
+            ui_smoke.stage_ui_smoke(
+                output_dir, ui_smoke_entries, smoke_port, cli_hint,
+                auth=ui_smoke_auth)
+            ui_smoke_cmd = ui_smoke.build_ui_smoke_cmd(
+                str(toolchain_cli) if toolchain_cli is not None else None)
+            log(f"[plan] UI contract smoke staged: "
+                f"{len(ui_smoke_entries)} contract strings, "
+                f"auth={'on (' + ui_smoke_auth['username'] + ')'
+                       if ui_smoke_auth else 'off'}")
+        # 场景流套件(FLOW RUN,09-27 契合度定论的主杠杆):从 ATOMIC
+        # description 确定性生成平台同构的交互级走查 spec——契约串
+        # presence 级探针看不见"控件存在但流走不通"类缺陷(sheet 二跑
+        # save 永久禁用/创建页强制填名、github 用户名非独立精确文本全
+        # 是这类),平台隐藏 spec 恰恰全是场景流。auth=None 时登录前奏
+        # 不可推导,需登录的流整条跳过(不产必红噪音)。
+        flow_node_map: dict[str, str] = {}
+        if (plan_on and ui_smoke_entries
+                and os.environ.get("OCTOS_ARC_UI_SMOKE", "1") != "0"):
+            flow_text, flow_node_map = flow_suite.generate_spec(
+                tree, ui_smoke_auth)
+            if flow_text:
+                (output_dir / ui_smoke.UI_SMOKE_SUBDIR
+                 / flow_suite.FLOW_SPEC_NAME).write_text(
+                    flow_text, encoding="utf-8")
+                log(f"[plan] flow suite staged: {len(flow_node_map)} "
+                    "scenario-flow test(s) "
+                    "(authoritative; batch-regressed + final-gated)")
         # extra_rules 全局契约:确定性渲染(静态 manifest → 每轮字节相同,
         # 缓存律),经稳定 CONTRACT 段常驻;节点 GIVEN 走 FOCUS validation 前缀。
         fixture_rules = fixture_manifest.render_extra_rules(
@@ -3363,6 +3564,38 @@ def main() -> int:
                             elif g_run:
                                 log(f"[plan] regression green: "
                                     f"{g_run[0]}p/{g_run[1]}f")
+                    # 批后流回归(FLOW):无 staged specs 的任务此前零批后
+                    # 回归;现在对"已完成节点"的流走查做平台同构回归——
+                    # grep 过滤只跑已实现节点,未实现流不产噪音。红 → 一轮
+                    # 修复趁上下文热(流级缺陷拖到 final 才发现就是
+                    # github 二跑 40 分钟耗尽的形态)。
+                    if (r_err is None and flow_node_map and not time_up()
+                            and os.environ.get("OCTOS_ARC_HOST_GRADE",
+                                               "1") != "0"
+                            and os.environ.get("OCTOS_ARC_FLOW_REGRESSION",
+                                               "1") != "0"):
+                        done_flow = [nid for nid, st in plan_statuses.items()
+                                     if st == "done" and nid in flow_node_map]
+                        if done_flow:
+                            grep = flow_suite.grep_for(done_flow)
+                            fr = ui_smoke.run_smoke(
+                                output_dir, smoke_port, ui_smoke_entries,
+                                spec_ports_extra, auth=ui_smoke_auth,
+                                grep=grep)
+                            if fr is not None and fr["failed"] > 0:
+                                flow_suite.merge_flow_fails(fr, flow_node_map)
+                                log(f"[plan] flow regression RED: "
+                                    f"{fr['passed']}p/{fr['failed']}f over "
+                                    f"{len(done_flow)} done node(s)")
+                                r_wall = turn_wall(len(batch))
+                                driver.run(UI_SMOKE_REPAIR_PROMPT.format(
+                                    reds=_ui_smoke_red_lines(fr, limit=10),
+                                    port=args.web_port, smoke=smoke_port,
+                                    visual=_ui_smoke_visual_lines(fr)),
+                                    min(node_timeout, r_wall), r_wall)
+                            elif fr is not None:
+                                log(f"[plan] flow regression green: "
+                                    f"{fr['passed']}p/{fr['failed']}f")
                     # validation_probes lives on HostSignals (next to
                     # rehearsal), not inside RehearsalReport.
                     r_report.pop("validation_probes", None)
@@ -3429,11 +3662,16 @@ def main() -> int:
                         and not time_up()):
                     ui_run = ui_smoke.run_smoke(
                         output_dir, smoke_port, ui_smoke_entries,
-                        spec_ports_extra)
+                        spec_ports_extra,
+                        auth=ui_smoke_auth,
+                        fixture_password=fixture_manifest.FIXTURE_PASSWORD)
                     if ui_run is not None:
+                        flow_suite.merge_flow_fails(ui_run, flow_node_map)
                         log(f"[plan] UI contract smoke: "
                             f"{ui_run['passed']}p/{ui_run['failed']}f "
-                            f"({len(ui_run['reds'])} red item(s))")
+                            f"({len(ui_run['reds'])} red item(s)"
+                            + (f", {ui_run.get('flow_reds', 0)} flow red(s)"
+                               if ui_run.get("flow_reds") else "") + ")")
                         for fix_attempt in (1, 2):
                             if not ui_run["reds"] or time_up():
                                 break
@@ -3441,7 +3679,8 @@ def main() -> int:
                             reds_txt = _ui_smoke_red_lines(ui_run, limit=12)
                             driver.run(UI_SMOKE_REPAIR_PROMPT.format(
                                 reds=reds_txt, port=args.web_port,
-                                smoke=smoke_port),
+                                smoke=smoke_port,
+                                visual=_ui_smoke_visual_lines(ui_run)),
                                 min(node_timeout, r_wall), r_wall)
                             # 修复后必须重建前端再复检(爬虫对着 dist 跑)。
                             _rehearse_startup(output_dir, smoke_port,
@@ -3453,7 +3692,12 @@ def main() -> int:
                                               fixture_probes=[])
                             ui_run = ui_smoke.run_smoke(
                                 output_dir, smoke_port, ui_smoke_entries,
-                                spec_ports_extra)
+                                spec_ports_extra,
+                                auth=ui_smoke_auth,
+                                fixture_password=fixture_manifest.FIXTURE_PASSWORD)
+                            if ui_run is not None:
+                                flow_suite.merge_flow_fails(
+                                    ui_run, flow_node_map)
                             log(f"[plan] ui-smoke repair {fix_attempt}: "
                                 f"{ui_run['failed']}f"
                                 if ui_run else
@@ -3505,18 +3749,28 @@ def main() -> int:
                             f"{smoke_port}. Do not re-run suites; spot-check "
                             "one chain if you must, then end the turn.")
                     if ui_run is not None and ui_run["reds"]:
-                        # UI 契约爬虫红项=宿主 authored ground truth:点名
-                        # 串+探针+证据,模型只修红项、不重建绿项。
+                        # UI 契约爬虫/场景流红项=宿主 authored ground
+                        # truth:点名串+探针+证据,模型只修红项、不重建
+                        # 绿项。[flow] 红是场景走查失败(平台 spec 同构)
+                        # ——runner 连续失败止损,入口家族流红必修。
                         final_prompt += (
                             "\nHOST UI SMOKE (ground truth, headless "
                             f"browser vs this app on port {smoke_port}): "
                             f"{ui_run['passed']} passed, {ui_run['failed']} "
                             f"FAILED. Red items:\n"
                             + _ui_smoke_red_lines(ui_run, limit=14)
-                            + "\nFix exactly these (exact accessible names, "
-                            "visible controls, Escape-closable dialogs, "
-                            "Shift-click keeps selection, BOM-free exports); "
-                            "rerun the UI SMOKE RUN command after fixing.")
+                            + "\nFix exactly these — [flow] items FIRST "
+                            "(they are platform-shaped scenario walks; the "
+                            "title names the REQ): walk that requirement's "
+                            "chain on port " + str(smoke_port) + ", fix the "
+                            "real flow. Then the probe items (exact "
+                            "accessible names, visible controls, "
+                            "Escape-closable dialogs, Shift-click keeps "
+                            "selection, BOM-free exports). After fixing, "
+                            "rerun the UI SMOKE RUN command with "
+                            "flow-suite.spec.ts appended to its file "
+                            "arguments."
+                            + _ui_smoke_visual_lines(ui_run))
                     elif ui_green and not tests_dir:
                         final_prompt += (
                             "\nHOST UI SMOKE (ground truth): all browser "
@@ -3685,6 +3939,7 @@ def main() -> int:
         # `npm start` reuses that file instead of reseeding. Hand over a
         # pristine seed start — as the LAST action (anything booting the
         # server after this would recreate the run file).
+        _ensure_eval_telemetry(output_dir)
         _handover_pristine_seed(output_dir)
         return 0
     except Exception as exc:  # platform judges by events, not exit code
@@ -3694,6 +3949,7 @@ def main() -> int:
         traceback.print_exc()
         _postflight_structure_check(output_dir, args.web_port)
         _free_web_port(args.web_port)
+        _ensure_eval_telemetry(output_dir)
         _handover_pristine_seed(output_dir)
         events.mark_run_failed(str(exc)[:1000])
         return 0

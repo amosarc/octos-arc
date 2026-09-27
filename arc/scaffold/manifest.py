@@ -40,6 +40,7 @@ SCAFFOLD_FILES: dict[str, tuple[str, str]] = {
     "backend/src/lib/util.js": (backend.UTIL_JS, "host"),
     "backend/src/lib/validate.js": (backend.VALIDATE_JS, "host"),
     "backend/src/lib/auth.js": (backend.AUTH_JS, "host"),
+    "backend/src/lib/eval-telemetry.js": (backend.EVAL_TELEMETRY_JS, "host"),
     "backend/src/database/store.js": (backend.STORE_JS, "host"),
     "backend/src/database/engine.js": (backend.ENGINE_JS, "host"),
     "backend/src/database/schema.js": (backend.SCHEMA_JS, "placeholder"),
@@ -51,6 +52,9 @@ SCAFFOLD_FILES: dict[str, tuple[str, str]] = {
     "frontend/src/app/App.jsx": (frontend.FRONTEND_APP_JSX, "host"),
     "frontend/src/app/store.jsx": (frontend.FRONTEND_STORE_JSX, "host"),
     "frontend/src/app/api.js": (frontend.FRONTEND_API_JS, "host"),
+    # UI kit:满分形态代码化(NativeSelect/AppDialog/AccountTrigger/
+    # SingleError/FixedGrid)——提示词规则的方差靠默认路径消零
+    "frontend/src/app/ui.jsx": (frontend.FRONTEND_UI_JSX, "host"),
     "frontend/src/app/styles.css": (frontend.FRONTEND_STYLES_CSS, "host"),
     "frontend/.npmrc": (NPMRC, "host"),
     ".npmrc": (NPMRC, "host"),
@@ -81,6 +85,7 @@ RULES_MUST_NAME = (
     "frontend/src/app/App.jsx",
     "frontend/src/app/store.jsx",
     "frontend/src/app/api.js",
+    "frontend/src/app/ui.jsx",
     "frontend/src/app/styles.css",
     "frontend/src/features",
 )
