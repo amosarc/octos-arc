@@ -80,7 +80,8 @@ SELFTEST_SUBDIR = "./ui-smoke"
 #   "REQ-1,REQ-3"  → 任意家族/子家族/原子 id 组合
 #   ""             → 全量(最终冲分提交务必改回这里!)
 # 本地仿真不受它影响:env OCTOS_ARC_FAMILIES 设置时覆盖此值。
-COMPETITION_FAMILY_SCOPE = "REQ-1"
+# COMPETITION_FAMILY_SCOPE = "REQ-1"
+COMPETITION_FAMILY_SCOPE = ""
 # ═══════════════════════════════════════════════════════════════════
 _DEBUG_LOG_PATH: Path | None = None
 _DEBUG_LOG_LOCK = threading.Lock()
