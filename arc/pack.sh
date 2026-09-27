@@ -1,6 +1,6 @@
 #!/bin/sh
 # 把 arc/ 打成 ARC 平台要的提交包。
-# 平台规范（同 pack-linux-x86.sh）：zip 根必须有 main.py / requirements.txt /
+# 平台规范：zip 根必须有 main.py / requirements.txt /
 # template/(frontend+backend+README.md+template.yaml)；平台把 template/ 铺成
 # 初始工作区，再调 python3 main.py <requirements-source> --output-dir <workspace>。
 # 布局参考 agent-arc-based：入口在根、模板在 template/，开发件(测试脚本、
@@ -101,7 +101,7 @@ cp -R arcbench_agent_runtime scaffold bin "$PKG/"
 cp -R template "$PKG/template"
 
 # 先 import 后清理：python 生成步骤会重新产生 __pycache__，收尾统一扫掉
-# （先清理后生成会让 pyc 回流进包——pack-linux-x86.sh 曾踩此坑）。
+# （先清理后生成会让 pyc 回流进包——历史踩坑：linux 包脚本曾因此翻车。）
 cd "$PKG"
 find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 find . -name '*.pyc' -o -name .DS_Store -delete
