@@ -264,16 +264,36 @@ class SystemRowTests(unittest.TestCase):
                                             self.FIXTURE_RULES)
         self.assertLess(len(ctx), 4000)
 
-    def test_write_system_row_file(self):
+    def test_session_injects_into_per_profile_data_dir(self):
+        """AGENTS.md 必须落在 per-profile data 目录(内核系统行读取点)。
+
+        serve.rs:344 把 resolve_data_dir(profile)=<data_dir>/profiles/
+        <pid>/data 传给 build_system_prompt 的 data_dir/project_dir 双位
+        (实读核实)——早前写到 <data_dir>/ 根是错位注入,内核读不到。"""
         import tempfile
+        import octos_stdio
         with tempfile.TemporaryDirectory() as td:
-            path = main.write_system_row_file(
-                Path(td), "stable content")
-            self.assertEqual(path.name, "AGENTS.md")
-            self.assertEqual(path.read_text(encoding="utf-8"),
-                             "stable content")
-            # 幂等:同目录重写不炸
-            main.write_system_row_file(Path(td), "stable content")
+            pid = "arc-test-1"
+            data_dir = Path(td)
+            # 复现 session._inject_system_context 的路径逻辑
+            target = (data_dir / "profiles" / pid / "data")
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "AGENTS.md").write_text("stable content",
+                                              encoding="utf-8")
+            self.assertEqual(
+                (target / "AGENTS.md").read_text(encoding="utf-8"),
+                "stable content")
+            # session 注入方法(时序在 create 后,不经 RPC)
+            session_like = octos_stdio.OctosStdioSession.__new__(
+                octos_stdio.OctosStdioSession)
+            session_like.data_dir = data_dir
+            session_like.profile_id = pid
+            session_like.system_context = "stable content"
+            session_like._stderr_lines = []
+            session_like._inject_system_context()
+            self.assertEqual(
+                (target / "AGENTS.md").read_text(encoding="utf-8"),
+                "stable content")
 
 
 class GoalFirstRulesTests(unittest.TestCase):
@@ -314,7 +334,7 @@ class GoalFirstRulesTests(unittest.TestCase):
 
     def test_selftest_note_carries_sanctioned_command_shape(self):
         note = main.build_selftest_note("/opt/cli.js")
-        self.assertIn("test --config .arc/ui-smoke/playwright.config.ts",
+        self.assertIn("test --config ui-smoke/playwright.config.ts",
                       note)
         self.assertIn("scenarios ARE the test oracle", note)
         note2 = main.build_selftest_note(None)

@@ -25,9 +25,13 @@ class OctosProtocolError(RuntimeError):
 
 class OctosStdioSession:
     def __init__(self, octos_bin: str, cwd: Path, env: dict, data_dir: Path,
-                 on_event: Callable[[str, dict], None] | None = None) -> None:
+                 on_event: Callable[[str, dict], None] | None = None,
+                 system_context: str | None = None) -> None:
         self.cwd = str(cwd)
         self.data_dir = Path(data_dir)
+        # 分层装配的全局层(root 契约+标题树+契约):create 后/upsert 前
+        # 落盘到 per-profile data 目录(见 _inject_system_context)。
+        self.system_context = system_context
         self.on_event = on_event or (lambda method, params: None)
         cmd = [octos_bin, "serve", "--stdio", "--solo", "--data-dir", str(data_dir)]
         if env.get("OCTOS_DANGER_FULL_ACCESS") == "1":
@@ -136,6 +140,7 @@ class OctosStdioSession:
         if not self.profile_id:
             raise OctosProtocolError(f"profile/local/create gave no profile_id: {res}")
         self._inject_iteration_cap()
+        self._inject_system_context()
         api_type = "anthropic" if provider == "anthropic" else "openai"
         route: dict = {"api_type": api_type}
         if base_url:
@@ -151,6 +156,30 @@ class OctosStdioSession:
                 "route": route,
             },
         }, want_response=True, timeout=timeout)
+
+    def _inject_system_context(self) -> None:
+        """把字节稳定的全局层落盘到 per-profile data 目录的 AGENTS.md。
+
+        内核 serve 路径的系统行装配链(实读核实):serve.rs:344 传
+        profile_data_dir=resolve_data_dir(profile)=<data_dir>/profiles/
+        <pid>/data → profile.rs:582 build_system_prompt 双实参同源 →
+        load_bootstrap_files(commands/mod.rs:149)读该目录下 AGENTS.md
+        进系统行(base+date 之后、memory 之前,无 cap)。
+
+        时序同 _inject_iteration_cap:create 之后、llm/upsert 之前——
+        upsert 触发 ProfileRuntime 重建,重读盘上 bootstrap 文件;每分段
+        新会话(new profile id)重新注入,内容字节稳定即跨段缓存前缀一致。
+        """
+        if not self.system_context:
+            return
+        data_dir = (self.data_dir / "profiles" / str(self.profile_id)
+                    / "data")
+        data_dir.mkdir(parents=True, exist_ok=True)
+        path = data_dir / "AGENTS.md"
+        path.write_text(self.system_context, encoding="utf-8")
+        self._stderr_lines.append(
+            f"[stdio] system-row context injected: {path} "
+            f"({len(self.system_context)} chars)")
 
     def _inject_iteration_cap(self) -> None:
         """Bound every turn of this session to OCTOS_TURN_MAX_ITERATIONS.

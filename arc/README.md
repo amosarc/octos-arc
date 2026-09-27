@@ -59,7 +59,8 @@ guard(自测命令放行形状/full-spec-run/trace-deny)、OCTOS_TOOL_ALLOWLIST�
 探针 + stage_specs)。
 
 上下文分两层装配(缓存 0 号位):字节稳定的全局层(root 契约逐字+标题树
-+契约+播种契约)经内核 bootstrap 通道落盘 `<data_dir>/AGENTS.md` 常驻系统行
++契约+播种契约)经内核 bootstrap 通道落盘 `<data_dir>/profiles/<profile_id>/data/AGENTS.md`
+(session 在 profile create 后自动注入)常驻系统行
 ——每分段(会话重开)付 1 次,轮轮前缀缓存命中;模块层(当前家族完整子树
 +`Depends on` 依赖闭包+批节点 scenarios+进度账本)随工单独立到达,工单从
 ~87KB 瘦到 ~10KB。升级路径 C-lite(分段累积已完成家族 FOLDER 契约)已在

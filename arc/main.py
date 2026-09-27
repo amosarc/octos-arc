@@ -67,7 +67,8 @@ import scaffold  # noqa: E402  (宿主脚手架包:模板/清单/schema 编译�
 import visual_ref  # noqa: E402  (参考图视觉预描述:VISUAL_MODEL 代看注入 tree)
 
 # 只保留:①工具链 CLI 发现(下述 _pw_* 助手);②被内核放行的自测命令
-# 形状所需的 .arc/ui-smoke/playwright.config.ts 最小骨架;③消息桥提取
+# 形状所需的 ui-smoke/playwright.config.ts 最小骨架(工作区根,脱离
+# 平台 .arc 命名空间);③消息桥提取
 # (_REQ_MESSAGE_RE,数据面 codegen 桥的数据源,非 UI 规则)。
 PLATFORM_PW_VERSION = "1.57.0"
 SELFTEST_SUBDIR = "./ui-smoke"
@@ -773,7 +774,7 @@ def stage_selftest_dir(output_dir: Path, smoke_port: int,
                        cli_hint: str | None = None) -> Path:
     """落盘模型自测所需的最小骨架(非规则、非用例):playwright config +
     MY-CHECK 示例。内核 shell guard 只放行
-    `test --config .arc/ui-smoke/playwright.config.ts` 形状的命令——
+    `test --config ui-smoke/playwright.config.ts` 形状的命令——
     模型自写 spec 后以显式文件参数挂该 config 运行。幂等。"""
     stage = Path(output_dir) / SELFTEST_SUBDIR
     stage.mkdir(parents=True, exist_ok=True)
@@ -789,7 +790,7 @@ def stage_selftest_dir(output_dir: Path, smoke_port: int,
 // MY-CHECK.spec.ts.example — write YOUR OWN spec from the requirement
 // text (the node's scenarios are the oracle), then run it with an
 // explicit file argument:
-//   node <cli> test --config .arc/ui-smoke/playwright.config.ts MY-CHECK.spec.ts
+//   node <cli> test --config ui-smoke/playwright.config.ts MY-CHECK.spec.ts
 // That form is allowed by the kernel (inline `node -e` browser scripts
 // are not), re-runnable, and green-stop-visible.
 import { test, expect } from '@playwright/test';
@@ -1490,19 +1491,6 @@ def collect_dependency_context(tree: dict, batch: list[dict],
     return "\n\n".join(parts)
 
 
-def write_system_row_file(data_dir: Path, content: str) -> Path:
-    """稳定上下文落盘 <data_dir>/AGENTS.md(内核 bootstrap 通道)。
-
-    load_bootstrap_files 把该文件拼进系统行(base+date 之后、memory 之前,
-    无 cap);每分段新会话重建 ProfileRuntime 时重读——内容字节稳定即
-    跨段缓存前缀一致。"""
-    root = Path(data_dir)
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / "AGENTS.md"
-    path.write_text(content, encoding="utf-8")
-    return path
-
-
 def _indent_block(text: str, pad: str) -> str:
     """多段描述整体缩进,空行保平(不产生尾随空白)。"""
     return "\n".join(
@@ -2044,7 +2032,9 @@ class OctosDriver:
     """
 
     def __init__(self, octos_bin: str, cwd: Path, env: dict, data_dir: Path,
-                 max_iterations: int, events_log: Path) -> None:
+                 max_iterations: int, events_log: Path,
+                 system_context: str | None = None) -> None:
+        self.system_context = system_context
         self.mode = os.environ.get("OCTOS_DRIVER", "stdio")
         self.octos_bin = octos_bin
         self.cwd = cwd
@@ -2098,6 +2088,7 @@ class OctosDriver:
             self._session = OctosStdioSession(
                 self.octos_bin, self.cwd, self.env, self.data_dir,
                 on_event=self._log_event,
+                system_context=self.system_context,
             )
             self._session.bootstrap_profile(
                 provider=self.env.get("_ARC_PROVIDER", "openai"),
@@ -3173,7 +3164,7 @@ def main() -> int:
                  if p not in (args.web_port, smoke_port)})
         # UI 契约冒烟(hackathon--sheet 3 分根因的修复通道):requirements-only
         # 任务的宿主验证原本止步 HTTP 层,而模型被禁止跑浏览器——六类 UI
-        # 契约缺陷全盲。宿主生成契约爬虫套件只读落盘 .arc/ui-smoke/,并
+        # 契约缺陷全盲。模型自测骨架落盘工作区根 ui-smoke/(09-28 起脱离 .arc),并
         # 下发与 SPEC RUN 同构的被批准自检命令;批末做静态轻检,final 跑
         # 完整爬虫+修复循环。内核三道 guard 对该命令形状结构性放行
         # (shell.rs ui_smoke_run_command_shape_passes_every_guard)。
@@ -3360,9 +3351,9 @@ def main() -> int:
         # 日志分两层: 平台契约 .arc/ 承载宿主可消费的追踪(协议帧流
         # octos-events.jsonl、debug.log, 与 agent-arc-based 的 runtime
         # 交互方式对齐——agent 只追加原始数据, 聚合渲染全在宿主侧);
-        # octos-logs/ 继续收自留调试件(二进制状态、dev-server 日志),
+        # octos/ 继续收自留调试件(二进制状态、dev-server 日志),
         # 与 backend/ 同级可见, 不用 .octos 这类隐藏目录。
-        logs_dir = output_dir / "octos-logs"
+        logs_dir = output_dir / "octos"
         logs_dir.mkdir(parents=True, exist_ok=True)
         _ignore_logs_in_workspace_git(output_dir)
         # 追踪契约路径跟随 RuntimePaths(平台注入 ARCBENCH_RUNNER_EVENTS_PATH
@@ -3372,21 +3363,23 @@ def main() -> int:
         data_dir.mkdir(parents=True, exist_ok=True)
         # 09-27 planctl 退役:envelope/系统行通道删除——契约改走工单正文;
         # 分层装配:字节稳定的全局层(root 契约+标题树+契约+播种契约)经
-        # 内核 bootstrap 通道(<data_dir>/AGENTS.md,load_bootstrap_files
-        # 无 cap)常驻系统行 0 号位——每分段付 1 次,轮轮缓存命中;挥发物
+        # 内核 bootstrap 通道(per-profile data 目录 AGENTS.md,由 session
+        # 在 profile create 后注入;load_bootstrap_files 无 cap)常驻系统行 0 号位——每分段付 1 次,轮轮缓存命中;挥发物
         # (进度/家族细节/批节点)留工单。=0 基线不注入。
         # goal-first 契约:frontend/src 全域归模型/UI kit 降为工具箱;
         # =0 走 host-first 契约。
         rules_text = (plan_envelope.HOST_STACK_RULES_GOAL_FIRST
                       if goal_first else plan_envelope.HOST_STACK_RULES)
+        system_row_ctx = ""
         if goal_first:
-            sysrow = write_system_row_file(
-                data_dir, build_system_row_context(
-                    tree, rules_text, fixture_rules,
-                    scope=family_scope or None))
-            log(f"[system-row] stable context injected: {sysrow} "
-                f"({sysrow.stat().st_size / 1024:.0f} KB; resident at "
-                "prefix position 0 — work orders carry only the delta)")
+            # 全局层内容传给 driver→session,在 profile create 后落盘到
+            # per-profile data 目录的 AGENTS.md(内核系统行 bootstrap 读取点)。
+            system_row_ctx = build_system_row_context(
+                tree, rules_text, fixture_rules,
+                scope=family_scope or None)
+            log(f"[system-row] stable context built: "
+                f"{len(system_row_ctx) / 1024:.0f} KB (resident at prefix "
+                "position 0 — work orders carry only the delta)")
         config_dir = Path(tempfile.mkdtemp(prefix="octos-config-"))
         env = build_octos_env(config_dir)
         # --data-dir 只覆盖 chat 模式;stdio 模式读环境变量,双保险。
@@ -3412,6 +3405,7 @@ def main() -> int:
         driver = OctosDriver(
             octos_bin, output_dir, env, data_dir, max_iter,
             events_log=events_log_path,
+            system_context=system_row_ctx or None,
         )
         # 09-27 planctl 退役:envelope/系统行通道删除——契约随分层装配走
         # (全局层在系统行,模块层在工单);进度账本是宿主本地 dict(供工单
