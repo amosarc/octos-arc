@@ -68,13 +68,13 @@ guard(自测命令放行形状/full-spec-run/trace-deny)、OCTOS_TOOL_ALLOWLIST�
 已完成家族契约。
 **提交范围配置见 [SCOPE.md](SCOPE.md)**——正式提交改 `main.py` 顶部 `COMPETITION_FAMILY_SCOPE` 常量重打包;本地用 env 覆盖。
 
-环境开关:`OCTOS_ARC_GOAL_FIRST`(目标优先家族工单,缺省开;=0 回退
-host-first 兄弟批路径,同样无 envelope)、`OCTOS_ARC_FAMILIES`(运行范围,
+环境开关:`OCTOS_ARC_FAMILIES`(运行范围,
 首跑/快迭代:逗号分隔 id,任意层级前缀——`REQ-1`=整家族/`REQ-2-3`=子
 家族/原子 id;范围外家族不生成工单/不计进度/不进 Tier-2 判定面,系统行
 追加 RUN SCOPE 段;未设置=全量)、`OCTOS_ARC_HOST_SCAFFOLD`
 (宿主落盘基础设施,缺省开)、`OCTOS_ARC_HOST_GRADE`(final 轮 Tier-2 宿主
-跑 staged Playwright,缺省关)。
+跑 staged Playwright,缺省关)。宿主优先回退路径(原 `OCTOS_ARC_GOAL_FIRST=0`)
+已整体删除:家族工单是唯一调度路径。
 
 ## 宿主模板 + schema 信号驱动 codegen(2026-09-17 起;2026-09-18 迁入 scaffold/ 包)
 
@@ -141,7 +141,6 @@ shasum -a 256 ../octos-arc-bundle.zip                 # 记录 sha
 
 1. 冒烟:`python3 arc/local/run-task-local.py arc/tasks/smoke--counter --name smoke1`。
 2. goal-first ×2(缺省全开),记录通过率/LLM 轮数/每工单墙钟。
-3. `OCTOS_ARC_GOAL_FIRST=0` ×1 回退对照,确认旧路径无回归。
-4. context-logs 断言(`.octos/context-logs/*/llm.jsonl`):USER 行含需求地图
+3. context-logs 断言(`.octos/context-logs/*/llm.jsonl`):USER 行含需求地图
    与契约(工单自包含);无 `[arc-plan]` 残留(通道已删)。
 7. 端口专项:grade-local 走 43300,curl 验证 3301 同 handler 在听。

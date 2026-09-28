@@ -794,6 +794,20 @@ def stage_selftest_dir(output_dir: Path, smoke_port: int,
 //   node <cli> test --config ui-smoke/playwright.config.ts MY-CHECK.spec.ts
 // That form is allowed by the kernel (inline `node -e` browser scripts
 // are not), re-runnable, and green-stop-visible.
+//
+// LOCATOR RULE — requirement phrasing maps to ROLES, exactly:
+//   "A region named X"      => getByRole('region', { name: X })
+//   "A dialog named X"      => getByRole('dialog', { name: X })
+//   "a combo box labeled X" => getByRole('combobox', { name: X })
+// getByText/getByLabel are NOT role equivalents: a <div aria-label> has
+// no region role, so a getByLabel assertion on it is green while the
+// grader's getByRole('region') times out (an entire pivot family was
+// lost exactly that way). Assert with the ROLE the requirement names.
+//
+// GESTURE RULE — self-test each selection-driven flow with BOTH drag AND
+// click+Shift-click (graders use both; a shift-collapsing handler passed
+// drag-only tests and still lost the whole family), and each dialog flow
+// with mouse AND keyboard (Enter commits, Escape cancels).
 import { test, expect } from '@playwright/test';
 
 test('my check - name what this verifies', async ({ page }) => {
@@ -802,6 +816,17 @@ test('my check - name what this verifies', async ({ page }) => {
   // await page.getByLabel('Workbook name').fill('Q3 Sales');
   // await page.getByRole('button', { name: 'Create', exact: true }).click();
   // await expect(page.getByText('Q3 Sales')).toBeVisible();
+  //
+  // Example: a "region named" contract asserts with the ROLE:
+  // const editor = page.getByRole('region', { name: 'Pivot table editor' });
+  // await expect(editor.getByRole('combobox', { name: 'Rows' })).toBeVisible();
+  //
+  // Example: the second selection gesture (click anchor, Shift-click end):
+  // await page.getByRole('gridcell', { name: 'A1', exact: true }).click();
+  // await page.getByRole('gridcell', { name: 'C5', exact: true })
+  //           .click({ modifiers: ['Shift'] });
+  // await expect(page.getByRole('gridcell', { name: 'B3', exact: true }))
+  //           .toHaveAttribute('aria-selected', 'true');
   expect(true).toBe(true);
 });
 """
@@ -834,7 +859,20 @@ def build_selftest_note(cli_path: str | None) -> str:
         f"  {cmd}\n"
         "That command shape is sanctioned; raw browser scripts and "
         "browserless guessing are not. Red = the flow fails on the RUNNING "
-        "app — fix the app, then rerun.\n")
+        "app — fix the app, then rerun.\n"
+        "SELF-TEST FIDELITY RULES (how the hidden grader differs from a "
+        "hand-walk): 1) LOCATORS ARE ROLES — a requirement phrase "
+        "\"A region named X\" means getByRole('region', { name: X }), "
+        "\"a dialog named X\" means getByRole('dialog', { name: X }); "
+        "getByText/getByLabel on a role-less div is a false green (the "
+        "grader's role locator is what runs). 2) TEST BOTH GESTURES — "
+        "every selection-driven flow needs a drag variant AND a "
+        "click+Shift-click variant (a Shift-collapsing handler passes "
+        "drag-only tests and still loses the family); every dialog flow "
+        "needs the mouse path AND Enter/Escape. 3) ASSERT STATE, NOT "
+        "PRESENCE — verify the observable result (aria-selected states, "
+        "persisted-then-reloaded values, computed results), not that "
+        "controls exist.\n")
 
 
 # ------------------------------------------------- requirement message bridge
@@ -1087,6 +1125,133 @@ def rehearse_node(output_dir: Path, smoke_port: int, probes: list,
     return err, report
 
 
+_PAGE_HEALTH_SPEC = """\
+import { test, expect } from '@playwright/test';
+
+// Host page-health probe: zero task knowledge — load the app, walk the
+// home page plus every internal hash link it exposes, fail on ANY uncaught
+// page error or unhandled rejection.
+const errors: string[] = [];
+
+test('no uncaught page errors on the home page and its links', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as any).__phErrors = [];
+    window.addEventListener('unhandledrejection', (e) => {
+      (window as any).__phErrors.push(
+        'unhandledrejection: ' + String((e as any)?.reason ?? e));
+    });
+  });
+  page.on('pageerror', (e) => errors.push('pageerror: ' + String(e?.message ?? e)));
+  await page.goto('/');
+  await page.waitForTimeout(1200);
+  const links = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('a[href^="#/"]'))
+      .map((a) => (a as HTMLAnchorElement).getAttribute('href') || '')
+      .filter((h, i, arr) => h && arr.indexOf(h) === i)
+      .slice(0, 12));
+  for (const href of links) {
+    await page.evaluate((h) => { location.hash = String(h).slice(1); }, href);
+    await page.waitForTimeout(600);
+  }
+  const injected = await page.evaluate(() => (window as any).__phErrors || []);
+  const all = errors.concat(injected);
+  expect(all, 'page health: ' + all.slice(0, 6).join(' | ')).toEqual([]);
+});
+"""
+
+
+def _page_health_run(output_dir: Path, smoke_port: int,
+                     extra_ports: list | None = None) -> list[str] | None:
+    """Host-owned browser minimum: no uncaught page errors on a walk.
+
+    Catches the ReferenceError-class shipped bug deterministically: the
+    09-27 sheet run carried 6 `hasNumbers is not defined` crashes in
+    bundles built 3 minutes before handover — caught by the agent's own
+    flow specs that time, but nothing HOST-owned would have flagged it.
+    Walks the home page + internal hash links of the freshly built app on
+    the smoke port. Returns the error list ([] = clean), or None when it
+    cannot run (no toolchain / no boot) — None is never a verdict.
+    """
+    lg_cli = _pw_lg_cli()
+    if lg_cli is None:
+        return None
+    grader = Path(tempfile.mkdtemp(prefix="octos-pagehealth-"))
+    try:
+        probes_dir = grader / "probes"
+        probes_dir.mkdir()
+        (probes_dir / "page-health.spec.ts").write_text(
+            _PAGE_HEALTH_SPEC, encoding="utf-8")
+        (grader / "playwright.config.ts").write_text(
+            "import { defineConfig } from '@playwright/test';\n"
+            "export default defineConfig({ testDir: './probes',\n"
+            "  fullyParallel: false, workers: 1, retries: 0,\n"
+            "  timeout: 20_000, expect: { timeout: 5_000 },\n"
+            f"  use: {{ baseURL: 'http://127.0.0.1:{smoke_port}', "
+            "headless: true, screenshot: 'off', trace: 'off' } });\n",
+            encoding="utf-8")
+        try:
+            (grader / "node_modules").symlink_to(
+                lg_cli.parents[2], target_is_directory=True)
+        except OSError:
+            pass
+        if not (output_dir / "frontend" / "dist" / "index.html").is_file():
+            return None
+        _stop_dev_server(smoke_port)
+        run_db = output_dir / "backend" / "data" / "db.run.json"
+        try:
+            run_db.unlink()
+        except OSError:
+            pass
+        env = plan_envelope.rehearsal_boot_env(os.environ, smoke_port,
+                                               extra_ports or [])
+        backend = output_dir / "backend"
+        proc = None
+        try:
+            with open(grader / "boot.log", "w") as fh:
+                try:
+                    proc = subprocess.Popen(
+                        ["npm", "start"], cwd=backend, env=env,
+                        stdout=fh, stderr=subprocess.STDOUT,
+                        start_new_session=True)
+                except OSError:
+                    return None
+                deadline = time.time() + 45
+                while time.time() < deadline:
+                    try:
+                        with socket.create_connection(
+                                ("127.0.0.1", smoke_port), timeout=2):
+                            break
+                    except OSError:
+                        if proc.poll() is not None:
+                            return None
+                        time.sleep(1)
+                else:
+                    return None
+                r = subprocess.run(
+                    [shutil.which("node") or "node", str(lg_cli), "test"],
+                    cwd=grader, capture_output=True, text=True,
+                    timeout=180, errors="replace")
+            if r.returncode == 0:
+                return []
+            out = (r.stdout or "") + (r.stderr or "")
+            errs = re.findall(r"page health: (.+)", out)
+            if errs:
+                return [e.strip()[:200] for e in errs[:4]]
+            return [out.strip().splitlines()[-1][:200]] if out.strip() \
+                else ["page-health probe failed (no detail)"]
+        except (OSError, subprocess.SubprocessError):
+            return None
+        finally:
+            if proc is not None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            _free_web_port(smoke_port)
+    finally:
+        shutil.rmtree(grader, ignore_errors=True)
+
+
 def js_syntax_errors(output_dir: Path) -> list[str]:
     """`node --check` every project JS file — the write-integrity gate.
 
@@ -1260,9 +1425,8 @@ def flatten_atomic_with_parent(node: dict, parent_id: str | None = None,
 def group_siblings(tree: dict, max_batch: int) -> list[list[dict]]:
     """Batch CONSECUTIVE atomic leaves that share the same parent FOLDER.
 
-    max_batch is clamped to [1, 4]; ≤1 gives one leaf per batch (the
-    legacy per-node behavior — the OCTOS_ARC_NODE_BATCH=1 rollback
-    switch). A longer sibling run chunks sequentially in document order
+    max_batch is clamped to [1, 4]; ≤1 gives one leaf per batch. A longer
+    sibling run chunks sequentially in document order
     (keep's REQ-2.7 ×5 with max_batch=2 → [2, 2, 1]). The flattened
     order of the batches equals flatten_atomic(tree) exactly, so
     dependency order across batches is unchanged.
@@ -1315,8 +1479,7 @@ def describe_node(node: dict,
 
 # ------------------------------------------------------- goal-first context
 #
-# 09-27 转向(宿主优先→目标优先):requirements.yaml 不整份透传
-# (github 3819 行/sheet 3022 行),分层封装——
+# requirements.yaml 不整份透传(github 3819 行/sheet 3022 行),分层封装——
 #   render_requirements_map: root description 逐字 + 一级标题地图
 #     (每家族 id+name 及其子标题),每工单必带,~2-3KB;
 #   describe_family_context: 本批所属家族的 FOLDER 契约逐字
@@ -1427,7 +1590,7 @@ def build_system_row_context(tree: dict, rules_text: str,
     # 去重(09-28 sheet run llm.jsonl 实证 FIXTURE CONTRACT ×2):rules 内嵌
     # 的通用段与紧随其后的 fixture_rules(任务专属超集,已覆盖 VERBATIM/
     # never-delete/db.run.json/restart 全部语义)重复——裁通用段留一行指针。
-    # 在装配层裁而非改常量:RULES_MUST_NAME 断言钉在常量上,=0 基线不动。
+    # 在装配层裁而非改常量:RULES_MUST_NAME 断言钉在常量上。
     trimmed_rules = re.sub(
         r"FIXTURE CONTRACT \(graded[^\n]*(?:\n(?![A-Z]{2,}|$)[^\n]*)*",
         "FIXTURE CONTRACT: see the task-specific FIXTURE section below — "
@@ -2309,193 +2472,8 @@ class OctosDriver:
 
 
 # ---------------------------------------------------------------- prompts
-
-# Hard-won UI contract from real bench runs (rounds 16/19/20, ticketbooking):
-# the platform's Playwright tests drive the UI with getByLabel/getByRole and
-# fill human-readable values. Native widgets silently score 0.
-UI_CONTRACT_PROMPT = """\
-Benchmark UI contract (the automated tests depend on these EXACTLY):
-- Use plain text inputs for ALL form fields: `type="text"` (or \
-`password`/`email`). NEVER `type="date"` or `type="number"` — tests fill \
-values like "Sun, May 31" which native date inputs reject.
-- Every form field needs a visible associated <label> (tests use \
-getByLabel with the field's name, e.g. "date", "from", "to").
-- Every form control must be visible and enabled at all times — never hide \
-native inputs/selects behind custom widgets or display:none containers.
-- NEVER rely on native HTML5 validation (`required`, `pattern`, tooltips). \
-Validate in JavaScript and render error messages as inline DOM text \
-containing words like "required" / "invalid" / "missing" — tests assert on \
-visible page text.
-- Buttons are real <button> elements with plain text labels (e.g. "Search", \
-"Book", "Register", "Sign in").
-- VERBATIM TEXT: copy every visible label / link / button / heading string \
-verbatim from the requirement document into the UI (e.g. if it says the \
-header exposes "Register" and "Login" links, use exactly those English \
-strings as <a> link text; if it says the button is "Next step", the button \
-text is exactly "Next step"). Tests locate elements by these exact strings, \
-some with ANCHORED regexes like /^name$/i — a field the requirement calls \
-"Name" must be labeled exactly "Name"; "Full Name" or "Your Name" never \
-matches.
-- UNIQUENESS (strict mode): any value the page echoes — search criteria, \
-names, dates — must appear in EXACTLY ONE visible element. Put the \
-normalized criteria in ONE summary line; result cards may show their own \
-fields but must NOT repeat the searched values as bare text anywhere else \
-(round 31's result cards echoed the searched value under the criteria \
-summary: getByText matched 3 elements and every search test died with \
-"strict mode violation").
-- SEED DATA: when the requirement states concrete published records (a \
-named entity whose searches/listings must return specific values), the \
-database seed MUST include exactly those records, stored and matched as \
-the verbatim strings shown — a displayed date is data, never re-format it \
-into another notation. Search matching is case-insensitive and trims \
-surrounding whitespace. OPTION LABELS ARE FIXTURE DATA TOO: every concrete \
-example value in the requirement must appear verbatim as an <option>/radio \
-label (round 31's registration tests all timed out because one select \
-lacked the fixture's option label — "did not find some options").
-- SESSIONS: after registration or login, redirect to the home page. The \
-requirement's minimum is that the signed-in username remains VISIBLE after \
-reload; the SAFEST form (satisfies every locator style) is the username as \
-its own visible exact-text element inside the account trigger: \
-<button aria-label="{the trigger name the requirement quotes}">\
-<span>{username}</span></button> — a bare \
-"Welcome, {username}" heading passes the loose reading but fails exact-text \
-locators; the trigger pattern passes both. The session must survive page \
-reload. Sign-out placement follows the requirement text verbatim (a header \
-link OR a menu item — copy exactly what it specifies).
-- ERROR STATES: failed validation stays on the same page, shows an inline \
-message naming the problem (tests match words like required/invalid/match/\
-terms/duplicate), keeps the anonymous header, and creates no records. Show \
-EXACTLY ONE error element at a time — never a per-field error and a \
-form-level summary together: round 31 rendered both "Date is required." \
-and "Please fix the invalid search criteria.", two elements matched the \
-test's error regex, and strict mode failed the assertion.
-- ONE MATCH PER VALUE FORM: when the same entity has a short and a long \
-written form (a city vs its station, a short name vs a full name), a page \
-must render ONE form so only ONE element matches — tests use combined \
-regexes over both forms, and two matching elements is a strict-mode \
-violation (round 32 showed both forms on one page and lost every related \
-assertion). Pick one display form per page and use it in exactly one \
-element.
-- UNLISTED CONTROL VALUES: when the requirement says a value must be "one \
-of the values offered by the control" WITHOUT listing them, offer the \
-broad standard set for that domain — a closed domain (nationality, \
-gender, salutation) renders its standard options verbatim, and any value \
-the tests plausibly select must be present (round 31/32 lost whole test \
-families to one missing standard option). Text fields accept values \
-verbatim — never re-format or re-parse what the requirement shows.
-- NATIVE-FIRST WIDGETS: never hand-roll what the platform ships. \
-Dropdowns are native <select> + <option> — graders use \
-getByRole('combobox') and selectOption; a custom div dropdown is \
-invisible to every selector without full ARIA combobox semantics \
-(sheet run 2: a hand-rolled combo destroyed a whole requirement \
-family). Modals are the native <dialog> element with showModal() — \
-Escape, backdrop click, and focus trapping come for free (a \
-hand-rolled undismissable overlay blocks every later grader step). \
-Build custom ONLY where HTML has no native widget (menus, tabs, \
-grids) — and then the requirement's exact ARIA roles are mandatory \
-(role="menu"/"menuitem", role="tab"/aria-selected, \
-role="grid"/"gridcell"). The scaffold ships these graded shapes as \
-CODE in frontend/src/app/ui.jsx — NativeSelect, AppDialog, \
-AccountTrigger, SingleError, FixedGrid: import and use them instead \
-of re-implementing.
-- DATA GRIDS: render the COMPLETE grid — role="grid" with visible \
-columnheader cells (column letters) and rowheader cells (row numbers) \
-plus role="gridcell" cells whose accessible name is the coordinate \
-(e.g. A1). A spreadsheet grid is FIXED-SIZE, not data-sized: render a \
-generous empty grid (≥ 20 rows × 8 columns) beyond the seeded data so \
-graders can select and type into EMPTY cells — the sheet runs shipped a \
-grid that stopped at the last data row, and every "type into A5"-class \
-test died at its first click.
-- SUBMIT ENABLEMENT: a submit/save button must become ENABLED once the \
-required fields are filled — a permanently disabled submit can never be \
-clicked by a test. Disabled is a transient state (Undo with an empty \
-stack), never a permanent condition.
-- FIXTURE CONTRACT POINTER: the SEED DATA rule above covers visible \
-example values; the full fixture contract (role accounts, ownership and \
-permission relationships, per-scenario pre-states, E2E_* items) is \
-compiled in your CONTRACT section and backend/data/db.json — seed or \
-preserve it exactly; demo-quality substitutes for named fixtures score \
-zero.
-- REFERENCE IMAGES: when the requirement text carries a "Page reference \
-image <path> (style/layout reference only) — <visual model> visual \
-description:" block, that text IS the image, transcribed upstream by the \
-host's vision model. The images are a STYLE AND LAYOUT REFERENCE ONLY: \
-follow the region arrangement, component placement, and grid/table \
-structure they show; NEVER copy any string, label, wording, language, \
-or data from the mockup — every user-facing string comes from the \
-requirement YAML text, which always wins. NEVER attempt OCR, ASCII \
-rendering, or any other image text extraction yourself, and never \
-install tools for it (round 24 burned a 28-minute turn that way and \
-produced no code).
-- WRITE CODE FIRST: start creating project files in your very first \
-actions. A turn that only reads and analyzes without writing files is a \
-failed turn, no matter how good the analysis is.
-"""
-
-# Compact recall of UI_CONTRACT_PROMPT for node/final turns. The full
-# contract ships once in the skeleton prompt and stays in the session
-# history; re-sending all 5k chars in EVERY turn prompt bloats every
-# subsequent LLM call's input (measured 2026-09-16: 1.73M input tokens
-# across a failed ticket-booking run, ~8.9k mean per call).
-UI_CONTRACT_RECAP = """\
-UI contract recap — the FULL contract was given in the first turn and \
-still applies EXACTLY (the graded Playwright specs are ground truth; when \
-the requirement text disagrees, the spec wins): plain text inputs only \
-(never type="date"/"number"); a visible <label> per field (getByLabel) \
-with the requirement's VERBATIM strings (anchored regexes like /^name$/i — \
-"Full Name" never matches "Name"); controls always visible and enabled; \
-no native HTML5 validation — validate in JS and render inline error text \
-(words like required/invalid/match/duplicate), EXACTLY ONE error element, \
-stay on the same page, create no records; every echoed value appears in \
-EXACTLY ONE visible element (strict mode); seed the requirement's concrete \
-records and option labels VERBATIM, and give unlisted control values the \
-broad standard set of their domain; text fields accept values verbatim; \
-widgets are \
-native-first — native <select> dropdowns, native <dialog> modals; \
-custom widgets only where HTML has none, with the requirement's exact \
-ARIA roles; the scaffold's frontend/src/app/ui.jsx primitives \
-(NativeSelect/AppDialog/AccountTrigger/SingleError/FixedGrid) ARE \
-those shapes — import them; grids render headers plus \
-coordinate-named gridcells; submits enable once required fields are \
-filled; after login or registration show the exact username (its own \
-exact-text node in the trigger the requirement names) plus the sign-out \
-control the requirement specifies, with the session surviving page reload; the UI is text-only (never OCR images; \
-inline visual-model descriptions are style/layout reference only — \
-never a source of strings); write code first.\
-"""
-
-# planctl host-first prompts: the kernel system row already carries the
-# full pinned CONTRACT (ruleset arc_web_v1), the plan checklist, focus
-# signals, the repo map, and host rehearsal reports — so the turn prompt
-# shrinks to direction only. The legacy constants below stay for
-# non-plan-capable kernels (OCTOS_ASSUME_ARC_PLAN=0 baselines).
-HOST_SKELETON_PROMPT = """\
-Create the application skeleton for this task. Fixed infrastructure \
-already exists (backend: package.json/.npmrc + src/{{app.js,index.js,lib/*,\
-database/*,routes/*}}, frontend: package.json + index.html + src/main.jsx \
-+ src/app/{{App.jsx,store.jsx,api.js,styles.css}}) — do NOT rewrite them. \
-Create ONLY what is missing: backend/data/schema.json per the HOST \
-CONTRACT (a host-written starter covering the seeded collections may \
-already exist — EXTEND it, keep every entity name and seeded row; the \
-host compiles it and mounts CRUD + auth), the fixture records the FIXTURE \
-CONTRACT lists as still unseeded into backend/data/db.json (the host \
-already compiled every machine-readable data:/GIVEN fixture into it — \
-NEVER delete or rename those rows), and the first requirement family's \
-stub under frontend/src/features/ (host-pre-created per family, REQ work \
-order in each header — fill it in place; mounts are pre-wired in \
-src/app/App.jsx, rearrange freely). Do NOT read requirements/requirements.yaml wholesale to \
-recover seed data — the fixture contract is fully carried by your \
-CONTRACT/FOCUS/GIVEN sections and the seeded db.json. \
-JavaScript/JSX only; dependencies are preinstalled — \
-never run npm install. Do not commit; the harness handles git.\
-PORT DISCIPLINE: run any dev/test server ONLY on port {smoke}; NEVER \
-bind port {port} (the grader watches it — binding it kills the whole \
-run). Stop every server you started when done.
-"""
-
 # goal-first 骨架轮:模板已在位可启动,但 App 外壳/路由/家族文件结构由
-# 代理依需求地图自建(不再引用宿主预装配 stub)。db.json 种子保护条款
-# 保留——那是数据契约,不是宿主优先残留。
+# 代理依需求地图自建。db.json 种子保护条款是数据契约。
 GOAL_FIRST_SKELETON_PROMPT = """\
 Lay this application's skeleton — you own frontend/src. The host backend \
 is already running (host-owned backend files: do NOT rewrite them). \
@@ -2522,40 +2500,6 @@ PORT DISCIPLINE: run any dev/test server ONLY on port {smoke}; NEVER \
 bind port {port} (the grader watches it — binding it kills the whole \
 run). Stop every server you started when done.
 """
-
-HOST_NODE_PROMPT_TEMPLATE = """\
-Implement requirement node {node_id}. The pinned HOST CONTRACT in your \
-system prompt applies exactly; the focus section lists this node's \
-acceptance signals and action chains. Extend the existing app, never \
-rewrite working files. Do not commit.\
-Definition of done for this node: every action chain under FOCUS walks \
-through on the RUNNING app; every GIVEN fixture named under FOCUS or the \
-node text is addressable on the RUNNING app (the account signs in, the \
-object opens, cell/field values match verbatim); red means fix, not \
-report.\
-PORT DISCIPLINE: NEVER bind port {port}. The app is ALREADY RUNNING, \
-host-managed, on port {smoke} — verify by curl directly; do NOT start \
-your own server. After editing backend/src run \
-`sh .arc/host/restart-server.sh` (host-provided) to pick changes up; \
-after editing frontend run `npm run build --prefix frontend` — the \
-running server serves the fresh dist immediately, no restart needed.\
-OPERATION BUDGET: land this node in at most ~40 tool operations. Plan \
-silently, read each file at most once, write each NEW feature file \
-whole in one edit and make surgical edits elsewhere, then verify once; \
-re-reading files you just wrote, micro-edits, and repeat builds burn \
-the shared wall clock and starve the remaining requirements (a skipped \
-node scores zero for every test behind it).
-ISOLATION: implement this node's UI in {feature_file} — a \
-host-pre-created stub under frontend/src/features/ whose header lists \
-this family's REQ ids; fill it IN PLACE (add sibling files only when a \
-sub-domain warrants). Wire/rearrange mounts in src/app/App.jsx. Do NOT \
-edit other features' files, and do NOT rewrite shared app files — a \
-regression in an already-green feature costs its tests.
-REGRESSION SCOPE: when re-checking earlier work, run ONLY the specs of \
-the features you touched this turn — the batch-filtered SPEC RUN below \
-is exactly that scope; anything wider wastes minutes per run.\
-
-{node_spec}"""
 
 # goal-first 家族工单:深度实现(真实可操作功能,浏览器走场景流才是判
 # 官)+ frontend/src 全域所有权 + 无 40-ops 帽。地图与本家族全文在
@@ -2589,8 +2533,14 @@ inside .arc/ — host-owned, read-only), and run it via the SELF-TEST \
 command against the RUNNING app (or curl the API directly) — scenario \
 flows actually walking, not string presence, are the verdict.\
 TOOLBOX (optional, unwired): frontend/src/app/ui.jsx ships proven \
-shapes (NativeSelect/AppDialog/AccountTrigger/SingleError/FixedGrid) — \
-use them or roll your own; the requirement text is the only authority.\
+shapes (NativeSelect/AppDialog/AccountTrigger/SingleError/Region — \
+render <Region label="X"> for a requirement phrase "A region named X", \
+a div with aria-label has no region role — and FixedGrid), \
+frontend/src/app/grid.js the useGrid selection kernel (pass \
+grid={grid} and click / Shift-click-extend / drag / aria-selected are \
+handled), frontend/src/app/formula.js a cell formula engine \
+(displayValue/evalFormula/adjustFormula) — use them or roll your own; \
+the requirement text is the only authority.\
 REGRESSION SCOPE: re-check only the families you touched this turn.\
 
 {node_spec}"""
@@ -2780,22 +2730,6 @@ contract (data: section + every scenario GIVEN line, verbatim). Do not \
 describe the plan — write the files now.\
 """
 
-ACCEPTANCE_TESTS_PROMPT = """\
-
-OFFICIAL ACCEPTANCE TESTS ARE AVAILABLE — this is the single most important \
-input. The benchmark grades this app with the Playwright specs under:
-  {tests_dir}
-Files: {files}
-Before writing code for any requirement, READ these spec files (and their \
-support/helpers) in full. They are the ground truth for: routes and hrefs, \
-accessible names used by getByRole/getByLabel, test ids, option labels, \
-exact/regex texts expected on screen, error-message wording, and the order \
-of user actions. Build the UI and API so that EVERY assertion in those files \
-passes. When the requirement text and the spec disagree, the spec wins. Do \
-not modify, copy into the project, or delete the spec files.
-"""
-
-
 def locate_acceptance_tests(tree: dict, bundle_dir: Path) -> Path | None:
     """Find the public Playwright specs for this task.
 
@@ -2950,7 +2884,7 @@ def main() -> int:
                 if time.time() >= probe_deadline:
                     log("[probe] endpoint still failing after 10min; proceeding anyway")
                     break
-                time.sleep(30)
+                time.sleep(50)
 
     req_src = Path(args.requirement_path).resolve()
     # On ARC-Bench the runner hands us the template workspace via
@@ -2977,8 +2911,7 @@ def main() -> int:
 
     runtime = AgentRuntime.from_env(project_dir=str(output_dir))
     events = runtime.events
-    # 追踪契约第三件: .arc/debug.log(与 octos-events.jsonl 同目录,
-    # 跟随平台注入的 RuntimePaths)。
+    # trace and eval
     set_debug_log_path(trace_artifact_paths(runtime.paths)[1])
     events.mark_run_started("octos bundle started")
 
@@ -2988,9 +2921,8 @@ def main() -> int:
         atomic_nodes = flatten_atomic(tree)
         if not atomic_nodes:
             raise ValueError("no ATOMIC requirement nodes found")
-        # goal-first 总开关与运行范围,提前到视觉通道之前——范围 run 的
-        # 参考图描述只做范围内节点(27 张全量是范围外死重)。
-        goal_first = os.environ.get("OCTOS_ARC_GOAL_FIRST", "1") != "0"
+        # 运行范围提前到视觉通道之前——范围 run 的参考图描述只做范围
+        # 内节点(27 张全量是范围外死重)。
         # 范围解析优先级:env 显式 > COMPETITION_FAMILY_SCOPE(烤入默认)。
         # 平台提交无法传 env → 正式范围改 main.py 顶部常量后重打包
         # (见 arc/SCOPE.md);本地仿真用 env-file 覆盖,"all"/"*" 显式全量。
@@ -3000,7 +2932,7 @@ def main() -> int:
         elif _raw_scope.strip().lower() in ("", "all", "*"):
             _raw_scope = ""
         family_scope = parse_family_scope(_raw_scope)
-        family_of = family_index(tree) if goal_first else {}
+        family_of = family_index(tree)
         # 夹具契约提取(ROOT data: 段 / 场景 GIVEN / "Seed data supplies" 句 /
         # E2E_* 环境项)——宿主尽算:先结构化,再编译种子、注入 envelope、
         # 生成 0-token 探针。github 2 分根因:这些契约此前全链无人消费。
@@ -3026,40 +2958,29 @@ def main() -> int:
 
         octos_bin = find_octos()
         # 工单正文,内核只做驱动与治理(shell guard/折叠/迭代帽照旧)。
-        # goal-first 总开关(宿主优先→目标优先):默认 1;=0 回退旧宿主
-        # 优先提示词路径(A/B 用,同样无 envelope)。
-        goal_first = os.environ.get("OCTOS_ARC_GOAL_FIRST", "1") != "0"
-        # goal-first: 家族工单——一个顶层家族一次交给代理连贯深实现
-        # (超大家族沿子家族边界切);=0 走兄弟批。预算随批规模放大。
-        # OCTOS_ARC_FAMILIES=运行范围(首跑/快迭代):只实现列出的家族
-        # (任意层级前缀,"REQ-1"/"REQ-2-3"/原子 id 均可,逗号分隔),
+        # 家族工单:一个顶层家族一次交给代理连贯深实现(超大家族沿子家族
+        # 边界切)。OCTOS_ARC_FAMILIES=运行范围(首跑/快迭代):只实现列出
+        # 的家族(任意层级前缀,"REQ-1"/"REQ-2-3"/原子 id 均可,逗号分隔),
         # 范围外家族不生成工单/不计进度/不进 Tier-2;未设置=全量。
-        # (goal_first/family_scope/family_of 已提前到视觉通道之前。)
-        batch_n = int(os.environ.get("OCTOS_ARC_NODE_BATCH", "2"))
-        if goal_first:
-            family_batch_max = int(
-                os.environ.get("OCTOS_ARC_FAMILY_BATCH_MAX", "6"))
-            node_batches = group_families(tree, family_batch_max)
-            if family_scope:
-                before = len(node_batches)
-                node_batches = [
-                    b for b in node_batches
-                    if batch_in_scope(b, family_scope, family_of)]
-                log(f"[scope] OCTOS_ARC_FAMILIES={','.join(sorted(family_scope))}: "
-                    f"{before} → {len(node_batches)} work order(s) "
-                    f"({sum(len(b) for b in node_batches)} node(s)); "
-                    "out-of-scope families: no work orders, no ledger, "
-                    "no Tier-2")
-            log(f"[flow] goal-first family work orders: "
-                f"{len(node_batches)} batch(es) for {len(atomic_nodes)} "
-                f"nodes over "
-                f"{len({str(f.get('id')) for f in family_of.values()})} "
-                "familie(s)")
-        else:
-            if family_scope:
-                log("[scope] OCTOS_ARC_FAMILIES set but GOAL_FIRST=0 — "
-                    "scope applies to family work orders only; ignored")
-            node_batches = group_siblings(tree, batch_n)
+        # (family_scope/family_of 已提前到视觉通道之前。)
+        family_batch_max = int(
+            os.environ.get("OCTOS_ARC_FAMILY_BATCH_MAX", "6"))
+        node_batches = group_families(tree, family_batch_max)
+        if family_scope:
+            before = len(node_batches)
+            node_batches = [
+                b for b in node_batches
+                if batch_in_scope(b, family_scope, family_of)]
+            log(f"[scope] OCTOS_ARC_FAMILIES={','.join(sorted(family_scope))}: "
+                f"{before} → {len(node_batches)} work order(s) "
+                f"({sum(len(b) for b in node_batches)} node(s)); "
+                "out-of-scope families: no work orders, no ledger, "
+                "no Tier-2")
+        log(f"[flow] goal-first family work orders: "
+            f"{len(node_batches)} batch(es) for {len(atomic_nodes)} "
+            f"nodes over "
+            f"{len({str(f.get('id')) for f in family_of.values()})} "
+            "familie(s)")
         max_batch = max((len(b) for b in node_batches), default=1)
         # Iteration-cap coupling: a healthy node needs 3-40 kernel
         # iterations (keep-25 data, median ~15), so a batch of B legitimately
@@ -3200,24 +3121,6 @@ def main() -> int:
                 f"{scaffolded}")
         else:
             log("[plan] OCTOS_ARC_HOST_SCAFFOLD=0; scaffolding left to the model")
-        # 任务形状预生成(09-27:两次真实交付对照——github 模型自己推对
-        # 了 14 个 feature 文件,sheet 推成了 97KB 巨石;家族划分本就
-        # 在需求树里,宿主尽算):每需求家族一对 feature/route stub(头
-        # 注释=该家族 REQ 工单),App.jsx/routes 装配版只在原始字节时
-        # 改写。节点轮提示词由此能点名本批家族文件,模型从"推理划分"
-        # 降为"填空"。
-        # goal-first:家族 stub 预装配默认关——填空框架被证伪为浅实现
-        # 放大器(09-27 转向);OCTOS_ARC_FEATURE_STUBS=1 可显式重开。
-        feature_of: dict[str, str] = {}
-        stubs_default = "0" if goal_first else "1"
-        if os.environ.get("OCTOS_ARC_FEATURE_STUBS",
-                          stubs_default) != "0":
-            _stubs, feature_of = scaffold.task_stubs(tree)
-            shape_written = scaffold.scaffold_task_features(
-                output_dir, tree, log=log)
-            if not shape_written:
-                log("[scaffold] task shape already present (or tree empty); "
-                    "no stubs written")
         # 模板已就位时依赖由宿主预装(模型零安装);codegen 门控紧随其后。
         template_ready = scaffold.template_ready(output_dir)
         if template_ready:
@@ -3378,25 +3281,21 @@ def main() -> int:
         events_log_path, _ = trace_artifact_paths(runtime.paths)
         data_dir = logs_dir / "state"
         data_dir.mkdir(parents=True, exist_ok=True)
-        # 09-27 planctl 退役:envelope/系统行通道删除——契约改走工单正文;
+        # envelope/系统行通道删除——契约改走工单正文;
         # 分层装配:字节稳定的全局层(root 契约+标题树+契约+播种契约)经
         # 内核 bootstrap 通道(per-profile data 目录 AGENTS.md,由 session
         # 在 profile create 后注入;load_bootstrap_files 无 cap)常驻系统行 0 号位——每分段付 1 次,轮轮缓存命中;挥发物
-        # (进度/家族细节/批节点)留工单。=0 基线不注入。
-        # goal-first 契约:frontend/src 全域归模型/UI kit 降为工具箱;
-        # =0 走 host-first 契约。
-        rules_text = (plan_envelope.HOST_STACK_RULES_GOAL_FIRST
-                      if goal_first else plan_envelope.HOST_STACK_RULES)
-        system_row_ctx = ""
-        if goal_first:
-            # 全局层内容传给 driver→session,在 profile create 后落盘到
-            # per-profile data 目录的 AGENTS.md(内核系统行 bootstrap 读取点)。
-            system_row_ctx = build_system_row_context(
-                tree, rules_text, fixture_rules,
-                scope=family_scope or None)
-            log(f"[system-row] stable context built: "
-                f"{len(system_row_ctx) / 1024:.0f} KB (resident at prefix "
-                "position 0 — work orders carry only the delta)")
+        # (进度/家族细节/批节点)留工单。
+        # goal-first 契约:frontend/src 全域归模型/UI kit 降为工具箱。
+        rules_text = plan_envelope.HOST_STACK_RULES_GOAL_FIRST
+        # 全局层内容传给 driver→session,在 profile create 后落盘到
+        # per-profile data 目录的 AGENTS.md(内核系统行 bootstrap 读取点)。
+        system_row_ctx = build_system_row_context(
+            tree, rules_text, fixture_rules,
+            scope=family_scope or None)
+        log(f"[system-row] stable context built: "
+            f"{len(system_row_ctx) / 1024:.0f} KB (resident at prefix "
+            "position 0 — work orders carry only the delta)")
         config_dir = Path(tempfile.mkdtemp(prefix="octos-config-"))
         env = build_octos_env(config_dir)
         # --data-dir 只覆盖 chat 模式;stdio 模式读环境变量,双保险。
@@ -3424,7 +3323,7 @@ def main() -> int:
             events_log=events_log_path,
             system_context=system_row_ctx or None,
         )
-        # 09-27 planctl 退役:envelope/系统行通道删除——契约随分层装配走
+        # envelope/系统行通道删除——契约随分层装配走
         # (全局层在系统行,模块层在工单);进度账本是宿主本地 dict(供工单
         # 进度行/分段摘要/事件标记消费)。
         plan_statuses: dict[str, str] = {
@@ -3438,48 +3337,31 @@ def main() -> int:
         batch_specs: list[str] = []
 
         try:
-            # Step 0: orient in the starter project + shared foundations.
-            # With the host template in place the app already boots — the
-            # skeleton LLM turn (and its nudge/syntax-gate retry machinery)
-            # is skipped entirely; the first model turn is node 1. The
-            # legacy loop below only runs when scaffolding is disabled
-            # (OCTOS_ARC_HOST_SCAFFOLD=0) or the template is incomplete.
-            # goal-first:模板数据面虽完整,skeleton 轮仍必走——App 外壳/
-            # 路由/家族文件结构由代理依需求地图自建(不再由 taskshape
-            # 预装配),复用下方现成的 legacy 重试机。
-            template_complete = (not goal_first) and \
-                scaffold.template_complete(output_dir)
-            if template_complete:
-                log("[flow] host template complete; skeleton turn skipped "
-                    f"({len(atomic_nodes)} atomic nodes queued)")
-                skeleton_ok = True
-            else:
-                log(f"[flow] skeleton/foundations turn starting "
-                    f"({len(atomic_nodes)} atomic nodes queued)")
-                skeleton_ok = False
-                skeleton_text = ""
-            # Template present → zero skeleton attempts (loop is empty);
-            # legacy/no-scaffold path keeps the 4-attempt retry machinery.
-            for sk_attempt in range(1, 1 if template_complete else 5):
+            # Step 0: skeleton/foundations turn — always runs. The host
+            # template's data plane (backend + deps) is complete, but the
+            # app shell/routes/family files are the model's to build from
+            # the requirements map; the retry machinery below also covers
+            # the no-scaffold path (OCTOS_ARC_HOST_SCAFFOLD=0).
+            log(f"[flow] skeleton/foundations turn starting "
+                f"({len(atomic_nodes)} atomic nodes queued)")
+            skeleton_ok = False
+            skeleton_text = ""
+            # 4-attempt retry machinery (also the no-scaffold path).
+            for sk_attempt in range(1, 5):
                 if time_up():
                     log("[flow] time budget exhausted before skeleton retry")
                     break
                 t0 = time.time()
-                if goal_first:
-                    # 全局层(地图/契约/播种契约)已常驻系统行——骨架轮
-                    # 直接从系统行取,不再重发。
-                    sk_prompt = GOAL_FIRST_SKELETON_PROMPT.format(
-                        port=args.web_port, smoke=smoke_port) \
-                        + "\nSYSTEM ROW: the full requirements map, host " \
-                        "contract and fixture contract are installed in " \
-                        "your system prompt (byte-stable) — work from " \
-                        "them directly; cross-family detail: read THAT " \
-                        "section of requirements/requirements.yaml by " \
-                        "heading id."
-                else:
-                    sk_prompt = HOST_SKELETON_PROMPT.format(
-                        port=args.web_port, smoke=smoke_port) \
-                        + "\n\n" + rules_text + "\n\n" + fixture_rules
+                # 全局层(地图/契约/播种契约)已常驻系统行——骨架轮
+                # 直接从系统行取,不再重发。
+                sk_prompt = GOAL_FIRST_SKELETON_PROMPT.format(
+                    port=args.web_port, smoke=smoke_port) \
+                    + "\nSYSTEM ROW: the full requirements map, host " \
+                    "contract and fixture contract are installed in " \
+                    "your system prompt (byte-stable) — work from " \
+                    "them directly; cross-family detail: read THAT " \
+                    "section of requirements/requirements.yaml by " \
+                    "heading id."
                 if tests_dir:
                     sk_prompt += "\n" + ACCEPTANCE_STAGED_NOTE
                 sk_wall = turn_wall(1)
@@ -3567,17 +3449,6 @@ def main() -> int:
             node_done_notes: dict[str, str] = {}
             segment_digest_pending = False
 
-
-            def _feature_file_for(ids: list[str]) -> str:
-                """本批节点的家族 feature 文件(宿主预生成 stub)点名。"""
-                for nid in ids:
-                    hit = feature_of.get(nid)
-                    if hit:
-                        return f"frontend/src/features/{hit}"
-                return ("frontend/src/features/<family>.jsx "
-                        "(pick the host-pre-created stub whose header "
-                        "lists this node's REQ id)")
-
             for idx, batch in enumerate(node_batches, 1):
                 # A2 会话分段:每 SEGMENT_BATCHES 批重置 stdio 会话,切断
                 # O(n²) 历史重放(run-002 实测 1.35 亿 token 的主 driver)。
@@ -3626,50 +3497,37 @@ def main() -> int:
                 progress_line = _progress_ledger_line(
                     family_of, plan_statuses,
                     only=family_scope or None)
-                if goal_first:
-                    # 分层装配:全局层(地图+契约+播种契约)常驻系统行;
-                    # 工单=模块层(本家族全子树)+依赖闭包+批节点+进度。
-                    fam = family_of.get(batch_ids[0])
-                    fam_ctx = describe_family_context(fam, batch) \
-                        if fam is not None else ""
-                    dep_ctx = collect_dependency_context(
-                        tree, batch, family_of)
-                    spec_parts = [
-                        "THIS FAMILY — folder contracts (verbatim):",
-                        fam_ctx,
-                    ]
-                    if dep_ctx:
-                        spec_parts += [
-                            "CROSS-FAMILY DEPENDENCIES (Depends on "
-                            "closure, verbatim):", dep_ctx]
+                # 分层装配:全局层(地图+契约+播种契约)常驻系统行;
+                # 工单=模块层(本家族全子树)+依赖闭包+批节点+进度。
+                fam = family_of.get(batch_ids[0])
+                fam_ctx = describe_family_context(fam, batch) \
+                    if fam is not None else ""
+                dep_ctx = collect_dependency_context(
+                    tree, batch, family_of)
+                spec_parts = [
+                    "THIS FAMILY — folder contracts (verbatim):",
+                    fam_ctx,
+                ]
+                if dep_ctx:
                     spec_parts += [
-                        "THIS BATCH — requirement nodes (verbatim):",
-                        "\n\n".join(describe_node(n, fixture_seeded_scenarios)
-                                   for n in batch),
-                        "NOTE: the full requirements map, host contract "
-                        "and fixture contract are installed in your "
-                        "system prompt (byte-stable) — they bind exactly "
-                        "as if quoted here. Cross-family detail beyond "
-                        "the closure above: read THAT section of "
-                        "requirements/requirements.yaml by heading id.",
-                        progress_line,
-                    ]
-                    node_spec = "\n\n".join(x for x in spec_parts if x)
-                    base_prompt = GOAL_FIRST_NODE_PROMPT_TEMPLATE.format(
-                        node_id=focus_id, node_spec=node_spec,
-                        port=args.web_port, smoke=smoke_port)
-                else:
-                    node_spec = "\n\n".join(x for x in (
-                        "\n\n".join(describe_node(n, fixture_seeded_scenarios)
-                                   for n in batch),
-                        "HOST CONTRACT:",
-                        rules_text,
-                        fixture_rules,
-                        progress_line) if x)
-                    base_prompt = HOST_NODE_PROMPT_TEMPLATE.format(
-                        node_id=focus_id, node_spec=node_spec,
-                        port=args.web_port, smoke=smoke_port,
-                        feature_file=_feature_file_for(batch_ids))
+                        "CROSS-FAMILY DEPENDENCIES (Depends on "
+                        "closure, verbatim):", dep_ctx]
+                spec_parts += [
+                    "THIS BATCH — requirement nodes (verbatim):",
+                    "\n\n".join(describe_node(n, fixture_seeded_scenarios)
+                               for n in batch),
+                    "NOTE: the full requirements map, host contract "
+                    "and fixture contract are installed in your "
+                    "system prompt (byte-stable) — they bind exactly "
+                    "as if quoted here. Cross-family detail beyond "
+                    "the closure above: read THAT section of "
+                    "requirements/requirements.yaml by heading id.",
+                    progress_line,
+                ]
+                node_spec = "\n\n".join(x for x in spec_parts if x)
+                base_prompt = GOAL_FIRST_NODE_PROMPT_TEMPLATE.format(
+                    node_id=focus_id, node_spec=node_spec,
+                    port=args.web_port, smoke=smoke_port)
                 batch_specs = sorted(
                     {f for nid in batch_ids
                      for f in (spec_map.get(nid) or [])})
@@ -3996,7 +3854,7 @@ def main() -> int:
                     # (全量套件对未实现家族必然全红,会把 final 带偏)。
                     tier2_specs = (scoped_spec_files(
                         spec_map, node_batches, family_scope, family_of)
-                        if (family_scope and goal_first) else None)
+                        if family_scope else None)
                     tier2_run = _run_staged_playwright(
                         output_dir, smoke_port, tests_dir, spec_ports_extra,
                         spec_files=tier2_specs)
@@ -4008,13 +3866,31 @@ def main() -> int:
                         if tier2_run else "[plan] Tier-2 unavailable; "
                                          "degrading to model final check")
 
+                # Host page-health probe (09-28 sheet forensics): the
+                # minimum browser check for ANY task — requirements-only
+                # tasks ship no staged specs, so without this nothing
+                # host-owned ever opens the built app in a browser.
+                # [] = clean walk; None = skipped (never a verdict).
+                ph_errors: list[str] | None = None
+                if f_err is None and toolchain_cli is not None:
+                    ph_errors = _page_health_run(output_dir, smoke_port,
+                                                 spec_ports_extra)
+                    if ph_errors:
+                        hs["page_health"] = {"errors": ph_errors}
+                        log("[plan] page-health RED: "
+                            + " | ".join(ph_errors[:3]))
+                    elif ph_errors is not None:
+                        hs["page_health"] = "clean"
+                        log("[plan] page-health clean")
+
                 _prune_acceptance_junk(output_dir, tests_dir, log)
                 # 09-27 定则:宿主不再跑自写浏览器套件——跳过 final LLM 轮
                 # 的门只剩 Tier-1 探针绿 + Tier-2 staged specs(任务自带
                 # 公开测试)全绿;requirements-only 任务的浏览器级验证由
                 # 模型自写 spec 自证(见 SELF-TEST 指引)。
                 if (f_err is None and tier2_run is not None
-                        and tier2_run[1] == 0 and tier2_run[0] > 0):
+                        and tier2_run[1] == 0 and tier2_run[0] > 0
+                        and not ph_errors):
                     ok, text = True, ("host spec run all green "
                                       f"({tier2_run[0]} passed); final LLM turn skipped")
                     log("[plan] Tier-2 all green; skipping final LLM turn")
@@ -4036,6 +3912,14 @@ def main() -> int:
                             f"Failing tests: {tier2_run[2]}. Reproduce with "
                             f"the staged specs under .arc/acceptance/, fix "
                             f"each failure, do not touch passing flows.")
+                    if ph_errors:
+                        final_prompt += (
+                            f"\nHOST PAGE-HEALTH PROBE (ground truth, "
+                            f"headless browser walk over the built app on "
+                            f"port {smoke_port}): uncaught page errors — "
+                            f"{ph_errors}. Open the same pages, find the "
+                            "throwing code path and fix it; every graded "
+                            "step behind a crash scores zero.")
                     elif tier2_run is not None and not probe_list:
                         final_prompt += (
                             f"\nHOST SPEC RUN (ground truth): all "
