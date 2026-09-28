@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 
 from . import backend, frontend
+from .formula_template import FORMULA_JS
+from .grid_template import GRID_JS
 
 STACK_ID = "web-react-express"
 # 09-27 版本对齐(镜像取证):runner 基础镜像默认 registry=npmjs.org——
@@ -65,6 +67,10 @@ SCAFFOLD_FILES: dict[str, tuple[str, str]] = {
     # UI kit:满分形态代码化(NativeSelect/AppDialog/AccountTrigger/
     # SingleError/FixedGrid)——提示词规则的方差靠默认路径消零
     "frontend/src/app/ui.jsx": (frontend.FRONTEND_UI_JSX, "host"),
+    # 09-28:网格选区/编辑内核 + 单元格公式引擎(纯函数、零任务语义,
+    # 手写形态两跑翻车后下沉为宿主代码;未 import 时 vite 不打包)
+    "frontend/src/app/grid.js": (GRID_JS, "host"),
+    "frontend/src/app/formula.js": (FORMULA_JS, "host"),
     "frontend/src/app/styles.css": (frontend.FRONTEND_STYLES_CSS, "host"),
     "frontend/.npmrc": (NPMRC, "host"),
     ".npmrc": (NPMRC, "host"),
@@ -97,6 +103,8 @@ RULES_MUST_NAME = (
     "frontend/src/app/store.jsx",
     "frontend/src/app/api.js",
     "frontend/src/app/ui.jsx",
+    "frontend/src/app/grid.js",
+    "frontend/src/app/formula.js",
     "frontend/src/app/styles.css",
     "frontend/src/features",
 )

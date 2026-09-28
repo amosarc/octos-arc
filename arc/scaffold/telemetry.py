@@ -1,8 +1,8 @@
-"""评测期遥测的交付前兜底落位。
+"""
 
-平台 func/e2e 失败明细不下发;应用自身把评测流量与前端异常写
-octos-logs/eval-traffic.jsonl 随工作区 zip 带回(2026-09-26 github 6 分
-run:8 会话后零写入的死因只能靠这层还原)。常规路径由 scaffold 开工时
+评测期遥测的交付前兜底落位。
+应用自身把评测流量与前端异常写
+octos-logs/eval-traffic.jsonl 。常规路径由 scaffold 开工时
 落盘三件(lib/eval-telemetry.js、app.js 的 require 行、index.html 错误
 钩子);本模块在交付前兜底——模型重写过 app.js/index.html 丢了钩子则
 原则注入回补,并写 marker 行切分 agent/评测两阶段流量。注入失败只告警:

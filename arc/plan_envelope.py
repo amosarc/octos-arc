@@ -43,16 +43,18 @@ CRUD factory), src/lib/auth.js (register/login/logout/me + sessions). Dependenci
 never add npm packages.
 FRONTEND LAYOUT (isolation contract): every requirement's UI lives in \
 its OWN self-contained file frontend/src/features/<name>.jsx (default \
-export; component+state+styles in that one file). frontend/src/features/README.md (host-owned) carries \
-the GRID EDITOR KERNEL PATTERN — grid-like tasks must build on ONE \
-shared selection/editing state model per the README instead of \
-re-implementing it per feature. Graded UI shapes are CODE: \
-frontend/src/app/ui.jsx ships NativeSelect (dropdowns = native \
-<select>, graders use selectOption), AppDialog (modals = native \
-<dialog>), AccountTrigger (username its own exact-text node; pass the \
-requirement's trigger label), SingleError (one visible error \
-element) and FixedGrid (fixed-size role=grid; pass the \
-requirement's grid name) — use them, never hand-roll. \
+export; component+state+styles colocated). Graded UI shapes are CODE: \
+frontend/src/app/ui.jsx ships NativeSelect (native <select>; graders \
+selectOption), AppDialog (native <dialog>), AccountTrigger (username \
+its own exact-text node + the requirement's trigger label), \
+SingleError (ONE visible error), Region ("A region named X" = \
+<Region label="X">) and FixedGrid (fixed-size role=grid; pass the \
+useGrid kernel); frontend/src/app/grid.js = the useGrid kernel (click \
+/ Shift-click-extend / drag / aria-selected built in); \
+frontend/src/app/formula.js = the cell formula engine — import, \
+never hand-roll. frontend/src/features/README.md (host-owned) \
+carries the GRID EDITOR KERNEL PATTERN — one shared grid kernel, \
+never per-feature re-implementations. \
 frontend/src/app/App.jsx is the ASSEMBLY layer only — \
 per feature one import+mount; the FIRST requirement may lay out the \
 page structure, never business logic after that. \
@@ -108,8 +110,8 @@ control with that EXACT accessible name — substring variants \
 <select> options are not visible controls (use a native <select> the \
 grader can selectOption, or visible radios/buttons); WIDGETS are \
 NATIVE-FIRST — dropdowns are always native <select> with real <option> \
-labels (a custom div dropdown is invisible to every selector without \
-full ARIA combobox semantics), modals prefer the native <dialog> \
+labels (a custom div dropdown is invisible to every selector), modals \
+prefer the native <dialog> \
 element (showModal() gives Escape/backdrop close and focus trapping \
 for free), and custom is built ONLY where HTML has no native widget \
 (menus/tabs/grids) with the requirement's exact ARIA roles mandatory; a DATA GRID renders its \
@@ -119,8 +121,8 @@ alone; a SUBMIT/SAVE control must become enabled once required fields \
 are filled — a permanently disabled submit can never be clicked by a \
 test; every dialog closes on Escape AND on cancel/overlay click — \
 an undismissable overlay blocks every later grader step; modifier \
-clicks keep selection (Shift-click extends the range — never collapse \
-it to the clicked cell in the click handler); downloads are \
+clicks keep selection (Shift-click extends the range — never \
+collapse it); downloads are \
 byte-exact: no UTF-8 BOM, exact CSV quoting."""
 
 # goal-first 变体(09-27 宿主优先→目标优先转向):后端数据面/夹具各段与
@@ -159,8 +161,18 @@ shapes — NativeSelect (dropdowns = native <select>, graders use \
 selectOption), AppDialog (native <dialog> modals), AccountTrigger \
 (username its own exact-text node + the requirement's trigger label — \
 the observed full-score shape), SingleError (one visible error \
-element) and FixedGrid (fixed-size role=grid) — use them or roll your \
-own; the requirement text is the only authority. \
+element), Region (render <Region label="X"> for a requirement phrase \
+"A region named X" — a section, so getByRole('region', {name}) \
+resolves; a div with aria-label has no region role) and FixedGrid \
+(fixed-size role=grid; pass the useGrid kernel as grid={...} and \
+click / Shift-click-extend / drag / aria-selected are handled for \
+you) — use them or roll your own; the requirement text is the only \
+authority. frontend/src/app/grid.js carries the useGrid selection/\
+editing kernel plus rectOf/inRectangle/rangeCoords geometry; \
+frontend/src/app/formula.js carries a cell formula engine \
+(displayValue/evalFormula/adjustFormula/shiftRefsOnRowChange/\
+shiftRefsOnColChange — =SUM(A1:A3)*2, =A1 + B1, =-A1, nested calls \
+and the #DIV/0!/#REF!/#NAME?/#ERROR! vocabulary included). \
 frontend/src/features/README.md carries the GRID EDITOR KERNEL \
 PATTERN — grid-like families build on ONE shared selection/editing \
 state model instead of re-implementing it per feature.

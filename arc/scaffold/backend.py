@@ -1,9 +1,5 @@
-"""backend 模板常量(纯标准库):完整可启动后端的全部文件内容。
-
-设计律:凡宿主能算的不交模型——HTTP/cookie/存储/校验/auth/CRUD 全部预置;
-模型只声明 schema(经 scaffold.codegen 编译)与写业务端点/前端。
-风格硬约束:JS 无空行、扁平早返回、2 空格缩进、变量名短而清晰
-(文件会被模型经 repomap/直读反复消费,字节即 token)。
+"""
+backend 模板常量(纯标准库):完整可启动后端的全部文件内容。
 """
 
 from __future__ import annotations
@@ -173,7 +169,10 @@ APP_JS = """\
 const path = require('path'); const fs = require('fs'); const express = require('express'); const U = require('./lib/util');
 const app = express();
 try { require('./lib/eval-telemetry').mount(app); } catch { /* telemetry best-effort, never blocks the app */ }
-app.use(express.json({ limit: '64kb' }));
+// 2mb: workbook/document states travel whole in the entity JSON (an
+// imported CSV becomes part of the row) — a small body cap turns a large
+// import into a 413 the frontend reports as a content failure.
+app.use(express.json({ limit: '2mb' }));
 app.use((req, res, next) => { req.cookies = U.cookies(req); next(); });
 app.get('/api/health', (req, res) => U.json(res, 200, { ok: true }));
 const schema = require('./database/schema');

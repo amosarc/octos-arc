@@ -1,21 +1,5 @@
-"""frontend 模板常量(纯标准库):React+Vite 模块化八件套。
-
-从 plan_envelope.py 迁入——plan_envelope 只保留 envelope 契约文本
-(HOST_STACK_RULES 等),模板内容统一归 scaffold 包。
-
-结构(run8 教训:单文件 main.jsx 1002 行叠改,后批重构破坏前批功能,
-18 个失败里 12 个是这种"做完又弄坏"):
-
-    src/main.jsx        宿主独占,仅 createRoot
-    src/app/App.jsx     组装层:import + 挂载 features,禁业务逻辑
-    src/app/store.jsx   宿主提供的共享数据层(useResource)
-    src/app/api.js      宿主提供的 REST 客户端
-    src/app/styles.css  全局基础样式
-    src/features/       模型扩展点:每需求域一个自包含文件
-
-批与批物理隔离——REQ-A 的重构只发生在 features/<a>.jsx 和 App.jsx 的
-接线上,REQ-B 的代码一行不被触碰。零新依赖(react/react-dom + Vite
-原生 css import),测试契约(语义选择器)与文件结构零耦合。
+"""
+frontend 模板常量(纯标准库):React+Vite 模块化八件套。
 """
 
 from __future__ import annotations
@@ -260,30 +244,46 @@ and add sibling files freely — the division is a starting grid, not a cage.
 
 ## Grid editor kernel pattern (spreadsheet-like tasks)
 
-Build every grid feature on ONE shared selection+editing state model,
-created in the FIRST grid feature file and imported by later features
-(never re-implemented, never rewritten):
+The kernel is HOST-SHIPPED CODE, not a pattern to re-derive. Import it and
+the graded interaction semantics hold by construction:
 
 ```jsx
-// useGrid: single source of truth for selection + editing
-// anchor + focus cells define the rectangular selection
-const [grid, setGrid] = useState({
-  anchor: 'A1', focus: 'A1', editing: null, // editing: {coord, draft}
-});
-// aria contract (graded): each cell renders
-//   role="gridcell" aria-label={coord}
-//   aria-selected={inRectangle(coord, anchor, focus) ? 'true' : 'false'}
-// commit:  Enter or click on another cell applies editing.draft
-// cancel:  Escape restores the original value, formula bar shows it
-// formula bar: value = editing ? draft : (formulaOf(selected) ?? valueOf(selected))
+// frontend/src/app/grid.js (host-owned): useGrid + geometry helpers
+import { useGrid, rectOf, inRectangle, rangeCoords } from '../app/grid.js';
+
+const grid = useGrid({ initial: 'A1', onSelect: persistSelection });
+// FixedGrid wires click/SHIFT-click-extend/drag/aria-selected for you:
+<FixedGrid name="Worksheet grid" grid={grid} rows={30} cols={12}
+           textAt={(coord) => displayValue(cells, coord)} />
 ```
+
+- aria-selected is derived from anchor/focus for the WHOLE rendered grid —
+  never maintain a per-cell Set (a Set capped at the render extent ships
+  stale aria state the moment the grid grows).
+- Task layer stays yours: in your own onCellClick (runs BEFORE the kernel
+  handler) commit a pending edit; persist via onSelect(anchor, focus);
+  drive the editing input with beginEdit/setDraft/commitEdit/cancelEdit
+  (Enter commits, Escape cancels).
+- FORMULAS: import the engine from ../app/formula.js — displayValue(cells,
+  coord) for the grid, evalFormula for checks, adjustFormula for
+  copy/paste, shiftRefsOnRowChange/shiftRefsOnColChange for row/column
+  operations. Do NOT hand-roll an evaluator: hand-rolled ones have shipped
+  #ERROR! on =SUM(A1:A3)*2, on spaces (=A1 + B1), on unary minus and on
+  nested calls; this engine handles all of them plus the graded error
+  vocabulary (#DIV/0!, #REF!, #NAME?, #ERROR!).
 
 Rules the graders assert verbatim (see your INTERACTION SEMANTICS section):
 - Escape cancels an uncommitted edit; Enter commits.
-- aria-selected must be maintained on EVERY gridcell, true inside the
-  current rectangle, false outside.
+- aria-selected must be true on EVERY gridcell inside the current
+  rectangle and false outside (the kernel derives this; keep it true when
+  you hand-roll a grid instead).
 - One visible error element per failure, exact message strings from the
   requirement.
+- REGION CONTRACT: a requirement phrase "A region named X" is the ARIA
+  region role — render <Region label="X"> (frontend/src/app/ui.jsx) so
+  getByRole('region', { name: X }) resolves. A <div aria-label> has NO
+  region role and the grader's locator times out (an entire pivot family
+  died exactly this way).
 - DIALOG CONTRACT: prefer the NATIVE <dialog> element — keep a ref,
   call ref.current.showModal() to open and ref.current.close() to
   dismiss; Escape, backdrop click handling, and focus trapping come
@@ -292,10 +292,15 @@ Rules the graders assert verbatim (see your INTERACTION SEMANTICS section):
   button carries the requirement's EXACT name ("Delete", not "Delete
   worksheet"). An undismissable overlay blocks every later grader
   step; a misnamed confirm is never found.
-- SELECTION CONTRACT: Shift-click EXTENDS the selection — the plain
-  click handler must not collapse it (guard with e.shiftKey); sort /
-  filter / validation / pivot ranges all read the selection anchor, so
-  one collapsing handler breaks five requirement families.
+- SELECTION CONTRACT (built into the useGrid kernel): Shift-click
+  EXTENDS the selection and a plain click replaces it — never write a
+  click handler that collapses a shift-extend (sort / filter / validation
+  / pivot ranges all read the selection anchor, so one collapsing handler
+  breaks five requirement families; this exact bug shipped twice).
+- GRID SIZING: size FixedGrid from the data you must SHOW plus margin —
+  derive rows/cols from the seeded/imported extent (e.g.
+  max(26, maxRow + 6) × max(10, maxCol + 4)); a grid smaller than the
+  imported data hides rows/columns no test can reach.
 - GRID COMPLETENESS: the grid renders its FULL structure — visible
   columnheader cells (column letters) and rowheader cells (row
   numbers) around role="gridcell" cells named by coordinate. A grid
@@ -319,8 +324,15 @@ completed feature's specs against your changes.
 # UI kit(09-27 契合度定论 S3):满分形态从提示词规则下沉为代码——
 # 满分版与平台版两代独立代码、同一坑两跑重现,证明"规则文本靠模型
 # 抽样遵守"方差过大;这些原语让正确形态成为默认路径(零新依赖)。
+# 09-28 增量(sheet 56 分法医):Region 原语("A region named X" 契约
+# 短语的 region role 由 <section> 隐式提供——div aria-label 评测器
+# getByRole('region') 0 命中,pivot 全族 10/10 卡死);FixedGrid 集成
+# grid.js 内核(Shift-click 扩选/拖选/aria 全网格判定内建,塌缩 onClick
+# 规则文本两跑失效后改由代码兜底)+ 表头 aria-label + 编辑态输入 +
+# 筛选/验证扩展点(对齐满分版模板演进形态)。
 FRONTEND_UI_JSX = """\
 import React, { useEffect, useRef } from 'react';
+import { inRectangle } from './grid.js';
 
 // UI KIT — the graded shapes, by construction. The hidden specs drive the
 // app with Playwright role/label locators: getByRole with EXACT accessible
@@ -356,6 +368,17 @@ export function AppDialog({ name, open, onClose, children }) {
   }, [open]);
   return (
     <dialog ref={ref} aria-label={name} onClose={onClose}>{children}</dialog>
+  );
+}
+
+// REGION: requirement phrase "A region named X" => <Region label="X">.
+// <section> carries the implicit ARIA region role, so the grader's
+// getByRole('region', { name: X }) resolves. A plain <div aria-label>
+// has NO role — that exact miss stalled an entire pivot family (every
+// scenario timed out at the editor the step after creating it).
+export function Region({ label, children, ...rest }) {
+  return (
+    <section aria-label={label} {...rest}>{children}</section>
   );
 }
 
@@ -396,16 +419,33 @@ const colLetters = (n) => {
 };
 
 // Spreadsheet-shaped grid: FIXED-SIZE (empty cells beyond the data region
-// stay selectable — a data-sized grid killed ~7 requirements in one run),
-// role=grid + named columnheaders (letters) + rowheaders (numbers) +
+// stay selectable — a data-sized grid killed ~7 requirements in one run;
+// size it from the seeded/imported data extent plus margin, never smaller).
+// role=grid + columnheaders named by LETTER + rowheaders by ROW NUMBER +
 // gridcells whose accessible name is the coordinate (A1). name and
 // multiselectable come FROM THE REQUIREMENT (its quoted grid name and
-// selection contract). Owns NO state: pass textAt(coord) and the
-// selection Set; wire click/mousedown/context-menu handlers yourself.
+// selection contract).
+//
+// Selection: pass the useGrid kernel as `grid` (from ./grid.js) and the
+// built-in handlers give plain-click select, SHIFT-click extend, drag
+// rectangle and whole-grid aria-selected with ZERO wiring on your side;
+// your own on* callbacks still fire first (commit a pending edit there).
+// Without `grid`, the legacy `selected` Set keeps working. `editing` is
+// the kernel's editing object {coord, draft} rendered as a cell input.
+// headerExtra/cellExtra decorate headers/cells (filter buttons, dropdown
+// triggers); rowHidden(r) hides filtered rows without deleting them.
 export function FixedGrid({ name, rows = 26, cols = 10, multiselectable = true,
-                            textAt, selected, onCellClick, onCellDown,
-                            onContextMenu }) {
+                            textAt, selected, grid,
+                            onCellClick, onCellDown, onCellEnter,
+                            onCellDoubleClick, onContextMenu,
+                            onColumnHeaderMenu, onRowHeaderMenu,
+                            editing, onEditChange, onEditKeyDown,
+                            headerExtra, cellExtra, rowHidden }) {
   const letters = colLetters(cols);
+  const isSelected = (coord) => (grid
+    ? inRectangle(coord, grid.anchor, grid.focus)
+    : Boolean(selected && selected.has && selected.has(coord)));
+  const editingCell = editing || (grid && grid.editing) || null;
   return (
     <table role="grid" aria-label={name}
            aria-multiselectable={multiselectable ? 'true' : 'false'}>
@@ -413,27 +453,63 @@ export function FixedGrid({ name, rows = 26, cols = 10, multiselectable = true,
         <tr role="row">
           <td></td>
           {letters.map((c) => (
-            <th key={c} role="columnheader">{c}</th>
+            <th key={c} role="columnheader" aria-label={c}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  onColumnHeaderMenu && onColumnHeaderMenu(c, e);
+                }}>
+              {c}
+              {headerExtra ? headerExtra(c) : null}
+            </th>
           ))}
         </tr>
       </thead>
       <tbody>
         {Array.from({ length: rows }, (_, i) => i + 1).map((r) => (
-          <tr key={r} role="row">
-            <th role="rowheader">{String(r)}</th>
+          <tr key={r} role="row" hidden={rowHidden ? rowHidden(r) : false}>
+            <th role="rowheader" aria-label={String(r)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  onRowHeaderMenu && onRowHeaderMenu(r, e);
+                }}>
+              {String(r)}
+            </th>
             {letters.map((c) => {
               const coord = c + r;
-              const sel = selected && selected.has && selected.has(coord);
+              const sel = isSelected(coord);
+              const isEditing = editingCell && editingCell.coord === coord;
               return (
                 <td key={coord} role="gridcell" aria-label={coord}
                     aria-selected={sel ? 'true' : 'false'}
-                    onClick={() => onCellClick && onCellClick(coord)}
-                    onMouseDown={(e) => onCellDown && onCellDown(coord, e)}
+                    onClick={(e) => {
+                      onCellClick && onCellClick(coord, e);
+                      grid && grid.handleCellClick(coord, e);
+                    }}
+                    onMouseDown={(e) => {
+                      onCellDown && onCellDown(coord, e);
+                      grid && grid.handleCellMouseDown(coord, e);
+                    }}
+                    onMouseEnter={() => {
+                      onCellEnter && onCellEnter(coord);
+                      grid && grid.handleCellMouseEnter(coord);
+                    }}
+                    onDoubleClick={() => onCellDoubleClick && onCellDoubleClick(coord)}
                     onContextMenu={(e) => {
                       e.preventDefault();
-                      onContextMenu && onContextMenu(coord);
+                      onContextMenu && onContextMenu(coord, e);
+                      grid && grid.handleCellClick(coord, e);
                     }}>
-                  {textAt ? (textAt(coord) || '') : ''}
+                  {isEditing ? (
+                    <input className="cell-editor" aria-label={'Edit ' + coord}
+                           value={editingCell.draft} autoFocus
+                           onChange={(e) => onEditChange && onEditChange(e.target.value)}
+                           onKeyDown={(e) => onEditKeyDown && onEditKeyDown(e)} />
+                  ) : (
+                    <React.Fragment>
+                      {textAt ? (textAt(coord) || '') : ''}
+                      {cellExtra ? cellExtra(coord) : null}
+                    </React.Fragment>
+                  )}
                 </td>
               );
             })}
