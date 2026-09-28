@@ -12,8 +12,16 @@ async function request(path, options = {}) {
   return res.status === 204 ? null : res.json();
 }
 
+const qs = (params) => {
+  if (!params) return '';
+  const pairs = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+  return pairs.length ? `?${pairs.join('&')}` : '';
+};
+
 export const api = {
-  list: (resource) => request(`/api/${resource}`),
+  list: (resource, params) => request(`/api/${resource}${qs(params)}`),
   get: (resource, id) => request(`/api/${resource}/${id}`),
   create: (resource, data) =>
     request(`/api/${resource}`, { method: 'POST', body: JSON.stringify(data) }),

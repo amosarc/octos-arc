@@ -159,9 +159,10 @@ def _routes_wiring(stubs: list[dict]) -> str:
         f"  require('./{s['slug']}')(app);"
         for s in stubs)
     return f"""\
-// routes/index.js — task-specific endpoints, pre-split per requirement
-// family (host-seeded). Each family module is a plain (app) => {{}}
-// registering its own routes; implement families in their files.
+// routes/index.js — ALL task API endpoints (auth included), pre-split per
+// requirement family (host-seeded). Each family module is a plain
+// (app) => {{}} registering its own routes; implement families in their
+// files.
 module.exports = (app) => {{
 {requires}
 }};

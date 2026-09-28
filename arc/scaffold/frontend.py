@@ -8,6 +8,9 @@ FRONTEND_PACKAGE_JSON = {
     "name": "frontend",
     "version": "1.0.0",
     "private": True,
+    # ESM 包:src 全部 import/export 语法(jsx/app 库);node 侧单测
+    # (csv.js)与 vite 消费同一语义,无双模块系统漂移。
+    "type": "module",
     "scripts": {"build": "vite build"},
     "dependencies": {"react": "^18.3.1", "react-dom": "^18.3.1"},
     "devDependencies": {"@vitejs/plugin-react": "^4.3.1", "vite": "^5.2.0"},
@@ -188,8 +191,16 @@ async function request(path, options = {}) {
   return res.status === 204 ? null : res.json();
 }
 
+const qs = (params) => {
+  if (!params) return '';
+  const pairs = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+  return pairs.length ? `?${pairs.join('&')}` : '';
+};
+
 export const api = {
-  list: (resource) => request(`/api/${resource}`),
+  list: (resource, params) => request(`/api/${resource}${qs(params)}`),
   get: (resource, id) => request(`/api/${resource}/${id}`),
   create: (resource, data) =>
     request(`/api/${resource}`, { method: 'POST', body: JSON.stringify(data) }),
@@ -309,6 +320,12 @@ Rules the graders assert verbatim (see your INTERACTION SEMANTICS section):
   labels (graders use getByRole('combobox') + selectOption). Never a
   custom div dropdown — without full ARIA combobox semantics it is
   invisible to every selector.
+- MENU CONTRACT: right-click/header menus use the host's useContextMenu +
+  Menu (frontend/src/app/ui.jsx): role=menu with menuitem buttons whose
+  labels are the requirement's EXACT strings ("Insert 1 row above", not
+  "Insert row"), closing on Escape AND outside click. FixedGrid already
+  routes onContextMenu/onColumnHeaderMenu/onRowHeaderMenu into this —
+  hand-rolled positioned divs drift on every one of those axes.
 - SUBMIT ENABLEMENT: a submit/save button becomes ENABLED once the
   required fields are filled. Disabled is a transient state (Undo with
   an empty stack), never permanent — a permanently disabled submit can
@@ -403,6 +420,61 @@ export function AccountTrigger({ username, onOpen, label }) {
 export function SingleError({ message }) {
   if (!message) return null;
   return <div role="alert" className="form-error">{message}</div>;
+}
+
+// PER-FIELD parallel errors (registration-style forms): several invalid
+// fields submitted together must show ALL their messages at once ("must
+// show ... together, rather than revealing only one"), each field owning
+// exactly ONE element beside it. errors is the backend {errors:[{field,
+// msg}]} shape (src/lib/crud.js emits it verbatim).
+export const byField = (errors, field) =>
+  (errors || []).filter((e) => e && e.field === field).slice(0, 1);
+export function FieldError({ errors, field }) {
+  const first = byField(errors, field)[0];
+  if (!first) return null;
+  return <div role="alert" className="error-text">{first.msg}</div>;
+}
+
+// MENUS (row/column-header menus, worksheet options, right-click grids):
+// role=menu with menuitem buttons carrying EXACT labels from the
+// requirement, closing on Escape AND outside click. FixedGrid already
+// routes onContextMenu / onColumnHeaderMenu / onRowHeaderMenu here —
+// useContextMenu captures the event point, Menu renders the popup.
+// items: [{label, onSelect}] — label IS the accessible name (verbatim).
+export function useContextMenu() {
+  const [menu, setMenu] = React.useState(null);
+  const open = (e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); };
+  const close = () => setMenu(null);
+  return { menu, open, close };
+}
+
+export function Menu({ menu, onClose, items }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!menu) return;
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    const onDown = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onDown);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onDown);
+    };
+  }, [menu, onClose]);
+  if (!menu) return null;
+  return (
+    <div ref={ref} role="menu" className="ctx-menu"
+         style={{ position: 'fixed', left: menu.x, top: menu.y, zIndex: 1000 }}>
+      {(items || []).map((it) => (
+        <button key={it.label} role="menuitem"
+                onClick={() => { onClose(); it.onSelect && it.onSelect(); }}>
+          {it.label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 // Column letters beyond Z wrap to AA, AB, ... — no artificial column cap

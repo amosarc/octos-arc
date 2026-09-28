@@ -3,11 +3,9 @@
 身份知识收敛在 manifest.py;调用方只 import 本包,不再触碰具体文件路径。
 
 外部入口:
-    scaffold(output_dir)              幂等落盘 17 件模板,返回本次写入 rel
+    scaffold(output_dir)              幂等落盘 27 件模板,返回本次写入 rel
     template_ready(output_dir)        宿主模板已就位(frontend/ + app.js)
-    template_complete(output_dir)     可跳过 skeleton 轮(+auth/engine/schema)
     prewarm_deps(output_dir, log)     宿主代装 backend/frontend 依赖
-    compile_schema / Watcher / schema_path / load_schema   schema 编译
     task_stubs / scaffold_task_features   需求树→家族 stub 预生成(taskshape)
 """
 
@@ -20,28 +18,22 @@ import time
 from pathlib import Path
 
 from . import backend, frontend, manifest  # noqa: F401  (re-export 便于排查)
-from .codegen import Watcher, compile_schema, load_schema, schema_path
 from .taskshape import scaffold_task_features, task_stubs
 from .manifest import (  # noqa: F401
-    CODEGEN_STATE_REL,
-    COMPLETE_KEYS,
-    COOKIE_NAME,
     INSTALL_REGISTRY,
     MODEL_FILES,
     NPM_REGISTRY,
     READY_KEYS,
     RULES_MUST_NAME,
     SCAFFOLD_FILES,
-    SCHEMA_JSON_REL,
     STACK_ID,
 )
 
 __all__ = [
-    "scaffold", "template_ready", "template_complete", "prewarm_deps",
+    "scaffold", "template_ready", "prewarm_deps",
     "task_stubs", "scaffold_task_features",
-    "Watcher", "compile_schema", "load_schema", "schema_path",
-    "SCAFFOLD_FILES", "READY_KEYS", "COMPLETE_KEYS", "SCHEMA_JSON_REL",
-    "COOKIE_NAME", "NPM_REGISTRY", "INSTALL_REGISTRY", "STACK_ID",
+    "SCAFFOLD_FILES", "READY_KEYS",
+    "NPM_REGISTRY", "INSTALL_REGISTRY", "STACK_ID",
     "RULES_MUST_NAME",
     "backend", "frontend", "manifest",
 ]
@@ -50,9 +42,9 @@ __all__ = [
 def scaffold(output_dir: Path) -> list[str]:
     """幂等落盘完整可启动模板(write-if-absent),返回本次写入的相对路径。
 
-    backend 全套(HTTP/cookie/存储/校验/auth/CRUD 通用层 + schema.js 占位)
-    与 frontend 五件套由宿主预置;业务语义(schema.json、routes、种子数据、
-    UI)留给模型——见 manifest 内各文件角色。
+    backend 基座(HTTP/cookie/存储/遥测 + routes 空扩展点)与 frontend
+    五件套由宿主预置;业务语义(routes 里的全部 API、种子数据、UI)留给
+    模型——见 manifest 内各文件角色。
     """
     root = Path(output_dir)
     written: list[str] = []
@@ -75,12 +67,6 @@ def template_ready(output_dir: Path) -> bool:
     """宿主模板已落盘(main.py 的就绪判定收敛于此)。"""
     root = Path(output_dir)
     return all(_key_present(root, rel) for rel in READY_KEYS)
-
-
-def template_complete(output_dir: Path) -> bool:
-    """模板完整可跳过 skeleton 轮(auth/engine/schema 三件在位)。"""
-    root = Path(output_dir)
-    return all(_key_present(root, rel) for rel in COMPLETE_KEYS)
 
 
 def _npm_bin() -> str:

@@ -72,6 +72,61 @@ export function SingleError({ message }) {
   return <div role="alert" className="form-error">{message}</div>;
 }
 
+// PER-FIELD parallel errors (registration-style forms): several invalid
+// fields submitted together must show ALL their messages at once ("must
+// show ... together, rather than revealing only one"), each field owning
+// exactly ONE element beside it. errors is the backend {errors:[{field,
+// msg}]} shape (src/lib/crud.js emits it verbatim).
+export const byField = (errors, field) =>
+  (errors || []).filter((e) => e && e.field === field).slice(0, 1);
+export function FieldError({ errors, field }) {
+  const first = byField(errors, field)[0];
+  if (!first) return null;
+  return <div role="alert" className="error-text">{first.msg}</div>;
+}
+
+// MENUS (row/column-header menus, worksheet options, right-click grids):
+// role=menu with menuitem buttons carrying EXACT labels from the
+// requirement, closing on Escape AND outside click. FixedGrid already
+// routes onContextMenu / onColumnHeaderMenu / onRowHeaderMenu here —
+// useContextMenu captures the event point, Menu renders the popup.
+// items: [{label, onSelect}] — label IS the accessible name (verbatim).
+export function useContextMenu() {
+  const [menu, setMenu] = React.useState(null);
+  const open = (e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); };
+  const close = () => setMenu(null);
+  return { menu, open, close };
+}
+
+export function Menu({ menu, onClose, items }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!menu) return;
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    const onDown = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onDown);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onDown);
+    };
+  }, [menu, onClose]);
+  if (!menu) return null;
+  return (
+    <div ref={ref} role="menu" className="ctx-menu"
+         style={{ position: 'fixed', left: menu.x, top: menu.y, zIndex: 1000 }}>
+      {(items || []).map((it) => (
+        <button key={it.label} role="menuitem"
+                onClick={() => { onClose(); it.onSelect && it.onSelect(); }}>
+          {it.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // Column letters beyond Z wrap to AA, AB, ... — no artificial column cap
 // (a capped grid dies the first time a grader clicks past it).
 const colLetters = (n) => {

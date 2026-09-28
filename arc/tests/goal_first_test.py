@@ -334,10 +334,14 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertIn("goal-first", rules)
         self.assertIn("the model owns it", rules)
         self.assertIn("TOOLBOX (optional, unwired)", rules)
-        # 数据面基座说明保留(已决保留的后端数据面 API 说明书)
-        for section in ("Host-owned (never rewrite)", "SCHEMA-DRIVEN BACKEND",
-                        "FIXTURE CONTRACT"):
+        # 数据面基座说明保留;09-28 CRUD 生成器退役:API 面归模型
+        # (backend/src/routes/),schema 声明协议整段删除
+        for section in ("Host-owned (never rewrite)",
+                        "ALL API endpoints are YOURS", "FIXTURE CONTRACT"):
             self.assertIn(section, rules)
+        self.assertNotIn("SCHEMA-DRIVEN BACKEND", rules)
+        self.assertNotIn("engine.js", rules)
+        self.assertNotIn("schema.json", rules)
         # 09-27 定则:宿主不制定行为规则——两段宿主发明纪律已裁
         self.assertNotIn("SERVER-SIDE VALIDATION", rules)
         self.assertNotIn("UI CONTRACT HYGIENE", rules)
@@ -369,19 +373,122 @@ class GoalFirstRulesTests(unittest.TestCase):
         note2 = main.build_selftest_note(None)
         self.assertIn("npx --yes @playwright/test test", note2)
 
-    def test_requirement_messages_extraction(self):
-        tree = node("ROOT", "FOLDER", [
-            node("REQ-1", "FOLDER", [node(
-                "REQ-1-1",
-                description='displays "Username already exists" and '
-                'rejected with "Invalid credentials"')],
-                description='must display "Welcome back"'),
-        ])
-        msgs = main._collect_requirement_messages(tree)
-        self.assertIn("Username already exists", msgs)
-        self.assertIn("Invalid credentials", msgs)
-        self.assertIn("Welcome back", msgs)
-        self.assertEqual(len(msgs), len(set(msgs)))
+    def test_requirement_message_bridge_is_retired(self):
+        # 09-28 CRUD 生成器退役:引号消息 sidecar 桥(_collect_requirement_
+        # messages + req-messages.json)无消费方,须保持删除状态(防回退)。
+        import scaffold as sc_pkg
+        self.assertFalse(hasattr(main, "_collect_requirement_messages"))
+        self.assertFalse(hasattr(main, "SCHEMA_DIRECTIVE"))
+        self.assertFalse(hasattr(sc_pkg, "Watcher"))
+        self.assertFalse(hasattr(sc_pkg, "compile_schema"))
+
+    def test_frontend_fingerprint_tracks_sources_only(self):
+        # rehearsal 构建缓存判定面:指纹只跟源文件走(node_modules/dist
+        # 不计),源未变则稳定,touch 源则变化。
+        import os
+        import tempfile
+        import time
+        with tempfile.TemporaryDirectory() as td:
+            fe = Path(td) / "frontend"
+            (fe / "src").mkdir(parents=True)
+            (fe / "src" / "App.jsx").write_text("x", encoding="utf-8")
+            (fe / "node_modules").mkdir()
+            (fe / "node_modules" / "dep.js").write_text("y", encoding="utf-8")
+            (fe / "dist").mkdir()
+            (fe / "dist" / "index.html").write_text("z", encoding="utf-8")
+            fp1 = main._frontend_fingerprint(fe)
+            self.assertEqual(main._frontend_fingerprint(fe), fp1)
+            (fe / "dist" / "index.html").write_text("changed", encoding="utf-8")
+            self.assertEqual(main._frontend_fingerprint(fe), fp1,
+                             "dist 产物不计入指纹")
+            (fe / "node_modules" / "dep.js").write_text("c2", encoding="utf-8")
+            self.assertEqual(main._frontend_fingerprint(fe), fp1,
+                             "node_modules 不计入指纹")
+            src = fe / "src" / "App.jsx"
+            os.utime(src, (time.time() + 10, time.time() + 10))
+            self.assertNotEqual(main._frontend_fingerprint(fe), fp1,
+                                "源变更必须改变指纹")
+            (fe / "src" / "new.css").write_text("body{}", encoding="utf-8")
+            self.assertNotEqual(main._frontend_fingerprint(fe), fp1,
+                                "新增源文件必须改变指纹")
+
+    def test_stage_deadline_parsing(self):
+        # "4h"/"1h30m"/纯秒;空/"0"/"off"/garbage→0(关闭);永不抛。
+        # 烤入常量是提交期旋钮(正式提交改值重打包),测试只钉
+        # "当前值必须可解析",不钉具体值。
+        self.assertGreaterEqual(
+            main._parse_deadline(main.COMPETITION_STAGE_DEADLINE), 0)
+        self.assertEqual(main._parse_deadline("4h"), 14400)
+        self.assertEqual(main._parse_deadline("1h30m"), 5400)
+        self.assertEqual(main._parse_deadline("90m"), 5400)
+        self.assertEqual(main._parse_deadline("7200"), 7200)
+        self.assertEqual(main._parse_deadline(" 2h "), 7200)
+        self.assertEqual(main._parse_deadline("30s"), 30)
+        self.assertEqual(main._parse_deadline(""), 0)
+        self.assertEqual(main._parse_deadline(None), 0)
+        self.assertEqual(main._parse_deadline("0"), 0)
+        self.assertEqual(main._parse_deadline("off"), 0)
+        self.assertEqual(main._parse_deadline("banana"), 0)
+        self.assertEqual(main._parse_deadline("1.5h"), 5400)
+
+    def test_prompt_templates_format_without_keyerror(self):
+        # {grid} 字面量未转义曾让每批工单组装 KeyError('grid')(存量雷,
+        # 09-28 随 CRUD 生成器退役顺手修复)——模板字面量花括号必须
+        # 保持 {{}} 转义,且后端所有权行指向 routes(生成器词汇不回流)。
+        sk = main.GOAL_FIRST_SKELETON_PROMPT.format(port=3000, smoke=3100)
+        self.assertIn("seed-accounts.json", sk)
+        self.assertNotIn("schema.json", sk)
+        node_p = main.GOAL_FIRST_NODE_PROMPT_TEMPLATE.format(
+            node_id="REQ-1", node_spec="NS", port=3000, smoke=3100)
+        self.assertIn("grid={grid}", node_p)
+        self.assertIn("backend/src/routes/", node_p)
+        self.assertNotIn("schema.json", node_p)
+
+    def test_mycheck_example_is_task_neutral(self):
+        # 09-28 审计 P1:示例曾内嵌 sheet 任务串('Q3 Sales'/'Pivot table
+        # editor'/'Workbook name'),每个任务都会收到别的任务的先验。
+        # LOCATOR/GESTURE 仪器规则(B 级)保留;任务词汇不得回流。
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            main.stage_selftest_dir(Path(td), 43101)
+            text = (Path(td) / "ui-smoke" / "MY-CHECK.spec.ts.example"
+                    ).read_text(encoding="utf-8")
+        for word in ("Q3 Sales", "Pivot table", "Workbook name", "pivot"):
+            self.assertNotIn(word, text)
+        for keep in ("LOCATOR RULE", "GESTURE RULE", "getByRole('region'",
+                     "gridcell", "Shift"):
+            self.assertIn(keep, text)
+
+    def test_segment_digest_seeds_line_is_gated(self):
+        # 09-28 审计 P3:种子声明行只在宿主真落过种子时附带——空种子
+        # 任务里它是假陈述。
+        notes = {"REQ-1": "did X"}
+        with_seeds = main._segment_digest(
+            notes, {"REQ-1": "done"}, has_seeds=True)
+        without = main._segment_digest(
+            notes, {"REQ-1": "done"}, has_seeds=False)
+        self.assertIn("seeds were compiled by the host", with_seeds)
+        self.assertNotIn("seeds were compiled by the host", without)
+        self.assertIn("REQ-1", without, "digest body itself stays")
+
+    def test_lazy_gate_ignores_requirements_dir(self):
+        # 09-28 审计:需求原文是只读真值,模型往 requirements/ 写文件
+        # 不得洗白零工作轮;backend/frontend 的真实变化仍计数。
+        import os
+        import tempfile
+        import time
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            req = out / "requirements"
+            req.mkdir(parents=True)
+            p = req / "requirements.yaml"
+            p.write_text("scratch\n", encoding="utf-8")
+            os.utime(p, (time.time() + 5, time.time() + 5))
+            self.assertFalse(main.project_files_changed(out, time.time()))
+            backend = out / "backend" / "src"
+            backend.mkdir(parents=True)
+            (backend / "index.js").write_text("x\n", encoding="utf-8")
+            self.assertTrue(main.project_files_changed(out, time.time() - 10))
 
 
 class HostRuntimeRegressionTests(unittest.TestCase):

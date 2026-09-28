@@ -58,10 +58,9 @@ preview:
   assets: frontend/dist/assets
 agent_guidance:
   ui_root: frontend/src
-  api_root: backend/src/app.js
+  api_root: backend/src/routes
   function_root: backend/src
   db_root: backend/src/database
-  schema_source: backend/data/schema.json
   e2e_test_root: .arc/acceptance
 EOF
 cat > template/README.md <<'EOF'
@@ -72,10 +71,12 @@ frontend from `frontend/dist` (SPA fallback), listening on `PORT` plus every
 port in `ARC_EXTRA_PORTS`.
 
 - `frontend/`: React + Vite; `npm run build` produces `frontend/dist/`.
-- `backend/`: Express; data model is declared in `backend/data/schema.json`
-  and compiled by the host into `backend/src/database/schema.js`; JSON store
-  at `backend/data/db.json`; auth (register/login/logout/me) and CRUD are
-  engine-driven; task-specific endpoints go in `backend/src/routes/index.js`.
+- `backend/`: Express; JSON store at `backend/data/db.json` (the graded
+  seed — runtime state goes to `db.run.json`, which resets to the seed on
+  every restart and never ships). The host owns only the substrate
+  (`src/app.js`, `src/index.js`, `src/lib/util.js`, `src/database/store.js`);
+  ALL API endpoints — auth included — are implemented by the agent in
+  `backend/src/routes/`.
 - npm dependencies are prewarmed by the host; never run npm install in turns.
 EOF
 

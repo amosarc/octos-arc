@@ -573,13 +573,16 @@ def _legacy_scenario_workbook(entry: dict, db: dict, covered: dict,
 def compile_seed(manifest: dict) -> dict:
     """夹具清单 → 宿主可落盘产物(确定性,无 IO)。
 
-    返回 {"kind", "db": {collection: [rows]}, "schema": starter|None,
+    返回 {"kind", "db": {collection: [rows]},
           "covered": {nid: [scenario 名]}, "uncovered": [...],
           "arrange": {nid: [scenario 名]}, "logins": [...]}
     covered 的场景种子已就位;arrange 的场景预置态与规范种子冲突
     (测试经 UI 自行布置,宿主不播种);uncovered 一律报告、不自编。
     sheet 型同名工作簿 ≥2 次被引用时合并为单一规范工作簿(评分断言
     的 `Q3 Sales` 必须唯一可见),否则保留按场景独立实例的 legacy 行为。
+    09-28 CRUD 生成器退役:schema starter(graph 13 实体块/sheet
+    workbooks)随生成器整体删除——数据模型是宿主编造的内容决策
+    (C 类),其唯一消费方 schema.json→engine 链已不存在。
     """
     kind = _kind(manifest)
     db: dict[str, list] = {}
@@ -875,144 +878,10 @@ def compile_seed(manifest: dict) -> dict:
                 if any(name in blob for name in seeded_names):
                     covered.setdefault(nid, []).append("seed-entities")
 
-    schema = None
-    if kind in ("graph", "mixed"):
-        schema = {"entities": [
-            {"name": "users", "auth": True, "label": "User", "fields": [
-                {"name": "username", "label": "Username", "type": "string",
-                 "required": True, "unique": True, "min": 3, "max": 39},
-                {"name": "email", "label": "Email", "type": "string",
-                 "required": True, "unique": True, "format": "email"},
-                {"name": "password", "label": "Password", "type": "password",
-                 "required": True},
-                {"name": "verifiedEmail", "label": "Email verified",
-                 "type": "boolean"},
-                {"name": "terms", "label": "Agree to the terms",
-                 "type": "boolean"}]},
-            {"name": "organizations", "label": "Organization", "fields": [
-                {"name": "name", "label": "Name", "type": "string",
-                 "required": True, "unique": True},
-                {"name": "displayName", "label": "Display name",
-                 "type": "string"},
-                {"name": "public", "label": "Public", "type": "boolean"}]},
-            {"name": "repositories", "label": "Repository", "fields": [
-                {"name": "orgName", "label": "Owner", "type": "string"},
-                {"name": "name", "label": "Name", "type": "string",
-                 "required": True},
-                {"name": "description", "label": "Description",
-                 "type": "string"},
-                {"name": "visibility", "label": "Visibility", "type": "string",
-                 "enum": ["public", "private"]},
-                {"name": "defaultBranch", "label": "Default branch",
-                 "type": "string"}]},
-            {"name": "members", "label": "Member", "fields": [
-                {"name": "orgName", "label": "Organization", "type": "string"},
-                {"name": "username", "label": "Username", "type": "string"},
-                {"name": "role", "label": "Role", "type": "string"}]},
-            {"name": "teams", "label": "Team", "fields": [
-                {"name": "orgName", "label": "Organization", "type": "string"},
-                {"name": "name", "label": "Name", "type": "string"},
-                {"name": "description", "label": "Description",
-                 "type": "string"}]},
-            {"name": "teamMembers", "label": "Team member", "fields": [
-                {"name": "orgName", "label": "Organization", "type": "string"},
-                {"name": "teamName", "label": "Team", "type": "string"},
-                {"name": "username", "label": "Username", "type": "string"}]},
-            # C(hackathon--github 47 节点):issue/PR/分支/标签/里程碑/
-            # 评论是 REQ-4/5/6 全族的挂靠实体,starter 不给,模型就得
-            # 每批自造数据模型——共享文件重写与回归震荡的又一根源。
-            {"name": "branches", "label": "Branch", "fields": [
-                {"name": "repoOrg", "label": "Repository owner",
-                 "type": "string"},
-                {"name": "repoName", "label": "Repository", "type": "string",
-                 "required": True},
-                {"name": "name", "label": "Name", "type": "string",
-                 "required": True},
-                {"name": "head", "label": "Head commit", "type": "string"},
-                {"name": "protected", "label": "Protected", "type": "boolean"}]},
-            {"name": "issues", "label": "Issue", "fields": [
-                {"name": "repoOrg", "label": "Repository owner",
-                 "type": "string"},
-                {"name": "repoName", "label": "Repository", "type": "string",
-                 "required": True},
-                {"name": "number", "label": "Number", "type": "number",
-                 "required": True},
-                {"name": "title", "label": "Title", "type": "string",
-                 "required": True},
-                {"name": "description", "label": "Description",
-                 "type": "string"},
-                {"name": "author", "label": "Author", "type": "string"},
-                {"name": "status", "label": "Status", "type": "string",
-                 "enum": ["open", "closed"]},
-                {"name": "labels", "label": "Labels", "type": "string"}]},
-            {"name": "pulls", "label": "Pull request", "fields": [
-                {"name": "repoOrg", "label": "Repository owner",
-                 "type": "string"},
-                {"name": "repoName", "label": "Repository", "type": "string",
-                 "required": True},
-                {"name": "number", "label": "Number", "type": "number",
-                 "required": True},
-                {"name": "title", "label": "Title", "type": "string",
-                 "required": True},
-                {"name": "author", "label": "Author", "type": "string"},
-                {"name": "sourceBranch", "label": "Source branch",
-                 "type": "string"},
-                {"name": "targetBranch", "label": "Target branch",
-                 "type": "string"},
-                {"name": "status", "label": "Status", "type": "string",
-                 "enum": ["open", "draft", "merged", "closed"]},
-                {"name": "reviewers", "label": "Reviewers", "type": "string"}]},
-            {"name": "labels", "label": "Label", "fields": [
-                {"name": "repoOrg", "label": "Repository owner",
-                 "type": "string"},
-                {"name": "repoName", "label": "Repository", "type": "string"},
-                {"name": "name", "label": "Name", "type": "string",
-                 "required": True},
-                {"name": "color", "label": "Color", "type": "string"}]},
-            {"name": "milestones", "label": "Milestone", "fields": [
-                {"name": "repoOrg", "label": "Repository owner",
-                 "type": "string"},
-                {"name": "repoName", "label": "Repository", "type": "string"},
-                {"name": "title", "label": "Title", "type": "string",
-                 "required": True},
-                {"name": "dueOn", "label": "Due date", "type": "string"}]},
-            {"name": "comments", "label": "Comment", "fields": [
-                {"name": "parentType", "label": "Parent type",
-                 "type": "string", "enum": ["issue", "pull"]},
-                {"name": "repoName", "label": "Repository", "type": "string"},
-                {"name": "parentNumber", "label": "Parent number",
-                 "type": "number"},
-                {"name": "author", "label": "Author", "type": "string"},
-                {"name": "body", "label": "Body", "type": "string"},
-                {"name": "createdAt", "label": "Created at",
-                 "type": "string"}]},
-            {"name": "commits", "label": "Commit", "fields": [
-                {"name": "repoOrg", "label": "Repository owner",
-                 "type": "string"},
-                {"name": "repoName", "label": "Repository", "type": "string",
-                 "required": True},
-                {"name": "sha", "label": "SHA", "type": "string",
-                 "required": True},
-                {"name": "branch", "label": "Branch", "type": "string"},
-                {"name": "message", "label": "Message", "type": "string",
-                 "required": True},
-                {"name": "author", "label": "Author", "type": "string"},
-                {"name": "createdAt", "label": "Created at",
-                 "type": "string"}]},
-        ]}
-    elif kind == "sheet":
-        schema = {"entities": [
-            {"name": "workbooks", "label": "Workbook", "fields": [
-                {"name": "name", "label": "Name", "type": "string",
-                 "required": True, "min": 1, "max": 200},
-                {"name": "lastUpdated", "label": "Last updated",
-                 "type": "string"}]},
-        ]}
-
     # 空集合不落键:setdefault 留下的空 list 会变成 db.json 空集合与
     # 对空集合的实体探针,纯噪音。
     db = {k: v for k, v in db.items() if v}
-    return {"kind": kind, "db": db, "schema": schema, "covered": covered,
+    return {"kind": kind, "db": db, "covered": covered,
             "arrange": arrange, "canonical": canonical_mode,
             "uncovered": uncovered, "logins": logins}
 
@@ -1166,8 +1035,8 @@ def render_extra_rules(manifest: dict, stats: dict | None = None) -> str:
         "contract — names, roles, ownership, visibility, and relationships "
         "must match VERBATIM. The host "
         "seeded the machine-compilable part into backend/data/db.json: "
-        "NEVER delete or rename seeded rows/collections; extend "
-        "backend/data/schema.json so every seeded field is exposed.",
+        "NEVER delete or rename seeded rows/collections; expose every "
+        "seeded row through your API.",
     ]
     if seeded_n:
         parts.append(
@@ -1195,10 +1064,12 @@ def render_extra_rules(manifest: dict, stats: dict | None = None) -> str:
             "pr-reviewer, protection-admin, issue-author, fork-user and 18 "
             "more — all with the quoted standard password; derive coverage "
             "from the requirement text, not that list. Declare EVERY "
-            "pre-provisioned account in backend/data/seed-accounts.json as "
-            '[{"username","password","note"}] — the host login-probe '
-            "expects each to sign in with 200; RED = your declared seed or "
-            "auth is broken.")
+            "pre-provisioned account in backend/data/seed-accounts.json "
+            'as [{"username","password","path"?,"body"?,"note"}] — the host '
+            "login-probe POSTs to each entry's path (default "
+            "/api/auth/login; body defaults to username+password JSON and "
+            "an explicit body string overrides it verbatim) and expects "
+            "200; RED = your declared seed or auth is broken.")
     if stats.get("kind") in ("graph", "mixed"):
         # 逐字/填充行分口径:解析成功≠语义全对,填充行的合成身份必须
         # 明示,否则模型把宿主编的约定也当需求原文背。
@@ -1258,9 +1129,10 @@ def render_extra_rules(manifest: dict, stats: dict | None = None) -> str:
 # ------------------------------------------------ 落盘/读取(宿主 IO 面最小)
 
 def materialize(output_dir, manifest: dict) -> dict | None:
-    """宿主种子落盘(幂等,保守):db.json 仍为空占位时才写,schema.json
-    缺失且编译器给出 starter 时才写;返回 compile_seed 结果供流控记账,
-    跳过时返回 None。模型已写过种子(非空 collections)绝不覆盖。"""
+    """宿主种子落盘(幂等,保守):db.json 仍为空占位时才写;返回
+    compile_seed 结果供流控记账,跳过时返回 None。模型已写过种子
+    (非空 collections)绝不覆盖。09-28 CRUD 生成器退役:schema.json
+    starter 不再落盘(数据模型归模型,宿主只播种契约数据)。"""
     import json
     from pathlib import Path
 
@@ -1288,10 +1160,4 @@ def materialize(output_dir, manifest: dict) -> dict | None:
     db_file.write_text(
         json.dumps(merged, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8")
-
-    schema_file = data_dir / "schema.json"
-    if compiled["schema"] and not schema_file.exists():
-        schema_file.write_text(
-            json.dumps(compiled["schema"], ensure_ascii=False, indent=2)
-            + "\n", encoding="utf-8")
     return compiled

@@ -26,8 +26,7 @@ preview:
   assets: frontend/dist/assets
 agent_guidance:
   ui_root: frontend/src
-  api_root: backend/src/app.js
+  api_root: backend/src/routes
   function_root: backend/src
   db_root: backend/src/database
-  schema_source: backend/data/schema.json
   e2e_test_root: .arc/acceptance

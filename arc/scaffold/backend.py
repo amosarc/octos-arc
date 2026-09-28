@@ -32,36 +32,77 @@ exports.id = () => Date.now().toString(36) + crypto.randomBytes(5).toString('hex
 exports.now = () => new Date().toISOString();
 """
 
-VALIDATE_JS = """\
-// validate.js — schema 词表驱动校验;check(fields, body) → [{field,msg}]。
-// 消息三级:field.messages[required|invalid|duplicate|match](三态) >
-// field.message(单一覆盖,兼容) > 英文契约族默认("X is required"/
-// "X is invalid"/"X does not match Y")。需求原文逐字引号串由
-// scaffold.codegen 桥自动灌进 messages(09-27 C1:中文默认与需求英文
-// 逐字契约冲突,注册/登录族是第一测试族+止损敏感区)。
-const LABEL = (f) => f.label || f.name;
-const MSG = (f, kind, dflt) => (f.messages && f.messages[kind]) || f.message || dflt;
-const FMT = {
-  email: (v, f) => (v.length <= 254 && /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(v)) || MSG(f, 'invalid', `${LABEL(f)} is invalid`),
-  username: (v, f) => /^[A-Za-z0-9_-]{3,32}$/.test(v) || MSG(f, 'invalid', `Invalid ${LABEL(f).toLowerCase()}`),
-  password: (v, f) => { const min = f.min || 12; const max = f.max || 128; const ok = v.length >= min && v.length <= max && /[a-z]/.test(v) && /[A-Z]/.test(v) && /[0-9]/.test(v) && /[^A-Za-z0-9]/.test(v); return ok || MSG(f, 'invalid', `Invalid ${LABEL(f).toLowerCase()}: must be ${min}-${max} characters with upper, lower, digit and symbol`); },
-};
-exports.check = (fields, body) => {
-  const errors = [];
-  for (const f of fields || []) {
-    if (f.match) { if (String(body[f.name] || '') !== String(body[f.match] || '')) errors.push({ field: f.name, msg: MSG(f, 'match', `${LABEL(f)} does not match ${f.match}`) }); continue; }
-    const v = body[f.name];
-    if (v === undefined || v === null || v === '') { if (f.required) errors.push({ field: f.name, msg: MSG(f, 'required', `${LABEL(f)} is required`) }); continue; }
-    if (f.type === 'number' && typeof v !== 'number') { errors.push({ field: f.name, msg: MSG(f, 'invalid', `${LABEL(f)} is invalid`) }); continue; }
-    if (f.type === 'boolean' && typeof v !== 'boolean') { errors.push({ field: f.name, msg: MSG(f, 'invalid', `${LABEL(f)} is invalid`) }); continue; }
-    if (f.enum && !f.enum.includes(v)) { errors.push({ field: f.name, msg: MSG(f, 'invalid', `${LABEL(f)} is invalid`) }); continue; }
-    const s = String(v);
-    if ((f.min && s.length < f.min) || (f.max && s.length > f.max)) { errors.push({ field: f.name, msg: MSG(f, 'invalid', `${LABEL(f)} is invalid`) }); continue; }
-    if (f.pattern && !new RegExp(f.pattern).test(s)) { errors.push({ field: f.name, msg: MSG(f, 'invalid', `${LABEL(f)} is invalid`) }); continue; }
-    const fmt = f.format || (f.type === 'password' ? 'password' : null);
-    if (fmt && FMT[fmt]) { const r = FMT[fmt](s, f); if (r !== true) errors.push({ field: f.name, msg: r }); }
-  }
-  return errors;
+SESSION_JS = """\
+// session.js — 会话机制助手(纯库,不挂路由):登录/登出/me 路由由模型自行
+// 接线;会话行存 store 的 'sessions' 集合——server 重启保留 db.run.json,
+// 会话随之中存续(graded contract: "sessions survive server restart");
+// 仅冷启动(无 run 文件)才从种子重建=干净会话面(交付前宿主删 run 文件,
+// 评测从种子起)。hash/verify 转出口令哈希(宿主播种账号的 scrypt 已逐位
+// 兼容,直接 verify)。
+const store = require('../database/store');
+const U = require('./util');
+const COOKIE = 'arc_session';
+const readToken = (req) => (req.cookies || {})[COOKIE];
+exports.createSession = (res, userId) => { const token = U.token(); store.insert('sessions', { token, userId, createdAt: U.now() }); U.setCookie(res, COOKIE, token); return token; };
+exports.readSession = (req) => { const t = readToken(req); return (t && store.one('sessions', (s) => s.token === t)) || null; };
+exports.currentUser = (req, entity) => { const s = exports.readSession(req); if (!s) return null; return store.one(entity || 'users', (r) => r.id === s.userId) || null; };
+exports.destroySession = (req, res) => { const t = readToken(req); if (t) store.remove('sessions', (s) => s.token === t); U.setCookie(res, COOKIE, ''); };
+exports.hash = store.hash;
+exports.verify = store.verify;
+"""
+
+CRUD_JS = """\
+// crud.js — 可选 REST 工厂(纯库,绝不自动挂载):模型对需要的每个集合
+// 显式 mount(app, '<collection>', opts);注册在本库之前的同名自定义路由
+// 优先(express 注册序),挂完可继续加端点。行为规则全走钩子——校验规则、
+// 错误文案(需求逐字串)、行可见性、列表过滤、落库前变换都由模型提供;
+// 本库只供统一管道:默认 CRUD 端点、{errors:[{field,msg}]} 错误形状、
+// 坏载荷一律 4xx 永不 5xx。
+const store = require('../database/store');
+const U = require('./util');
+const plain = (b) => (b && typeof b === 'object' && !Array.isArray(b) ? b : {});
+const intOr = (v, d) => { const n = parseInt(v, 10); return Number.isFinite(n) && n >= 0 ? n : d; };
+const NOT_FOUND = { errors: [{ msg: 'Not found' }] };
+exports.mount = (app, name, opts) => {
+  opts = opts || {};
+  const pub = opts.publicRow || ((r) => r);
+  const validate = opts.validate || (() => []);
+  const prepare = opts.prepare || ((body) => body);
+  const base = `/api/${name}`;
+  app.get(base, (req, res) => { try {
+    const q = opts.listQuery ? (opts.listQuery(req.query) || {}) : {};
+    if (q.sort === undefined) q.sort = req.query.sort || undefined;
+    if (q.desc === undefined) q.desc = req.query.dir === 'desc';
+    if (q.offset === undefined) q.offset = intOr(req.query.offset, 0);
+    if (q.limit === undefined && req.query.limit !== undefined) q.limit = intOr(req.query.limit, 0);
+    return U.json(res, 200, store.query(name, q).map(pub));
+  } catch { U.bad(res, [{ msg: 'Invalid request' }]); } });
+  app.get(`${base}/:id`, (req, res) => { try {
+    const r = store.get(name, req.params.id);
+    return r ? U.json(res, 200, pub(r)) : U.json(res, 404, NOT_FOUND);
+  } catch { U.bad(res, [{ msg: 'Invalid request' }]); } });
+  app.post(base, (req, res) => { try {
+    const body = plain(req.body);
+    const errors = validate(body, { existing: null });
+    if (errors.length) return U.bad(res, errors);
+    const row = Object.assign({ id: U.id(), createdAt: U.now() }, body, prepare(body, { existing: null }));
+    return U.json(res, 201, pub(store.insert(name, row)));
+  } catch { U.bad(res, [{ msg: 'Invalid request' }]); } });
+  const change = (req, res) => { try {
+    const existing = store.get(name, req.params.id);
+    if (!existing) return U.json(res, 404, NOT_FOUND);
+    const body = plain(req.body);
+    const errors = validate(body, { existing });
+    if (errors.length) return U.bad(res, errors);
+    const patch = Object.assign({}, body, prepare(body, { existing }));
+    return U.json(res, 200, pub(store.update(name, existing.id, patch)));
+  } catch { U.bad(res, [{ msg: 'Invalid request' }]); } };
+  app.patch(`${base}/:id`, change);
+  app.put(`${base}/:id`, change);
+  app.delete(`${base}/:id`, (req, res) => { try {
+    const n = store.remove(name, (r) => r.id === req.params.id);
+    return n ? U.json(res, 200, { ok: true }) : U.json(res, 404, NOT_FOUND);
+  } catch { U.bad(res, [{ msg: 'Invalid request' }]); } });
 };
 """
 
@@ -69,12 +110,15 @@ STORE_JS = """\
 // store.js — 种子/运行时双文件 db:db.json 是模型维护的种子(交付干净、git 跟踪),
 // db.run.json 承载运行时状态;进程首次 load 时从种子初始化,此后读写只走 run 文件
 // ——每次 server 重启(rehearsal/Tier-2/eval)都自动回到种子起点,跨轮测试污染不累积。
-// 集合 CRUD、唯一索引(小写比较)、scrypt;进程内单例。
+// 集合 CRUD、通用查询(query:where/sort/分页)、原子多写事务(tx)、每作用域
+// 自增序号(nextSeq)、唯一索引(小写比较)、scrypt;进程内单例。
 const fs = require('fs'); const path = require('path'); const crypto = require('crypto');
 const DATA = path.join(__dirname, '..', '..', 'data');
 const SEED_FILE = path.join(DATA, 'db.json');
 const FILE = path.join(DATA, 'db.run.json');
 let db = null;
+let txDepth = 0; // tx 期间 save 延迟到收尾——中途崩溃磁盘零半写
+const doSave = () => { fs.mkdirSync(DATA, { recursive: true }); const tmp = `${FILE}.tmp`; fs.writeFileSync(tmp, JSON.stringify(db)); fs.renameSync(tmp, FILE); };
 exports.load = () => {
   if (db) return db;
   fs.mkdirSync(DATA, { recursive: true });
@@ -83,89 +127,24 @@ exports.load = () => {
   if (!db.collections) db.collections = {};
   return db;
 };
-exports.save = () => { fs.mkdirSync(DATA, { recursive: true }); const tmp = `${FILE}.tmp`; fs.writeFileSync(tmp, JSON.stringify(db)); fs.renameSync(tmp, FILE); };
+exports.save = () => { if (txDepth) return; doSave(); };
 exports.coll = (name) => { const d = exports.load(); if (!d.collections[name]) d.collections[name] = []; return d.collections[name]; };
 exports.all = (name) => exports.coll(name).slice();
 exports.one = (name, fn) => exports.coll(name).find(fn);
+exports.get = (name, id) => exports.coll(name).find((r) => r.id === id) || null;
 exports.dup = (name, field, value, skipId) => { const s = String(value).toLowerCase(); return exports.coll(name).find((r) => r[field] !== undefined && String(r[field]).toLowerCase() === s && r.id !== skipId) || null; };
 exports.insert = (name, row) => { exports.coll(name).push(row); exports.save(); return row; };
+exports.update = (name, id, patch) => { const r = exports.get(name, id); if (!r) return null; if (patch && typeof patch === 'object' && !Array.isArray(patch)) Object.assign(r, patch); exports.save(); return r; };
 exports.remove = (name, fn) => { const d = exports.load(); const keep = d.collections[name].filter((r) => !fn(r)); const n = d.collections[name].length - keep.length; d.collections[name] = keep; if (n) exports.save(); return n; };
+exports.query = (name, o) => { o = o || {}; let rows = exports.all(name); if (o.where) rows = rows.filter(o.where); if (o.sort) { const k = o.sort; rows = rows.slice().sort((a, b) => { const x = a[k]; const y = b[k]; const c = x === y ? 0 : (x > y ? 1 : -1); return o.desc ? -c : c; }); } const off = Math.max(0, o.offset | 0); return o.limit === undefined ? rows.slice(off) : rows.slice(off, off + Math.max(0, o.limit | 0)); };
+exports.tx = (fn) => { const d = exports.load(); const snap = JSON.stringify(d); txDepth++; try { const out = fn(d); txDepth--; doSave(); return out; } catch (e) { txDepth--; const fresh = JSON.parse(snap); for (const k of Object.keys(d)) delete d[k]; Object.assign(d, fresh); throw e; } };
+exports.nextSeq = (name, scope) => { const d = exports.load(); if (!d.seq) d.seq = {}; const key = `${name}:${scope === undefined ? '_' : scope}`; const n = (d.seq[key] || 0) + 1; d.seq[key] = n; exports.save(); return n; };
 exports.hash = (pw) => { const salt = crypto.randomBytes(16).toString('hex'); return `${salt}:${crypto.scryptSync(String(pw), salt, 32).toString('hex')}`; };
 exports.verify = (pw, stored) => { try { const [salt, h] = String(stored).split(':'); return crypto.scryptSync(String(pw), salt, 32).toString('hex') === h; } catch { return false; } };
 """
 
-ENGINE_JS = """\
-// engine.js — schema 驱动 CRUD(非 auth 实体):每实体 POST(建)/GET(列)/GET /:id;坏载荷一律 4xx。
-// 消息三级与 validate.js 同律:messages.duplicate > message > "X already exists"。
-const store = require('./store'); const { check } = require('../lib/validate'); const U = require('../lib/util');
-const SECRET = (f) => f.type === 'password' || f.format === 'password';
-const DUP = (f) => (f.messages && f.messages.duplicate) || f.message || `${f.label || f.name} already exists`;
-const pub = (e, r) => { const o = { id: r.id, createdAt: r.createdAt }; for (const f of e.fields || []) if (!SECRET(f) && r[f.name] !== undefined) o[f.name] = r[f.name]; return o; };
-const plain = (req) => req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
-const uniq = (e, body) => { const errors = check(e.fields, body); for (const f of e.fields || []) if (f.unique && body[f.name] !== undefined && store.dup(e.name, f.name, body[f.name])) errors.push({ field: f.name, msg: DUP(f) }); return errors; };
-exports.mount = (app, schema) => {
-  for (const e of (schema.entities || []).filter((x) => !x.auth)) {
-    const base = `/api/${e.name}`;
-    app.post(base, (req, res) => { try {
-      const body = plain(req);
-      const errors = uniq(e, body);
-      if (errors.length) return U.bad(res, errors);
-      const row = { id: U.id(), createdAt: U.now() };
-      for (const f of e.fields || []) if (!f.match && body[f.name] !== undefined) row[f.name] = SECRET(f) ? store.hash(body[f.name]) : body[f.name];
-      U.json(res, 201, pub(e, store.insert(e.name, row)));
-    } catch { U.bad(res, [{ msg: 'Invalid request' }]); } });
-    app.get(base, (req, res) => { try { U.json(res, 200, store.all(e.name).map((r) => pub(e, r))); } catch { U.bad(res, [{ msg: 'Invalid request' }]); } });
-    app.get(`${base}/:id`, (req, res) => { try { const r = store.one(e.name, (x) => x.id === req.params.id); return r ? U.json(res, 200, pub(e, r)) : U.json(res, 404, { errors: [{ msg: 'Not found' }] }); } catch { U.bad(res, [{ msg: 'Invalid request' }]); } });
-  }
-};
-"""
-
-AUTH_JS = """\
-// auth.js — 通用认证:schema 中 auth:true 的实体激活;登录标识 = 该实体 unique 非密码字段(用户名或邮箱)。
-// 登录失败文案:schema.messages.loginFailure(需求引号串,codegen 桥灌入)>
-// 默认 "Invalid username or password"——统一文案不泄露账号存在性,
-// 且文本可被需求逐字契约覆盖(09-27 C1)。
-const store = require('../database/store'); const { check } = require('./validate'); const U = require('./util');
-const COOKIE = 'arc_session';
-const SECRET = (f) => f.type === 'password' || f.format === 'password';
-const DUP = (f) => (f.messages && f.messages.duplicate) || f.message || `${f.label || f.name} already exists`;
-const pub = (e, r) => { const o = { id: r.id }; for (const f of e.fields || []) if (!SECRET(f) && !f.match && r[f.name] !== undefined) o[f.name] = r[f.name]; return o; };
-const uniq = (e, body) => { const errors = check(e.fields, body); for (const f of e.fields || []) if (f.unique && body[f.name] !== undefined && store.dup(e.name, f.name, body[f.name])) errors.push({ field: f.name, msg: DUP(f) }); return errors; };
-const matchIdent = (f, stored, ident) => stored !== undefined && (String(stored) === ident || (f.format === 'email' && String(stored).toLowerCase() === ident.toLowerCase()));
-const startSession = (res, userId) => { const token = U.token(); store.insert('sessions', { token, userId, createdAt: U.now() }); U.setCookie(res, COOKIE, token); };
-const readToken = (req) => (req.cookies || {})[COOKIE];
-exports.currentUser = (e, req) => { const t = readToken(req); const s = t && store.one('sessions', (x) => x.token === t); return (s && store.one(e.name, (r) => r.id === s.userId)) || null; };
-exports.mount = (app, schema) => {
-  const e = (schema.entities || []).find((x) => x.auth);
-  if (!e) return;
-  const LOGIN_FAIL = (schema.messages && schema.messages.loginFailure) || 'Invalid username or password';
-  const pwField = (e.fields || []).find(SECRET);
-  const ids = (e.fields || []).filter((f) => f.unique && !SECRET(f) && !f.match);
-  app.post('/api/auth/register', (req, res) => { try {
-    const body = req.body && typeof req.body === 'object' ? req.body : {};
-    const errors = uniq(e, body);
-    if (errors.length) return U.bad(res, errors);
-    const row = { id: U.id(), createdAt: U.now() };
-    for (const f of e.fields || []) if (!f.match && body[f.name] !== undefined) row[f.name] = SECRET(f) ? store.hash(body[f.name]) : body[f.name];
-    store.insert(e.name, row);
-    startSession(res, row.id);
-    U.json(res, 201, { user: pub(e, row) });
-  } catch { U.bad(res, [{ msg: 'Invalid request' }]); } });
-  app.post('/api/auth/login', (req, res) => { try {
-    const b = req.body || {};
-    const ident = String(b.username !== undefined ? b.username : b.identifier !== undefined ? b.identifier : b.email || '').trim();
-    const row = ident && store.one(e.name, (r) => ids.some((f) => matchIdent(f, r[f.name], ident)));
-    if (!row || !pwField || !store.verify(String(b.password || ''), row[pwField.name])) return U.err(res, LOGIN_FAIL);
-    startSession(res, row.id);
-    U.json(res, 200, { user: pub(e, row) });
-  } catch { U.err(res, LOGIN_FAIL); } });
-  app.post('/api/auth/logout', (req, res) => { const t = readToken(req); if (t) store.remove('sessions', (s) => s.token === t); U.setCookie(res, COOKIE, ''); U.json(res, 200, { ok: true }); });
-  app.get('/api/me', (req, res) => { const u = exports.currentUser(e, req); U.json(res, 200, { user: u ? pub(e, u) : null }); });
-};
-"""
-
 APP_JS = """\
-// app.js — express 装配:健康检查、auth、schema CRUD、业务 routes、静态 frontend/dist。
+// app.js — express 装配:健康检查、业务 routes、静态 frontend/dist。
 const path = require('path'); const fs = require('fs'); const express = require('express'); const U = require('./lib/util');
 const app = express();
 try { require('./lib/eval-telemetry').mount(app); } catch { /* telemetry best-effort, never blocks the app */ }
@@ -175,11 +154,7 @@ try { require('./lib/eval-telemetry').mount(app); } catch { /* telemetry best-ef
 app.use(express.json({ limit: '2mb' }));
 app.use((req, res, next) => { req.cookies = U.cookies(req); next(); });
 app.get('/api/health', (req, res) => U.json(res, 200, { ok: true }));
-const schema = require('./database/schema');
-require('./lib/auth').mount(app, schema);
-// 业务 routes 先于引擎 CRUD 注册：同名路径以任务定制实现为准（后注册不覆盖先注册）。
 require('./routes')(app);
-require('./database/engine').mount(app, schema);
 const dist = path.join(__dirname, '..', '..', 'frontend', 'dist');
 if (fs.existsSync(dist)) { app.use(express.static(dist)); app.get(/^(?!\\/api(\\/|$)).*/, (req, res) => res.sendFile(path.join(dist, 'index.html'))); }
 module.exports = app;
@@ -273,13 +248,14 @@ for (const p of ports) app.listen(Number(p), () => console.log('[backend] listen
 """
 
 ROUTES_INDEX_JS = """\
-// routes/index.js — 业务端点扩展点:本任务的特有 API 路由挂在这里(用 ../database/store 与 ../lib/*)。
+// routes/index.js — ALL task API endpoints live here (auth included):
+// implement the requirement's data model and flows directly with Express,
+// on top of ../database/store (seed/run dual-file JSON store; db.json is
+// the graded seed — load its rows, never delete or rename them) and
+// ../lib/util (json/bad/err responses, cookies, ids, scrypt helpers are
+// in store.hash/verify). Auth, CRUD, search, flows — everything the
+// requirements name is yours to write in this directory.
 module.exports = () => {};
-"""
-
-SCHEMA_JS = """\
-// schema.js — 宿主由 backend/data/schema.json 编译生成,勿手改;空 entities = 仅通用层。
-module.exports = { "entities": [] };
 """
 
 DB_JSON = '{"collections":{}}\n'

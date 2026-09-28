@@ -30,7 +30,21 @@ Configuration is via environment variables:
                           AGENT_RUN_TIMEOUT_SECONDS is visible in the env —
                           then timeout − 3600 so the flow lands itself
                           before the outer runner kill)
-    OCTOS_NODE_WALL      (hard wall clock per turn, default 45% of budget)
+    OCTOS_STAGE_DEADLINE (generation-stage wall clock, "4h"/"1h30m"/
+                          "90m"/"7200"; default 0 = off. When it hits, NO
+                          new implementation batch starts — remaining nodes
+                          are marked skipped and the flow proceeds through
+                          final verification + postflight to a NORMAL
+                          exit-0 completion. The platform's sole "previous
+                          stage ended normally" criterion is the agent's
+                          exit code 0 (a timeout SIGKILL leaves
+                          exit_code:null AND skips every handover step).
+                          Orthogonal to OCTOS_TIME_BUDGET, which keeps
+                          governing the final pass.)
+    OCTOS_NODE_WALL      (hard wall clock per turn, default 3600s —
+                          STANDALONE, scaled by batch size at the call
+                          sites: turn_wall(len(batch)); decoupled from the
+                          budget)
     OCTOS_FINAL_RESERVE  (tail slice kept for final verification, default
                           max(300, budget//9))
     OCTOS_NODE_FLOOR     (min remaining seconds to start a new node, default 300)
@@ -65,8 +79,7 @@ import scaffold  # noqa: E402  (宿主脚手架包:模板/清单/schema 编译�
 
 # 只保留:①工具链 CLI 发现(下述 _pw_* 助手);②被内核放行的自测命令
 # 形状所需的 ui-smoke/playwright.config.ts 最小骨架(工作区根,脱离
-# 平台 .arc 命名空间);③消息桥提取
-# (_REQ_MESSAGE_RE,数据面 codegen 桥的数据源,非 UI 规则)。
+# 平台 .arc 命名空间)。
 PLATFORM_PW_VERSION = "1.57.0"
 SELFTEST_SUBDIR = "./ui-smoke"
 
@@ -79,6 +92,17 @@ SELFTEST_SUBDIR = "./ui-smoke"
 # 本地仿真不受它影响:env OCTOS_ARC_FAMILIES 设置时覆盖此值。
 # COMPETITION_FAMILY_SCOPE = "REQ-1"
 COMPETITION_FAMILY_SCOPE = ""
+# ═══════════════════════════════════════════════════════════════════
+# 生成阶段(骨架+批循环)墙钟 deadline(值形如 "4h"/"1h30m"/"90m"/"7200",
+# 纯数字=秒;空=关闭)。到点不再开启新批:未启动节点记 skipped,流程继续
+# 走 final verification → postflight → mark_run_completed → return 0。
+# "正常结束"对齐平台判据=agent 退出码 0;被外层超时 SIGKILL 的指纹是
+# agent-execution.json exit_code:null 且 postflight/db.run.json 清理全跳
+# ——自落地是唯一正道,deadline 保证生成阶段有界、收尾时间有保障。
+# 与 OCTOS_TIME_BUDGET 分层:deadline 只管停止开新批,final 仍归 budget 管;
+# 推荐配 deadline=外层时限−final 预留(如 6h 外层配 5h deadline)。
+# 本地仿真:env OCTOS_STAGE_DEADLINE 设置时覆盖此值。
+COMPETITION_STAGE_DEADLINE = "2h"
 # ═══════════════════════════════════════════════════════════════════
 _DEBUG_LOG_PATH: Path | None = None
 _DEBUG_LOG_LOCK = threading.Lock()
@@ -141,7 +165,7 @@ def log(msg: str) -> None:
 def _ensure_eval_telemetry(output_dir: Path) -> None:
     """评测期遥测兜底(委托 scaffold.telemetry.ensure):平台的 func/e2e
     失败明细不下发,应用自身把评测流量与前端异常写
-    octos-logs/eval-traffic.jsonl 随 zip 带回;交付前回补模型可能重写丢的
+    octos/eval-traffic.jsonl 随 zip 带回;交付前回补模型可能重写丢的
     钩子并写 marker 切分 agent/评测两阶段流量。OCTOS_ARC_EVAL_TELEMETRY=0
     关闭。注入失败只告警——遥测永远不破坏交付。
     """
@@ -210,7 +234,8 @@ def _prune_acceptance_junk(output_dir: Path, tests_dir: Path | None,
 
 
 def _segment_digest(node_done_notes: dict[str, str],
-                    plan_statuses: dict[str, str]) -> str:
+                    plan_statuses: dict[str, str],
+                    has_seeds: bool = True) -> str:
     """分段后首 turn 注入的"上段做了什么"正版答案(≤2000 字符)。
 
     hg-github-001:分段后模型翻自己的事件日志/重读已读文件来重建
@@ -229,11 +254,14 @@ def _segment_digest(node_done_notes: dict[str, str],
         lines.append(entry)
     while len("\n".join(lines)) > 1900 and len(lines) > 3:
         lines.pop()
-    lines.append(
-        "backend/data/db.json seeds were compiled by the host from the "
-        "requirement's GIVEN lines — build on them; where a seeded value "
-        "contradicts the requirement text, the requirement wins (correct "
-        "the seed row, keep the collection and row names).")
+    if has_seeds:
+        # 仅在宿主真落过种子时声明(db 为空的任务这句是假陈述);
+        # 仲裁条款(需求原文 wins)只在有种子可仲裁时才有意义。
+        lines.append(
+            "backend/data/db.json seeds were compiled by the host from the "
+            "requirement's GIVEN lines — build on them; where a seeded value "
+            "contradicts the requirement text, the requirement wins (correct "
+            "the seed row, keep the collection and row names).")
     return "\n".join(lines)[:2000]
 
 
@@ -256,11 +284,11 @@ def _postflight_structure_check(output_dir: Path, web_port: int = 3000) -> None:
     # octos-logs/ 下,保证日志目录始终与 backend/ 同级可见。
     hidden = output_dir / ".octos"
     if hidden.is_dir():
-        target = output_dir / "octos-logs" / "dot-octos"
+        target = output_dir / "octos" / "dot-octos"
         if not target.exists():
             try:
                 shutil.move(str(hidden), str(target))
-                print(f"[postflight] relocated .octos/ -> octos-logs/dot-octos/",
+                print(f"[postflight] relocated .octos/ -> octos/dot-octos/",
                       flush=True)
             except OSError as exc:
                 print(f"[postflight] could not relocate .octos/: {exc}", flush=True)
@@ -370,6 +398,30 @@ def _port_watchdog(web_port: int, output_dir: Path,
         stop.wait(5)
 
 
+_REHEARSAL_FP: dict[str, str] = {}
+
+
+def _frontend_fingerprint(frontend: Path) -> str:
+    """前端源指纹(relpath:mtime_ns,排除 node_modules/dist)。
+
+    rehearsal 的构建缓存判定:指纹与上次成功构建时一致且 dist 在位,
+    说明 dist 对应的就是当前源——重建是纯浪费(每批 ~30-60s × N 批,
+    deadline 模式下直接吃生成窗口)。模型轮中自跑的 build 只会更新鲜,
+    不会造成源-产物错配(指纹只看源)。
+    """
+    sig: list[str] = []
+    for root, dirs, files in os.walk(frontend):
+        dirs[:] = [d for d in dirs if d not in ("node_modules", "dist")]
+        for f in sorted(files):
+            p = Path(root) / f
+            try:
+                sig.append(f"{p.relative_to(frontend)}:"
+                           f"{p.stat().st_mtime_ns}")
+            except OSError:
+                continue
+    return "|".join(sig)
+
+
 def _rehearse_startup(output_dir: Path, smoke_port: int, *,
                       probes: list | None = None,
                       extra_ports: list | None = None,
@@ -408,15 +460,25 @@ def _rehearse_startup(output_dir: Path, smoke_port: int, *,
         out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
         return r.returncode, out[-1500:]
 
-    # 1. Frontend build (the runner builds before serving).
+    # 1. Frontend build (the runner builds before serving) — cached on the
+    # source fingerprint: unchanged sources + existing dist skip the
+    # rebuild (per-batch rehearsals otherwise burn 30-60s each rebuilding
+    # the same tree).
     if (frontend / "package.json").exists():
-        rc, out = run_cmd(["npm", "install", "--no-audit", "--no-fund"],
-                          frontend, 600)
-        if rc != 0 and not (frontend / "node_modules").is_dir():
-            return f"frontend `npm install` failed:\n{out}"
-        rc, out = run_cmd(["npm", "run", "build"], frontend, 600)
-        if rc != 0:
-            return f"frontend `npm run build` failed:\n{out}"
+        fp = _frontend_fingerprint(frontend)
+        if (_REHEARSAL_FP.get(str(frontend)) == fp
+                and (frontend / "dist" / "index.html").is_file()):
+            log("[rehearsal] frontend source unchanged since last green "
+                "build; skipping rebuild")
+        else:
+            rc, out = run_cmd(["npm", "install", "--no-audit", "--no-fund"],
+                              frontend, 600)
+            if rc != 0 and not (frontend / "node_modules").is_dir():
+                return f"frontend `npm install` failed:\n{out}"
+            rc, out = run_cmd(["npm", "run", "build"], frontend, 600)
+            if rc != 0:
+                return f"frontend `npm run build` failed:\n{out}"
+            _REHEARSAL_FP[str(frontend)] = fp
 
     if report is not None:
         report["build_ok"] = True
@@ -491,8 +553,10 @@ def _probe_routes_on(smoke_port: int, probes: list, extra_ports: list,
     Records `{method, path, status}` rows in the report. Red only on
     infrastructure facts (connection failure or 5xx); 4xx is a recorded
     fact, not a host failure — business assertions belong to Playwright.
-    fixture_probes 例外:它们验证的是宿主自己的种子承诺(登录可达、实体
-    行未被删),语义明确,400/401/404/空列表同样是 RED。
+    fixture_probes 例外:它们验证的是宿主自己的种子承诺(声明账号登录
+    可达),语义明确,400/401/404 同样是 RED。种子集合的"行未被删"
+    不走 HTTP(CRUD 生成器退役后端点形状归模型)——文件级完整性检查
+    见 _seed_integrity_errors。
     Returns an error string for the repair turn, or None when green.
     """
     import urllib.request
@@ -556,8 +620,9 @@ def _probe_routes_on(smoke_port: int, probes: list, extra_ports: list,
         vrows.append({"method": "POST", "path": label, "status": status})
     report["validation_probes"] = vrows
 
-    # 夹具探针:验证宿主种子在模型实现后的 app 上仍然成立(0-token 验证,
-    # RED 直接进 rehearsal-repair 回路)。语义见 build_fixture_probes。
+    # 夹具探针:验证模型自报/宿主逐字种子的账号在实现后的 app 上登录
+    # 可达(0-token 验证,RED 直接进 rehearsal-repair 回路)。语义见
+    # build_fixture_probes;种子行完整性由 _seed_integrity_errors 承接。
     for fp in (fixture_probes or [])[:8]:
         method = str(fp.get("method", "GET")).upper()
         path = str(fp.get("path", "/"))
@@ -570,17 +635,12 @@ def _probe_routes_on(smoke_port: int, probes: list, extra_ports: list,
             headers={"Content-Type": "application/json"},
             method=method,
         )
-        status, resp_body = 0, b""
+        status = 0
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 status = resp.status
-                resp_body = resp.read(1 << 20)
         except urllib.error.HTTPError as exc:
             status = exc.code
-            try:
-                resp_body = exc.read(1 << 20)
-            except Exception:  # noqa: BLE001
-                resp_body = b""
         except Exception as exc:  # noqa: BLE001 — connection refused etc.
             rows.append({"method": method, "path": path, "status": 0})
             problems.append(f"fixture probe {method} {path} -> {exc}")
@@ -597,44 +657,20 @@ def _probe_routes_on(smoke_port: int, probes: list, extra_ports: list,
                     f"{user!r} (HTTP {status} on {path}) — this account is "
                     "declared in backend/data/seed-accounts.json (or "
                     "seeded verbatim in backend/data/db.json); the seed "
-                    "row, its password, and the auth verify path must "
-                    "agree. The grader signs in as role accounts like "
+                    "row, its password, and your auth route must agree "
+                    "(if your login route is not the default "
+                    "/api/auth/login, put it in the entry's path field). "
+                    "The grader signs in as role accounts like "
                     "this one — a rejected login here fails whole "
                     "requirement families")
             elif status == 404:
                 problems.append(
                     f"fixture login route {path} missing (HTTP 404) — "
-                    "schema.json must declare an auth entity so the "
-                    "host auth layer mounts")
+                    "the account is declared but nothing answers at "
+                    f"{path}; point the entry's path field at your real "
+                    "sign-in route")
             else:
                 problems.append(f"fixture login {path} -> HTTP {status}")
-        elif kind == "entity":
-            name = fp.get("entity") or path
-            listed: list | None = None
-            try:
-                parsed = json.loads(resp_body.decode("utf-8", "replace"))
-                if isinstance(parsed, list):
-                    listed = parsed
-                elif isinstance(parsed, dict):
-                    for key in ("items", "data", "rows"):
-                        if isinstance(parsed.get(key), list):
-                            listed = parsed[key]
-                            break
-            except Exception:  # noqa: BLE001 — 非 JSON 响应按未知处理
-                listed = None
-            if status == 404:
-                problems.append(
-                    f"seeded entity {name!r} has no GET route "
-                    f"({path} -> 404) — schema.json must expose entity "
-                    f"{name!r}; keep host-seeded collections")
-            elif status == 200 and listed is not None and not listed:
-                problems.append(
-                    f"seeded entity {name!r} lists EMPTY at {path} — "
-                    "host-seeded fixture rows were deleted or the "
-                    "collection was renamed; restore them in backend/"
-                    "data/db.json")
-            elif status >= 500:
-                problems.append(f"fixture entity {path} -> HTTP {status}")
 
     if problems:
         return "; ".join(problems)[:1200]
@@ -809,8 +845,8 @@ def stage_selftest_dir(output_dir: Path, smoke_port: int,
 //   "a combo box labeled X" => getByRole('combobox', { name: X })
 // getByText/getByLabel are NOT role equivalents: a <div aria-label> has
 // no region role, so a getByLabel assertion on it is green while the
-// grader's getByRole('region') times out (an entire pivot family was
-// lost exactly that way). Assert with the ROLE the requirement names.
+// grader's getByRole('region') times out (an entire family was lost
+// exactly that way). Assert with the ROLE the requirement names.
 //
 // GESTURE RULE — self-test each selection-driven flow with BOTH drag AND
 // click+Shift-click (graders use both; a shift-collapsing handler passed
@@ -820,13 +856,14 @@ import { test, expect } from '@playwright/test';
 
 test('my check - name what this verifies', async ({ page }) => {
   await page.goto('/');
-  // Example: walk one form chain end to end.
-  // await page.getByLabel('Workbook name').fill('Q3 Sales');
+  // Example: walk one form chain end to end (use the requirement's OWN
+  // quoted labels and values — these placeholders are shapes, not content).
+  // await page.getByLabel('Name').fill('Demo entry');
   // await page.getByRole('button', { name: 'Create', exact: true }).click();
-  // await expect(page.getByText('Q3 Sales')).toBeVisible();
+  // await expect(page.getByText('Demo entry')).toBeVisible();
   //
   // Example: a "region named" contract asserts with the ROLE:
-  // const editor = page.getByRole('region', { name: 'Pivot table editor' });
+  // const editor = page.getByRole('region', { name: 'Editor' });
   // await expect(editor.getByRole('combobox', { name: 'Rows' })).toBeVisible();
   //
   // Example: the second selection gesture (click anchor, Shift-click end):
@@ -889,33 +926,9 @@ def build_selftest_note(cli_path: str | None) -> str:
 
 
 # ------------------------------------------------- requirement message bridge
-# (自 flow_suite.py 迁入:codegen 编译 schema 时的确定性消息桥数据源,
-#  数据面能力,非 UI 规则。)
-_REQ_MESSAGE_Q = (r'["\u201c]([A-Za-z0-9][^"\u201d\u2019\n]{1,119})'
-                  r'["\u201d\u2019]')
-_REQ_MESSAGE_RE = re.compile(
-    r"(?:displays?|displayed|shown?|reject(?:ed)? with|must be rejected with"
-    r"|must display|message(?:\s+is)?)\s*:?\s*" + _REQ_MESSAGE_Q, re.I)
-
-
-def _collect_requirement_messages(tree: dict) -> list[str]:
-    """树内全部引号消息(去重,文档序)——.arc/host/req-messages.json 的
-    数据源,codegen 桥只按后缀/正则挑消息,非消息类引号串是无害噪音。"""
-    out: list[str] = []
-    seen: set[str] = set()
-
-    def visit(node) -> None:
-        for m in _REQ_MESSAGE_RE.finditer(str(node.get("description") or "")):
-            name = m.group(1).strip()
-            if name and not ("<" in name and ">" in name) \
-                    and "{" not in name and name not in seen:
-                seen.add(name)
-                out.append(name)
-        for child in node.get("children") or []:
-            visit(child)
-
-    visit(tree or {})
-    return out
+# (2026-09-28 退役:引号消息提取的唯一消费方是 codegen 的确定性消息桥
+# ——CRUD 生成器退役后无消费方,sidecar 与正则一并删除。需求逐字串
+# 的消费方回到模型自己读需求原文。)
 
 
 def _ensure_host_toolchain(log) -> Path | None:
@@ -1125,15 +1138,52 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
         _free_web_port(smoke_port)
 
 
+def _seed_integrity_errors(output_dir: Path, seed_rows: dict) -> list[str]:
+    """宿主种子的文件级完整性检查(0-token,无 API 形状假设)。
+
+    CRUD 生成器退役后实体探针(GET /api/<name>)失去形状依据——种子
+    "未被删/未改名"的验证改在文件面做:db.json 必须仍含宿主编译的
+    每个集合(行 id 逐一比对,每集合报首个缺失即止)。API 暴露由模型
+    自测与 final 检查承接(09-28 定则:内容面归模型,宿主只验证
+    自己播种的承诺)。
+    """
+    if not seed_rows:
+        return []
+    try:
+        db = json.loads((output_dir / "backend" / "data" / "db.json")
+                        .read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — 缺档/坏档按全丢处理
+        return ["backend/data/db.json unreadable — host-seeded rows "
+                "must stay in place (collections and rows verbatim)"]
+    colls = db.get("collections") or {}
+    problems: list[str] = []
+    for name, rows in seed_rows.items():
+        have = {r.get("id") for r in (colls.get(name) or [])
+                if isinstance(r, dict)}
+        for r in rows:
+            if r.get("id") not in have:
+                problems.append(
+                    f"seeded collection {name!r} lost row "
+                    f"{r.get('id')!r} — restore host-seeded rows in "
+                    "backend/data/db.json (never delete or rename them)")
+                break
+    return problems
+
+
 def rehearse_node(output_dir: Path, smoke_port: int, probes: list,
                   extra_ports: list,
-                  fixture_probes: list | None = None
+                  fixture_probes: list | None = None,
+                  seed_rows: dict | None = None
                   ) -> tuple[str | None, dict]:
     """Node-turn boundary rehearsal (A-flip) → (err, RehearsalReport)."""
     report = {"build_ok": False, "boot_ok": False, "routes": [], "digest": ""}
     err = _rehearse_startup(output_dir, smoke_port, probes=probes,
                             extra_ports=extra_ports, report=report,
                             fixture_probes=fixture_probes)
+    seed_errs = _seed_integrity_errors(output_dir, seed_rows or {})
+    if seed_errs:
+        err = ((err + "; ") if err else "") + "; ".join(seed_errs)
+        err = err[:1200]
     report["digest"] = (err or "")[-600:]
     return err, report
 
@@ -1265,25 +1315,43 @@ def _page_health_run(output_dir: Path, smoke_port: int,
         shutil.rmtree(grader, ignore_errors=True)
 
 
+def _esbuild_bin(output_dir: Path) -> str | None:
+    """frontend 的 esbuild(vite 依赖自带,prewarm 后在位);缺则 None。"""
+    cand = output_dir / "frontend" / "node_modules" / ".bin" / "esbuild"
+    if cand.is_file():
+        return str(cand)
+    return shutil.which("esbuild")
+
+
 def js_syntax_errors(output_dir: Path) -> list[str]:
-    """`node --check` every project JS file — the write-integrity gate.
+    """Syntax-check every project JS/JSX file — the write-integrity gate.
 
     A turn cut off mid-write can leave truncated files on disk (2026-09-16
     ticket-baseline-1: server.js:229 `const pass…` SyntaxError, backend
-    never booted, 0 Playwright tests executed). The gate is best-effort:
-    a missing/unusable node binary skips the check rather than the run.
+    never booted, 0 Playwright tests executed). Division of labor:
+    backend .js → `node --check` (CommonJS); frontend .js/.jsx → esbuild
+    batch parse when available (handles ESM `export` and JSX uniformly —
+    node --check's ESM-package detection varies by Node version, and it
+    cannot parse JSX at all; a truncated .jsx used to sail through to
+    the next rehearsal's vite build). Best-effort: a missing checker
+    skips that half rather than the run.
     """
     errors: list[str] = []
     node = shutil.which("node")
-    if not node:
-        return errors
+    esbuild = _esbuild_bin(output_dir)
+    fe_files: list[Path] = []
     for sub in ("backend", "frontend"):
         root = output_dir / sub
         if not root.is_dir():
             continue
-        for path in sorted(root.rglob("*.js")):
+        for path in sorted(root.rglob("*.js")) + sorted(root.rglob("*.jsx")):
             rel = path.relative_to(output_dir)
             if any(part in rel.parts for part in ("node_modules", "dist")):
+                continue
+            if sub == "frontend" and esbuild:
+                fe_files.append(path)
+                continue
+            if not node:
                 continue
             try:
                 r = subprocess.run([node, "--check", str(path)],
@@ -1295,6 +1363,37 @@ def js_syntax_errors(output_dir: Path) -> list[str]:
                 err_line = next((l for l in lines if "Error" in l),
                                 lines[0] if lines else "syntax error")
                 errors.append(f"{rel}: {err_line[:160]}")
+    if fe_files:
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="octos-syngate-") as td:
+            try:
+                r = subprocess.run(
+                    [esbuild, *(str(p) for p in fe_files),
+                     f"--outdir={td}"],
+                    capture_output=True, text=True, timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                return errors
+            if r.returncode != 0:
+                # esbuild 默认 pretty 格式:`✘ [ERROR] msg` 行后跟
+                # `  /abs/path.jsx:LINE:COL:` 定位行(同一错误的次要定位
+                # 行只取首个——发一条就够修复轮用)。
+                pending_msg: str | None = None
+                loc_re = re.compile(r"^\s*(\S+):\d+:\d+:\s*$")
+                err_re = re.compile(r"\[ERROR\]\s+(.*)$")
+                for line in ((r.stderr or "") + (r.stdout or "")).splitlines():
+                    m = err_re.search(line)
+                    if m:
+                        pending_msg = m.group(1).strip()
+                        continue
+                    m = loc_re.match(line)
+                    if m and pending_msg:
+                        abs_path = m.group(1)
+                        try:
+                            rel = str(Path(abs_path).relative_to(output_dir))
+                        except ValueError:
+                            rel = Path(abs_path).name
+                        errors.append(f"{rel}: {pending_msg[:160]}")
+                        pending_msg = None
     return errors
 
 
@@ -1318,7 +1417,9 @@ def project_files_changed(output_dir: Path, since: float) -> bool:
     same guard (mtime granularity on some filesystems is 1s, hence the
     slack).
     """
-    for sub in ("backend", "frontend", "requirements"):
+    # requirements/ 不计入:需求原文是只读真值,模型往里写文件不得
+    # 洗白零工作轮(09-28 审计)。
+    for sub in ("backend", "frontend"):
         root = output_dir / sub
         if not root.is_dir():
             continue
@@ -1813,6 +1914,32 @@ def parse_family_scope(raw: str | None) -> frozenset[str]:
     if not raw:
         return frozenset()
     return frozenset(s.strip() for s in raw.split(",") if s.strip())
+
+
+def _parse_deadline(raw: str | None) -> int:
+    """"4h"/"1h30m"/"90m"/"7200" → 秒;空/"0"/"off"/解析失败 → 0(关闭)。
+
+    永不抛错:控制面参数解析失败按"未设置"处理并告警——deadline
+    缺席只是回到无界生成行为,不能让 run 起不来。
+    """
+    if not raw:
+        return 0
+    text = str(raw).strip().lower()
+    if not text or text in ("0", "off", "none"):
+        return 0
+    total = 0.0
+    matched = False
+    for value, unit in re.findall(r"(\d+(?:\.\d+)?)\s*([hms])", text):
+        total += float(value) * {"h": 3600.0, "m": 60.0, "s": 1.0}[unit]
+        matched = True
+    if matched:
+        return int(total)
+    try:
+        return max(0, int(float(text)))
+    except ValueError:
+        log(f"[flow] stage deadline value unparseable ({raw!r}); "
+            "stage deadline disabled")
+        return 0
 
 
 def _node_matches_scope(nid: str, scope: frozenset[str]) -> bool:
@@ -2466,15 +2593,22 @@ class OctosDriver:
 # goal-first 骨架轮:模板已在位可启动,但 App 外壳/路由/家族文件结构由
 # 代理依需求地图自建。db.json 种子保护条款是数据契约。
 GOAL_FIRST_SKELETON_PROMPT = """\
-Lay this application's skeleton — you own frontend/src. The backend is \
-host-owned: do NOT rewrite its files (the host boots it for you before \
-the implementation turns; if you start it yourself to verify, port \
+Lay this application's skeleton — you own frontend/src AND the backend \
+API (backend/src/routes/). The host substrate (src/app.js, src/index.js, \
+src/database/store.js, src/lib/util.js) already boots — never rewrite \
+those files (the host boots the server for you before the \
+implementation turns; if you start it yourself to verify, port \
 {smoke} only). \
 Work from the REQUIREMENTS MAP in your system prompt:
-1) backend/data/schema.json per the HOST CONTRACT (a host-written \
-starter covering the seeded collections may already exist — EXTEND it, \
-keep every entity name and seeded row; the host compiles it and mounts \
-CRUD + auth).
+1) The backend API in backend/src/routes/: implement auth (sign-in \
+for the accounts the requirements name) and the core data endpoints \
+the map's families share, with Express on top of the host substrate \
+(src/lib/session.js = session mechanics, src/lib/crud.js = optional \
+generic REST factory, src/database/store.js = seed/query/tx store — \
+see the HOST CONTRACT) — \
+backend/data/db.json is the seeded database (expose its rows; NEVER \
+delete or rename them). Declare every account you provision in \
+backend/data/seed-accounts.json as [{{"username","password","path"?}}].
 2) Fixture records the FIXTURE CONTRACT lists as still unseeded go into \
 backend/data/db.json (the host already compiled every machine-readable \
 data:/GIVEN fixture into it — NEVER delete or rename those rows).
@@ -2511,9 +2645,10 @@ walks through on the RUNNING app; every GIVEN fixture is addressable \
 verbatim); red means fix, not report.\
 SCOPE: you own frontend/src as a whole — structure it as the \
 requirements demand (restructure the shell, add files, split or merge \
-features); never regress an already-green family, and never touch the \
-host-owned backend files listed in the HOST CONTRACT (business data \
-goes through backend/data/schema.json + backend/src/routes/index.js).\
+features); never regress an already-green family. ALL API endpoints \
+live in backend/src/routes/ (yours to extend freely); never touch the \
+host-owned backend substrate listed in the HOST CONTRACT (src/app.js, \
+src/index.js, src/database/store.js, src/lib/util.js).\
 REFERENCE IMAGES: any ![image](...) in this work order is attached to \
 this conversation as a real image — style/layout reference only \
 (region arrangement, component placement, grid structure); every \
@@ -2532,13 +2667,22 @@ inside .arc/ — host-owned, read-only), and run it via the SELF-TEST \
 command against the RUNNING app (or curl the API directly) — scenario \
 flows actually walking, not string presence, are the verdict.\
 TOOLBOX (optional, unwired): frontend/src/app/ui.jsx ships proven \
-shapes (NativeSelect/AppDialog/AccountTrigger/SingleError/Region — \
-render <Region label="X"> for a requirement phrase "A region named X", \
-a div with aria-label has no region role — and FixedGrid), \
+shapes (NativeSelect/AppDialog/AccountTrigger/SingleError/FieldError/\
+useContextMenu+Menu/Region — render <Region label="X"> for a \
+requirement phrase "A region named X", a div with aria-label has no \
+region role — and FixedGrid), \
 frontend/src/app/grid.js the useGrid selection kernel (pass \
-grid={grid} and click / Shift-click-extend / drag / aria-selected are \
-handled), frontend/src/app/formula.js a cell formula engine \
-(displayValue/evalFormula/adjustFormula) — use them or roll your own; \
+grid={{grid}} and click / Shift-click-extend / drag / aria-selected are \
+handled) plus compareValues for type-aware sorts, \
+frontend/src/app/formula.js a cell formula engine \
+(displayValue/evalFormula/adjustFormula), frontend/src/app/csv.js \
+RFC4180 parse + byte-exact stringify + TSV paste + download/import \
+file helpers + clipboard copy, \
+frontend/src/app/undo.js a snapshot undo/redo stack hook, \
+frontend/src/app/router.js hash routing for deep links; on the \
+backend src/lib/session.js (session mechanics — you wire the routes) \
+and src/lib/crud.js (optional generic REST factory, mounted per \
+collection, hooks carry your validation) — use them or roll your own; \
 the requirement text is the only authority.\
 REGRESSION SCOPE: re-check only the families you touched this turn.\
 
@@ -2657,32 +2801,13 @@ def final_spec_files(tier2_run, output_dir: Path) -> list[str] | None:
             hits.append(name)
     return hits or all_specs
 
-# plan §4: schema-first directive for the first node turn (host template
-# present). The model declares data; the host compiles schema.json →
-# database/schema.js and the engine/auth mount CRUD + auth automatically.
-# 路径经 manifest 注入(%-style:文本含字面量 JSON 花括号,且无 % 字符)。
-SCHEMA_DIRECTIVE = """
-FIRST ACTION: write %(schema_json)s declaring this task's data — \
-{"entities":[{"name":"users","auth":true,"fields":[...]}]} with field keys \
-name/label/type(string|number|boolean|password)/required/unique/min/max/\
-pattern/enum/match/format(email|username|password), plus message (single) \
-or messages {required,invalid,duplicate} per reason — quoted "<X> is \
-required"/"<X> already exists" strings auto-map onto matching fields, and \
-any OTHER quoted error string in the requirement must be copied verbatim \
-into messages. CRUD at /api/<entity> and auth (register/login/logout/me) \
-then exist automatically — build the UI on them; write ONLY task-specific \
-endpoints (search/booking flows) in src/routes/index.js. Extend \
-backend/data/db.json only with fixture records still missing from the \
-FIXTURE CONTRACT — never delete or rename host-seeded rows. \
-Dependencies are preinstalled — never run npm install.\
-""" % {"schema_json": scaffold.SCHEMA_JSON_REL}
-
 HOST_FINAL_CHECK_PROMPT = """\
 The host already built the app, booted it, and probed the /api/ routes; \
 any host-found failure is listed below. Verify only what the host \
-cannot: assertion semantics — strict-mode single matches for echoed \
-values, exactly one visible error element per failure, verbatim option \
-labels, and session persistence across reload. Walk the action chains \
+cannot: assertion semantics (grading behaviors observed in real runs) — \
+strict-mode single matches for echoed values, exactly one visible \
+error element per failure, verbatim option labels, and session \
+persistence across reload. Walk the action chains \
 behind each failing test named below, on the running app, and report \
 one line of evidence per chain; an empty "all good" without evidence \
 is a failed check. Fix what is wrong; do not rebuild what works. Do \
@@ -2697,7 +2822,8 @@ the requirement scenarios; the SELF-TEST command runs them against the \
 running app). Walk the action chains behind the requirement scenarios — \
 visible feedback for every named control, exactly one visible error \
 element per failure, strict-mode unique echoes, verbatim labels and \
-seeded values. Report one line of evidence per chain; an empty "all \
+seeded values (grading behaviors observed in real runs, not \
+host-invented rules). Report one line of evidence per chain; an empty "all \
 good" without evidence is a failed check. BUDGET: one walk per chain — \
 verify each chain once, fix only what is red, then end the turn; never \
 re-run whole suites and never re-verify chains that already passed. \
@@ -3070,6 +3196,17 @@ def main() -> int:
             "OCTOS_FINAL_RESERVE", str(max(300, budget // 9)) if budget else 0))
         node_floor = int(os.environ.get("OCTOS_NODE_FLOOR", "300"))
         t_run_start = time.time()
+        # 生成阶段 deadline:env 优先(OCTOS_STAGE_DEADLINE),烤入常量
+        # 兜底(平台无法传 env,与 COMPETITION_FAMILY_SCOPE 同一通道)。
+        _raw_deadline = os.environ.get("OCTOS_STAGE_DEADLINE")
+        if _raw_deadline is None:
+            _raw_deadline = COMPETITION_STAGE_DEADLINE
+        stage_deadline = _parse_deadline(_raw_deadline)
+        stage_deadline_hit = False
+        if stage_deadline:
+            log(f"[flow] stage deadline: {stage_deadline}s from run start "
+                "(no new implementation batch after it; final verification "
+                "proceeds normally)")
         # Smoke tests must NEVER use the grading port: round 21 was SIGTERMed
         # minutes after the final-verification turn started a server on
         # port 3000 — the runner appears to treat a live grading port as
@@ -3127,7 +3264,7 @@ def main() -> int:
                 f"{scaffolded}")
         else:
             log("[plan] OCTOS_ARC_HOST_SCAFFOLD=0; scaffolding left to the model")
-        # 模板已就位时依赖由宿主预装(模型零安装);codegen 门控紧随其后。
+        # 模板已就位时依赖由宿主预装(模型零安装)。
         template_ready = scaffold.template_ready(output_dir)
         if template_ready:
             # 宿主托管的 dev server 一键重启脚本：模型改了 backend/src 后
@@ -3151,8 +3288,6 @@ def main() -> int:
                 'echo "server failed; see octos-logs/host-dev-server.log"; '
                 "exit 1\n",
                 encoding="utf-8")
-        codegen_on = (os.environ.get("OCTOS_ARC_HOST_CODEGEN", "1") != "0"
-                      and bool(scaffolded) and template_ready)
         if template_ready and os.environ.get("OCTOS_ARC_PREWARM", "1") != "0":
             scaffold.prewarm_deps(output_dir, log)
 
@@ -3194,6 +3329,18 @@ def main() -> int:
         else:
             log("[fixture] no machine-compilable fixtures; contract rides "
                 "in FOCUS GIVEN lists")
+        # 种子完整性基线(文件级检查用):materialize 落盘成功时直接取
+        # 编译产物;跳过(db.json 已有种子,重跑场景)时 compile_seed
+        # 纯函数重算——预期行清单与落盘路径无关。
+        seed_rows_expected: dict = {}
+        if fixture_compiled and fixture_compiled.get("db"):
+            seed_rows_expected = fixture_compiled["db"]
+        elif fixture_data:
+            try:
+                seed_rows_expected = fixture_manifest.compile_seed(
+                    fixture_data).get("db") or {}
+            except Exception as exc:  # noqa: BLE001 — 基线缺失只降级检查
+                log(f"[fixture] seed integrity baseline unavailable: {exc}")
         # ---- 模型自测骨架 staging(09-27 目标优先定则) ----
         # 宿主不再编写验收用例(ui_smoke 契约套件/flow_suite 流套件已
         # 删除)——测试用例由模型根据需求原文自己生成。宿主只落盘内核
@@ -3206,23 +3353,6 @@ def main() -> int:
         log("[plan] self-test skeleton staged "
             f"({SELFTEST_SUBDIR}/playwright.config.ts + example); "
             "tests are model-authored from the requirement text")
-        # C1 配套:需求引号消息 sidecar——codegen 编译 schema 时确定性
-        # 桥接("<X> is required"/"<X> already exists" 灌字段三态消息,
-        # credential 族进 messages.loginFailure)。宿主生成 API 的错误
-        # 面由此默认英文契约族、需求逐字串优先(中文默认与英文逐字
-        # 契约冲突,注册/登录族=第一测试族+止损敏感区)。
-        req_msgs = _collect_requirement_messages(tree)
-        if req_msgs:
-            try:
-                host_msg_dir = output_dir / ".arc" / "host"
-                host_msg_dir.mkdir(parents=True, exist_ok=True)
-                (host_msg_dir / "req-messages.json").write_text(
-                    json.dumps(req_msgs, ensure_ascii=False) + "\n",
-                    encoding="utf-8")
-                log(f"[fixture] requirement message sidecar: "
-                    f"{len(req_msgs)} quoted string(s) for the codegen bridge")
-            except OSError as exc:
-                log(f"[fixture] req-messages sidecar write failed: {exc}")
         # extra_rules 全局契约:确定性渲染(静态 manifest → 每轮字节相同,
         # 缓存律),经稳定 CONTRACT 段常驻;节点 GIVEN 走 FOCUS validation 前缀。
         fixture_rules = fixture_manifest.render_extra_rules(
@@ -3248,9 +3378,11 @@ def main() -> int:
             for sname in snames)
 
         def fixture_probe_list() -> list[dict]:
-            """夹具探针:模型自报账号(seed-accounts.json)登录可达 +
-            宿主已播种实体存在;两者皆无则空。角色账号由模型推理决定,
-            宿主只验证其声明——声明了却登不进,RED 进 rehearsal-repair。"""
+            """夹具探针:模型自报账号(seed-accounts.json)登录可达。
+            角色账号由模型推理决定,宿主只验证其声明——声明了却登不进,
+            RED 进 rehearsal-repair。条目可带 path 指向真实登录路由
+            (缺省 /api/auth/login)。种子集合完整性走 _seed_integrity_errors
+            (文件级,无 API 形状假设),不再发实体探针。"""
             declared: list[dict] = []
             accounts_file = (output_dir / "backend" / "data"
                              / "seed-accounts.json")
@@ -3260,18 +3392,18 @@ def main() -> int:
                         accounts_file.read_text(encoding="utf-8"))
                     declared = [
                         {"username": str(a.get("username", "")),
-                         "password": str(a.get("password", ""))}
+                         "password": str(a.get("password", "")),
+                         **({"path": str(a["path"])} if a.get("path") else {}),
+                         **({"body": str(a["body"])} if a.get("body") else {})}
                         for a in (raw if isinstance(raw, list) else [])
                         if isinstance(a, dict) and a.get("username")]
             except Exception:  # noqa: BLE001 — 声明文件坏格式按未声明处理
                 declared = []
             compiled_logins = ((fixture_compiled or {}).get("logins") or [])
-            collections = list(
-                (fixture_compiled or {}).get("db", {}).keys())
-            if not declared and not compiled_logins and not collections:
+            if not declared and not compiled_logins:
                 return []
             return plan_envelope.build_fixture_probes(
-                declared + compiled_logins, collections)
+                declared + compiled_logins)
 
         def remaining() -> float:
             # No budget (0) ⇒ unlimited: the node-skip gate, tail
@@ -3456,24 +3588,46 @@ def main() -> int:
                     log("[flow] resetting session before next skeleton "
                         "attempt (empty-context loop)")
                     driver.close()
-                time.sleep(45)
+                # 梯度退避(15/30/45):固定 45s 在模型行为型失败(非网关
+                # 型)上是纯等待;梯度保留网关喘息窗口又不拖慢重试。
+                time.sleep(15 * sk_attempt)
             if not skeleton_ok:
                 raise RuntimeError(f"skeleton scaffolding failed: {skeleton_text}")
             runtime.git.commit("chore: host template + app skeleton")
 
-            # Per-node implementation. The schema watcher compiles
-            # backend/data/schema.json MID-TURN (stable 3s) so the model can
-            # exercise host-generated endpoints in the same turn it declares
-            # the schema; sync() at turn end is the guaranteed fallback.
-            codegen = (scaffold.Watcher(output_dir, log=log)
-                       if codegen_on else None)
-            if codegen:
-                codegen.start()
             failed: list[str] = []
+            # skip 节点的真实原因(deadline/budget/auth)——终局 test 事件
+            # 用它,而不是误导性的 "final verification did not pass"
+            # (skip 的节点从未被验证过;09-29 event-hygiene)。
+            skip_reasons: dict[str, str] = {}
             node_done_notes: dict[str, str] = {}
             segment_digest_pending = False
 
             for idx, batch in enumerate(node_batches, 1):
+                # 生成阶段墙钟 deadline(正常收尾通道):到点不再开新批,
+                # 本批+后续批的节点全部按 skipped 记账(事件形态与预算
+                # 批尾修剪逐字对齐),流程继续 final verification →
+                # postflight → return 0——平台判"上一阶段正常结束"的
+                # 唯一标准就是退出码 0。
+                if (stage_deadline and not stage_deadline_hit
+                        and time.time() - t_run_start >= stage_deadline):
+                    skipped = [str(n.get("id"))
+                               for later in node_batches[idx - 1:]
+                               for n in later]
+                    log(f"[flow] stage deadline reached "
+                        f"({int(time.time() - t_run_start)}s >= "
+                        f"{stage_deadline}s); stopping before batch "
+                        f"{idx}/{len(node_batches)} — {len(skipped)} "
+                        "node(s) recorded as skipped; proceeding to final "
+                        "verification normally")
+                    for tid in skipped:
+                        events.mark_implementation_started(tid)
+                        events.mark_implementation_failed(
+                            tid, "skipped: stage deadline")
+                        skip_reasons[tid] = "skipped: stage deadline"
+                        failed.append(tid)
+                    stage_deadline_hit = True
+                    break
                 # A2 会话分段:每 SEGMENT_BATCHES 批重置 stdio 会话,切断
                 # O(n²) 历史重放(run-002 实测 1.35 亿 token 的主 driver)。
                 # 上下文经 planctl 磁盘重水合续命(envelope + repoMap 全量
@@ -3496,6 +3650,7 @@ def main() -> int:
                     log(f"[flow] time budget exhausted; trimming {tid} from batch")
                     events.mark_implementation_started(tid)
                     events.mark_implementation_failed(tid, "skipped: time budget")
+                    skip_reasons[tid] = "skipped: time budget"
                     failed.append(tid)
                 if not batch:
                     continue
@@ -3582,14 +3737,13 @@ def main() -> int:
                             count=len(batch), smoke=smoke_port))
                 if segment_digest_pending:
                     # P3:分段后首 turn 的正版记忆——逐节点完成笔记,
-                    # 替代模型翻 .arc 考古(见 _segment_digest 注释)。
+                    # 替代模型翻 .arc 考古(见注入点注释)。
                     # flag 不在此清:该 turn 若死于流错误/墙钟(hg-github-
                     # 001 死过 3 个 turn),重试与后续批仍要拿到摘要;
                     # 直到本批某个 turn 真正成功才在下方清掉。
                     node_prompt += _segment_digest(
-                        node_done_notes, plan_statuses)
-                if codegen_on and not scaffold.schema_path(output_dir).exists():
-                    node_prompt += SCHEMA_DIRECTIVE
+                        node_done_notes, plan_statuses,
+                        has_seeds=bool(seed_rows_expected))
                 if template_ready:
                     _ensure_dev_server(output_dir, smoke_port,
                                        spec_ports_extra, log)
@@ -3615,6 +3769,10 @@ def main() -> int:
                     ok, text = False, (
                         f"skipped: auth failure limit "
                         f"({driver.auth_failures})")
+                    for nid in batch_ids:
+                        skip_reasons[nid] = (
+                            f"skipped: auth failure limit "
+                            f"({driver.auth_failures})")
                 else:
                     wall = turn_wall(len(batch))
                     ok, text = driver.run(node_prompt, min(node_timeout, wall), wall)
@@ -3706,17 +3864,18 @@ def main() -> int:
                         except Exception as exc:
                             log(f"[plan] syntax-gate rollback failed: {exc}")
                     continue
-                for nid in batch_ids:
-                    events.mark_implementation_done(nid, text[-500:] or None)
-                    node_done_notes[nid] = (text or "")[-160:]
+                # N1(09-29 修复):失败 turn 不再无条件打"实现完成"事件——
+                # auth 耗尽跳过的批什么都没跑、wall 切断的批语义未定,
+                # done 标记只属于成功 turn 或 rehearsal 恢复路径(下方)。
+                # commit 保持无条件:切断轮已落盘的文件仍需入库留痕,
+                # 由 rehearsal 门裁决其成色。
+                if ok:
+                    for nid in batch_ids:
+                        events.mark_implementation_done(nid, text[-500:] or None)
+                        node_done_notes[nid] = (text or "")[-160:]
                 runtime.git.commit(
                     f"{focus_id} (implement): "
                     + "; ".join(str(n.get("name", "")) for n in batch))
-                if codegen:
-                    written = codegen.sync()
-                    if written:
-                        scaffolded = sorted(set(scaffolded) | set(written))
-                        log(f"[codegen] host compiled {written}")
                 if not time_up():
                     # A-flip: the HOST verifies whatever landed (build +
                     # boot + route probes + extra ports) — once per batch.
@@ -3724,8 +3883,8 @@ def main() -> int:
                     # batch stays blocked in the plan.
                     r_err, r_report = rehearse_node(
                         output_dir, smoke_port, probe_list,
-                        spec_ports_extra, fixture_probe_list())
-                    report_vrows = r_report.get("validation_probes") or []
+                        spec_ports_extra, fixture_probe_list(),
+                        seed_rows=seed_rows_expected)
                     log(f"[plan] batch {focus_id} rehearsal "
                         f"{'GREEN' if r_err is None else 'RED'}: "
                         f"{(r_err or 'ok').splitlines()[0][:200]}")
@@ -3740,8 +3899,8 @@ def main() -> int:
                                 min(node_timeout, r_wall), r_wall)
                             r_err, r_report = rehearse_node(
                                 output_dir, smoke_port, probe_list,
-                                spec_ports_extra, fixture_probe_list())
-                            report_vrows = r_report.get("validation_probes") or []
+                                spec_ports_extra, fixture_probe_list(),
+                                seed_rows=seed_rows_expected)
                             log(f"[plan] batch {focus_id} repair "
                                 f"{fix_attempt}: "
                                 f"{'GREEN' if r_err is None else 'RED'}")
@@ -3844,10 +4003,6 @@ def main() -> int:
 
 
 
-            if codegen:
-                codegen.stop()
-                if codegen.sync():
-                    log("[codegen] final compile done")
             # Final verification pass; octos leaves the port free.
             ok, text = False, "skipped: time budget"
             if time_up():
@@ -3861,7 +4016,7 @@ def main() -> int:
                 log("[plan] final host verification (Tier-1 probes)")
                 f_err, f_report = rehearse_node(
                     output_dir, smoke_port, probe_list, spec_ports_extra,
-                    fixture_probe_list())
+                    fixture_probe_list(), seed_rows=seed_rows_expected)
                 log(f"[plan] final rehearsal {'GREEN' if f_err is None else 'RED'}")
                 f_report.pop("validation_probes", None)
                 hs = {"rehearsal": f_report}
@@ -4040,11 +4195,43 @@ def main() -> int:
                         elif r_ok > 0:
                             log("[plan] Tier-2 re-run all green; "
                                 "fix verified by ground truth")
+                # O1(09-29 修复):final 修复轮后的重探针。此前 final 轮把
+                # 红项修好后宿主从不复查——批间 rehearsal 红掉的批永远停
+                # 在 blocked、事件面拿不到正向证据、仪表留陈旧红。现在对
+                # 同一 Tier-1 探针面(路由/夹具/种子完整性)重跑一次:
+                # 绿 → blocked 批升级 done + 事件补正,pre-final rehearsal
+                # 红被翻案。只升级 rehearsal-blocked 节点——deadline/budget
+                # skipped 的节点从未实现,绿探针证明不了它们。
+                _blocked_nodes = [nid for nid, st in plan_statuses.items()
+                                  if st == "blocked"]
+                if ((f_err is not None or _blocked_nodes)
+                        and not time_up()):
+                    rf_err, _rf_report = rehearse_node(
+                        output_dir, smoke_port, probe_list, spec_ports_extra,
+                        fixture_probe_list(), seed_rows=seed_rows_expected)
+                    log(f"[plan] post-final rehearsal "
+                        f"{'GREEN' if rf_err is None else 'RED'}")
+                    hs["post_final_rehearsal"] = {
+                        "green": rf_err is None,
+                        "digest": (rf_err or "")[-300:] or None}
+                    if rf_err is None:
+                        for nid in _blocked_nodes:
+                            plan_statuses[nid] = "done"
+                            if nid in failed:
+                                failed.remove(nid)
+                                events.mark_implementation_done(
+                                    nid, "recovered via final repair")
+                                node_done_notes[nid] = \
+                                    "recovered via final repair"
+                        if f_err is not None:
+                            ok = True
+                            text = ("post-final rehearsal green after "
+                                    "repair turn")
                 # final 验证仪表落盘(自留取证件,随工作区带回):Tier-1
                 # rehearsal 报告/Tier-2 两轮计数/page-health 红项——平台
                 # 不下发失败明细,这里是唯一的宿主侧验真记录。
                 try:
-                    hs_dir = output_dir / "octos-logs"
+                    hs_dir = output_dir / "octos"
                     hs_dir.mkdir(parents=True, exist_ok=True)
                     (hs_dir / "final-verification.json").write_text(
                         json.dumps(hs, ensure_ascii=False, indent=2) + "\n",
@@ -4100,7 +4287,9 @@ def main() -> int:
         for node in atomic_nodes:
             node_id = str(node.get("id"))
             if node_id in failed:
-                events.mark_test_failed(node_id, "final verification did not pass")
+                events.mark_test_failed(
+                    node_id,
+                    skip_reasons.get(node_id, "final verification did not pass"))
             elif plan_statuses.get(node_id) == "done":
                 events.mark_test_passed(
                     node_id, "batch rehearsal green (host build+boot+probes)")
@@ -4109,7 +4298,11 @@ def main() -> int:
         runtime.git.commit("chore: final verification pass")
 
         if failed:
-            events.mark_run_completed(f"completed with {len(failed)} failed node(s): {', '.join(failed)}")
+            note = f"completed with {len(failed)} failed node(s): {', '.join(failed)}"
+            if stage_deadline_hit:
+                note += (" (stage deadline reached — unstarted nodes "
+                         "recorded as skipped, normal exit)")
+            events.mark_run_completed(note)
         else:
             events.mark_run_completed("all requirement nodes implemented")
         _postflight_structure_check(output_dir, args.web_port)

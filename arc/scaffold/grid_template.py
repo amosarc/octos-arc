@@ -22,6 +22,37 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 export const colNum = (s) => String(s).toUpperCase().split('').reduce(
   (n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0);
 
+// Type-aware ordering for sort-driven features ("Numbers, parseable dates,
+// and text are compared according to their respective types"): values that
+// both parse as numbers compare numerically ('9' < '10'); values that both
+// look like ISO dates compare chronologically; everything else compares as
+// text by code units (deterministic — no locale variance). Array#sort is
+// stable, so equal keys keep their original relative order by construction.
+const asNumber = (v) => {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  const s = String(v === undefined || v === null ? '' : v).trim();
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+};
+const asDate = (v) => {
+  const s = String(v === undefined || v === null ? '' : v).trim();
+  if (!/^\\d{4}-\\d{2}-\\d{2}/.test(s)) return null;
+  const t = Date.parse(s);
+  return Number.isNaN(t) ? null : t;
+};
+export function compareValues(a, b) {
+  const na = asNumber(a);
+  const nb = asNumber(b);
+  if (na !== null && nb !== null) return na - nb;
+  const da = asDate(a);
+  const dd = asDate(b);
+  if (da !== null && dd !== null) return da - dd;
+  const sa = a === undefined || a === null ? '' : String(a);
+  const sb = b === undefined || b === null ? '' : String(b);
+  return sa < sb ? -1 : sa > sb ? 1 : 0;
+}
+
 export const colLetter = (n) => {
   let out = '';
   let j = n - 1;

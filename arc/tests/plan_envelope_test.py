@@ -117,14 +117,25 @@ class ValidationProbeTests(unittest.TestCase):
 
 
 class HostStackRulesTests(unittest.TestCase):
-    def test_contains_stack_facts_and_generic_validation(self):
-        r = pe.HOST_STACK_RULES
+    def test_goal_first_rules_carry_substrate_and_model_ownership(self):
+        r = pe.HOST_STACK_RULES_GOAL_FIRST
         for needle in ["scrypt", "ARC_EXTRA_PORTS", "never run npm install",
-                       "schema.json", "/api/auth/register",
-                       "SERVER-SIDE VALIDATION", "min, min+1, max, max+1",
-                       "a 5xx on any input is a bug"]:
+                       "backend/src/routes", "ALL API endpoints are YOURS",
+                       "seed-accounts.json", "db.run.json must NEVER ship",
+                       "FIXTURE CONTRACT",
+                       # 09-28 技术选型层:库式基座在契约中逐一点名
+                       "src/lib/session.js", "src/lib/crud.js",
+                       "frontend/src/app/csv.js", "frontend/src/app/undo.js",
+                       "frontend/src/app/router.js",
+                       "tx (atomic", "nextSeq"]:
             self.assertIn(needle, r)
-        self.assertLessEqual(len(r), 6000)  # wire 上限(planctl mod.rs:99)
+        self.assertLessEqual(len(r), 6000)
+        # 09-28 CRUD 生成器退役:声明协议/生成层词汇不得回流
+        self.assertNotIn("SCHEMA-DRIVEN", r)
+        self.assertNotIn("schema.json", r)
+        self.assertNotIn("engine.js", r)
+        self.assertNotIn("validate.js", r)
+        self.assertNotIn("lib/auth.js", r)
         # 通用内核文案撤销后不得回流:无普适 UI 行为条
         self.assertNotIn("RE-RENDER", r)
         self.assertNotIn("bilingual", r)
@@ -171,11 +182,7 @@ class HostScaffoldTests(unittest.TestCase):
                 "backend/src/app.js",
                 "backend/src/index.js",
                 "backend/src/lib/util.js",
-                "backend/src/lib/validate.js",
-                "backend/src/lib/auth.js",
                 "backend/src/database/store.js",
-                "backend/src/database/engine.js",
-                "backend/src/database/schema.js",
                 "backend/src/routes/index.js",
                 "backend/data/db.json",
                 "frontend/package.json",
@@ -250,17 +257,47 @@ class FixtureProbeTests(unittest.TestCase):
         logins = [{"username": "org-owner", "password": "pw"},
                   {"username": "ghost"},
                   {"username": "alice-dev", "password": "quoted-pw"}]
-        probes = pe.build_fixture_probes(logins, ["users", "organizations"])
-        logins_only = [p for p in probes if p.get("kind") == "login"]
-        self.assertEqual([p["user"] for p in logins_only],
+        probes = pe.build_fixture_probes(logins)
+        self.assertEqual([p["user"] for p in probes],
                          ["org-owner", "alice-dev"])
-        for p in logins_only:
+        for p in probes:
             self.assertEqual(json.loads(p["body"])["password"] in
                              ("pw", "quoted-pw"), True)
 
-    def test_login_probe_cap_leaves_room_for_entities(self):
+    def test_declared_path_overrides_default_login_route(self):
+        # CRUD 生成器退役:登录路由形状归模型,声明条目的 path 字段
+        # 覆盖缺省约定 /api/auth/login。
+        probes = pe.build_fixture_probes([
+            {"username": "u", "password": "p", "path": "/api/login"},
+            {"username": "v", "password": "p"}])
+        self.assertEqual(probes[0]["path"], "/api/login")
+        self.assertEqual(probes[1]["path"], "/api/auth/login")
+
+    def test_declared_entry_supersedes_compiled_duplicate(self):
+        # 09-29 审计:同名去重、声明优先——模型声明了真实路由后,
+        # compiled 缺省条目不得再探测死路径造成永久红。
+        probes = pe.build_fixture_probes([
+            {"username": "alice", "password": "p", "path": "/api/login"},
+            {"username": "alice", "password": "p"},
+            {"username": "bob", "password": "p"}])
+        self.assertEqual([p["user"] for p in probes], ["alice", "bob"])
+        self.assertEqual(probes[0]["path"], "/api/login")
+
+    def test_declared_body_overrides_default_shape(self):
+        # 声明条目可用 body 逐字覆写请求体——宿主对模型自报声明
+        # 不设字段形状假设。
+        probes = pe.build_fixture_probes([
+            {"username": "u", "password": "p",
+             "body": '{"identifier":"u","secret":"p"}'}])
+        self.assertEqual(probes[0]["body"],
+                         '{"identifier":"u","secret":"p"}')
+        # 无 body 声明仍走缺省形状
+        probes = pe.build_fixture_probes([{"username": "v", "password": "p"}])
+        self.assertEqual(json.loads(probes[0]["body"]),
+                         {"username": "v", "password": "p"})
+
+    def test_login_probe_cap(self):
         logins = [{"username": f"u{i}", "password": "pw"} for i in range(9)]
-        probes = pe.build_fixture_probes(logins, ["organizations", "teams"])
-        self.assertEqual(len([p for p in probes if p.get("kind") == "login"]), 4)
-        self.assertEqual(len([p for p in probes if p.get("kind") == "entity"]), 2)
-        self.assertEqual(len(probes), 6)
+        probes = pe.build_fixture_probes(logins)
+        self.assertEqual(len(probes), 8)
+        self.assertEqual(pe.build_fixture_probes([]), [])

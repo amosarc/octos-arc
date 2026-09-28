@@ -1,13 +1,15 @@
-"""scaffold 包测试:load/compile/template-static/template-smoke + 防漂移一致性。
+"""scaffold 包测试:template-static/template-smoke + 防漂移一致性。
 
-用法: python3 arc/scaffold_test.py -v
+用法: python3 arc/tests/scaffold_test.py -v
 模板冒烟会真实 npm install express(npmmirror)并跑 node 端到端流程;
 node/npm 缺失时对应用例跳过。
 
-一致性组(ManifestConsistencyTests)是本次封装的核心回归面:路径知识此前
+一致性组(ManifestConsistencyTests)是封装的核心回归面:路径知识此前
 散布 4 层(生成/编译/就绪判定/文字契约),收敛到 manifest 后用测试钉住
 "清单 ↔ 模板内容 ↔ 文字契约 ↔ 冒烟脚本"四者不漂移——这正是参考项目
 agent-arc-built(template.yaml 无代码执行)踩过的坑。
+09-28 CRUD 生成器退役:schema 编译组(LoadSchema/CompileSchema)随
+codegen.py 删除;基座冒烟只承诺装配/健康/存储/重启回种子。
 """
 
 from __future__ import annotations
@@ -25,136 +27,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import plan_envelope as pe  # noqa: E402
 import scaffold as sc  # noqa: E402
 
-VALID = {
-    "entities": [
-        {"name": "users", "auth": True, "fields": [
-            {"name": "username", "label": "用户名", "type": "string",
-             "required": True, "unique": True, "format": "username"},
-            {"name": "email", "type": "email", "unique": True},
-            {"name": "password", "type": "password", "required": True},
-            {"name": "confirmPassword", "match": "password"},
-            {"name": "idType", "enum": ["护照", "居民身份证"]},
-        ]},
-        {"name": "things", "fields": [
-            {"name": "name", "type": "string", "required": True, "max": 255},
-        ]},
-    ]
-}
-
 
 def _node_bin() -> str | None:
     return shutil.which("node")
-
-
-class LoadSchemaTests(unittest.TestCase):
-    def _load(self, raw: str | None):
-        with TemporaryDirectory() as td:
-            out = Path(td)
-            p = sc.schema_path(out)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            if raw is not None:
-                p.write_text(raw, encoding="utf-8")
-            return sc.load_schema(out)
-
-    def test_valid_schema_round_trips(self):
-        s, err = self._load(json.dumps(VALID))
-        self.assertIsNone(err)
-        self.assertEqual([e["name"] for e in s["entities"]],
-                         ["users", "things"])
-
-    def test_absent_and_invalid_json(self):
-        s, err = self._load(None)
-        self.assertIsNone(s)
-        self.assertEqual(err, "absent")
-        s, err = self._load("{nope")
-        self.assertIsNone(s)
-        self.assertIn("invalid json", err)
-
-    def test_structure_violations(self):
-        cases = [
-            ('{"x":1}', "entities"),
-            ('{"entities":[{"name":"1bad","fields":[]}]}', "identifier"),
-            ('{"entities":[{"name":"a","fields":[{"name":"f"},{"name":"f"}]}]}', "duplicate field"),
-            ('{"entities":[{"name":"a","fields":[{"name":"f","type":"blob"}]}]}', "unknown type"),
-            ('{"entities":[{"name":"a","fields":[{"name":"f","format":"uuid"}]}]}', "unknown format"),
-            ('{"entities":[{"name":"a","fields":[{"name":"f","min":"3"}]}]}', "must be int"),
-            ('{"entities":[{"name":"a","fields":[{"name":"f","match":"g"}]}]}', "unknown field"),
-            ('{"entities":[{"name":"a","fields":[]},{"name":"a","fields":[]}]}', "duplicate entity"),
-        ]
-        for raw, needle in cases:
-            s, err = self._load(raw)
-            self.assertIsNone(s, raw)
-            self.assertIn(needle, err, raw)
-
-    def test_match_forward_reference_ok(self):
-        s, err = self._load('{"entities":[{"name":"a","fields":['
-                            '{"name":"c","match":"p"},{"name":"p","type":"string"}]}]}')
-        self.assertIsNone(err)
-        self.assertEqual(s["entities"][0]["fields"][0]["match"], "p")
-
-
-class CompileSchemaTests(unittest.TestCase):
-    def test_compile_route_literals_and_idempotence(self):
-        with TemporaryDirectory() as td:
-            out = Path(td)
-            sc.scaffold(out)
-            p = sc.schema_path(out)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(VALID), encoding="utf-8")
-            written = sc.compile_schema(out)
-            self.assertEqual(written, [str(sc.codegen.SCHEMA_JS)])
-            js = (out / sc.codegen.SCHEMA_JS).read_text(encoding="utf-8")
-            self.assertIn("/api/users", js)
-            self.assertIn("/api/things", js)
-            self.assertIn('"auth": true', js)
-            self.assertEqual(sc.compile_schema(out), [], "unchanged → skip")
-            p.write_text(json.dumps({"entities": []}), encoding="utf-8")
-            self.assertEqual(sc.compile_schema(out), [str(sc.codegen.SCHEMA_JS)])
-            self.assertIn("entities", (out / sc.codegen.SCHEMA_JS).read_text())
-
-    def test_invalid_schema_compiles_nothing(self):
-        with TemporaryDirectory() as td:
-            out = Path(td)
-            sc.scaffold(out)
-            p = sc.schema_path(out)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text('{"entities":[{"name":"a","fields":[{"name":"f","type":"blob"}]}]}',
-                         encoding="utf-8")
-            self.assertEqual(sc.compile_schema(out), [])
-            self.assertFalse((out / sc.codegen.SCHEMA_JS).read_text().count("blob"))
-
-    def test_message_bridge_maps_requirement_quotes(self):
-        # C1(09-27):需求引号消息 sidecar → 字段三态消息 + loginFailure。
-        # 模型显式写的 message/messages 永不被覆盖;不匹配的串是无害噪音。
-        with TemporaryDirectory() as td:
-            out = Path(td)
-            sc.scaffold(out)
-            p = sc.schema_path(out)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps({"entities": [
-                {"name": "users", "auth": True, "fields": [
-                    {"name": "username", "type": "string", "required": True,
-                     "unique": True},
-                    {"name": "title", "type": "string", "required": True},
-                    {"name": "email", "type": "string", "required": True,
-                     "unique": True, "message": "Model override"}]}]}),
-                encoding="utf-8")
-            from scaffold.manifest import REQ_MESSAGES_REL
-            sidecar = out / REQ_MESSAGES_REL
-            sidecar.parent.mkdir(parents=True, exist_ok=True)
-            sidecar.write_text(json.dumps([
-                "Username already exists", "Title is required",
-                "Email already exists", "Invalid credentials",
-                "A workbook must contain at least one worksheet"]),
-                encoding="utf-8")
-            sc.compile_schema(out)
-            compiled = (out / sc.codegen.SCHEMA_JS).read_text(encoding="utf-8")
-            self.assertIn('"Username already exists"', compiled)   # 字段名直配→duplicate
-            self.assertIn('"Title is required"', compiled)         # →required
-            self.assertNotIn('"Email already exists"', compiled)   # 模型 message 优先,不覆盖
-            self.assertIn("loginFailure", compiled)                # credential 族→loginFailure
-            self.assertIn('"Invalid credentials"', compiled)
-            self.assertNotIn("workbook", compiled.lower())         # 无害噪音不进 schema
 
 
 class TaskShapeTests(unittest.TestCase):
@@ -235,7 +110,7 @@ class TaskShapeTests(unittest.TestCase):
 
 
 class ScaffoldLifecycleTests(unittest.TestCase):
-    """scaffold/template_ready/template_complete 的幂等与判定语义。"""
+    """scaffold/template_ready 的幂等与判定语义。"""
 
     def test_scaffold_writes_all_and_is_idempotent(self):
         with TemporaryDirectory() as td:
@@ -250,27 +125,43 @@ class ScaffoldLifecycleTests(unittest.TestCase):
             sc.scaffold(out)
             self.assertEqual((out / ".npmrc").read_text(), "custom\n")
 
-    def test_readiness_gates(self):
+    def test_readiness_gate(self):
         with TemporaryDirectory() as td:
             out = Path(td)
             self.assertFalse(sc.template_ready(out))
-            self.assertFalse(sc.template_complete(out))
             sc.scaffold(out)
             self.assertTrue(sc.template_ready(out))
-            self.assertTrue(sc.template_complete(out))
-            # 缺 schema.js 占位 → 不完整(compiled 或被模型删过都算)
-            (out / sc.SCHEMA_JSON_REL).parent.mkdir(parents=True, exist_ok=True)
-            (out / "backend/src/database/schema.js").unlink()
-            self.assertTrue(sc.template_ready(out))
-            self.assertFalse(sc.template_complete(out))
+
+    def test_generator_files_are_gone(self):
+        # 09-28 CRUD 生成器退役:生成层文件不再是模板的一部分,
+        # scaffold 包也不再暴露编译面(防回退)。
+        for rel in ("backend/src/lib/validate.js", "backend/src/lib/auth.js",
+                    "backend/src/database/engine.js",
+                    "backend/src/database/schema.js"):
+            self.assertNotIn(rel, sc.SCAFFOLD_FILES)
+        for name in ("compile_schema", "load_schema", "schema_path",
+                     "Watcher", "template_complete"):
+            self.assertFalse(hasattr(sc, name), name)
+        app_js = sc.SCAFFOLD_FILES["backend/src/app.js"][0]
+        self.assertNotIn("database/schema", app_js)
+        self.assertNotIn("lib/auth", app_js)
+        self.assertNotIn("database/engine", app_js)
 
     def test_model_owned_files_never_scaffolded(self):
         with TemporaryDirectory() as td:
             out = Path(td)
             sc.scaffold(out)
-            for rel in sc.MODEL_FILES:
-                self.assertFalse((out / rel).exists(),
-                                 f"{rel} 属模型独占,宿主不得落盘")
+            # 模型独占面:features 业务组件(README 契约除外)与 schema
+            # 声明(已随生成器退役,宿主不再落 starter)。
+            self.assertFalse((out / "backend/data/schema.json").exists())
+            self.assertFalse(
+                any((out / "frontend/src/features").glob("*.jsx")),
+                "features 业务文件属模型,宿主只落 README.md")
+            # routes/ 宿主只落空扩展点 index.js;家族业务模块(taskshape
+            # stub)只在 scaffold_task_features 时播种。
+            self.assertEqual(
+                [p.name for p in (out / "backend/src/routes").glob("*.js")],
+                ["index.js"])
 
 
 class TemplateStaticTests(unittest.TestCase):
@@ -297,32 +188,30 @@ class ManifestConsistencyTests(unittest.TestCase):
     """防漂移:清单 ↔ 文字契约 ↔ 冒烟脚本 ↔ 模板内容互相咬合。"""
 
     def test_host_stack_rules_names_every_contract_path(self):
-        # HOST_STACK_RULES 是发给模型的文字契约;清单里登记的契约路径
-        # 必须逐一点名,否则模型会改写宿主文件或漏掉扩展点。
+        # HOST_STACK_RULES_GOAL_FIRST 是发给模型的文字契约;清单里登记的
+        # 契约路径必须逐一点名,否则模型会改写宿主文件或漏掉扩展点。
         for name in sc.RULES_MUST_NAME:
-            self.assertIn(name, pe.HOST_STACK_RULES,
-                          f"HOST_STACK_RULES 缺少 {name!r}")
-
-    def test_cookie_name_single_sourced(self):
-        # cookie 名在 AUTH_JS 模板与 template_smoke.js 断言链两处出现,
-        # manifest 是唯一字面源。
-        auth_js = sc.SCAFFOLD_FILES["backend/src/lib/auth.js"][0]
-        self.assertIn(f"const COOKIE = '{sc.COOKIE_NAME}'", auth_js)
-        smoke = (Path(__file__).resolve().parent / "template_smoke.js").read_text(
-            encoding="utf-8")
-        self.assertIn(sc.COOKIE_NAME, smoke)
+            self.assertIn(name, pe.HOST_STACK_RULES_GOAL_FIRST,
+                          f"goal-first rules 缺少 {name!r}")
 
     def test_manifest_covers_backend_js_and_frontend(self):
         backend_js = {rel for rel in sc.SCAFFOLD_FILES
                       if rel.startswith("backend/src") and rel.endswith(".js")}
-        self.assertTrue({"backend/src/app.js", "backend/src/lib/auth.js",
-                         "backend/src/database/schema.js"} <= backend_js)
+        self.assertTrue({"backend/src/app.js", "backend/src/index.js",
+                         "backend/src/lib/util.js",
+                         "backend/src/lib/session.js",
+                         "backend/src/lib/crud.js",
+                         "backend/src/database/store.js",
+                         "backend/src/routes/index.js"} <= backend_js)
         frontend_files = {rel for rel in sc.SCAFFOLD_FILES
                           if rel.startswith("frontend/")}
         self.assertTrue({"frontend/package.json", "frontend/src/main.jsx",
                          "frontend/src/app/App.jsx",
                          "frontend/src/app/store.jsx",
                          "frontend/src/app/api.js",
+                         "frontend/src/app/csv.js",
+                         "frontend/src/app/undo.js",
+                         "frontend/src/app/router.js",
                          "frontend/src/app/styles.css"} <= frontend_files)
 
     def test_frontend_modular_contract_pieces_exist(self):
@@ -336,9 +225,9 @@ class ManifestConsistencyTests(unittest.TestCase):
                          "main.jsx must stay a thin bootstrap, not carry App")
         store_jsx = sc.SCAFFOLD_FILES["frontend/src/app/store.jsx"][0]
         self.assertIn("useResource", store_jsx)
-        rules = pe.HOST_STACK_RULES
+        rules = pe.HOST_STACK_RULES_GOAL_FIRST
         self.assertIn("frontend/src/features", rules)
-        self.assertIn("NEVER edit another requirement's feature file", rules)
+        self.assertIn("GRID EDITOR KERNEL", rules)
 
     def test_store_seed_runtime_split(self):
         # 种子/运行时双文件:db.json 是模型种子,db.run.json 是运行态,
@@ -420,14 +309,9 @@ class TemplateSmokeTests(unittest.TestCase):
         npm = shutil.which("npm")
         if not node or not npm:
             self.skipTest("node/npm not available")
-        # output_dir 必须是工作区根(SCHEMA_JSON/SCHEMA_JS 为根相对路径)。
         with TemporaryDirectory() as td:
             out = Path(td)
             sc.scaffold(out)
-            p = sc.schema_path(out)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(VALID), encoding="utf-8")
-            self.assertEqual(sc.compile_schema(out), [str(sc.codegen.SCHEMA_JS)])
             backend = out / "backend"
             env = {"PATH": "/usr/local/bin:/usr/bin:/bin",
                    "npm_config_registry": sc.NPM_REGISTRY}
@@ -439,6 +323,103 @@ class TemplateSmokeTests(unittest.TestCase):
             smoke = Path(__file__).resolve().parent / "template_smoke.js"
             r = subprocess.run([node, str(smoke)], cwd=backend,
                                capture_output=True, text=True, timeout=120)
+            self.assertEqual(r.returncode, 0,
+                             f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}")
+
+    def test_frontend_build_and_csv_lib(self):
+        """vite 集成构建(含 undo/router 的 react import)+ csv.js 纯函数
+        行为单测(ESM,frontend package.json type=module 使 node 直测)。"""
+        node = _node_bin()
+        npm = shutil.which("npm")
+        if not node or not npm:
+            self.skipTest("node/npm not available")
+        with TemporaryDirectory() as td:
+            out = Path(td)
+            sc.scaffold(out)
+            frontend = out / "frontend"
+            env = {"PATH": "/usr/local/bin:/usr/bin:/bin",
+                   "npm_config_registry": sc.NPM_REGISTRY}
+            r = subprocess.run([npm, "install", "--no-audit", "--no-fund",
+                                "--loglevel", "error"],
+                               cwd=frontend, env=env, capture_output=True,
+                               text=True, timeout=600)
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+            # vite build:App/store 集成 sanity(注:未接线工具箱库不在
+            # import 图里,vite 不会碰它们——语法门在下方 esbuild)。
+            r = subprocess.run([npm, "run", "build"], cwd=frontend, env=env,
+                               capture_output=True, text=True, timeout=300)
+            self.assertEqual(r.returncode, 0,
+                             f"stdout:\n{r.stdout[-800:]}\nstderr:\n{r.stderr[-800:]}")
+            # 语法门:工具箱库不在 vite 构建图内,esbuild transform 逐个
+            # 解析(undo/router 的 react import 在 transform 模式不解析)。
+            esbuild = frontend / "node_modules" / ".bin" / "esbuild"
+            libs = ["src/app/undo.js", "src/app/router.js",
+                    "src/app/grid.js", "src/app/formula.js",
+                    "src/app/csv.js", "src/app/ui.jsx"]
+            r = subprocess.run([str(esbuild), *libs,
+                                f"--outdir={out / 'esb-out'}"],
+                               cwd=frontend, env=env, capture_output=True,
+                               text=True, timeout=120)
+            self.assertEqual(r.returncode, 0,
+                             f"stdout:\n{r.stdout[-500:]}\nstderr:\n{r.stderr[-500:]}")
+            # JSX/ESM 语法门(esbuild 就位于本用例 npm install 之后):
+            # 截断的 .jsx 与截断的 ESM .js 必须被 js_syntax_errors 抓到,
+            # 正常模板件必须零误报。
+            import main as arc_main
+            (frontend / "src" / "Broken.jsx").write_text(
+                "export default function Broken() {\n  return (<div>\n",
+                encoding="utf-8")
+            (frontend / "src" / "app" / "Broken.js").write_text(
+                "export const x = (\n", encoding="utf-8")
+            errs = arc_main.js_syntax_errors(out)
+            self.assertTrue(
+                any("Broken.jsx" in e for e in errs), errs)
+            self.assertTrue(
+                any("Broken.js" in e for e in errs), errs)
+            self.assertTrue(
+                all("Broken" in e for e in errs),
+                f"false positives on pristine template files: {errs}")
+            (frontend / "src" / "Broken.jsx").unlink()
+            (frontend / "src" / "app" / "Broken.js").unlink()
+            # csv.js 行为单测 + grid.js compareValues 单测:零依赖纯函数,
+            # node ESM 直测(grid 的 react import 从 frontend/node_modules 解析)。
+            csv_url = (frontend / "src" / "app" / "csv.js").as_uri()
+            grid_url = (frontend / "src" / "app" / "grid.js").as_uri()
+            harness = r'''
+import { parseCSV, stringifyCSV, parseTSV } from "__CSV_URL__";
+import { compareValues } from "__GRID_URL__";
+const ok = (n, c) => { if (!c) { console.error('FAIL ' + n); process.exit(1); } console.log('PASS ' + n); };
+let r = parseCSV('a,b\n1,2');
+ok('basic', !r.error && JSON.stringify(r.rows) === '[["a","b"],["1","2"]]');
+r = parseCSV('"x,y","he said ""hi""","line1\nline2"');
+ok('quoted', !r.error && r.rows[0][0] === 'x,y' && r.rows[0][1] === 'he said "hi"' && r.rows[0][2] === 'line1\nline2');
+r = parseCSV('\uFEFFa,b');
+ok('bom', !r.error && r.rows[0][0] === 'a');
+ok('unterminated', !!parseCSV('"oops').error);
+r = parseCSV('a,b\n1,2\n');
+ok('trailing-newline', !r.error && r.rows.length === 2);
+const out = stringifyCSV([['a','b'],['x,y','he said "hi"']]);
+ok('stringify-byte-exact', out === 'a,b\r\n"x,y","he said ""hi"""\r\n');
+ok('roundtrip', !parseCSV(out).error);
+r = parseTSV('a\tb\nc\td');
+ok('tsv', !r.error && JSON.stringify(r.rows) === '[["a","b"],["c","d"]]');
+r = parseCSV('a,,c');
+ok('empty-cells', !r.error && r.rows[0][1] === '' && r.rows[0][2] === 'c');
+ok('cmp-numeric-text', compareValues('9', '10') < 0 && compareValues(2, 10) < 0);
+ok('cmp-date', compareValues('2026-01-02', '2026-03-01') < 0);
+ok('cmp-text', compareValues('abc', 'abd') < 0);
+ok('cmp-mixed-falls-to-text', compareValues('abc', '5') > 0);
+ok('cmp-empty-vs-value', compareValues('', 'x') < 0);
+const sorted = ['10', '9', 'abc', '2026-02-01', '2025-12-31', '2']
+  .sort(compareValues);
+ok('cmp-full-sort', JSON.stringify(sorted) === JSON.stringify(
+  ['2', '9', '10', '2025-12-31', '2026-02-01', 'abc']));
+console.log('libs harness OK');
+'''.replace("__CSV_URL__", csv_url).replace("__GRID_URL__", grid_url) + "\n"
+            harness_path = Path(td) / "csv_harness.mjs"
+            harness_path.write_text(harness, encoding="utf-8")
+            r = subprocess.run([node, str(harness_path)], cwd=frontend,
+                               capture_output=True, text=True, timeout=60)
             self.assertEqual(r.returncode, 0,
                              f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}")
 

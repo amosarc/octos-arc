@@ -28,110 +28,10 @@ WIPE_GLOBS = ("*.spec.ts", "support")
 
 # 宿主环境事实(grading 形状)——现印进每个工单正文(=0 回退路径用)。
 # 刻意不含任何 UI 行为规则:任务的验收规则来自 requirements.yaml 本身,
-# 宿主不发明规则(09-27 定则)。
-HOST_STACK_RULES = """\
-HOST CONTRACT (graded Playwright specs are ground truth — where the \
-requirement text disagrees, the spec wins):
-STACK: React(Vite) frontend + Express backend, PREBUILT BY THE HOST — \
-the backend already runs. Host-owned (never rewrite): src/app.js + \
-src/index.js (bootstrap; PORT + ARC_EXTRA_PORTS; serves frontend/dist), \
-src/lib/util.js (responses/cookies/ids), src/lib/validate.js \
-(schema-driven validators, English contract-family error defaults), \
-src/database/store.js (atomic JSON store: coll/one/all/dup/insert/\
-remove/save + scrypt hash/verify), src/database/engine.js (schema-driven \
-CRUD factory), src/lib/auth.js (register/login/logout/me + sessions). Dependencies are PREINSTALLED — never run npm install, \
-never add npm packages.
-FRONTEND LAYOUT (isolation contract): every requirement's UI lives in \
-its OWN self-contained file frontend/src/features/<name>.jsx (default \
-export; component+state+styles colocated). Graded UI shapes are CODE: \
-frontend/src/app/ui.jsx ships NativeSelect (native <select>; graders \
-selectOption), AppDialog (native <dialog>), AccountTrigger (username \
-its own exact-text node + the requirement's trigger label), \
-SingleError (ONE visible error), Region ("A region named X" = \
-<Region label="X">) and FixedGrid (fixed-size role=grid; pass the \
-useGrid kernel); frontend/src/app/grid.js = the useGrid kernel (click \
-/ Shift-click-extend / drag / aria-selected built in); \
-frontend/src/app/formula.js = the cell formula engine — import, \
-never hand-roll. frontend/src/features/README.md (host-owned) \
-carries the GRID EDITOR KERNEL PATTERN — one shared grid kernel, \
-never per-feature re-implementations. \
-frontend/src/app/App.jsx is the ASSEMBLY layer only — \
-per feature one import+mount; the FIRST requirement may lay out the \
-page structure, never business logic after that. \
-Shared entities go through frontend/src/app/store.jsx \
-(useResource('<entity>')) — never duplicate shared state inside \
-features. NEVER edit another requirement's feature file; keep \
-frontend/src/main.jsx, frontend/src/app/api.js and \
-frontend/src/app/styles.css as-is (colocate feature styles with the \
-feature, or reuse the global classes).
-SCHEMA-DRIVEN BACKEND: to add data, write backend/data/schema.json = \
-{"entities":[{"name":"users","auth":true,"label":"用户名","fields":[...]}]}; \
-field keys: name, label (used in error messages), type \
-(string|number|boolean|password), required, unique, min, max, pattern \
-(JS regex), enum, match (mirror field, e.g. confirmPassword), format \
-(email|username|password), message (single) or messages \
-{required,invalid,duplicate} per reason (quoted "<X> is required"/ \
-"<X> already exists" auto-map; copy quoted error strings verbatim). \
-The host compiles it \
-to src/database/schema.js and mounts CRUD at /api/<entity> \
-automatically; entities with auth:true additionally get \
-/api/auth/register (validates ALL fields, scrypt-hashes the secret, \
-auto-login session), /api/auth/login (accepts any unique identifier \
-(username or email; trimmed, email case-insensitive), uniform failure message (quoted credential string wins via the codegen \
-bridge, default "Invalid username or password"; never reveals existence), /api/auth/logout, /api/me (session restore; sessions \
-survive server restart). Non-plain-CRUD endpoints (search/booking flows) go in \
-src/routes/index.js using store + lib helpers.
-FIXTURE CONTRACT (graded, not demo data): the `data:` section + every \
-scenario GIVEN line are the graded seed contract, already compiled into \
-backend/data/db.json. Names may carry a unique suffix, but roles, \
-ownership, visibility, relationships match VERBATIM; NEVER delete or rename seeded rows \
-or collections, and extend schema.json so every seeded field is \
-exposed. Scenarios that MODIFY data each need their OWN fresh \
-preconfigured instance (never share one mutable fixture across \
-scenarios). Files/commits are the single source of truth: branches \
-store head references only, NEVER duplicate whole file trees per \
-branch or fork. db.json is the SEED: runtime state goes to db.run.json \
-and every server restart resets to the seed (sh .arc/host/\
-restart-server.sh); db.run.json must NEVER ship.
-SERVER-SIDE VALIDATION (generic discipline, every task): the backend \
-re-validates ALL input and never trusts the client. Enforce the \
-contract's required/length/format/uniqueness rules EXACTLY, boundaries \
-included (min, min+1, max, max+1). Any rejected submit stays on the \
-page, shows exactly ONE visible error, and creates no records or \
-sessions. Empty, oversized, or wrong-type payloads must be rejected \
-(4xx) — a 5xx on any input is a bug. Before declaring done, walk the \
-FAILURE cases (empty/missing/oversized/duplicate), not just the happy \
-path.
-
-UI CONTRACT HYGIENE (graded in a real browser by the host smoke and \
-the hidden tests): every quoted string in a requirement is a VISIBLE \
-control with that EXACT accessible name — substring variants \
-("Delete worksheet" vs the required "Delete") fail, and hidden \
-<select> options are not visible controls (use a native <select> the \
-grader can selectOption, or visible radios/buttons); WIDGETS are \
-NATIVE-FIRST — dropdowns are always native <select> with real <option> \
-labels (a custom div dropdown is invisible to every selector), modals \
-prefer the native <dialog> \
-element (showModal() gives Escape/backdrop close and focus trapping \
-for free), and custom is built ONLY where HTML has no native widget \
-(menus/tabs/grids) with the requirement's exact ARIA roles mandatory; a DATA GRID renders its \
-COMPLETE structure — role="grid" with visible columnheader/rowheader \
-cells and gridcells named by coordinate (A1), never the data region \
-alone; a SUBMIT/SAVE control must become enabled once required fields \
-are filled — a permanently disabled submit can never be clicked by a \
-test; every dialog closes on Escape AND on cancel/overlay click — \
-an undismissable overlay blocks every later grader step; modifier \
-clicks keep selection (Shift-click extends the range — never \
-collapse it); downloads are \
-byte-exact: no UTF-8 BOM, exact CSV quoting."""
-
-# goal-first 变体(09-27 宿主优先→目标优先转向):后端数据面/夹具各段与
-# host-first 完全一致;差异只在 FRONTEND 段——frontend/src 全域归模型,
-# UI kit 从"必须用"降为"可选工具箱",需求原文是唯一权威。
-# 宿主不制定行为规则(09-27 定则):SERVER-SIDE VALIDATION 与 UI CONTRACT
-# HYGIENE 两段宿主发明纪律已裁——验收用例由模型根据需求自生成;
-# 留下的三段全是数据面基座的 API 说明书,非任务规则。
-# RULES_MUST_NAME 的路径拼写同样必须逐一点名(scaffold_test 双断言)。
+# 宿主不发明规则(09-27 定则)。09-28 CRUD 生成器退役:SCHEMA-DRIVEN
+# BACKEND 段与 engine/auth/validate 通用层整体删除——数据模型/API 形状/
+# 校验语义全归模型(backend/src/routes/),宿主只保留数据面基座
+# (store 双文件存储 + util + 装配)与种子/声明契约。
 HOST_STACK_RULES_GOAL_FIRST = """\
 HOST CONTRACT (goal-first: the requirement text is the authoritative \
 product contract — quoted names are exact accessible names, quoted \
@@ -142,69 +42,78 @@ derive the behavior and the tests from the requirement text):
 STACK: React(Vite) frontend + Express backend, PREBUILT BY THE HOST — \
 the backend already runs. Host-owned (never rewrite): src/app.js + \
 src/index.js (bootstrap; PORT + ARC_EXTRA_PORTS; serves frontend/dist), \
-src/lib/util.js (responses/cookies/ids), src/lib/validate.js \
-(schema-driven validators, English contract-family error defaults), \
-src/database/store.js (atomic JSON store: coll/one/all/dup/insert/\
-remove/save + scrypt hash/verify), src/database/engine.js (schema-driven \
-CRUD factory), src/lib/auth.js (register/login/logout/me + sessions). Dependencies are PREINSTALLED — never run npm install, \
-never add npm packages.
+src/lib/util.js (responses/cookies/ids), src/lib/session.js (session \
+token/cookie/currentUser mechanics on the store — YOU wire the \
+login/logout/me routes), src/lib/crud.js (OPTIONAL generic REST \
+factory: mount(app, '<collection>', {publicRow, validate, prepare, \
+listQuery}) per collection — hooks carry YOUR validation and exact \
+error strings; custom routes registered before mount take precedence), \
+src/database/store.js (seed/run dual-file JSON store: coll/one/get/all/\
+dup/insert/update/remove/save + query (where/sort/page) + tx (atomic \
+multi-write with rollback) + nextSeq (scoped auto-increment numbers) \
++ scrypt hash/verify). Dependencies are PREINSTALLED — never run npm \
+install, never add npm packages. ALL API endpoints are YOURS: \
+implement the requirement's data model, auth, and flows in \
+backend/src/routes/ with Express on top of store + these helpers — \
+routes, payload shapes, validation, and error messages follow the \
+requirement text, nothing else.
 FRONTEND (goal-first — the model owns it): frontend/src is yours to \
 shape as the requirements demand: frontend/src/app/App.jsx, the shell, \
 frontend/src/app/styles.css, and frontend/src/features/ — restructure \
 freely (a proven shape: one self-contained file per requirement family \
 under frontend/src/features/<name>.jsx, App.jsx a thin assembly layer). \
 Keep frontend/src/main.jsx, frontend/src/app/store.jsx \
-(useResource('<entity>')) and frontend/src/app/api.js working as the \
+(useResource('<resource>')) and frontend/src/app/api.js working as the \
 backend client — extend them, never fork shared state into features. \
 TOOLBOX (optional, unwired): frontend/src/app/ui.jsx ships proven \
 shapes — NativeSelect (dropdowns = native <select>, graders use \
 selectOption), AppDialog (native <dialog> modals), AccountTrigger \
 (username its own exact-text node + the requirement's trigger label — \
 the observed full-score shape), SingleError (one visible error \
-element), Region (render <Region label="X"> for a requirement phrase \
-"A region named X" — a section, so getByRole('region', {name}) \
-resolves; a div with aria-label has no region role) and FixedGrid \
+element), FieldError + byField (per-field parallel errors from the \
+backend {errors:[{field,msg}]} shape — registration-style forms must \
+show every field's message together), Region (render <Region label="X"> \
+for a requirement phrase "A region named X" — a section, so \
+getByRole('region', {name}) resolves; a div with aria-label has no \
+region role), useContextMenu + Menu (role=menu + menuitem buttons with \
+the requirement's exact labels, Escape/outside-click close — FixedGrid \
+routes its right-click/header-menu callbacks here) and FixedGrid \
 (fixed-size role=grid; pass the useGrid kernel as grid={...} and \
 click / Shift-click-extend / drag / aria-selected are handled for \
 you) — use them or roll your own; the requirement text is the only \
 authority. frontend/src/app/grid.js carries the useGrid selection/\
-editing kernel plus rectOf/inRectangle/rangeCoords geometry; \
+editing kernel plus rectOf/inRectangle/rangeCoords geometry and \
+compareValues (type-aware ordering: numbers, ISO dates, then text); \
 frontend/src/app/formula.js carries a cell formula engine \
 (displayValue/evalFormula/adjustFormula/shiftRefsOnRowChange/\
 shiftRefsOnColChange — =SUM(A1:A3)*2, =A1 + B1, =-A1, nested calls \
-and the #DIV/0!/#REF!/#NAME?/#ERROR! vocabulary included). \
+and the #DIV/0!/#REF!/#NAME?/#ERROR! vocabulary included); \
+frontend/src/app/csv.js carries RFC4180 CSV parse + byte-exact \
+stringify (no BOM, minimal quoting) + TSV clipboard parse + download \
+trigger + readFileText (file-import chain) + copyText (clipboard \
+write with fallback for the "Copy <value>" → "Copied" contracts); \
+frontend/src/app/undo.js carries a snapshot undo/redo stack \
+hook (you supply the getSnapshot closure — one whole-state snapshot \
+covers value, structure, rule and config edits alike); \
+frontend/src/app/router.js carries hash routing (parseRoute + \
+useHashRoute — deep links, refresh and back-forward stay consistent). \
 frontend/src/features/README.md carries the GRID EDITOR KERNEL \
 PATTERN — grid-like families build on ONE shared selection/editing \
 state model instead of re-implementing it per feature.
-SCHEMA-DRIVEN BACKEND: to add data, write backend/data/schema.json = \
-{"entities":[{"name":"users","auth":true,"label":"用户名","fields":[...]}]}; \
-field keys: name, label (used in error messages), type \
-(string|number|boolean|password), required, unique, min, max, pattern \
-(JS regex), enum, match (mirror field, e.g. confirmPassword), format \
-(email|username|password), message (single) or messages \
-{required,invalid,duplicate} per reason (quoted "<X> is required"/ \
-"<X> already exists" auto-map; copy quoted error strings verbatim). \
-The host compiles it \
-to src/database/schema.js and mounts CRUD at /api/<entity> \
-automatically; entities with auth:true additionally get \
-/api/auth/register (validates ALL fields, scrypt-hashes the secret, \
-auto-login session), /api/auth/login (accepts any unique identifier \
-(username or email; trimmed, email case-insensitive), uniform failure message (quoted credential string wins via the codegen \
-bridge, default "Invalid username or password"; never reveals existence), /api/auth/logout, /api/me (session restore; sessions \
-survive server restart). Non-plain-CRUD endpoints (search/booking flows) go in \
-src/routes/index.js using store + lib helpers.
 FIXTURE CONTRACT (graded, not demo data): the `data:` section + every \
 scenario GIVEN line are the graded seed contract, already compiled into \
 backend/data/db.json. Names may carry a unique suffix, but roles, \
 ownership, visibility, relationships match VERBATIM; NEVER delete or rename seeded rows \
-or collections, and extend schema.json so every seeded field is \
-exposed. Scenarios that MODIFY data each need their OWN fresh \
+or collections, and expose every seeded row through your API. Scenarios that MODIFY data each need their OWN fresh \
 preconfigured instance (never share one mutable fixture across \
 scenarios). Files/commits are the single source of truth: branches \
 store head references only, NEVER duplicate whole file trees per \
 branch or fork. db.json is the SEED: runtime state goes to db.run.json \
 and every server restart resets to the seed (sh .arc/host/\
-restart-server.sh); db.run.json must NEVER ship."""
+restart-server.sh); db.run.json must NEVER ship. Declare EVERY \
+account your auth provisions in backend/data/seed-accounts.json \
+(see the FIXTURE section of your system prompt for the exact shape \
+the host login-probe verifies)."""
 
 
 def rehearsal_boot_env(base_env: dict, smoke_port: int, extra_ports: list) -> dict:
@@ -245,37 +154,46 @@ def build_validation_probes(routes: list) -> list[dict]:
     return probes
 
 
-def build_fixture_probes(logins: list[dict], collections: list[str]) -> list[dict]:
+def build_fixture_probes(logins: list[dict]) -> list[dict]:
     """夹具探针(宿主 0-token 验证,复用 rehearsal-repair 回路)。
 
-    - login: POST /api/auth/login(宿主固定 auth 路由)期待 200;
-      400/401 = 声明的账号/密码与实际认证不符,404 = auth 实体未声明。
-      登录清单优先取模型自报的 backend/data/seed-accounts.json(角色
-      账号由模型推理决定,宿主只验证其声明),逐字转录种子殿后。
-      无密码条目跳过——宿主不再有统一密码兜底(09-28 退役)。
-    - entity: GET /api/<name> 期待 200 且非空;空 = 宿主种子行被删/集合被
-      改名,404 = schema.json 未暴露该实体。users(auth 实体)没有引擎
-      GET 路由,由 login 探针代管。判定语义在 _probe_routes_on 落地。
+    login:POST 到声明路径(条目可带 path,默认 /api/auth/login——纯
+    缺省约定,声明可覆盖;亦可带 body 逐字覆写请求体——模型对自己
+    的声明有完全控制权,宿主不设形状假设)期待 200;400/401 = 声明
+    的账号/密码与实际认证不符,404 = 声明路径无路由。清单优先取模型
+    自报的 backend/data/seed-accounts.json(角色账号由模型推理决定,
+    宿主只验证其声明),逐字转录种子殿后(同名去重,声明条目优先);
+    无密码条目跳过——宿主不再有统一密码兜底(09-28 退役)。
+    种子集合的 API 可达性不再走 HTTP 形状假设(CRUD 生成器退役后
+    端点形状归模型)——由 main.py 的文件级种子完整性检查承接
+    (db.json 种子行 vs 宿主编译清单)。判定语义在 _probe_routes_on 落地。
     """
     probes: list[dict] = []
+    seen: set[str] = set()
     for login in (logins or []):
-        if len(probes) >= 4:
+        if len(probes) >= 8:
             break
         username = str(login.get("username") or "")
         password = str(login.get("password") or "")
         if not username or not password:
             continue
-        probes.append({
-            "method": "POST", "path": "/api/auth/login", "kind": "login",
-            "user": username,
-            "body": json.dumps({
-                "username": username,
-                "password": password})})
-    for name in (collections or []):
-        if name == "users" or len(probes) >= 8:
+        # 按用户名去重,首现优先——调用点 declared 在前:模型声明条目
+        # (可带 path/body)压过 compiled 缺省条目,消灭"声明了真实路由、
+        # compiled 副本仍探测缺省路径"的永久红陷阱(09-29 审计)。
+        if username in seen:
             continue
-        probes.append({"method": "GET", "path": f"/api/{name}",
-                       "kind": "entity", "entity": name})
+        seen.add(username)
+        # 声明条目可用 body 逐字覆写请求体——宿主缺省形状
+        # ({"username","password"} JSON)对自报声明不设假设。
+        body = login.get("body")
+        if not isinstance(body, str) or not body.strip():
+            body = json.dumps({"username": username, "password": password})
+        probes.append({
+            "method": "POST",
+            "path": str(login.get("path") or "/api/auth/login"),
+            "kind": "login",
+            "user": username,
+            "body": body})
     return probes[:8]
 
 
