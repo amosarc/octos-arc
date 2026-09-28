@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import time
 from typing import Any
 
+from clock import stamp as timestamp
 from .context import RuntimePaths
 from .jsonio import append_jsonl
-
-
-def utc_timestamp() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
 
 class EventClient:
@@ -30,7 +26,7 @@ class EventClient:
                 "node_id": normalized_node_id,
                 "phase": str(phase or "").strip(),
                 "status": str(status or "").strip(),
-                "timestamp": utc_timestamp(),
+                "timestamp": timestamp(),
                 "message": message,
             },
         )
@@ -78,7 +74,7 @@ class EventClient:
             {
                 "type": "runner_state",
                 "state": str(state or "").strip(),
-                "timestamp": utc_timestamp(),
+                "timestamp": timestamp(),
                 "message": message,
             },
         )
@@ -100,7 +96,7 @@ class EventClient:
 
     def _emit_traceability_event(self, payload: dict[str, Any]) -> None:
         normalized = dict(payload)
-        normalized.setdefault("timestamp", utc_timestamp())
+        normalized.setdefault("timestamp", timestamp())
         append_jsonl(self.paths.runner_events_path, normalized)
 
     def _emit_refresh_signal(
@@ -119,7 +115,7 @@ class EventClient:
             {
                 "type": "signal",
                 "reason": str(reason or "").strip() or "arcbench_agent_runtime",
-                "timestamp": utc_timestamp(),
+                "timestamp": timestamp(),
                 "refresh": {
                     "submission": bool(submission),
                     "logs": bool(logs),

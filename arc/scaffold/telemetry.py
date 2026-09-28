@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
 from pathlib import Path
+
+from clock import iso as now_iso
 
 # index.html 回补钩子的锚点标记(scaffold 常量的内联脚本也含此 data 属性,
 # 存在即免注)。字符串形态与 scaffold/frontend.py 保持一致。
@@ -93,7 +94,7 @@ def ensure(output_dir, log=print) -> bool:
         with open(logs_dir / "eval-traffic.jsonl", "a",
                   encoding="utf-8") as fh:
             fh.write(json.dumps({
-                "t": datetime.now(timezone.utc).isoformat(),
+                "t": now_iso(),
                 "kind": "marker",
                 "note": "agent finished; platform eval follows"}) + "\n")
     except OSError as exc:

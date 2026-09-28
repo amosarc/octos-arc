@@ -49,7 +49,6 @@ import shutil
 import signal
 import socket
 import subprocess
-from datetime import datetime, timezone
 import sys
 import tempfile
 import threading
@@ -61,6 +60,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from arcbench_agent_runtime import AgentRuntime  # noqa: E402
+import clock  # noqa: E402  (时间戳单一时钟源:北京时间 UTC+8)
 import fixture_manifest  # noqa: E402  (夹具契约提取/宿主种子编译)
 import plan_envelope  # noqa: E402
 import scaffold  # noqa: E402  (宿主脚手架包:模板/清单/schema 编译唯一公开面)
@@ -120,13 +120,19 @@ def log(msg: str) -> None:
     more raw artifact the agent appends and the host renders. Only lines
     after runtime init land there (the probe phase predates the contract
     paths, same as the reference project).
+
+    Every line carries a Beijing-time (UTC+8) stamp from clock.py. The
+    platform prefixes its own UTC arrival stamp to stream lines — that one
+    is platform-side and not ours to change; the in-content stamp is what
+    makes each line self-describing for a Beijing reader.
     """
-    print(msg, flush=True)
-    print(msg, file=sys.stderr, flush=True)
+    stamped = f"[{clock.stamp()}] {msg}"
+    print(stamped, flush=True)
+    print(stamped, file=sys.stderr, flush=True)
     path = _DEBUG_LOG_PATH
     if path is None:
         return
-    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    stamp = clock.stamp()
     try:
         with _DEBUG_LOG_LOCK, path.open("a", encoding="utf-8") as fh:
             for line in str(msg).splitlines() or [""]:
@@ -2894,7 +2900,7 @@ def main() -> int:
     elif os.environ.get("ARCBENCH_TEMPLATE_DIR"):
         output_dir = Path(os.environ["ARCBENCH_TEMPLATE_DIR"]).resolve()
     else:
-        output_dir = Path.cwd() / "workspace" / f"run-{time.strftime('%Y%m%d-%H%M%S')}"
+        output_dir = Path.cwd() / "workspace" / f"run-{clock.compact()}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Mirror ARC: copy the requirement input into the workspace. On the

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from clock import stamp as timestamp
 from .context import RuntimePaths
 from .events import EventClient
 from .jsonio import read_json, write_json_atomic
@@ -19,10 +19,6 @@ TABLE_NAMES = (
     "node_states",
     "node_contracts",
 )
-
-
-def _utc_timestamp() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -588,7 +584,7 @@ class TraceabilityStore:
                 "from_interface_id": str(from_interface_id or "").strip(),
                 "to_interface_id": str(to_interface_id or "").strip(),
                 "edge_type": str(edge_type or "").strip() or "parent_child",
-                "created_at": _utc_timestamp(),
+                "created_at": timestamp(),
             },
         )
         self.events.notify_traceability_changed("call_edges_updated")
@@ -622,7 +618,7 @@ class TraceabilityStore:
                 "req_id": normalized_req_id,
                 "state": normalized_state,
                 "phase": _as_optional_str(phase),
-                "updated_at": _utc_timestamp(),
+                "updated_at": timestamp(),
             },
         )
         self.events.notify_traceability_changed("node_state_updated")
@@ -654,7 +650,7 @@ class TraceabilityStore:
             {
                 "req_id": normalized_req_id,
                 "content": content if isinstance(content, dict) else {},
-                "updated_at": _utc_timestamp(),
+                "updated_at": timestamp(),
             },
         )
         self.events.notify_traceability_changed("node_contract_updated")
