@@ -7,26 +7,24 @@
 
 1. extract(tree): 契约清单结构化(data: 条目 / E2E_* 环境项 / 每节点 GIVEN
    与种子句),落盘 .arc/fixture-manifest.json 供对表;
-2. compile_seed(manifest): 把可机械解析的部分直接编译成 db.json 行集
+2. compile_seed(manifest): 把需求逐字点名的部分转录成 db.json 行集
    (sheet 型: "A1/B1 are Item/Amount" → cells 字典,每场景一个独立工作簿,
-   天然满足隔离契约;graph 型: 角色清单 → 账号/组织/仓库/团队骨架行,
-   密码统一约定,scrypt 与 backend store.verify 逐位兼容);
-3. render_extra_rules(manifest, stats): ≤2400 字符、确定性(字节稳定,
+   天然满足隔离契约;graph 型: 逐字账号/组织/仓库/团队/附属行,密码取
+   需求引号明文,scrypt 与 backend store.verify 逐位兼容);
+3. render_extra_rules(manifest, stats): ≤2900 字符、确定性(字节稳定,
    满足缓存律)的全局契约文本,经 envelope.extra_rules 渲染进稳定 CONTRACT 段。
 
-解析不了的条目一律进 uncovered 报告降级为清单注入,绝不自编替代品。
+边界定则(09-28):宿主只转录逐字契约、只验证模型声明——需求没点名的
+账号/实体(尤其角色账号)一律由模型按需求文本自行推理决定,宿主不做
+任何合成兜底(写死的名字/密码与平台真值必然错位,github 真跑 24 个
+角色账号登录全 400 即教训)。解析不了的条目进 uncovered 报告降级为
+清单注入,绝不自编替代品。
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
-
-# 种子账号统一密码约定:extra_rules 下发给模型,登录探针按它验证;
-# 大小写+数字+特殊字符,满足 validate.js 的 password 格式(≥12 位)。
-FIXTURE_PASSWORD = "Fixture-password-123!"
-# 无仓库种子句时的挂靠仓(hackathon--github 的公开仓库锚点)。
-PUBLIC_REPO_DEFAULT = "acme-docs"
 
 E2E_RE = re.compile(r"E2E_[A-Z0-9_]+")
 SEED_SENTENCE_RE = re.compile(
@@ -37,7 +35,7 @@ COORD_RE = re.compile(r"\b([A-Z]{1,3}[1-9][0-9]{0,3})\b")
 # 坐标,kind 判定被带偏成 sheet、种子账号零编译)。
 _QUARTER_TOKEN_RE = re.compile(r"\b[Qq][1-4]\b(?!\d)")
 
-_MAX_EXTRA_RULES = 2400
+_MAX_EXTRA_RULES = 2900
 
 
 # ---------------------------------------------------------------- 提取
@@ -402,18 +400,23 @@ def parse_seed_sentence(text: str) -> dict:
     }
 
 
-# ------------------------------------------------ 角色 → 实体(graph 型)
+# ------------------------------------------------ 角色词(graph 型分类用)
 
+# 角色词仅用于 kind 分类(graph/sheet/none),不再驱动任何合成播种:
+# 账号该建哪些、叫什么、归谁——由模型按需求文本自行推理决定
+# (09-28 定则:宿主写死的猜测(fixture-<role>/统一密码)与平台真值
+# 必然错位,合成底座整体退役)。裸 "write"/"admin"/"reviewer" 仍要求
+# 权限语境短语,避免把任意任务误判成 graph。
 _ROLE_PATTERNS: list[tuple[str, str]] = [
     (r"organization owner|org owner", "org-owner"),
     (r"organization member|org member", "org-member"),
     (r"repository read|\bread\b role|role of read", "repo-read"),
-    (r"\btriage\b", "triage"),
-    (r"\bwrite\b", "write"),
-    (r"\bmaintain\b", "maintain"),
-    (r"\badmin\b", "admin"),
+    (r"\btriage\b\s*(access|role|permission)", "triage"),
+    (r"\bwrite\b\s*(access|role|permission)", "write"),
+    (r"\bmaintain(?:er)?\b\s*(access|role|permission)", "maintain"),
+    (r"\badmin\b\s*(access|role|permission)|administrator role", "admin"),
     (r"pull-request author|pr author", "pr-author"),
-    (r"non-author reviewer|reviewer", "reviewer"),
+    (r"non-author reviewer|reviewer role", "reviewer"),
     (r"no-repository-access|no repository access|no-access", "no-access"),
 ]
 
@@ -426,20 +429,6 @@ def _scrypt_hex(password: str, salt_hex: str) -> str:
         password.encode("utf-8"), salt=salt_hex.encode("utf-8"),
         dklen=32, n=16384, r=8, p=1, maxmem=64 * 1024 * 1024)
     return f"{salt_hex}:{digest.hex()}"
-
-
-def fixture_user_row(role: str) -> dict:
-    username = f"fixture-{role}"
-    salt = hashlib.md5(role.encode()).hexdigest()[:16]
-    return {
-        "id": f"u-fixture-{role}",
-        "username": username,
-        "email": f"{username}@example.test",
-        "password": _scrypt_hex(FIXTURE_PASSWORD, salt),
-        "verifiedEmail": True,
-        "terms": True,
-        "createdAt": "2026-01-01T00:00:00.000Z",
-    }
 
 
 def _detect_roles(texts: list[str]) -> list[str]:
@@ -460,7 +449,9 @@ def _kind(manifest: dict) -> str:
     # 不剔除会把 graph 型任务误判成 sheet(hackathon--github 32/32 全误计)。
     given_blob = _QUARTER_TOKEN_RE.sub("", given_blob)
     global_blob = "\n".join(g["text"] for g in manifest["global"])
-    cellish = len(COORD_RE.findall(given_blob))
+    # 去重再计数:同一坐标反复提及("A1"×10)不构成 sheet 证据,≥4 个
+    # 不同坐标才是。
+    cellish = len(set(COORD_RE.findall(given_blob)))
     roles = _detect_roles([global_blob])
     # hackathon 新句式的图谱种子实体("account `x`, email `y`, password `z`"
     # / "organization `A`")同样是 graph 证据,即便角色关键词被匿名化。
@@ -646,7 +637,6 @@ def compile_seed(manifest: dict) -> dict:
         global_blob = [g["text"] for g in manifest["global"]]
         seed_blob = [s for info in manifest["nodes"].values()
                      for s in info["seed_sentences"]]
-        roles = _detect_roles(global_blob + seed_blob)
         blob = "\n".join(global_blob + seed_blob).lower()
         # hackathon 新句式种子实体:逐字账号/组织/仓库/成员/团队
         # ("The seeded data is account `alice-dev`, email `a@x.test`,
@@ -660,56 +650,10 @@ def compile_seed(manifest: dict) -> dict:
                for g in info["given"]],
             attr_texts=[info.get("description", "")
                         for info in manifest["nodes"].values()])
-        # 合成实体门控(hg-github-001 复盘):需求已给完整逐字账号矩阵时,
-        # fixture-* 合成用户/org/repo 是需求外实体——模型每个分段都重新
-        # 审查它们是否违约(本跑 4 段 × ~10-15 calls 纯考古)。仅当需求
-        # 没有逐字实体时才落合成底座(旧 github 任务的既定行为)。
-        has_literal_accounts = bool(seeded["accounts"])
-        if not has_literal_accounts:
-            for role in roles:
-                row = fixture_user_row(role)
-                db.setdefault("users", []).append(row)
-                logins.append({"username": row["username"], "role": role})
-        if not seeded["organizations"] and (
-                "organization" in blob or "repository" in blob
-                or "team" in blob):
-            db.setdefault("organizations", []).append({
-                "id": "o-fixture-org", "name": "fixture-org",
-                "displayName": "Fixture Organization", "public": True,
-                "createdAt": "2026-01-01T00:00:00.000Z"})
-            if "org-owner" in roles:
-                db.setdefault("members", []).append({
-                    "id": "m-fixture-owner", "orgName": "fixture-org",
-                    "username": "fixture-org-owner", "role": "owner"})
-            if "org-member" in roles:
-                db.setdefault("members", []).append({
-                    "id": "m-fixture-member", "orgName": "fixture-org",
-                    "username": "fixture-org-member", "role": "member"})
-        if (not seeded["repositories"] and "repository" in blob
-                and "organization" in blob):
-            db.setdefault("repositories", []).append({
-                "id": "r-fixture-public", "orgName": "fixture-org",
-                "name": "fixture-public-repo",
-                "description": "Fixture public repository",
-                "visibility": "public", "defaultBranch": "main",
-                "updatedAt": "2026-01-01T00:00:00.000Z"})
-            if "private repositor" in blob or "private repository" in blob:
-                db.setdefault("repositories", []).append({
-                    "id": "r-fixture-private", "orgName": "fixture-org",
-                    "name": "fixture-private-repo",
-                    "description": "Fixture private repository",
-                    "visibility": "private", "defaultBranch": "main",
-                    "updatedAt": "2026-01-01T00:00:00.000Z"})
-        if not seeded["teams"] and "team" in blob:
-            db.setdefault("teams", []).append({
-                "id": "t-fixture-team", "orgName": "fixture-org",
-                "name": "fixture-team", "description": "Fixture team",
-                "createdAt": "2026-01-01T00:00:00.000Z"})
-            if "org-owner" in roles:
-                db.setdefault("teamMembers", []).append({
-                    "id": "tm-fixture-owner", "orgName": "fixture-org",
-                    "teamName": "fixture-team",
-                    "username": "fixture-org-owner"})
+        # 宿主只转录需求逐字点名的实体;角色账号/org/repo/team 的一切
+        # 合成兜底已退役(09-28 定则:宿主写死的猜测与平台真值必然错位,
+        # github 真跑 24 个角色账号全 400 即教训)。需求没点名的内容
+        # 由模型按 GIVEN/角色措辞自行推理建种。
         for acct in seeded["accounts"]:
             if any(u["username"] == acct["username"]
                    for u in db.get("users", [])):
@@ -732,192 +676,192 @@ def compile_seed(manifest: dict) -> dict:
                 "id": "o-seed-" + hashlib.sha1(org.encode()).hexdigest()[:8],
                 "name": org, "displayName": org, "public": True,
                 "createdAt": "2026-01-01T00:00:00.000Z"})
-        # 归属保真:逐字实体优先挂逐字 org(需求原文 "repository `acme-docs`
-        # ... organization `Acme Demo`");合成 fixture-org 只在没有逐字
-        # org 时兜底。旧实现恒取 org_rows[0],fixture-org 先入队导致
-        # acme-docs/secret-research 全挂错组织,模型得自己搬家。
+        # 归属保真:逐字实体只挂逐字 org(需求原文 "repository `acme-docs`
+        # ... organization `Acme Demo`")。没有逐字 org 时 org 依赖的
+        # 实体(repo/team/member/附属)一律不落——半接线行是宿主编造,
+        # 留给模型按 GIVEN 自建。
         literal_orgs = [o["name"] for o in org_rows
                         if str(o.get("id", "")).startswith("o-seed-")]
-        primary_org = (literal_orgs[0] if literal_orgs
-                       else (org_rows[0]["name"] if org_rows else "fixture-org"))
+        primary_org = literal_orgs[0] if literal_orgs else ""
         repo_rows = db.setdefault("repositories", [])
-        for repo in seeded["repositories"]:
-            if any(r["name"] == repo for r in repo_rows):
-                continue
-            repo_rows.append({
-                "id": "r-seed-" + hashlib.sha1(repo.encode()).hexdigest()[:8],
-                "orgName": primary_org, "name": repo,
-                "description": f"Seeded repository {repo}",
-                # 可见性保真:"private repository `secret-research`" 按句内
-                # 修饰语落 private(旧实现硬编码 public,搜索/可见性测试
-                # 全靠模型自己救)。
-                "visibility": seeded["repo_visibility"].get(repo, "public"),
-                "defaultBranch": "main",
-                "updatedAt": "2026-01-01T00:00:00.000Z"})
-        team_rows = db.setdefault("teams", [])
-        for team in seeded["teams"]:
-            if any(t["name"] == team for t in team_rows):
-                continue
-            team_rows.append({
-                "id": "t-seed-" + hashlib.sha1(team.encode()).hexdigest()[:8],
-                "orgName": primary_org, "name": team,
-                "description": f"Seeded team {team}",
-                "createdAt": "2026-01-01T00:00:00.000Z"})
-        member_rows = db.setdefault("members", [])
-        for member in seeded["members"]:
-            if any(m["username"] == member for m in member_rows):
-                continue
-            member_rows.append({
-                "id": "m-seed-" + hashlib.sha1(member.encode()).hexdigest()[:8],
-                "orgName": primary_org, "username": member, "role": "member"})
-        # owner 保真:"public repository `acme-docs`, private repository
-        # `secret-research`, owner `alice-dev`" → owner 账号是该 org 的
-        # owner 角色成员(与 REQ-2-1-2 "创建组织者即 owner" 语义一致)。
-        for owner in seeded["owners"]:
-            if any(m["username"] == owner and m["orgName"] == primary_org
-                   for m in member_rows):
-                continue
-            member_rows.append({
-                "id": "m-seed-owner-" + hashlib.sha1(
-                    owner.encode()).hexdigest()[:8],
-                "orgName": primary_org, "username": owner, "role": "owner"})
-        # C:仓库附属种子(分支/issue/PR/标签/里程碑/提交)挂到首个仓库;
-        # README.md 与 main 分支是需求原文点名的最小文件集。逐字仓库
-        # 优先(旧实现恒取 repo_rows[0],fixture 仓先入队时附属种子
-        # 全挂错仓库)。
+        if primary_org:
+            for repo in seeded["repositories"]:
+                if any(r["name"] == repo for r in repo_rows):
+                    continue
+                repo_rows.append({
+                    "id": "r-seed-" + hashlib.sha1(repo.encode()).hexdigest()[:8],
+                    "orgName": primary_org, "name": repo,
+                    "description": f"Seeded repository {repo}",
+                    # 可见性保真:"private repository `secret-research`" 按句内
+                    # 修饰语落 private(旧实现硬编码 public,搜索/可见性测试
+                    # 全靠模型自己救)。
+                    "visibility": seeded["repo_visibility"].get(repo, "public"),
+                    "defaultBranch": "main",
+                    "updatedAt": "2026-01-01T00:00:00.000Z"})
+            team_rows = db.setdefault("teams", [])
+            for team in seeded["teams"]:
+                if any(t["name"] == team for t in team_rows):
+                    continue
+                team_rows.append({
+                    "id": "t-seed-" + hashlib.sha1(team.encode()).hexdigest()[:8],
+                    "orgName": primary_org, "name": team,
+                    "description": f"Seeded team {team}",
+                    "createdAt": "2026-01-01T00:00:00.000Z"})
+            member_rows = db.setdefault("members", [])
+            for member in seeded["members"]:
+                if any(m["username"] == member for m in member_rows):
+                    continue
+                member_rows.append({
+                    "id": "m-seed-" + hashlib.sha1(member.encode()).hexdigest()[:8],
+                    "orgName": primary_org, "username": member, "role": "member"})
+            # owner 保真:"public repository `acme-docs`, private repository
+            # `secret-research`, owner `alice-dev`" → owner 账号是该 org 的
+            # owner 角色成员(与 REQ-2-1-2 "创建组织者即 owner" 语义一致)。
+            for owner in seeded["owners"]:
+                if any(m["username"] == owner and m["orgName"] == primary_org
+                       for m in member_rows):
+                    continue
+                member_rows.append({
+                    "id": "m-seed-owner-" + hashlib.sha1(
+                        owner.encode()).hexdigest()[:8],
+                    "orgName": primary_org, "username": owner, "role": "owner"})
+        # C:仓库附属种子(分支/issue/PR/标签/里程碑/提交)挂到首个仓库,
+        # main 分支是需求点名的默认分支。仓库行本就全为逐字种子;
+        # 没有仓库行就不落附属种子——半接线行留给模型按 GIVEN 自建。
         literal_repos = [r["name"] for r in repo_rows
                          if str(r.get("id", "")).startswith("r-seed-")]
-        primary_repo = (literal_repos[0] if literal_repos
-                        else (repo_rows[0]["name"] if repo_rows
-                              else PUBLIC_REPO_DEFAULT))
-        branch_rows = db.setdefault("branches", [])
-        def _branch(name: str, protected: bool = False) -> None:
-            if any(b["name"] == name and b["repoName"] == primary_repo
-                   for b in branch_rows):
-                return
-            branch_rows.append({
-                "id": "br-seed-" + hashlib.sha1(
-                    f"{primary_repo}:{name}".encode()).hexdigest()[:8],
-                "repoOrg": primary_org, "repoName": primary_repo,
-                "name": name, "head": "seed-head",
-                "protected": protected})
-        _branch("main", protected=True)
-        for name in seeded["branches"]:
-            _branch(name)
-        if "main" not in seeded["branches"]:
-            pass  # main 已由默认分支补齐
-        issue_rows = db.setdefault("issues", [])
-        seed_login = next((l["username"] for l in logins
-                           if l.get("role") == "seed"),
-                          logins[0]["username"] if logins else "seed")
-        seed_label_str = ", ".join(seeded["labels"])
-        all_issue_titles = list(seeded["issues"]) + list(
-            seeded["closed_issue_titles"])
-        # closed 伴随 issue:REQ-5-1-1 点名 "The seeded closed issue title
-        # is `Legacy welcome text`" ——列表过滤场景需要一开一闭两条种子。
-        issue_status = {t: "closed" for t in seeded["closed_issue_titles"]}
-        for title in all_issue_titles:
-            if any(x["title"] == title for x in issue_rows):
-                continue
-            issue_rows.append({
-                "id": "i-seed-" + hashlib.sha1(
-                    f"{primary_repo}:{title}".encode()).hexdigest()[:8],
-                "repoOrg": primary_org, "repoName": primary_repo,
-                "number": len(issue_rows) + 1, "title": title,
-                # 描述保真:"its description is `Describe the onboarding
-                # improvement.`"(旧实现恒空串)。
-                "description": seeded["issue_descriptions"].get(title, ""),
-                "author": seed_login,
-                "status": issue_status.get(title, "open"),
-                # 标签关联保真:"issue `Improve onboarding`, labels `bug`
-                # and `documentation`" → 行内 labels 逗号串(schema 的
-                # issues.labels 是单 string 字段,标签行另有 labels 集合)。
-                "labels": seed_label_str})
-        pull_rows = db.setdefault("pulls", [])
-        # PR 状态保真:"one Open PR created by `alice` and one Closed PR
-        # created by `alice`" → 列表序首开次闭(需求未逐题点名标题↔状态
-        # 映射,按句序约定);作者短名解析到逐字账号。
-        pr_states = seeded["pr_states"]
-        reviewers_str = ", ".join(seeded["reviewers"])
-        for i, title in enumerate(seeded["pulls"], 1):
-            if any(x["title"] == title for x in pull_rows):
-                continue
-            status = "open"
-            author = seed_login
-            if pr_states:
-                if i == 1:
-                    author = _resolve_seed_username(
-                        pr_states["open_author"], seeded["accounts"])
-                elif i >= 2:
-                    status = "closed"
-                    author = _resolve_seed_username(
-                        pr_states["closed_author"], seeded["accounts"])
-            pull_rows.append({
-                "id": "p-seed-" + hashlib.sha1(
-                    f"{primary_repo}:{title}".encode()).hexdigest()[:8],
-                "repoOrg": primary_org, "repoName": primary_repo,
-                "number": i, "title": title, "author": author,
-                "sourceBranch": "feature-search", "targetBranch": "main",
-                "status": status, "reviewers": reviewers_str})
-        label_rows = db.setdefault("labels", [])
-        for name in seeded["labels"]:
-            if any(x["name"] == name for x in label_rows):
-                continue
-            label_rows.append({
-                "id": "l-seed-" + hashlib.sha1(
-                    f"{primary_repo}:{name}".encode()).hexdigest()[:8],
-                "repoOrg": primary_org, "repoName": primary_repo,
-                "name": name, "color": "#84b6eb"})
-        ms_rows = db.setdefault("milestones", [])
-        for title in seeded["milestones"]:
-            if any(x["title"] == title for x in ms_rows):
-                continue
-            ms_rows.append({
-                "id": "ms-seed-" + hashlib.sha1(
-                    f"{primary_repo}:{title}".encode()).hexdigest()[:8],
-                "repoOrg": primary_org, "repoName": primary_repo,
-                "title": title, "dueOn": "2026-09-30"})
-        # 评论种子:REQ-5-1-2 "at least one comment" / REQ-6-3-1 "one
-        # discussion comment" ——旧实现完全无评论,模型每题自造。作者取
-        # 首个 reviewer/member(bob-reviewer 一类),正文为通用占位(需求
-        # 未给逐字文案)。
-        comment_author = (seeded["reviewers"] or seeded["members"]
-                          or [seed_login])[0]
-        comment_rows = db.setdefault("comments", [])
-        if issue_rows and not comment_rows:
-            comment_rows.append({
-                "id": "cm-seed-issue-" + hashlib.sha1(
-                    primary_repo.encode()).hexdigest()[:8],
-                "parentType": "issue", "repoName": primary_repo,
-                "parentNumber": issue_rows[0]["number"],
-                "author": comment_author,
-                "body": "I can take a look at this.",
-                "createdAt": "2026-01-02T00:00:00.000Z"})
-        open_pulls = [p for p in pull_rows if p["status"] == "open"]
-        if open_pulls and len(comment_rows) < 2:
-            comment_rows.append({
-                "id": "cm-seed-pull-" + hashlib.sha1(
-                    primary_repo.encode()).hexdigest()[:8],
-                "parentType": "pull", "repoName": primary_repo,
-                "parentNumber": open_pulls[0]["number"],
-                "author": comment_author,
-                "body": "Seed discussion comment.",
-                "createdAt": "2026-01-02T00:00:00.000Z"})
-        # 提交种子:旧实现提取了 commit 名却静默丢弃(schema 也没有
-        # commits 实体)——REQ-4-2 的历史/对比页全靠模型每批自造。
-        commit_rows = db.setdefault("commits", [])
-        for message in seeded["commits"]:
-            if any(c["message"] == message for c in commit_rows):
-                continue
-            commit_rows.append({
-                "id": "c-seed-" + hashlib.sha1(
-                    f"{primary_repo}:{message}".encode()).hexdigest()[:8],
-                "repoOrg": primary_org, "repoName": primary_repo,
-                "sha": hashlib.sha1(
-                    f"{primary_repo}:{message}".encode()).hexdigest(),
-                "branch": "main", "message": message,
-                "author": seed_login,
-                "createdAt": "2026-01-02T00:00:00.000Z"})
+        primary_repo = literal_repos[0] if literal_repos else ""
+        if primary_repo:
+            branch_rows = db.setdefault("branches", [])
+
+            def _branch(name: str, protected: bool = False) -> None:
+                if any(b["name"] == name and b["repoName"] == primary_repo
+                       for b in branch_rows):
+                    return
+                branch_rows.append({
+                    "id": "br-seed-" + hashlib.sha1(
+                        f"{primary_repo}:{name}".encode()).hexdigest()[:8],
+                    "repoOrg": primary_org, "repoName": primary_repo,
+                    "name": name, "head": "seed-head",
+                    "protected": protected})
+            _branch("main", protected=True)
+            for name in seeded["branches"]:
+                _branch(name)
+            issue_rows = db.setdefault("issues", [])
+            seed_login = next((l["username"] for l in logins
+                               if l.get("role") == "seed"),
+                              logins[0]["username"] if logins else "seed")
+            seed_label_str = ", ".join(seeded["labels"])
+            all_issue_titles = list(seeded["issues"]) + list(
+                seeded["closed_issue_titles"])
+            # closed 伴随 issue:REQ-5-1-1 点名 "The seeded closed issue
+            # title is `Legacy welcome text`" ——列表过滤场景需要一开一闭
+            # 两条种子。
+            issue_status = {t: "closed" for t in seeded["closed_issue_titles"]}
+            for title in all_issue_titles:
+                if any(x["title"] == title for x in issue_rows):
+                    continue
+                issue_rows.append({
+                    "id": "i-seed-" + hashlib.sha1(
+                        f"{primary_repo}:{title}".encode()).hexdigest()[:8],
+                    "repoOrg": primary_org, "repoName": primary_repo,
+                    "number": len(issue_rows) + 1, "title": title,
+                    # 描述保真:"its description is `Describe the onboarding
+                    # improvement.`"(旧实现恒空串)。
+                    "description": seeded["issue_descriptions"].get(title, ""),
+                    "author": seed_login,
+                    "status": issue_status.get(title, "open"),
+                    # 标签压平(有意保留,非逐 issue 归属):解析器没有
+                    # "issue X labels a and b" 的归属正则,全局标签集进
+                    # 每一行。github 需求断言 "Closed issue with the same
+                    # label",超集兼容;逐 issue 归属待真值需要时加正则。
+                    "labels": seed_label_str})
+            pull_rows = db.setdefault("pulls", [])
+            # PR 状态约定:"one Open PR created by `alice` and one Closed
+            # PR created by `alice`" → 列表序首开次闭(需求未逐题点名
+            # 标题↔状态映射时的合成约定,非逐字契约);作者短名解析到
+            # 逐字账号。
+            pr_states = seeded["pr_states"]
+            reviewers_str = ", ".join(seeded["reviewers"])
+            for i, title in enumerate(seeded["pulls"], 1):
+                if any(x["title"] == title for x in pull_rows):
+                    continue
+                status = "open"
+                author = seed_login
+                if pr_states:
+                    if i == 1:
+                        author = _resolve_seed_username(
+                            pr_states["open_author"], seeded["accounts"])
+                    elif i >= 2:
+                        status = "closed"
+                        author = _resolve_seed_username(
+                            pr_states["closed_author"], seeded["accounts"])
+                pull_rows.append({
+                    "id": "p-seed-" + hashlib.sha1(
+                        f"{primary_repo}:{title}".encode()).hexdigest()[:8],
+                    "repoOrg": primary_org, "repoName": primary_repo,
+                    "number": i, "title": title, "author": author,
+                    "sourceBranch": "feature-search", "targetBranch": "main",
+                    "status": status, "reviewers": reviewers_str})
+            label_rows = db.setdefault("labels", [])
+            for name in seeded["labels"]:
+                if any(x["name"] == name for x in label_rows):
+                    continue
+                label_rows.append({
+                    "id": "l-seed-" + hashlib.sha1(
+                        f"{primary_repo}:{name}".encode()).hexdigest()[:8],
+                    "repoOrg": primary_org, "repoName": primary_repo,
+                    "name": name, "color": "#84b6eb"})
+            ms_rows = db.setdefault("milestones", [])
+            for title in seeded["milestones"]:
+                if any(x["title"] == title for x in ms_rows):
+                    continue
+                ms_rows.append({
+                    "id": "ms-seed-" + hashlib.sha1(
+                        f"{primary_repo}:{title}".encode()).hexdigest()[:8],
+                    "repoOrg": primary_org, "repoName": primary_repo,
+                    "title": title, "dueOn": "2026-09-30"})
+            # 评论种子:REQ-5-1-2 "at least one comment" / REQ-6-3-1 "one
+            # discussion comment" ——旧实现完全无评论,模型每题自造。作者
+            # 取首个 reviewer/member,正文为合成占位(需求未给逐字文案,
+            # extra_rules 已按填充行口径声明)。
+            comment_author = (seeded["reviewers"] or seeded["members"]
+                              or [seed_login])[0]
+            comment_rows = db.setdefault("comments", [])
+            if issue_rows and not comment_rows:
+                comment_rows.append({
+                    "id": "cm-seed-issue-" + hashlib.sha1(
+                        primary_repo.encode()).hexdigest()[:8],
+                    "parentType": "issue", "repoName": primary_repo,
+                    "parentNumber": issue_rows[0]["number"],
+                    "author": comment_author,
+                    "body": "I can take a look at this.",
+                    "createdAt": "2026-01-02T00:00:00.000Z"})
+            open_pulls = [p for p in pull_rows if p["status"] == "open"]
+            if open_pulls and len(comment_rows) < 2:
+                comment_rows.append({
+                    "id": "cm-seed-pull-" + hashlib.sha1(
+                        primary_repo.encode()).hexdigest()[:8],
+                    "parentType": "pull", "repoName": primary_repo,
+                    "parentNumber": open_pulls[0]["number"],
+                    "author": comment_author,
+                    "body": "Seed discussion comment.",
+                    "createdAt": "2026-01-02T00:00:00.000Z"})
+            # 提交种子:旧实现提取了 commit 名却静默丢弃(schema 也没有
+            # commits 实体)——REQ-4-2 的历史/对比页全靠模型每批自造。
+            commit_rows = db.setdefault("commits", [])
+            for message in seeded["commits"]:
+                if any(c["message"] == message for c in commit_rows):
+                    continue
+                commit_rows.append({
+                    "id": "c-seed-" + hashlib.sha1(
+                        f"{primary_repo}:{message}".encode()).hexdigest()[:8],
+                    "repoOrg": primary_org, "repoName": primary_repo,
+                    "sha": hashlib.sha1(
+                        f"{primary_repo}:{message}".encode()).hexdigest(),
+                    "branch": "main", "message": message,
+                    "author": seed_login,
+                    "createdAt": "2026-01-02T00:00:00.000Z"})
         # 种子账号/实体已被宿主播种的节点 → covered(FOCUS 头变
         # "verify addressable",避免模型重复播种)。
         seeded_names = ({u["username"] for u in db.get("users", [])}
@@ -1065,6 +1009,9 @@ def compile_seed(manifest: dict) -> dict:
                  "type": "string"}]},
         ]}
 
+    # 空集合不落键:setdefault 留下的空 list 会变成 db.json 空集合与
+    # 对空集合的实体探针,纯噪音。
+    db = {k: v for k, v in db.items() if v}
     return {"kind": kind, "db": db, "schema": schema, "covered": covered,
             "arrange": arrange, "canonical": canonical_mode,
             "uncovered": uncovered, "logins": logins}
@@ -1197,7 +1144,7 @@ def _resolve_seed_username(name: str, accounts: list[dict]) -> str:
 # ------------------------------------------------- extra_rules(稳定段)
 
 def render_extra_rules(manifest: dict, stats: dict | None = None) -> str:
-    """全局夹具契约文本:确定性渲染(同输入 → 逐字节相同,缓存律),≤2400。
+    """全局夹具契约文本:确定性渲染(同输入 → 逐字节相同,缓存律),≤2900。
 
     stats 键:kind / uncovered / arrange / seeded / canonical。
     按任务形态条件化——无种子账号不提密码,规范种子模式宣布
@@ -1228,12 +1175,39 @@ def render_extra_rules(manifest: dict, stats: dict | None = None) -> str:
             "the seed with their exact emails and scrypt-hashed passwords — "
             "auth must verify them from the seed; tests sign in with the "
             "plaintext passwords quoted in the GIVEN lines.")
-    elif stats.get("kind") in ("graph", "mixed"):
+    if stats.get("kind") in ("graph", "mixed"):
+        # 角色账号是模型的地盘:宿主只给契约信号+平台观测证据,
+        # 建哪些账号/叫什么/什么关系由模型推理决定(09-28 定则:
+        # 宿主写死合成账号与平台真值必然错位,github 真跑 24 个
+        # 角色账号登录全 400、REQ-2~6 整族零分)。
         parts.append(
-            f'Seeded fixture accounts share the password "'
-            f'{FIXTURE_PASSWORD}" (username fixture-<role>, email '
-            "fixture-<role>@example.test) — auth must verify them from the "
-            "seed and sign-in pages must accept these credentials.")
+            "ROLE-ACTOR ACCOUNTS (graded, you decide them): the hidden e2e "
+            "signs in via the standard form as EVERY actor any atomic "
+            "requirement describes — including roles no GIVEN names as an "
+            "account (organization owner, repository admin, pull-request "
+            "reviewer, branch-protection admin, fork user...). Enumerate "
+            "those actors, provision sign-in-capable accounts (unique "
+            "username, @example.test email, verified, the standard "
+            "compliant password the sign-in lines quote), and wire "
+            "ownership/membership/grants so each role's stated permissions "
+            "hold. Observed in a real graded run (2026-09-28, evidence not "
+            "law): bare kebab-case usernames — org-owner, repo-admin, "
+            "pr-reviewer, protection-admin, issue-author, fork-user and 18 "
+            "more — all with the quoted standard password; derive coverage "
+            "from the requirement text, not that list. Declare EVERY "
+            "pre-provisioned account in backend/data/seed-accounts.json as "
+            '[{"username","password","note"}] — the host login-probe '
+            "expects each to sign in with 200; RED = your declared seed or "
+            "auth is broken.")
+    if stats.get("kind") in ("graph", "mixed"):
+        # 逐字/填充行分口径:解析成功≠语义全对,填充行的合成身份必须
+        # 明示,否则模型把宿主编的约定也当需求原文背。
+        parts.append(
+            "Seed rows named by the requirement are verbatim contract; "
+            "rows it does not name (placeholder comments, fill-in author, "
+            "status, or label assignments) are host filler so flows have "
+            "data to render — wherever filler can disagree with the "
+            "requirement text, the requirement text wins.")
     if is_canonical and is_sheetish:
         parts.append(
             "The seeded workbook is CANONICAL and FINAL: never rewrite it, "
@@ -1248,8 +1222,9 @@ def render_extra_rules(manifest: dict, stats: dict | None = None) -> str:
             "preconfigured instance (never share one mutable fixture across "
             "scenarios; the graders restore state between runs).")
     parts.append(
-        f"E2E_* harness fixtures named by the requirement: {e2e_str} — "
-        "every one must map to a concrete seeded object you create.")
+        f"E2E_* variables the requirement names: {e2e_str}. The harness "
+        "itself passes only base-URL variables — any other fixture the "
+        "scenarios imply is yours to create and seed.")
     if stats.get("kind") in ("graph", "mixed"):
         parts.append(
             "Files/commits are the single source of truth: branches store "

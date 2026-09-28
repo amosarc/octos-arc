@@ -272,6 +272,19 @@ class SystemRowTests(unittest.TestCase):
                                           self.FIXTURE_RULES)
         self.assertEqual(a, b)
 
+    def test_system_row_strips_reference_image_marks(self):
+        # AGENTS.md 全局层不携带 reference 图记号:内核在含图工单的 turn
+        # 把真实图片附给模型,系统行只需 root 文字契约(root 契约是唯一
+        # 逐字进系统行的需求文本,是潜在携带路径)。
+        tree = node("ROOT", "FOLDER", [
+            node("REQ-1", "FOLDER", [node("REQ-1-1", description="d11")]),
+        ], description='Global rules. See ![image](reference/sign-up.png) '
+                       'and ![img](https://cdn.example.com/x.png) for looks.')
+        ctx = main.build_system_row_context(tree, "rules", "fx")
+        self.assertNotIn("![image]", ctx)
+        self.assertNotIn("![](", ctx)
+        self.assertIn("Global rules.", ctx)
+
     def test_system_row_is_compact(self):
         ctx = main.build_system_row_context(TREE, self.RULES,
                                             self.FIXTURE_RULES)
@@ -369,6 +382,52 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertIn("Invalid credentials", msgs)
         self.assertIn("Welcome back", msgs)
         self.assertEqual(len(msgs), len(set(msgs)))
+
+
+class HostRuntimeRegressionTests(unittest.TestCase):
+    """09-28 评审修复回归:final 重放后 SPEC RUN 装置不残、懒人门不误判。"""
+
+    def test_final_replay_restores_spec_run_runtime(self):
+        # 防篡改重放(stage_specs)只回填 *.spec.ts+support——config 必须
+        # 由 stage_acceptance_runtime 重建,否则 final 轮的 verbatim SPEC
+        # RUN 命令指向不存在的 config(09-28 评审 P0-1)。
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            tests = out / "tests-src"
+            tests.mkdir()
+            (tests / "REQ-1.spec.ts").write_text(
+                "import { test, expect } from '@playwright/test';\n",
+                encoding="utf-8")
+            stage = plan_envelope.stage_specs(tests, out)
+            main.stage_acceptance_runtime(stage, 43101, None)
+            cfg = (stage / "playwright.config.ts").read_text()
+            self.assertIn("http://127.0.0.1:43101", cfg)
+            self.assertIn("timeout: 10_000", cfg)
+            # 重放清目录 → 重建(final 调用点同一路径)
+            stage2 = plan_envelope.stage_specs(tests, out)
+            self.assertFalse((stage2 / "playwright.config.ts").exists())
+            main.stage_acceptance_runtime(stage2, 43101, None)
+            self.assertTrue((stage2 / "playwright.config.ts").is_file())
+
+    def test_project_files_changed_ignores_runtime_run_file(self):
+        # 首批 turn 的时间窗覆盖宿主首次起服(store 把种子拷成
+        # db.run.json):运行态文件不得计入懒人轮门禁的工作证据。
+        import os
+        import tempfile
+        import time as _time
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            run_file = out / "backend" / "data" / "db.run.json"
+            run_file.parent.mkdir(parents=True)
+            run_file.write_text("{}", encoding="utf-8")
+            t = _time.time()
+            os.utime(run_file, (t + 10, t + 10))  # 未来 mtime=必比 since 新
+            self.assertFalse(main.project_files_changed(out, t))
+            real = out / "frontend" / "src" / "app.jsx"
+            real.parent.mkdir(parents=True)
+            real.write_text("x", encoding="utf-8")
+            self.assertTrue(main.project_files_changed(out, t))
 
 
 if __name__ == "__main__":

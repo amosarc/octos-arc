@@ -73,7 +73,7 @@ guard(自测命令放行形状/full-spec-run/trace-deny)、OCTOS_TOOL_ALLOWLIST�
 家族/原子 id;范围外家族不生成工单/不计进度/不进 Tier-2 判定面,系统行
 追加 RUN SCOPE 段;未设置=全量)、`OCTOS_ARC_HOST_SCAFFOLD`
 (宿主落盘基础设施,缺省开)、`OCTOS_ARC_HOST_GRADE`(final 轮 Tier-2 宿主
-跑 staged Playwright,缺省关)。宿主优先回退路径(原 `OCTOS_ARC_GOAL_FIRST=0`)
+跑 staged Playwright,缺省开)。宿主优先回退路径(原 `OCTOS_ARC_GOAL_FIRST=0`)
 已整体删除:家族工单是唯一调度路径。
 
 ## 宿主模板 + schema 信号驱动 codegen(2026-09-17 起;2026-09-18 迁入 scaffold/ 包)
@@ -94,9 +94,10 @@ guard(自测命令放行形状/full-spec-run/trace-deny)、OCTOS_TOOL_ALLOWLIST�
 
 请求任何模型之前,宿主完成:完整模板落盘(`scaffold.scaffold`:HTTP/cookie/
 存储/校验/auth/CRUD 通用层,backend 零依赖即可启动)→ `npm install`
-预装(npmmirror,`OCTOS_ARC_PREWARM=0` 关)。skeleton LLM 轮整个删除,第一轮就是
-REQ-1 节点轮,首轮 prompt 追加 `SCHEMA_DIRECTIVE`(首动作写
-`backend/data/schema.json`)。schema.json 落盘即信号:`scaffold.Watcher`
+预装(INSTALL_REGISTRY=npmmirror,`OCTOS_ARC_PREWARM=0` 关)。goal-first(09-27)起 skeleton 轮
+恒走:模板只供数据面,App 外壳/路由/家族文件由模型依需求地图自建;
+`SCHEMA_DIRECTIVE` 仅在 schema.json 缺席时追加到节点工单(骨架轮提示词
+已含同等指引)。schema.json 落盘即信号:`scaffold.Watcher`
 轮中 2s 轮询、稳定 3s 即编译为 `src/database/schema.js`(轮末兜底 sync),
 engine/auth 在下次 boot 时挂出 `/api/<entity>` CRUD 与 `/api/auth/*`;
 tree-sitter repomap 每个 marker turn 全量重扫,宿主直写文件自动进图,

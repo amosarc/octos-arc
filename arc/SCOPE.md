@@ -39,7 +39,7 @@ unzip -p octos-arc-bundle.zip main.py | grep -m1 COMPETITION_FAMILY_SCOPE
 - 进度账本只列范围内家族（无"永远 pending"噪音）；
 - Tier-2 判定面收窄到范围内节点的 specs（全量套件对未实现家族必然全红，会带偏 final 修复轮）；
 - 系统行追加 `RUN SCOPE` 段，模型明确知道其他表面缺失是预期的；
-- 视觉通道只描述范围内节点引用的参考图（27→6 级别）；
+- 参考图随工单直达：内核在含图工单的 turn 把真实图片附给模型（style/layout reference），范围外家族的图不进任何工单；
 - **种子仍全量播种**（db.json 含所有家族种子行，schema 暴露全部实体）——这是评测冷启动需要，不是范围违规。
 
 ## 本地仿真覆盖（env 通道）

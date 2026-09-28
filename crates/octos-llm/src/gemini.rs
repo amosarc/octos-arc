@@ -1134,6 +1134,7 @@ mod tests {
         .unwrap();
         assert!(auto.get("toolConfig").is_none(), "{auto}");
         let none = ChatConfig {
+            model: None,
             tool_choice: crate::ToolChoice::None,
             ..Default::default()
         };
@@ -1153,6 +1154,7 @@ mod tests {
     fn provider_normalized_manifest_proves_same_epoch_append_only_contents() {
         let provider = GeminiProvider::new("test-key", "gemini-2.5-flash");
         let config = ChatConfig {
+            model: None,
             prompt_cache_context: Some(crate::PromptCacheContext {
                 affinity_key: "unused".to_owned(),
                 epoch_id: "epoch-one".to_owned(),
@@ -1505,6 +1507,7 @@ mod tests {
         let effort = serde_json::from_value(serde_json::json!("none"))
             .expect("none should disable reasoning");
         let config = ChatConfig {
+            model: None,
             reasoning_effort: Some(effort),
             ..Default::default()
         };
@@ -1517,6 +1520,7 @@ mod tests {
     fn test_response_format_json_schema() {
         use crate::config::ResponseFormat;
         let config = ChatConfig {
+            model: None,
             response_format: Some(ResponseFormat::JsonSchema {
                 name: "test".into(),
                 schema: serde_json::json!({"type": "object", "additionalProperties": false}),
@@ -1538,6 +1542,7 @@ mod tests {
     fn should_reject_response_schema_when_array_items_are_empty() {
         use crate::config::ResponseFormat;
         let config = ChatConfig {
+            model: None,
             response_format: Some(ResponseFormat::JsonSchema {
                 name: "test".into(),
                 schema: serde_json::json!({

@@ -241,3 +241,26 @@ class ProbeRoutesTests(unittest.TestCase):
         self.assertEqual(len(probes), 3)
 
 
+
+
+class FixtureProbeTests(unittest.TestCase):
+    def test_declared_logins_first_and_passwordless_skipped(self):
+        # 模型自报账号(seed-accounts.json)优先;无密码条目跳过——
+        # 宿主不再有统一密码兜底(09-28 合成账号退役)。
+        logins = [{"username": "org-owner", "password": "pw"},
+                  {"username": "ghost"},
+                  {"username": "alice-dev", "password": "quoted-pw"}]
+        probes = pe.build_fixture_probes(logins, ["users", "organizations"])
+        logins_only = [p for p in probes if p.get("kind") == "login"]
+        self.assertEqual([p["user"] for p in logins_only],
+                         ["org-owner", "alice-dev"])
+        for p in logins_only:
+            self.assertEqual(json.loads(p["body"])["password"] in
+                             ("pw", "quoted-pw"), True)
+
+    def test_login_probe_cap_leaves_room_for_entities(self):
+        logins = [{"username": f"u{i}", "password": "pw"} for i in range(9)]
+        probes = pe.build_fixture_probes(logins, ["organizations", "teams"])
+        self.assertEqual(len([p for p in probes if p.get("kind") == "login"]), 4)
+        self.assertEqual(len([p for p in probes if p.get("kind") == "entity"]), 2)
+        self.assertEqual(len(probes), 6)

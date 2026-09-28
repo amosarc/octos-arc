@@ -32,6 +32,15 @@ pub struct SemanticCheckpointHint {
 /// Configuration for a chat completion request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatConfig {
+    /// Per-request model override (ARC 请求端视觉路由 2026-09-28): when set,
+    /// THIS request targets the named model on the same endpoint and
+    /// credentials. `ModelHints` are re-derived from the override name, so
+    /// provider quirks (GLM reasoning tiers, kimi reasoning stubs, system
+    /// merging) follow the effective model, not the lane default. Requesters
+    /// that only sometimes carry images set it conditionally; an empty/None
+    /// value keeps the lane's default model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Maximum tokens to generate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
@@ -172,6 +181,7 @@ pub enum ReasoningEffort {
 impl Default for ChatConfig {
     fn default() -> Self {
         Self {
+            model: None,
             max_tokens: Some(crate::context::default_max_tokens()),
             temperature: Some(0.0),
             tool_choice: ToolChoice::Auto,
@@ -312,6 +322,7 @@ mod tests {
     #[test]
     fn test_chat_config_serde_roundtrip() {
         let config = ChatConfig {
+            model: None,
             max_tokens: Some(2048),
             temperature: Some(0.7),
             tool_choice: ToolChoice::Required,

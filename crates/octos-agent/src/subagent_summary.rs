@@ -532,6 +532,7 @@ async fn fetch_summary(
     llm_timeout: Duration,
 ) -> Result<String, String> {
     let config = ChatConfig {
+        model: None,
         max_tokens: Some(64),
         temperature: Some(0.0),
         tool_choice: Default::default(),

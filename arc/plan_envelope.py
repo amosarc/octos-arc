@@ -249,19 +249,27 @@ def build_fixture_probes(logins: list[dict], collections: list[str]) -> list[dic
     """夹具探针(宿主 0-token 验证,复用 rehearsal-repair 回路)。
 
     - login: POST /api/auth/login(宿主固定 auth 路由)期待 200;
-      400/401 = 种子账号或统一密码约定被破坏,404 = auth 实体未声明。
+      400/401 = 声明的账号/密码与实际认证不符,404 = auth 实体未声明。
+      登录清单优先取模型自报的 backend/data/seed-accounts.json(角色
+      账号由模型推理决定,宿主只验证其声明),逐字转录种子殿后。
+      无密码条目跳过——宿主不再有统一密码兜底(09-28 退役)。
     - entity: GET /api/<name> 期待 200 且非空;空 = 宿主种子行被删/集合被
       改名,404 = schema.json 未暴露该实体。users(auth 实体)没有引擎
       GET 路由,由 login 探针代管。判定语义在 _probe_routes_on 落地。
     """
     probes: list[dict] = []
-    for login in (logins or [])[:2]:
-        password = str(login.get("password") or fixture_manifest.FIXTURE_PASSWORD)
+    for login in (logins or []):
+        if len(probes) >= 4:
+            break
+        username = str(login.get("username") or "")
+        password = str(login.get("password") or "")
+        if not username or not password:
+            continue
         probes.append({
             "method": "POST", "path": "/api/auth/login", "kind": "login",
-            "user": str(login.get("username") or ""),
+            "user": username,
             "body": json.dumps({
-                "username": login.get("username"),
+                "username": username,
                 "password": password})})
     for name in (collections or []):
         if name == "users" or len(probes) >= 8:

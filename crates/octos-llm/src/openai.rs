@@ -289,6 +289,11 @@ pub struct OpenAIProvider {
     /// Kimi/DeepSeek/vLLM never see a reserved field they may reject; the
     /// operator kill-switch (`OCTOS_PROMPT_CACHING`) is evaluated per request.
     prompt_cache_affinity: bool,
+    /// 请求端视觉路由(ARC 2026-09-28):env `VISUAL_MODEL` 配置后,携带
+    /// 用户图片的请求经 [`Self::apply_vision_override`] 把
+    /// `ChatConfig::model` 填成该模型(同端点同密钥,仅换模型);未配置 =
+    /// None(维持原行为,文本端点走既有 image-modality 400 降级)。
+    vision_model: Option<String>,
 }
 
 const OFFICIAL_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -308,6 +313,7 @@ impl OpenAIProvider {
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         let model = model.into();
         let hints = ModelHints::detect(&model);
+        let vision_model = Self::vision_model_from_env(&model);
         Self {
             client: crate::provider::build_http_client(
                 crate::provider::DEFAULT_LLM_TIMEOUT_SECS,
@@ -322,7 +328,39 @@ impl OpenAIProvider {
             base_url: OFFICIAL_OPENAI_BASE_URL.to_string(),
             provider_label: "openai".to_string(),
             prompt_cache_affinity: true,
+            vision_model,
         }
+    }
+
+    /// env 视觉模型:`VISUAL_MODEL` 显式配置才启用(与主模型同名视为未
+    /// 配置)。模型经 [`ChatConfig::model`] 在请求上生效——同端点同密钥,
+    /// 仅换模型;跨端点/密钥的通道一般化留待真需求出现。
+    fn vision_model_from_env(main_model: &str) -> Option<String> {
+        let model = std::env::var("VISUAL_MODEL").ok()?;
+        let model = model.trim();
+        if model.is_empty() || model.eq_ignore_ascii_case(main_model) {
+            return None;
+        }
+        Some(model.to_string())
+    }
+
+    /// 视觉路由策略:配置了视觉模型、请求方尚未显式指定 model、且请求
+    /// 携带用户图片 → 克隆 config 填 `model`(请求方显式值永远 wins)。
+    fn apply_vision_override<'a>(
+        &self,
+        messages: &[Message],
+        config: &'a ChatConfig,
+    ) -> std::borrow::Cow<'a, ChatConfig> {
+        if let (Some(vision_model), None) =
+            (&self.vision_model, &config.model)
+        {
+            if request_has_user_images(messages, &self.hints) {
+                let mut owned = config.clone();
+                owned.model = Some(vision_model.clone());
+                return std::borrow::Cow::Owned(owned);
+            }
+        }
+        std::borrow::Cow::Borrowed(config)
     }
 
     /// Set a custom base URL (for Azure, local proxies, etc.).
@@ -501,9 +539,19 @@ impl OpenAIProvider {
         config: &'a ChatConfig,
         force_text_only: bool,
     ) -> OpenAIRequest<'a> {
-        // Effective content hints: honour the configured `lacks_vision`, and
-        // additionally strip images on the text-only retry leg.
-        let mut content_hints = self.hints.clone();
+        // Effective model + hints: a per-request model override
+        // (`ChatConfig::model`, e.g. the vision lane) re-derives hints from
+        // the override name so GLM reasoning tiers, kimi reasoning stubs and
+        // system-merging follow the EFFECTIVE model. Then honour the
+        // configured `lacks_vision`, and additionally strip images on the
+        // text-only retry leg.
+        let effective_model = config.model.as_deref().unwrap_or(&self.model);
+        let mut content_hints =
+            if config.model.is_some() && effective_model != self.model {
+                ModelHints::detect(effective_model)
+            } else {
+                self.hints.clone()
+            };
         content_hints.lacks_vision = content_hints.lacks_vision || force_text_only;
         let openai_messages: Vec<OpenAIMessage> = messages
             .iter()
@@ -550,8 +598,8 @@ impl OpenAIProvider {
                 // verified live to return 200 without the field, and non-official
                 // nvidia/vllm endpoints that don't expect it) get no
                 // reasoning_content at all.
-                let model_lower = self.model.to_lowercase();
-                let needs_reasoning_stub = self.hints.fixed_temperature
+                let model_lower = effective_model.to_lowercase();
+                let needs_reasoning_stub = content_hints.fixed_temperature
                     && (model_lower.contains("kimi-k2")
                         || model_lower.contains("kimi-k3")
                         // Kimi Code API ids: bare `k3`/`k3-256k` and the
@@ -579,7 +627,7 @@ impl OpenAIProvider {
             })
             .collect();
 
-        let openai_messages = if self.hints.merge_system_messages {
+        let openai_messages = if content_hints.merge_system_messages {
             merge_system_messages(openai_messages)
         } else {
             openai_messages
@@ -603,7 +651,7 @@ impl OpenAIProvider {
             )
         };
 
-        let temperature = if self.hints.fixed_temperature {
+        let temperature = if content_hints.fixed_temperature {
             None
         } else {
             config.temperature
@@ -657,7 +705,7 @@ impl OpenAIProvider {
             _ => config.reasoning_effort,
         };
         let (reasoning_effort, thinking): (Option<&str>, Option<serde_json::Value>) =
-            match (configured_effort, self.hints.reasoning_style) {
+            match (configured_effort, content_hints.reasoning_style) {
                 (Some(effort), style) => {
                     use crate::config::ReasoningEffort as RE;
                     let enabled = || serde_json::json!({ "type": "enabled" });
@@ -737,14 +785,14 @@ impl OpenAIProvider {
             };
 
         OpenAIRequest {
-            model: &self.model,
+            model: effective_model,
             messages: openai_messages,
-            max_tokens: if self.hints.uses_completion_tokens {
+            max_tokens: if content_hints.uses_completion_tokens {
                 None
             } else {
                 config.max_tokens
             },
-            max_completion_tokens: if self.hints.uses_completion_tokens {
+            max_completion_tokens: if content_hints.uses_completion_tokens {
                 config.max_tokens.or(Some(4096))
             } else {
                 None
@@ -825,30 +873,11 @@ impl OpenAIProvider {
             self.prompt_cache_input_manifest(request, config).trace();
         }
     }
-}
 
-/// Request keys octos sets via dedicated `OpenAIRequest` fields; if an operator
-/// puts one of these in `sampling_params` it is dropped (the dedicated field /
-/// knob wins) rather than emitted twice. See [`OpenAIProvider::build_request`].
-const RESERVED_SAMPLING_KEYS: &[&str] = &[
-    "model",
-    "messages",
-    "max_tokens",
-    "max_completion_tokens",
-    "temperature",
-    "tools",
-    "response_format",
-    "reasoning_effort",
-    "thinking",
-    "stream",
-    "stream_options",
-    "prompt_cache_key",
-    "tool_choice",
-];
-
-#[async_trait]
-impl LlmProvider for OpenAIProvider {
-    async fn chat(
+    /// Non-routing chat round: build the request on THIS lane and send it,
+    /// with the in-lane image-modality 400 fallback (retry once text-only).
+    /// The routed [`Self::chat`] delegates here on whichever lane wins.
+    async fn chat_round(
         &self,
         messages: &[Message],
         tools: &[ToolSpec],
@@ -886,7 +915,6 @@ impl LlmProvider for OpenAIProvider {
                 .into());
             }
         }
-
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
@@ -1004,7 +1032,8 @@ impl LlmProvider for OpenAIProvider {
         })
     }
 
-    async fn chat_stream(
+    /// Non-routing streaming round (see [`Self::chat_round`]).
+    async fn chat_stream_round(
         &self,
         messages: &[Message],
         tools: &[ToolSpec],
@@ -1060,6 +1089,54 @@ impl LlmProvider for OpenAIProvider {
 
         Ok(Box::pin(event_stream))
     }
+}
+
+
+/// Request keys octos sets via dedicated `OpenAIRequest` fields; if an operator
+/// puts one of these in `sampling_params` it is dropped (the dedicated field /
+/// knob wins) rather than emitted twice. See [`OpenAIProvider::build_request`].
+const RESERVED_SAMPLING_KEYS: &[&str] = &[
+    "model",
+    "messages",
+    "max_tokens",
+    "max_completion_tokens",
+    "temperature",
+    "tools",
+    "response_format",
+    "reasoning_effort",
+    "thinking",
+    "stream",
+    "stream_options",
+    "prompt_cache_key",
+    "tool_choice",
+];
+
+#[async_trait]
+impl LlmProvider for OpenAIProvider {
+    async fn chat(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        config: &ChatConfig,
+    ) -> Result<ChatResponse> {
+        // 请求端视觉路由(ARC 2026-09-28):env VISUAL_MODEL 配置后,携带
+        // 用户图片的请求把 ChatConfig::model 覆盖为视觉模型(同端点同
+        // 密钥);未配置/无图/请求方已显式指定 → 原样。
+        let config = self.apply_vision_override(messages, config);
+        self.chat_round(messages, tools, &config).await
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        config: &ChatConfig,
+    ) -> Result<ChatStream> {
+        // 请求端视觉路由(与 chat 同一律)。
+        let config = self.apply_vision_override(messages, config);
+        self.chat_stream_round(messages, tools, &config).await
+    }
+
 
     fn model_id(&self) -> &str {
         &self.model
@@ -1607,6 +1684,52 @@ mod tests {
 
     fn msg(content: &str) -> Message {
         crate::types::test_msg(octos_core::MessageRole::User, content)
+    }
+
+    #[test]
+    fn vision_override_applies_only_to_image_requests_without_explicit_model() {
+        // 请求端视觉路由三态:带图+配置了视觉模型+请求方未指定 → 覆盖;
+        // 纯文本 → 原样;请求方已显式指定 model → 尊重请求方。
+        let mut provider = OpenAIProvider::new("key", "deepseek-v4-flash");
+        provider.vision_model = Some("glm-5.3-flash".to_string());
+
+        let mut user_image = msg("look at this");
+        user_image.media = vec!["reference/a.png".to_string()];
+        let cfg = ChatConfig::default();
+        let out = provider.apply_vision_override(&[user_image.clone()], &cfg);
+        assert_eq!(out.model.as_deref(), Some("glm-5.3-flash"));
+
+        let out = provider.apply_vision_override(&[msg("plain text turn")], &cfg);
+        assert!(out.model.is_none());
+
+        let mut explicit = ChatConfig::default();
+        explicit.model = Some("kimi-k3".to_string());
+        let out = provider.apply_vision_override(&[user_image], &explicit);
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(out.model.as_deref(), Some("kimi-k3"));
+
+        // 未配置视觉模型 → 永不覆盖。
+        let bare = OpenAIProvider::new("key", "deepseek-v4-flash");
+        let mut img = msg("look");
+        img.media = vec!["reference/a.png".to_string()];
+        let default_cfg = ChatConfig::default();
+        let out = bare.apply_vision_override(&[img], &default_cfg);
+        assert!(out.model.is_none());
+    }
+
+    #[test]
+    fn build_request_honors_per_request_model_override() {
+        let provider = OpenAIProvider::new("key", "deepseek-v4-flash");
+        let mut override_cfg = ChatConfig::default();
+        override_cfg.model = Some("glm-5.3-flash".to_string());
+        let messages = [msg("hello")];
+
+        let request = provider.build_request(&messages, &[], &override_cfg, false);
+        assert_eq!(request.model, "glm-5.3-flash");
+
+        let plain_cfg = ChatConfig::default();
+        let plain = provider.build_request(&messages, &[], &plain_cfg, false);
+        assert_eq!(plain.model, "deepseek-v4-flash");
     }
 
     #[test]

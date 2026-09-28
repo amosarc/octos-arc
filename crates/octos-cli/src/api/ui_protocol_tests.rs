@@ -3120,3 +3120,37 @@ fn v2_projects_errored_and_interrupted_terminals() {
         }
     }
 }
+
+#[test]
+fn prompt_reference_images_resolved_deduped_and_filtered() {
+    let dir = tempfile::tempdir().unwrap();
+    let reference = dir.path().join("reference");
+    std::fs::create_dir_all(&reference).unwrap();
+    std::fs::write(reference.join("a.png"), b"png").unwrap();
+    std::fs::write(reference.join("b.jpg"), b"jpg").unwrap();
+    std::fs::write(dir.path().join("notes.txt"), b"text").unwrap();
+
+    let prompt = "work order\n\
+                  ![image](reference/a.png)\n\
+                  ![image](reference/a.png)\n\
+                  ![remote](https://example.com/x.png)\n\
+                  ![data](data:image/png;base64,AAAA)\n\
+                  ![escape](../outside.png)\n\
+                  ![abs](/etc/passwd)\n\
+                  ![text](notes.txt)\n\
+                  ![missing](reference/missing.png)\n\
+                  ![second](reference/b.jpg)";
+    let media = super::attach_prompt_reference_images(prompt, dir.path(), vec![]);
+    assert_eq!(media, vec!["reference/a.png", "reference/b.jpg"]);
+
+    // Existing turn uploads occupy the cap first; prompt marks top up to it
+    // (the repeated b.jpg mark dedupes, so upload + 2 distinct marks = 3).
+    let uploads = vec!["uploads/upload-1.png".to_string()];
+    let media = super::attach_prompt_reference_images(
+        &format!("{prompt} ![third](reference/b.jpg)"),
+        dir.path(),
+        uploads,
+    );
+    assert_eq!(media.len(), 3);
+    assert!(media.contains(&"uploads/upload-1.png".to_string()));
+}

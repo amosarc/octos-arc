@@ -1377,6 +1377,7 @@ pub fn llm_compaction_summary_with_budget(
         // silent heuristic fallback). Mirrors codex, which sets no output cap on
         // its compaction turn — the system prompt keeps the summary concise.
         let config = ChatConfig {
+            model: None,
             max_tokens: Some(provider.max_output_tokens().min(budget_tokens.max(1))),
             // Low but non-zero: a factual handoff summary, lightly deterministic.
             temperature: Some(0.2),

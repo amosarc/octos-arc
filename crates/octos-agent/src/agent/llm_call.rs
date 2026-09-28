@@ -1121,6 +1121,7 @@ mod tests {
         // Start with a small per-turn cap (what cuts the call off).
         let small_cap = 1200u32;
         let config = ChatConfig {
+            model: None,
             max_tokens: Some(small_cap),
             ..Default::default()
         };

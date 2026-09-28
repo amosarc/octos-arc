@@ -14767,6 +14767,76 @@ fn normalize_tool_context(value: Option<&str>) -> Option<String> {
     Some(value.to_string())
 }
 
+/// Scan a turn prompt for markdown reference-image marks (`![alt](path)`)
+/// and append workspace-resolved image files to `media` (deduped, capped).
+///
+/// ARC requirement work orders carry `![image](reference/*.png)` marks; a
+/// multimodal model should see the actual image on the turn that implements
+/// the requirement instead of a lossy host-side text description. Marks stay
+/// in the prompt text (the model keeps the path reference and prompt bytes
+/// stay stable) — only `media` is extended. Remote URLs, `data:` URLs,
+/// absolute paths, parent-dir escapes, non-image files, and missing files
+/// are ignored. Existing entries in `media` (turn uploads) win the cap.
+fn attach_prompt_reference_images(
+    prompt: &str,
+    workspace_root: &Path,
+    mut media: Vec<String>,
+) -> Vec<String> {
+    const MAX_PROMPT_IMAGES: usize = 8;
+    let mut search_from = 0usize;
+    while media.len() < MAX_PROMPT_IMAGES {
+        let Some(start_rel) = prompt[search_from..].find("![") else {
+            break;
+        };
+        let start = search_from + start_rel;
+        let Some(sep_rel) = prompt[start + 2..].find("](") else {
+            break;
+        };
+        let sep = start + 2 + sep_rel;
+        let Some(close_rel) = prompt[sep + 2..].find(')') else {
+            break;
+        };
+        let close = sep + 2 + close_rel;
+        let raw = prompt[sep + 2..close].trim();
+        search_from = close + 1;
+        if raw.is_empty()
+            || raw.starts_with("http://")
+            || raw.starts_with("https://")
+            || raw.starts_with("data:")
+        {
+            continue;
+        }
+        // Relative workspace paths only: reject absolute paths and any
+        // parent-dir/root component that could escape the workspace.
+        let candidate = Path::new(raw);
+        let mut clean = PathBuf::new();
+        let mut escaped = false;
+        for component in candidate.components() {
+            match component {
+                std::path::Component::Normal(part) => clean.push(part),
+                std::path::Component::CurDir => {}
+                _ => {
+                    escaped = true;
+                    break;
+                }
+            }
+        }
+        if escaped || clean.as_os_str().is_empty() {
+            continue;
+        }
+        if !workspace_root.join(&clean).is_file() {
+            continue;
+        }
+        let key = clean.to_string_lossy().to_string();
+        if !octos_llm::vision::is_image(&key) || media.iter().any(|m| m == &key)
+        {
+            continue;
+        }
+        media.push(key);
+    }
+    media
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_standalone_turn(
     ws: WsConnection,
@@ -15964,6 +16034,15 @@ async fn run_standalone_turn(
         // scope would skip the ownership check for them (codex round-5 P1).
         Some(session_runtime.profile.profile_id.as_str()),
         &raw_media,
+    );
+    // ARC reference images: the requirement work orders embed
+    // `![image](reference/*.png)` marks. Resolve them against the workspace
+    // and attach as media so a multimodal model sees the actual image on the
+    // turn that implements the requirement (marks stay in the text).
+    let turn_media_paths = attach_prompt_reference_images(
+        &prompt,
+        &session_runtime.workspace_root,
+        turn_media_paths,
     );
     if let Some(rewrite_for) = params.rewrite_for.as_deref() {
         tracing::debug!(

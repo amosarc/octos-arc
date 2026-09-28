@@ -83,16 +83,16 @@ EOF
 # arcbench_agent_runtime) + 惰性 import(octos_stdio) + 内核(bin/) + 初始
 # 模板(template/)
 # (fixture_manifest.py:夹具契约提取/宿主种子编译——main.py 顶层依赖,漏打即启动崩)
-# (visual_ref.py:参考图视觉预描述(VISUAL_MODEL 通道)——main.py 顶层依赖,
-#  requirements-only 任务的 ![image](reference/*) 靠它在提示词里变成描述)
 # (clock.py:时间戳单一时钟源(北京时间UTC+8)——main.py/事件流/追溯表/
 #  遥测共享,main.py 顶层依赖,漏打即启动崩)
+# (visual_ref.py 已退役(2026-09-28):参考图由内核在含图工单的 turn 直接
+#  作为 user 消息媒体附件,宿主预描述通道删除)
 # (09-27 目标优先定则:ui_smoke/flow_suite 宿主自写验收套件已删除——
 #  测试用例由模型根据需求自生成,宿主只落盘 .arc/ui-smoke 最小骨架)
 # public-tests 不进包(2026-09-26 正式比赛决策):平台挂载 /workspace/tests
 # 或 ARCBENCH_TESTS_DIR 优先生效;两者皆缺的任务走 no-staged-specs 的
 # 模型自测契约(main.py locate_acceptance_tests 的包内回落分支因此休眠)。
-cp main.py plan_envelope.py fixture_manifest.py visual_ref.py octos_stdio.py clock.py requirements.txt "$PKG/"
+cp main.py plan_envelope.py fixture_manifest.py octos_stdio.py clock.py requirements.txt "$PKG/"
 cp -R arcbench_agent_runtime scaffold bin "$PKG/"
 # 自验工具链零打包(2026-09-27 决策):生产/仿真 runner 镜像自带全局
 # @playwright/test@1.57.0 + chromium-1200,_ensure_host_toolchain /

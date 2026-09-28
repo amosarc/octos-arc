@@ -14,14 +14,12 @@ git commits.
 
 Configuration is via environment variables:
     OPENAI_API_KEY / OPENAI_BASE_URL / MODEL   (OpenAI-compatible endpoint)
-    VISUAL_MODEL / VISUAL_API_KEY / VISUAL_BASE_URL
-                         (vision lane describing requirement reference
-                          images before the coding turns; falls back to
-                          MODEL / OPENAI_API_KEY / OPENAI_BASE_URL, visual
-                          model default glm-5.3-flash. Best-effort: an
-                          unavailable lane leaves image refs as plain text)
-    OCTOS_VISUAL_BUDGET (seconds cap for the whole description phase,
-                         default 900; per-image timeout 180s)
+    VISUAL_MODEL (kernel-side per-request vision routing: turns whose
+                  prompt carries reference-image marks get this model
+                  injected into ChatConfig.model, so a multimodal model
+                  sees the actual images on those turns; same endpoint/
+                  key as the main lane. Unset = images degrade to the
+                  image-modality text-only fallback)
     OCTOS_PROVIDER  (override provider name, e.g. deepseek/openai/anthropic)
     OCTOS_MODEL     (override model name)
     OCTOS_BIN       (path to the octos binary; default: ./bin/octos then PATH)
@@ -64,7 +62,6 @@ import clock  # noqa: E402  (时间戳单一时钟源:北京时间 UTC+8)
 import fixture_manifest  # noqa: E402  (夹具契约提取/宿主种子编译)
 import plan_envelope  # noqa: E402
 import scaffold  # noqa: E402  (宿主脚手架包:模板/清单/schema 编译唯一公开面)
-import visual_ref  # noqa: E402  (参考图视觉预描述:VISUAL_MODEL 代看注入 tree)
 
 # 只保留:①工具链 CLI 发现(下述 _pw_* 助手);②被内核放行的自测命令
 # 形状所需的 ui-smoke/playwright.config.ts 最小骨架(工作区根,脱离
@@ -233,8 +230,10 @@ def _segment_digest(node_done_notes: dict[str, str],
     while len("\n".join(lines)) > 1900 and len(lines) > 3:
         lines.pop()
     lines.append(
-        "backend/data/db.json seeds match the requirement text (the host "
-        "verified them) — build on them, do not re-audit.")
+        "backend/data/db.json seeds were compiled by the host from the "
+        "requirement's GIVEN lines — build on them; where a seeded value "
+        "contradicts the requirement text, the requirement wins (correct "
+        "the seed row, keep the collection and row names).")
     return "\n".join(lines)[:2000]
 
 
@@ -531,9 +530,11 @@ def _probe_routes_on(smoke_port: int, probes: list, extra_ports: list,
 
     # Generic input-validation probes (host-computed, no business
     # semantics): empty body and one oversized field on each POST route.
-    # A 5xx is a hard RED (no input may 500); 4xx/2xx are recorded as
-    # FACTS — a 2xx on garbage may be a legitimate frontend-validation
-    # pattern, so the model checks it against the contract.
+    # Recorded as FACTS, never RED: the goal-first contract derives
+    # behavior rules from the requirement text, and the host no longer
+    # enforces a server-side-validation discipline of its own (09-27
+    # 定则). A 5xx row still lands in the report (and in final-
+    # verification.json) for the model and operator to read.
     vprobes = plan_envelope.build_validation_probes(probes)
     vrows = []
     for vp in vprobes:
@@ -553,9 +554,6 @@ def _probe_routes_on(smoke_port: int, probes: list, extra_ports: list,
         label = (f"{vp['path']} " + "{}") if vp["variant"] == "empty" \
             else f"{vp['path']} +10k"
         vrows.append({"method": "POST", "path": label, "status": status})
-        if status >= 500:
-            problems.append(f"validation probe {vp['path']} "
-                            f"({vp['variant']}) -> HTTP {status}")
     report["validation_probes"] = vrows
 
     # 夹具探针:验证宿主种子在模型实现后的 app 上仍然成立(0-token 验证,
@@ -595,10 +593,14 @@ def _probe_routes_on(smoke_port: int, probes: list, extra_ports: list,
                 pass
             elif status in (400, 401):
                 problems.append(
-                    f"fixture login rejected for seeded account "
-                    f"{user!r} (HTTP {status} on {path}) — auth must "
-                    "verify host-seeded accounts (password convention "
-                    f"{fixture_manifest.FIXTURE_PASSWORD!r})")
+                    f"fixture login rejected for account "
+                    f"{user!r} (HTTP {status} on {path}) — this account is "
+                    "declared in backend/data/seed-accounts.json (or "
+                    "seeded verbatim in backend/data/db.json); the seed "
+                    "row, its password, and the auth verify path must "
+                    "agree. The grader signs in as role accounts like "
+                    "this one — a rejected login here fails whole "
+                    "requirement families")
             elif status == 404:
                 problems.append(
                     f"fixture login route {path} missing (HTTP 404) — "
@@ -866,6 +868,11 @@ def build_selftest_note(cli_path: str | None) -> str:
         "That command shape is sanctioned; raw browser scripts and "
         "browserless guessing are not. Red = the flow fails on the RUNNING "
         "app — fix the app, then rerun.\n"
+        "SEED RESET (before each self-test round): run "
+        "`rm -f backend/data/db.run.json && sh .arc/host/restart-server.sh` "
+        "from the workspace root — earlier turns and spec runs leave "
+        "runtime data behind, and arrange steps that assume the seeded "
+        "state then fail with false reds on perfectly good code.\n"
         "SELF-TEST FIDELITY RULES (how the hidden grader differs from a "
         "hand-walk): 1) LOCATORS ARE ROLES — a requirement phrase "
         "\"A region named X\" means getByRole('region', { name: X }), "
@@ -1320,6 +1327,11 @@ def project_files_changed(output_dir: Path, since: float) -> bool:
                 continue
             if any(part in path.parts for part in ("node_modules", "dist")):
                 continue
+            if path.name == "db.run.json":
+                # 运行态非工作产物:首批 turn 的窗口覆盖宿主首次起服
+                # (store 把种子拷成 db.run.json),不排除会把零工作 turn
+                # 误判为"有文件变化"。
+                continue
             try:
                 if path.stat().st_mtime >= since - 1:
                     return True
@@ -1619,7 +1631,12 @@ def build_system_row_context(tree: dict, rules_text: str,
             + ", ".join(sorted(scope))
             + " — work orders for other families are out of scope; do "
             "not implement them, and expect their surfaces to be absent.")
-    return "\n\n".join(parts)
+    ctx = "\n\n".join(parts)
+    # 防线:reference 图记号只属于含它的工作订单(内核在入站 prompt 解析
+    # 后把真实图片附给当轮),系统行全局层不携带——root 契约是唯一逐字进
+    # 系统行的需求文本,剔除确定性保持字节稳定。
+    ctx = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", ctx)
+    return ctx
 
 
 def collect_dependency_context(tree: dict, batch: list[dict],
@@ -1829,38 +1846,6 @@ def scoped_spec_files(spec_map: dict[str, list[str]],
             for n in batch:
                 wanted.update(spec_map.get(str(n.get("id"))) or [])
     return sorted(wanted)
-
-
-def _in_scope_node_ids(tree: dict, scope: frozenset[str],
-                       family_of: dict[str, dict]) -> frozenset[str] | None:
-    """范围 run 的节点白名单(视觉通道过滤用);无范围 → None(全量)。
-
-    覆盖:命中前缀的节点(任意层级)+ 范围内原子的祖先 FOLDER
-    (家族/子家族描述里的图同样属于范围内契约)。"""
-    if not scope:
-        return None
-    scoped_atomic = {str(n.get("id")) for n in flatten_atomic(tree)
-                     if _node_matches_scope(str(n.get("id")), scope)
-                     or (str(n.get("id")) in family_of
-                         and _node_matches_scope(
-                             str(family_of[str(n.get("id"))].get("id")),
-                             scope))}
-    out = set(scoped_atomic)
-
-    def walk(node: dict) -> None:
-        nid = str(node.get("id") or "")
-        if nid and any(a == nid or a.startswith(nid + "-")
-                       or a.startswith(nid + ".")
-                       for a in scoped_atomic):
-            out.add(nid)
-        for child in node.get("children") or []:
-            if isinstance(child, dict):
-                walk(child)
-
-    for folder in (tree or {}).get("children") or []:
-        if isinstance(folder, dict):
-            walk(folder)
-    return frozenset(out)
 
 
 # ---------------------------------------------------------------- octos driver
@@ -2481,8 +2466,10 @@ class OctosDriver:
 # goal-first 骨架轮:模板已在位可启动,但 App 外壳/路由/家族文件结构由
 # 代理依需求地图自建。db.json 种子保护条款是数据契约。
 GOAL_FIRST_SKELETON_PROMPT = """\
-Lay this application's skeleton — you own frontend/src. The host backend \
-is already running (host-owned backend files: do NOT rewrite them). \
+Lay this application's skeleton — you own frontend/src. The backend is \
+host-owned: do NOT rewrite its files (the host boots it for you before \
+the implementation turns; if you start it yourself to verify, port \
+{smoke} only). \
 Work from the REQUIREMENTS MAP in your system prompt:
 1) backend/data/schema.json per the HOST CONTRACT (a host-written \
 starter covering the seeded collections may already exist — EXTEND it, \
@@ -2515,7 +2502,8 @@ Implement requirement family {node_id} DEEP — goal-first: every node in \
 this work order must become a REAL, operable feature. A grader in a \
 real browser walks each scenario end-to-end; strings on the page \
 without a working flow score zero. The pinned HOST CONTRACT applies \
-exactly; the focus section carries this batch's acceptance signals. Do \
+exactly; the THIS BATCH section below carries this work order's \
+requirement nodes — their scenarios ARE the acceptance signals. Do \
 not commit.\
 Definition of done: every scenario of every node in this work order \
 walks through on the RUNNING app; every GIVEN fixture is addressable \
@@ -2526,6 +2514,11 @@ requirements demand (restructure the shell, add files, split or merge \
 features); never regress an already-green family, and never touch the \
 host-owned backend files listed in the HOST CONTRACT (business data \
 goes through backend/data/schema.json + backend/src/routes/index.js).\
+REFERENCE IMAGES: any ![image](...) in this work order is attached to \
+this conversation as a real image — style/layout reference only \
+(region arrangement, component placement, grid structure); every \
+user-facing string, label, and value comes from the requirement text, \
+never from the mockup.\
 PORT DISCIPLINE: NEVER bind port {port}. The app is ALREADY RUNNING, \
 host-managed, on port {smoke} — verify by curl directly; do NOT start \
 your own server. After editing backend/src run \
@@ -2564,10 +2557,10 @@ BATCH_DIRECTIVE_NO_SPEC = """\
 
 BATCH MODE: this turn implements the {count} focus nodes IN THE LISTED \
 ORDER, one at a time. There are no staged specs for this task: after \
-each node, walk its FOCUS action chains on the RUNNING app (port \
-{smoke}) — a chain that does not walk through means fix that node \
-before moving on. The turn is complete when every node's chains walk \
-through — then write a short per-node summary and finish.\
+each node, walk its scenarios on the RUNNING app (port \
+{smoke}) — a scenario that does not walk through means fix that node \
+before moving on. The turn is complete when every node's scenarios \
+walk through — then write a short per-node summary and finish.\
 """
 
 BATCH_DIRECTIVE = """\
@@ -2685,21 +2678,23 @@ Dependencies are preinstalled — never run npm install.\
 """ % {"schema_json": scaffold.SCHEMA_JSON_REL}
 
 HOST_FINAL_CHECK_PROMPT = """\
-The host already built the app, booted it, and probed the /api/ routes \
-(the HOST REPORT section shows every result). Verify only what the host \
+The host already built the app, booted it, and probed the /api/ routes; \
+any host-found failure is listed below. Verify only what the host \
 cannot: assertion semantics — strict-mode single matches for echoed \
 values, exactly one visible error element per failure, verbatim option \
-labels, and session persistence across reload. Walk every action chain \
-in the ACCEPTANCE sections on the running app and report one line of \
-evidence per chain; an empty "all good" without evidence is a failed \
-check. Fix what is wrong; do not rebuild what works. Do not commit.\
+labels, and session persistence across reload. Walk the action chains \
+behind each failing test named below, on the running app, and report \
+one line of evidence per chain; an empty "all good" without evidence \
+is a failed check. Fix what is wrong; do not rebuild what works. Do \
+not commit.\
 """
 
 HOST_FINAL_CHECK_UI_PROMPT = """\
-The host verified build + boot + ports — everything in a real browser \
-is yours to verify with your OWN specs (derive them from the \
-requirement scenarios; the SELF-TEST command runs them against the \
-running app). Walk the action chains in the ACCEPTANCE sections — \
+The host verified build + boot + ports, plus a crash-free page walk \
+(unless a page-health finding is listed below) — everything else in a \
+real browser is yours to verify with your OWN specs (derive them from \
+the requirement scenarios; the SELF-TEST command runs them against the \
+running app). Walk the action chains behind the requirement scenarios — \
 visible feedback for every named control, exactly one visible error \
 element per failure, strict-mode unique echoes, verbatim labels and \
 seeded values. Report one line of evidence per chain; an empty "all \
@@ -2715,13 +2710,13 @@ Playwright specs live READ-ONLY at .arc/acceptance/ — never edit, copy, \
 move, or delete anything there (the host re-stages them from a pristine \
 source and re-runs them itself; tampering only wastes your wall clock). \
 YOUR OWN specs live ONLY under ui-smoke/ (sanctioned config: \
-ui-smoke/playwright.config.ts). The official specs' routes, roles, \
-labels, testids, and per-test action chains are extracted into your \
-system prompt (CONTRACT + FOCUS sections) as an INDEX, not a \
-replacement: implement against them, and when anything fails or a \
-detail is ambiguous, re-read the exact spec file under .arc/acceptance/ \
-— it is the ground truth. Where the requirement text disagrees, the \
-spec wins.\
+ui-smoke/playwright.config.ts). The staged spec files themselves are \
+the operational index of routes, roles, labels, testids, and per-test \
+action chains — your system prompt carries the requirements map and \
+the fixture contract, not the specs. Implement against the spec files, \
+and when anything fails or a detail is ambiguous, re-read the exact \
+spec under .arc/acceptance/ — it is the ground truth. Where the \
+requirement text disagrees, the spec wins.\
 """
 
 
@@ -2790,6 +2785,39 @@ def spec_base_ports(tests_dir: Path | None) -> list[int]:
     return sorted(ports)
 
 
+def stage_acceptance_runtime(stage_dir: Path, smoke_port: int,
+                             toolchain_cli: Path | None) -> None:
+    """Staged SPEC RUN runtime: playwright.config.ts + node_modules link.
+
+    stage_specs() only restores *.spec.ts + support/ — the anti-tamper
+    replay before Tier-2 would otherwise leave the model's sanctioned
+    SPEC RUN command pointing at a missing config with @playwright/test
+    unresolvable, exactly when the final turn is told to reproduce red
+    tests. The config mirrors the grading config field-for-field
+    (10s/10s timeouts, workers 1): staged self-verification once used
+    Playwright's default 30s, and slow-but-local flows die on the eval's
+    10s wall (run7/8/11 "green locally, red at eval" were almost all
+    `Test timeout 10000ms`).
+    """
+    (stage_dir / "playwright.config.ts").write_text(
+        "import { defineConfig } from '@playwright/test';\n"
+        "export default defineConfig({ testDir: '.',\n"
+        "  fullyParallel: false, workers: 1, retries: 0,\n"
+        "  timeout: 10_000, expect: { timeout: 10_000 },\n"
+        # 09-27 镜像取证:生产 runner 亲写 config 的 use 段逐字段
+        # 对齐(headless/screenshot/trace)——同构到字段级。
+        "  use: { baseURL: "
+        f"'http://127.0.0.1:{smoke_port}', "
+        "headless: true, screenshot: 'off', trace: 'off' } });\n",
+        encoding="utf-8")
+    if toolchain_cli is not None:
+        try:
+            (stage_dir / "node_modules").symlink_to(
+                toolchain_cli.parents[2], target_is_directory=True)
+        except OSError:
+            pass
+
+
 
 
 REHEARSAL_REPAIR_PROMPT = """\
@@ -2821,7 +2849,7 @@ app on port {smoke}):
 {failed}
 
 Fix ONLY what these failures cover. Do NOT rewrite working features, do \
-NOT edit other requirements' files under frontend/src/features/, and do \
+NOT regress other families' already-green flows, and do \
 NOT revert project files with git — fix forward with surgical edits. \
 Reproduce with the SPEC RUN command below (pre-filtered to the failing \
 specs), then finish the turn.\
@@ -2927,8 +2955,8 @@ def main() -> int:
         atomic_nodes = flatten_atomic(tree)
         if not atomic_nodes:
             raise ValueError("no ATOMIC requirement nodes found")
-        # 运行范围提前到视觉通道之前——范围 run 的参考图描述只做范围
-        # 内节点(27 张全量是范围外死重)。
+        # 运行范围解析前置——scope 影响后续所有装配决策(工单/账本/
+        # Tier-2 判定面/参考图归属)。
         # 范围解析优先级:env 显式 > COMPETITION_FAMILY_SCOPE(烤入默认)。
         # 平台提交无法传 env → 正式范围改 main.py 顶部常量后重打包
         # (见 arc/SCOPE.md);本地仿真用 env-file 覆盖,"all"/"*" 显式全量。
@@ -2943,15 +2971,6 @@ def main() -> int:
         # E2E_* 环境项)——宿主尽算:先结构化,再编译种子、注入 envelope、
         # 生成 0-token 探针。github 2 分根因:这些契约此前全链无人消费。
         fixture_data = fixture_manifest.extract(tree)
-
-        # 参考图视觉注入:![image](reference/*.png) 对文本通道是死文本,
-        # 宿主用 VISUAL_MODEL(默认 glm-5.3-flash)按视觉格式预描述后原地
-        # 改写 tree,describe_node 等下游提示词自动携带。
-        # 置于 fixture 提取之后(提取读原文)、traceability 存档之后
-        # (平台工件保留原树);best-effort,失败降级为占位说明。
-        visual_ref.apply_visual_references(
-            tree, dest_req, log=log, work_dir=output_dir,
-            only_nodes=_in_scope_node_ids(tree, family_scope, family_of))
 
         tests_dir = locate_acceptance_tests(tree, Path(__file__).resolve().parent)
         if tests_dir:
@@ -2968,7 +2987,7 @@ def main() -> int:
         # 边界切)。OCTOS_ARC_FAMILIES=运行范围(首跑/快迭代):只实现列出
         # 的家族(任意层级前缀,"REQ-1"/"REQ-2-3"/原子 id 均可,逗号分隔),
         # 范围外家族不生成工单/不计进度/不进 Tier-2;未设置=全量。
-        # (family_scope/family_of 已提前到视觉通道之前。)
+        # (family_scope/family_of 已前置。)
         family_batch_max = int(
             os.environ.get("OCTOS_ARC_FAMILY_BATCH_MAX", "6"))
         node_batches = group_families(tree, family_batch_max)
@@ -3076,29 +3095,10 @@ def main() -> int:
         if tests_dir:
             stage_dir = plan_envelope.stage_specs(tests_dir, output_dir)
             log(f"[plan] staged acceptance specs at {stage_dir}")
-            # 宿主尽算：自验 config 无条件落盘（内容只依赖冒烟口）——
-            # 工具链缺席时模型至少拿到可用的 config；依赖软链仍以
-            # 工具链就位为前提。timeout 与隐藏评测配置同构(10s/10s,
-            # workers 1):staged 自验曾用 Playwright 默认 30s,本地熬过的
-            # 慢流程在评测 10s 墙上必挂(run7 12 个/run8 14 个/run11 5 个
-            # "曾绿后评测红"的评测错误几乎清一色 Test timeout 10000ms)。
-            (stage_dir / "playwright.config.ts").write_text(
-                "import { defineConfig } from '@playwright/test';\n"
-                "export default defineConfig({ testDir: '.',\n"
-                "  fullyParallel: false, workers: 1, retries: 0,\n"
-                "  timeout: 10_000, expect: { timeout: 10_000 },\n"
-                # 09-27 镜像取证:生产 runner 亲写 config 的 use 段逐字段
-                # 对齐(headless/screenshot/trace)——同构到字段级。
-                "  use: { baseURL: "
-                f"'http://127.0.0.1:{smoke_port}', "
-                "headless: true, screenshot: 'off', trace: 'off' } });\n",
-                encoding="utf-8")
-            if toolchain_cli is not None:
-                try:
-                    (stage_dir / "node_modules").symlink_to(
-                        toolchain_cli.parents[2], target_is_directory=True)
-                except OSError:
-                    pass
+            # config+依赖软链无条件落盘(工具链缺席时模型至少拿到可用的
+            # config;依赖软链仍以工具链就位为前提)。final 防篡改重放会
+            # 清空本目录——重建走同一 helper,见 Tier-2 前调用点。
+            stage_acceptance_runtime(stage_dir, smoke_port, toolchain_cli)
             spec_map = plan_envelope.spec_to_node_map(tests_dir, atomic_nodes)
             log(f"[plan] spec→node map: {spec_map}")
             probe_list = plan_envelope.probe_routes(stage_dir)
@@ -3248,12 +3248,30 @@ def main() -> int:
             for sname in snames)
 
         def fixture_probe_list() -> list[dict]:
-            """夹具探针(登录可达 + 已播种实体存在);无宿主种子则空。"""
-            if not fixture_compiled or not fixture_compiled["db"]:
+            """夹具探针:模型自报账号(seed-accounts.json)登录可达 +
+            宿主已播种实体存在;两者皆无则空。角色账号由模型推理决定,
+            宿主只验证其声明——声明了却登不进,RED 进 rehearsal-repair。"""
+            declared: list[dict] = []
+            accounts_file = (output_dir / "backend" / "data"
+                             / "seed-accounts.json")
+            try:
+                if accounts_file.exists():
+                    raw = json.loads(
+                        accounts_file.read_text(encoding="utf-8"))
+                    declared = [
+                        {"username": str(a.get("username", "")),
+                         "password": str(a.get("password", ""))}
+                        for a in (raw if isinstance(raw, list) else [])
+                        if isinstance(a, dict) and a.get("username")]
+            except Exception:  # noqa: BLE001 — 声明文件坏格式按未声明处理
+                declared = []
+            compiled_logins = ((fixture_compiled or {}).get("logins") or [])
+            collections = list(
+                (fixture_compiled or {}).get("db", {}).keys())
+            if not declared and not compiled_logins and not collections:
                 return []
             return plan_envelope.build_fixture_probes(
-                fixture_compiled["logins"],
-                list(fixture_compiled["db"].keys()))
+                declared + compiled_logins, collections)
 
         def remaining() -> float:
             # No budget (0) ⇒ unlimited: the node-skip gate, tail
@@ -3854,8 +3872,12 @@ def main() -> int:
                     # 拷进 .arc/acceptance 并删了原始公开 spec)——Tier-2 前
                     # 从 pristine 源重放 staged specs。Tier-2 本就跑
                     # tests_dir 源,重放只恢复模型自己的 staged 视图。
+                    # 重放只回填 specs——config+依赖软链必须随后重建,否则
+                    # final 轮的 verbatim SPEC RUN 命令指向不存在的 config。
                     if tests_dir:
-                        plan_envelope.stage_specs(tests_dir, output_dir)
+                        stage_acceptance_runtime(
+                            plan_envelope.stage_specs(tests_dir, output_dir),
+                            smoke_port, toolchain_cli)
                     # 范围 run:Tier-2 判定面收窄到范围内节点的 specs
                     # (全量套件对未实现家族必然全红,会把 final 带偏)。
                     tier2_specs = (scoped_spec_files(
@@ -3907,6 +3929,13 @@ def main() -> int:
                     final_prompt = (
                         HOST_FINAL_CHECK_PROMPT if probe_list
                         else HOST_FINAL_CHECK_UI_PROMPT)
+                    if f_err is not None:
+                        # 此前 rehearsal 红时 final 轮盲修——错误细节
+                        # (build/boot/探针输出)就在手边,直接给模型。
+                        final_prompt += (
+                            "\nHOST REHEARSAL (build + boot + route probes) "
+                            "FAILED — fix this first:\n"
+                            f"{f_err[-800:]}")
                     if tier2_run and tier2_run[1] > 0:
                         # Tier-2 ran and is RED: the failing titles are ground
                         # truth — hand them to the model instead of letting it
@@ -4011,7 +4040,17 @@ def main() -> int:
                         elif r_ok > 0:
                             log("[plan] Tier-2 re-run all green; "
                                 "fix verified by ground truth")
-
+                # final 验证仪表落盘(自留取证件,随工作区带回):Tier-1
+                # rehearsal 报告/Tier-2 两轮计数/page-health 红项——平台
+                # 不下发失败明细,这里是唯一的宿主侧验真记录。
+                try:
+                    hs_dir = output_dir / "octos-logs"
+                    hs_dir.mkdir(parents=True, exist_ok=True)
+                    (hs_dir / "final-verification.json").write_text(
+                        json.dumps(hs, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8")
+                except OSError as exc:
+                    log(f"[plan] final-verification.json write failed: {exc}")
 
             # Startup rehearsal: run the grading sequence ourselves on the
             # smoke port and hand any failure back for repair. Round 30
@@ -4055,21 +4094,13 @@ def main() -> int:
         # platform's own Playwright run is the verdict there, so leave the
         # nodes unmarked instead of blanket-failing the ones that landed.
         # C2(09-27 宿主过度定制审计):事件按节点级证据标记,final 不绿
-        # 不再全量连坐——旧逻辑把自验噪音(ui-smoke 已知有状态依赖
-        # 假红族)直接变成平台侧 requirement_state=test/failed 全量,
-        # 已工作节点被报死。证据序:浏览器红项点名节点(权威负)>
+        # 不再全量连坐。证据序:批内失败记录(负)>
         # 批 rehearsal 绿(build+boot+探针,正)> final 全绿(兜底正)>
         # 无证据则不标(平台自有判官)。
-        final_skipped = (not ok) and text.startswith("skipped: time budget")
-        red_nodes: dict[str, str] = {}
         for node in atomic_nodes:
             node_id = str(node.get("id"))
             if node_id in failed:
                 events.mark_test_failed(node_id, "final verification did not pass")
-            elif node_id in red_nodes:
-                events.mark_test_failed(
-                    node_id,
-                    "host browser evidence: " + red_nodes[node_id][:200])
             elif plan_statuses.get(node_id) == "done":
                 events.mark_test_passed(
                     node_id, "batch rehearsal green (host build+boot+probes)")
