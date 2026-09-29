@@ -80,7 +80,7 @@ SELFTEST_SUBDIR = "./ui-smoke"
 #   ""             → 全量(最终冲分提交务必改回这里!)
 # 本地仿真不受它影响:env OCTOS_ARC_FAMILIES 设置时覆盖此值。
 # COMPETITION_FAMILY_SCOPE = "REQ-1"
-COMPETITION_FAMILY_SCOPE = ""
+COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2,REQ-3"
 
 _DEBUG_LOG_PATH: Path | None = None
 _DEBUG_LOG_LOCK = threading.Lock()
@@ -259,7 +259,8 @@ def _postflight_structure_check(output_dir: Path, web_port: int = 3000) -> None:
     holding it.
     """
     # 兜底:二进制若仍在 cwd 落了隐藏 .octos/(context-logs),收进可见的
-    # octos-logs/ 下,保证日志目录始终与 backend/ 同级可见。
+    # octos/ 下——全部日志统一落 octos/(state/logs/dot-octos),不再有
+    # 并行的 octos-logs/ 目录(09-29 收敛)。
     hidden = output_dir / ".octos"
     if hidden.is_dir():
         target = output_dir / "octos" / "dot-octos"
@@ -693,7 +694,7 @@ def _boot_dev_server(output_dir: Path, smoke_port: int,
         return False
     env = plan_envelope.rehearsal_boot_env(os.environ, smoke_port,
                                            extra_ports)
-    dev_log_dir = output_dir / "octos-logs"
+    dev_log_dir = output_dir / "octos" / "logs"
     dev_log_dir.mkdir(parents=True, exist_ok=True)
     log_fh = open(dev_log_dir / "host-dev-server.log", "ab")
     try:
@@ -2247,11 +2248,13 @@ def find_octos() -> str:
 
 
 def _ignore_logs_in_workspace_git(output_dir: Path) -> None:
-    """workspace 仓库忽略日志目录:磁盘上可见可收集,但不进 traceability 提交。"""
+    """workspace 仓库忽略运行时目录:磁盘上可见可收集,但不进 traceability
+    提交。"octos/" 整树忽略(state/logs/dot-octos 运行时件均不进批间
+    commit——此前 octos/state 变更会随 git add . 混入提交)。"""
     gi = output_dir / ".gitignore"
     existing = gi.read_text(encoding="utf-8") if gi.is_file() else ""
     lines = set(existing.splitlines())
-    missing = [line for line in ("octos-logs/", ".octos/") if line not in lines]
+    missing = [line for line in ("octos/", ".octos/") if line not in lines]
     if missing:
         gi.write_text(
             existing.rstrip("\n") + ("\n" if existing else "")
@@ -3431,13 +3434,14 @@ def main() -> int:
                 'cd "$(dirname "$0")/../../backend" || exit 1\n'
                 'lsof -ti TCP:"$PORT" -sTCP:LISTEN | xargs -r kill 2>/dev/null\n'
                 "sleep 1\n"
+                'mkdir -p ../octos/logs\n'
                 'PORT="$PORT" nohup node src/index.js '
-                '>> ../octos-logs/host-dev-server.log 2>&1 &\n'
+                '>> ../octos/logs/host-dev-server.log 2>&1 &\n'
                 "i=0; while [ $i -lt 30 ]; do\n"
                 '  curl -sf "http://127.0.0.1:$PORT/api/health" >/dev/null '
                 "2>&1 && { echo \"server ready on $PORT\"; exit 0; }\n"
                 "  sleep 1; i=$((i+1)); done\n"
-                'echo "server failed; see octos-logs/host-dev-server.log"; '
+                'echo "server failed; see octos/logs/host-dev-server.log"; '
                 "exit 1\n",
                 encoding="utf-8")
         if template_ready and os.environ.get("OCTOS_ARC_PREWARM", "1") != "0":

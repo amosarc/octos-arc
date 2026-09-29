@@ -26,7 +26,7 @@ FRONTEND_INDEX_HTML = """\
     <script data-host="__arcTelemetryHook">
       // Host-owned frontend error hook (best-effort): page errors and
       // unhandled rejections are beaconed to the backend telemetry endpoint
-      // so eval-time crashes land in octos-logs/eval-traffic.jsonl.
+      // so eval-time crashes land in octos/logs/eval-traffic.jsonl.
       (function () {
         var send = function (kind, msg) {
           try {

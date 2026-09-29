@@ -2,7 +2,8 @@
 
 评测期遥测的交付前兜底落位。
 应用自身把评测流量与前端异常写
-octos-logs/eval-traffic.jsonl 。常规路径由 scaffold 开工时
+octos/logs/eval-traffic.jsonl (09-29 从 octos-logs/ 收敛,全部日志统一
+octos/)。常规路径由 scaffold 开工时
 落盘三件(lib/eval-telemetry.js、app.js 的 require 行、index.html 错误
 钩子);本模块在交付前兜底——模型重写过 app.js/index.html 丢了钩子则
 原则注入回补,并写 marker 行切分 agent/评测两阶段流量。注入失败只告警:
@@ -89,7 +90,7 @@ def ensure(output_dir, log=print) -> bool:
         log(f"[postflight] eval telemetry index.html check failed: {exc}")
     # 4) 交付 marker:评测窗口 = marker 之后的行
     try:
-        logs_dir = output_dir / "octos-logs"
+        logs_dir = output_dir / "octos" / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         with open(logs_dir / "eval-traffic.jsonl", "a",
                   encoding="utf-8") as fh:

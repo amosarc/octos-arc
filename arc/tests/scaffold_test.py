@@ -243,7 +243,8 @@ class ManifestConsistencyTests(unittest.TestCase):
 
 class TelemetryTests(unittest.TestCase):
     """评测期遥测(2026-09-27):平台 func/e2e 失败明细不下发,应用自身把
-    评测流量与前端异常落 octos-logs/eval-traffic.jsonl 随 zip 带回。
+    评测流量与前端异常落 octos/logs/eval-traffic.jsonl 随 zip 带回
+    (09-29 从 octos-logs/ 收敛——全部日志统一 octos/ 一处)。
     三件套 = lib/eval-telemetry.js + app.js require 行 + index.html 钩子;
     scaffold 常规路径落盘,telemetry.ensure 在交付前兜底回补。"""
 
@@ -280,7 +281,7 @@ class TelemetryTests(unittest.TestCase):
             self.assertIn("__arcTelemetryHook", html)
             self.assertLess(html.index("__arcTelemetryHook"),
                             html.index("</head>"))
-            marker = (out / "octos-logs/eval-traffic.jsonl").read_text(
+            marker = (out / "octos/logs/eval-traffic.jsonl").read_text(
                 encoding="utf-8").strip().splitlines()[-1]
             self.assertIn('"kind": "marker"', marker)
             # 幂等:第二次 ensure 不重复注入
@@ -300,7 +301,7 @@ class TelemetryTests(unittest.TestCase):
                 "module.exports = require('express')();\n", encoding="utf-8")
             self.assertFalse(telemetry.ensure(out, log=lambda *a: None))
             self.assertTrue(
-                (out / "octos-logs/eval-traffic.jsonl").is_file())
+                (out / "octos/logs/eval-traffic.jsonl").is_file())
 
 
 class TemplateSmokeTests(unittest.TestCase):

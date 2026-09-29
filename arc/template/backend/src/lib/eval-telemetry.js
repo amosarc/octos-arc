@@ -1,9 +1,9 @@
 // eval-telemetry.js — host-owned runtime telemetry (best-effort, never throws).
 // Appends one JSON line per /api request (and frontend error reports) to
-// <workspace>/octos-logs/eval-traffic.jsonl. Pure fs, no dependencies.
+// <workspace>/octos/logs/eval-traffic.jsonl. Pure fs, no dependencies.
 const fs = require('fs');
 const path = require('path');
-const LOG = path.join(__dirname, '..', '..', '..', 'octos-logs', 'eval-traffic.jsonl');
+const LOG = path.join(__dirname, '..', '..', '..', 'octos', 'logs', 'eval-traffic.jsonl');
 const MAX_BYTES = 4 * 1024 * 1024;
 function line(obj) {
   try {

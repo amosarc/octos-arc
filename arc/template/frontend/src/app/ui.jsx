@@ -142,7 +142,10 @@ const colLetters = (n) => {
 
 // Spreadsheet-shaped grid: FIXED-SIZE (empty cells beyond the data region
 // stay selectable — a data-sized grid killed ~7 requirements in one run;
-// size it from the seeded/imported data extent plus margin, never smaller).
+// size it from the seeded/imported data extent plus margin, never smaller
+// than 40 rows × 20 cols — the reference apps show a LARGE empty grid
+// around the data, and graders address cells well beyond the seeded
+// extent).
 // role=grid + columnheaders named by LETTER + rowheaders by ROW NUMBER +
 // gridcells whose accessible name is the coordinate (A1). name and
 // multiselectable come FROM THE REQUIREMENT (its quoted grid name and
@@ -156,7 +159,7 @@ const colLetters = (n) => {
 // the kernel's editing object {coord, draft} rendered as a cell input.
 // headerExtra/cellExtra decorate headers/cells (filter buttons, dropdown
 // triggers); rowHidden(r) hides filtered rows without deleting them.
-export function FixedGrid({ name, rows = 26, cols = 10, multiselectable = true,
+export function FixedGrid({ name, rows = 40, cols = 20, multiselectable = true,
                             textAt, selected, grid,
                             onCellClick, onCellDown, onCellEnter,
                             onCellDoubleClick, onContextMenu,

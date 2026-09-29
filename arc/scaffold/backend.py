@@ -162,19 +162,20 @@ module.exports = app;
 
 # backend/src/lib/eval-telemetry.js — 评测期遥测(2026-09-27)。
 # 平台 func/e2e 评测在 agent 退出后于同一 workspace 跑分,失败明细平台不下发;
-# 应用自身把全量 /api 流量 + 前端异常逐行追加到 workspace 根的
-# octos-logs/eval-traffic.jsonl,随工作区 zip 带回做赛后取证
+# 应用自身把全量 /api 流量 + 前端异常逐行追加到 workspace 的
+# octos/logs/eval-traffic.jsonl,随工作区 zip 带回做赛后取证
 # (2026-09-26 github:8 会话后零写入的死因、func 失败的响应体,都靠这层还原)。
 # 约束:零依赖 CommonJS;所有写入 try/catch best-effort——遥测永远不能
 # 影响应用行为;>4MB 轮转保留一代;agent 阶段流量与评测流量同文件,
 # 由 postflight 写入的 marker 行切分。
+# 09-29:路径从 octos-logs/ 收敛进 octos/logs/(全部日志统一 octos/ 一处)。
 EVAL_TELEMETRY_JS = """\
 // eval-telemetry.js — host-owned runtime telemetry (best-effort, never throws).
 // Appends one JSON line per /api request (and frontend error reports) to
-// <workspace>/octos-logs/eval-traffic.jsonl. Pure fs, no dependencies.
+// <workspace>/octos/logs/eval-traffic.jsonl. Pure fs, no dependencies.
 const fs = require('fs');
 const path = require('path');
-const LOG = path.join(__dirname, '..', '..', '..', 'octos-logs', 'eval-traffic.jsonl');
+const LOG = path.join(__dirname, '..', '..', '..', 'octos', 'logs', 'eval-traffic.jsonl');
 const MAX_BYTES = 4 * 1024 * 1024;
 function line(obj) {
   try {
