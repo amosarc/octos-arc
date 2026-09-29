@@ -520,18 +520,49 @@ class SystemRowTests(unittest.TestCase):
                                           self.FIXTURE_RULES)
         self.assertEqual(a, b)
 
-    def test_system_row_strips_reference_image_marks(self):
-        # AGENTS.md 全局层不携带 reference 图记号:内核在含图工单的 turn
-        # 把真实图片附给模型,系统行只需 root 文字契约(root 契约是唯一
-        # 逐字进系统行的需求文本,是潜在携带路径)。
-        tree = node("ROOT", "FOLDER", [
-            node("REQ-1", "FOLDER", [node("REQ-1-1", description="d11")]),
-        ], description='Global rules. See ![image](reference/sign-up.png) '
-                       'and ![img](https://cdn.example.com/x.png) for looks.')
+    def test_load_strips_reference_image_marks(self):
+        # 09-29 裁决:参考图记号在 yaml 载入时整体剥离(自动附图通道
+        # 退役,内核视觉支持保留给显式媒体通道的调用方)——下游渲染器
+        # (describe_node/骨架 blob/系统行)天然无图,防线正则随之删除。
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            req = Path(td)
+            (req / "requirements.yaml").write_text(
+                "id: ROOT\n"
+                "name: root\n"
+                "type: FOLDER\n"
+                "description: Global rules. See "
+                "![image](reference/sign-up.png) for looks.\n"
+                "children:\n"
+                "  - id: REQ-1\n"
+                "    name: Family One\n"
+                "    type: FOLDER\n"
+                "    description: \"Page reference: "
+                "![image](reference/home.png)\"\n"
+                "    children:\n"
+                "      - id: REQ-1-1\n"
+                "        name: N1\n"
+                "        type: ATOMIC\n"
+                "        description: \"Build it. Page reference: "
+                "![image](reference/grid.png)\"\n"
+                "        scenarios:\n"
+                "          - name: s1\n"
+                "            steps:\n"
+                "              - keyword: THEN\n"
+                "                content: works "
+                "![shot](reference/after.png)\n",
+                encoding="utf-8")
+            tree = main.load_requirement_tree(req)
+        blob = main.render_verbatim_nodes(tree)
         ctx = main.build_system_row_context(tree, "rules", "fx")
-        self.assertNotIn("![image]", ctx)
-        self.assertNotIn("![](", ctx)
+        for text in (blob, ctx):
+            self.assertNotIn("![", text)
+            self.assertNotIn("](reference/", text)
+        # 悬空的整行 "Page reference:" 一并消失,正文其余保留。
+        self.assertNotIn("Page reference:", blob)
         self.assertIn("Global rules.", ctx)
+        self.assertIn("Build it.", blob)
+        self.assertIn("works", blob)
 
     def test_system_row_is_compact(self):
         ctx = main.build_system_row_context(TREE, self.RULES,

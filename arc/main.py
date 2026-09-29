@@ -14,12 +14,10 @@ git commits.
 
 Configuration is via environment variables:
     OPENAI_API_KEY / OPENAI_BASE_URL / MODEL   (OpenAI-compatible endpoint)
-    VISUAL_MODEL (kernel-side per-request vision routing: turns whose
-                  prompt carries reference-image marks get this model
-                  injected into ChatConfig.model, so a multimodal model
-                  sees the actual images on those turns; same endpoint/
-                  key as the main lane. Unset = images degrade to the
-                  image-modality text-only fallback)
+    VISUAL_MODEL (kernel-side per-request vision routing for callers that
+                  attach images explicitly via the media channel; the ARC
+                  run does NOT attach reference images — image marks are
+                  stripped from requirement text at yaml load, 09-29)
     OCTOS_PROVIDER  (override provider name, e.g. deepseek/openai/anthropic)
     OCTOS_MODEL     (override model name)
     THINKING / OCTOS_THINKING
@@ -1509,8 +1507,48 @@ def load_requirement_tree(req_dir: Path) -> dict:
                 break
     if not isinstance(data, dict) or "id" not in data:
         raise ValueError(f"invalid requirements.yaml in {req_dir}")
+    _strip_reference_image_marks(data)
     _attach_source_lines(data, raw)
     return data
+
+
+# 参考图记号剥离(09-29 裁决):`![alt](path)` 与悬空的整行
+# "Page reference:" 不再参与任何模型上下文——自动附图通道已退役
+# (内核 attach_prompt_reference_images 删除),记号留在文本里只会
+# 误导模型去找它看不了的图。reference/ 目录本身保留(平台任务夹具);
+# 需要视觉的调用方走显式媒体通道(params.media)+VISUAL_MODEL 路由。
+_IMAGE_MARK_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+# 行尾悬空的 "Page reference:" 标签(图记号剥离后什么都不指)整段删除;
+# 独占一行与行中两种形态都覆盖。
+_PAGE_REF_LINE_RE = re.compile(r"[ \t]*Page reference:[ \t]*$", re.M)
+
+
+def _strip_text_marks(text: str) -> str:
+    stripped = _IMAGE_MARK_RE.sub(" ", text)
+    stripped = _PAGE_REF_LINE_RE.sub("", stripped)
+    return stripped
+
+
+def _strip_reference_image_marks(node: dict) -> None:
+    """递归剥离节点树中的图片记号(description + 场景 step content)。
+
+    在 load_requirement_tree 的 safe_load 之后、源行号附着之前执行;
+    下游 describe_node/render_verbatim_nodes/家族契约/闭包全部继承,
+    系统行/工单/骨架 blob 自此天然无图。确定性,字节稳定。
+    """
+    desc = node.get("description")
+    if isinstance(desc, str):
+        node["description"] = _strip_text_marks(desc)
+    for sc in node.get("scenarios") or []:
+        if not isinstance(sc, dict):
+            continue
+        for step in sc.get("steps") or []:
+            if isinstance(step, dict) and isinstance(
+                    step.get("content"), str):
+                step["content"] = _strip_text_marks(step["content"])
+    for child in node.get("children") or []:
+        if isinstance(child, dict):
+            _strip_reference_image_marks(child)
 
 
 def _attach_source_lines(tree: dict, raw: str) -> None:
@@ -1792,12 +1830,9 @@ def build_system_row_context(tree: dict, rules_text: str,
             + ", ".join(sorted(scope))
             + " — work orders for other families are out of scope; do "
             "not implement them, and expect their surfaces to be absent.")
-    ctx = "\n\n".join(parts)
-    # 防线:reference 图记号只属于含它的工作订单(内核在入站 prompt 解析
-    # 后把真实图片附给当轮),系统行全局层不携带——root 契约是唯一逐字进
-    # 系统行的需求文本,剔除确定性保持字节稳定。
-    ctx = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", ctx)
-    return ctx
+    # 图片记号防线已上移到 load_requirement_tree 的载入剥离(09-29):
+    # 树在进任何渲染器之前已无 ![...](...) 记号,此处不再重复防御。
+    return "\n\n".join(parts)
 
 
 def _node_family_index(tree: dict) -> tuple[dict[str, dict], dict[str, str]]:
@@ -2851,11 +2886,6 @@ features); never regress an already-green family. ALL API endpoints \
 live in backend/src/routes/ (yours to extend freely); never touch the \
 host-owned backend substrate listed in the HOST CONTRACT (src/app.js, \
 src/index.js, src/database/store.js, src/lib/util.js).\
-REFERENCE IMAGES: any ![image](...) in this work order is attached to \
-this conversation as a real image — style/layout reference only \
-(region arrangement, component placement, grid structure); every \
-user-facing string, label, and value comes from the requirement text, \
-never from the mockup.\
 PORT DISCIPLINE: NEVER bind port {port}. The app is ALREADY RUNNING, \
 host-managed, on port {smoke} — verify by curl directly; do NOT start \
 your own server. After editing backend/src run \
