@@ -78,7 +78,10 @@ getByRole('region', {name}) resolves; a div with aria-label has no \
 region role), useContextMenu + Menu (role=menu + menuitem buttons with \
 the requirement's exact labels, Escape/outside-click close — FixedGrid \
 routes its right-click/header-menu callbacks here) and FixedGrid \
-(fixed-size role=grid; pass the useGrid kernel as grid={...} and \
+(fixed-size role=grid — MINIMUM EXTENT 40 rows × 20 cols even when the \
+data is smaller: the reference apps show a large empty grid around the \
+data and graders address cells beyond the seeded extent; pass the useGrid \
+kernel as grid={...} and \
 click / Shift-click-extend / drag / aria-selected are handled for \
 you) — use them or roll your own; the requirement text is the only \
 authority. frontend/src/app/grid.js carries the useGrid selection/\

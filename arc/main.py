@@ -830,6 +830,11 @@ def stage_selftest_dir(output_dir: Path, smoke_port: int,
 // click+Shift-click (graders use both; a shift-collapsing handler passed
 // drag-only tests and still lost the whole family), and each dialog flow
 // with mouse AND keyboard (Enter commits, Escape cancels).
+//
+// SOURCE RULE — the spec is derived from the requirement text, never from
+// the implementation: quote dialog names, labels, and error strings
+// verbatim from the scenarios. If the app and the text disagree, the text
+// wins — fix the app, never edit the spec to match what you built.
 import { test, expect } from '@playwright/test';
 
 test('my check - name what this verifies', async ({ page }) => {
@@ -1426,6 +1431,20 @@ NODE_NUDGE_PROMPT = (
     "observe, or announce plans.")
 
 
+def batch_req_block(batch: list[dict],
+                    seeded_scenarios: set[str] | frozenset | None = None
+                    ) -> str:
+    """受影响批次的双段契约原文(修复/nudge 轮追加)。
+
+    修复轮原本只有错误细节——补上"本轮修的东西要满足什么",契约与
+    错误同场,不再让模型凭实现记忆猜。
+    """
+    return ("\n\nTHIS BATCH — REQ CONTENT + VERIFICATION REQUIREMENTS "
+            "(verbatim — satisfy these on the RUNNING app):\n\n"
+            + "\n\n".join(describe_node(n, seeded_scenarios)
+                          for n in batch))
+
+
 # ---------------------------------------------------------------- requirements
 
 def load_requirement_tree(req_dir: Path) -> dict:
@@ -1543,15 +1562,24 @@ def group_siblings(tree: dict, max_batch: int) -> list[list[dict]]:
     return batches
 
 
+_VERIFICATION_LABEL = (
+    "VERIFICATION REQUIREMENTS (verbatim — these scenarios are the "
+    "acceptance criteria; a grader walks them end-to-end in a real "
+    "browser; every step must pass):")
+
+
 def describe_node(node: dict,
                   seeded_scenarios: set[str] | frozenset | None = None
                   ) -> str:
+    # 双段契约:REQ CONTENT(实现什么)与 VERIFICATION REQUIREMENTS(怎么算
+    # 过)显式分立——不混在描述里,执行者每轮都清楚两件事的原文。
     lines = [f"ID: {node.get('id')}", f"Name: {node.get('name', '')}"]
     if node.get("description"):
-        lines.append(f"Description: {node['description']}")
+        lines.append("REQ CONTENT (verbatim):")
+        lines.append(_indent_block(str(node["description"]), "  "))
     scenarios = node.get("scenarios") or []
     if scenarios:
-        lines.append("Scenarios:")
+        lines.append(_VERIFICATION_LABEL)
         for sc in scenarios:
             lines.append(f"  - {sc.get('name', 'scenario')}")
             key = f"{node.get('id')}::{sc.get('name', 'scenario')}"
@@ -1572,6 +1600,18 @@ def describe_node(node: dict,
     if deps:
         lines.append(f"Depends on: {', '.join(map(str, deps))}")
     return "\n".join(lines)
+
+
+def render_verbatim_nodes(tree: dict,
+                          seeded_scenarios: set[str] | frozenset | None = None
+                          ) -> str:
+    """全量 atomic 节点双段拼接(REQ CONTENT + VERIFICATION REQUIREMENTS)。
+
+    骨架轮全量注入源:auth/数据端点契约决策直接以原文在场,不依赖地图
+    指针自读(09-29 sheet run:骨架轮裸猜 /api/signin 被排练门抓住返修)。
+    """
+    return "\n\n".join(
+        describe_node(n, seeded_scenarios) for n in flatten_atomic(tree))
 
 
 # ------------------------------------------------------- goal-first context
@@ -1718,14 +1758,8 @@ def build_system_row_context(tree: dict, rules_text: str,
     return ctx
 
 
-def collect_dependency_context(tree: dict, batch: list[dict],
-                               family_of: dict[str, dict]) -> str:
-    """本批节点 Depends on 闭包(跨家族部分,契约块逐字)。
-
-    依赖 id 指向的节点若不在本批所属顶层家族,其 [id — name] + description
-    按文档序去重补进工单;同家族依赖剪枝(契约已在本工单家族段)。
-    确定性树遍历,零 LLM。"""
-    # 全树索引:node id → (node, 顶层家族 id)
+def _node_family_index(tree: dict) -> tuple[dict[str, dict], dict[str, str]]:
+    """全树索引:node id → (node, 顶层家族 id)。闭包提取与家族边共用。"""
     node_by_id: dict[str, dict] = {}
     fam_of_node: dict[str, str] = {}
     for folder in (tree or {}).get("children") or []:
@@ -1742,29 +1776,81 @@ def collect_dependency_context(tree: dict, batch: list[dict],
             for child in node.get("children") or []:
                 if isinstance(child, dict):
                     stack.append((child, fam))
+    return node_by_id, fam_of_node
+
+
+_CLOSURE_MAX_NODES = 12
+_CLOSURE_MAX_CHARS = 30000
+
+
+def collect_dependency_context(tree: dict, batch: list[dict],
+                               family_of: dict[str, dict],
+                               seeded_scenarios: set[str] | frozenset | None
+                               = None) -> str:
+    """本批节点 Depends on 闭包(跨家族部分,双段契约逐字)。
+
+    传递闭包按距离分轮展开(直接依赖优先,文档序 tiebreak);同族节点
+    只作穿越不作输出(其契约已在本工单家族段)。失控保护:输出节点
+    >12 或累计 >30K chars 时截断深距离层并留标记——直接依赖(距离 1)
+    永不截。确定性遍历,零 LLM。
+    """
+    node_by_id, fam_of_node = _node_family_index(tree)
     current_fam = ""
     for n in batch:
         fam_node = family_of.get(str(n.get("id")))
         if fam_node is not None:
             current_fam = str(fam_node.get("id"))
             break
-    seen: set[str] = {str(n.get("id")) for n in batch}
-    parts: list[str] = []
-    for n in batch:
-        for dep in n.get("dependencies") or []:
-            dep_id = str(dep)
-            if dep_id in seen:
-                continue
-            seen.add(dep_id)
-            dep_node = node_by_id.get(dep_id)
-            if dep_node is None:
-                continue
-            if fam_of_node.get(dep_id) == current_fam:
-                continue
-            desc = str(dep_node.get("description") or "").strip()
-            parts.append(f"[{dep_id} — {dep_node.get('name', '')}]\n"
-                         + _indent_block(desc or "(no description)", ""))
-    return "\n\n".join(parts)
+    batch_ids = {str(n.get("id")) for n in batch}
+    # BFS 按距离分轮:frontier 全展开(含同族,保证传递链穿透),输出只
+    # 留跨家族且未见过的。
+    seen: set[str] = set(batch_ids)
+    frontier = list(batch)  # 文档序
+    by_distance: list[list[str]] = []
+    while frontier:
+        next_frontier: list[dict] = []
+        emitted: list[str] = []
+        for n in frontier:
+            for dep in n.get("dependencies") or []:
+                dep_id = str(dep)
+                if dep_id in seen:
+                    continue
+                seen.add(dep_id)
+                dep_node = node_by_id.get(dep_id)
+                if dep_node is None:
+                    continue
+                next_frontier.append(dep_node)
+                if fam_of_node.get(dep_id) != current_fam:
+                    emitted.append(dep_id)
+        if emitted:
+            by_distance.append(emitted)
+        frontier = next_frontier
+    if not by_distance:
+        return ""
+    # 距离 1 永不截;深距离层在超限时整层丢弃,留截断标记。
+    keep: list[str] = []
+    chars = 0
+    dropped = 0
+    for distance, round_ in enumerate(by_distance, 1):
+        take = distance == 1
+        if distance > 1 and (len(keep) + len(round_) <= _CLOSURE_MAX_NODES
+                             and chars < _CLOSURE_MAX_CHARS):
+            take = True
+        if take:
+            for dep_id in round_:
+                block = describe_node(node_by_id[dep_id], seeded_scenarios)
+                keep.append(block)
+                chars += len(block)
+        else:
+            dropped += len(round_)
+    parts = ["\n\n".join(keep)]
+    if dropped:
+        parts.append(
+            f"[dependency closure truncated: {dropped} deeper node(s) "
+            f"omitted (cap {_CLOSURE_MAX_NODES} nodes / "
+            f"{_CLOSURE_MAX_CHARS} chars) — read them from "
+            "requirements/requirements.yaml by heading id if needed]")
+    return "\n\n".join(p for p in parts if p)
 
 
 def _indent_block(text: str, pad: str) -> str:
@@ -1784,6 +1870,91 @@ def family_index(tree: dict) -> dict[str, dict]:
                 if nid:
                     out[nid] = folder
     return out
+
+
+def family_dependency_edges(tree: dict) -> dict[str, set[str]]:
+    """家族级直接依赖边(节点 dependencies → 顶层家族,同族剪枝)。
+
+    会话分组与闭包注入共用的图源——解析 yaml 即感知依赖关系。
+    """
+    node_by_id, fam_of_node = _node_family_index(tree)
+    edges: dict[str, set[str]] = {}
+    for nid, fam in fam_of_node.items():
+        for dep in (node_by_id.get(nid) or {}).get("dependencies") or []:
+            dfam = fam_of_node.get(str(dep))
+            if dfam and dfam != fam:
+                edges.setdefault(fam, set()).add(dfam)
+    return edges
+
+
+def session_group_batches(tree: dict, batches: list[list[dict]],
+                           family_of: dict[str, dict]) -> list[list[int]]:
+    """批索引按家族依赖图 SCC 分组,组间拓扑序(文档序 tiebreak)。
+
+    执行粒度裁决(09-29):相互依赖成环的家族共组共享会话;单向依赖
+    跨组由工单闭包双段注入承载(REQ CONTENT + VERIFICATION 原文在场)。
+    返回按执行顺序的组序列,每组是批索引列表(组内保持文档序)。
+    """
+    def fam_of_batch(batch: list[dict]) -> str:
+        for n in batch:
+            fam = family_of.get(str(n.get("id")))
+            if fam is not None:
+                return str(fam.get("id"))
+        return ""
+
+    batch_fam = [fam_of_batch(b) for b in batches]
+    fam_order: list[str] = []
+    for f in batch_fam:
+        if f and f not in fam_order:
+            fam_order.append(f)
+    if len(fam_order) <= 1:
+        return [list(range(len(batches)))] if batches else []
+    present = set(fam_order)
+    edges = {a: {d for d in bs if d in present}
+             for a, bs in family_dependency_edges(tree).items()
+             if a in present}
+    # 可达闭包(家族数 ≤ 十级,平方可接受)→ 互达即同 SCC。
+    reach: dict[str, set[str]] = {}
+    for f in fam_order:
+        seen: set[str] = set()
+        stack = [f]
+        while stack:
+            x = stack.pop()
+            for d in edges.get(x, ()):
+                if d not in seen:
+                    seen.add(d)
+                    stack.append(d)
+        reach[f] = seen
+    groups: list[list[str]] = []
+    for f in fam_order:
+        for g in groups:
+            if f in reach[g[0]] and g[0] in reach[f]:
+                g.append(f)
+                break
+        else:
+            groups.append([f])
+    # 组间拓扑:组 G 依赖组 H(G 的边指向 H)⇒ H 先执行;就绪组里取
+    # 文档序最小者(tiebreak)。缩聚图必为 DAG,ready 恒非空。
+    group_of = {f: i for i, g in enumerate(groups) for f in g}
+    dep_groups: dict[int, set[int]] = {i: set() for i in range(len(groups))}
+    for a, ds in edges.items():
+        for d in ds:
+            ga, gd = group_of[a], group_of[d]
+            if ga != gd:
+                dep_groups[ga].add(gd)
+    doc_index = {f: i for i, f in enumerate(fam_order)}
+    executed: set[int] = set()
+    order: list[int] = []
+    remaining = set(range(len(groups)))
+    while remaining:
+        ready = [i for i in sorted(remaining)
+                 if dep_groups[i] <= executed]
+        pick = min(ready, key=lambda i: min(doc_index[f] for f in groups[i]))
+        order.append(pick)
+        executed.add(pick)
+        remaining.discard(pick)
+    return [[bi for bi in range(len(batches))
+             if batch_fam[bi] in groups[gi]] for gi in order]
 
 
 def describe_family_context(family: dict, batch: list[dict]) -> str:
@@ -2156,6 +2327,13 @@ def build_octos_env(config_dir: Path) -> dict:
     # llm.jsonl——分层装配的前缀缓存验证基建(逐字节比对系统行/前缀;
     # 磁盘代价 KB 级/轮)。
     env.setdefault("OCTOS_CONTEXT_LOG", "1")
+    # 滑动窗口双管(09-29 三跑:单会话累积到 631K 才压缩一次,整表重写=
+    # 全额缓存 miss,60M cache_read 主导成本)。①压缩阈值从"窗口 70%"
+    # (deepseek 大窗口下形同虚设)钉到 150K;②内核压力淘汰(PromptBuild
+    # Policy 的 max_prompt_token_estimate)同值激活——按 token 帽做尾部
+    # 感知淘汰,不动压缩代数,悬崖变斜坡。运维显式 export 仍优先。
+    env.setdefault("OCTOS_CONTEXT_COMPACT_THRESHOLD_TOKENS", "150000")
+    env.setdefault("OCTOS_PROMPT_PRESSURE_TOKENS", "150000")
     # Any npm/npx the model runs inside the runner goes to the China mirror;
     # npmjs.org is slow/unreliable from the ARC runner network.
     env.setdefault("npm_config_registry", "https://registry.npmmirror.com")
@@ -2618,6 +2796,14 @@ strings = exact accessible names), keep it under ui-smoke/ (never \
 inside .arc/ — host-owned, read-only), and run it via the SELF-TEST \
 command against the RUNNING app (or curl the API directly) — scenario \
 flows actually walking, not string presence, are the verdict.\
+SPEC DISCIPLINE: derive every spec sentence-by-sentence from the \
+VERIFICATION REQUIREMENTS text above — dialog names, control labels, \
+and quoted error strings must match the requirement text verbatim. \
+When the running app and the requirement text disagree, the TEXT wins: \
+fix the app, never edit the spec to match the implementation. End the \
+turn only when every VERIFICATION REQUIREMENT walks green on the \
+running app; if some cannot, list each red chain explicitly in your \
+closing message.\
 TOOLBOX (optional, unwired): frontend/src/app/ui.jsx ships proven \
 shapes (NativeSelect/AppDialog/AccountTrigger/SingleError/FieldError/\
 useContextMenu+Menu/Region — render <Region label="X"> for a \
@@ -3449,16 +3635,23 @@ def main() -> int:
                     log("[flow] time budget exhausted before skeleton retry")
                     break
                 t0 = time.time()
-                # 全局层(地图/契约/播种契约)已常驻系统行——骨架轮
-                # 直接从系统行取,不再重发。
+                # 全局层(地图/契约/播种契约)已常驻系统行;骨架轮决策面
+                # (auth/数据端点契约)再以全量双段原文直接在场——不依赖
+                # "按行号自读"指针(09-29 sheet run:骨架轮裸猜
+                # /api/signin,排练门返修 22 调用)。
                 sk_prompt = GOAL_FIRST_SKELETON_PROMPT.format(
                     port=args.web_port, smoke=smoke_port) \
                     + "\nSYSTEM ROW: the full requirements map, host " \
                     "contract and fixture contract are installed in " \
                     "your system prompt (byte-stable) — work from " \
-                    "them directly; cross-family detail: read THAT " \
-                    "section of requirements/requirements.yaml by " \
-                    "heading id."
+                    "them directly." \
+                    + "\n\nALL REQUIREMENTS — REQ CONTENT + VERIFICATION " \
+                    "REQUIREMENTS (verbatim from requirements.yaml; the " \
+                    "auth and data contracts you lay now must satisfy " \
+                    "these; family work orders re-carry their own " \
+                    "scope):\n\n" \
+                    + render_verbatim_nodes(tree,
+                                            fixture_seeded_scenarios)
                 if tests_dir:
                     sk_prompt += "\n" + ACCEPTANCE_STAGED_NOTE
                 sk_wall = turn_wall(1)
@@ -3543,19 +3736,49 @@ def main() -> int:
             skip_reasons: dict[str, str] = {}
             node_done_notes: dict[str, str] = {}
             segment_digest_pending = False
+            # 会话策略(09-29 裁决):解析 yaml 感知家族依赖——相互依赖
+            # 成环(SCC)的家族共组共享会话;单向依赖跨组由工单闭包双段
+            # 注入(REQ CONTENT + VERIFICATION 原文)承载,独立家族各自
+            # 单会话执行。OCTOS_ARC_SESSION_POLICY=single 退回全程单会话;
+            # OCTOS_ARC_SEGMENT_BATCHES>0 为应急每 N 批盲切(旧路径)。
+            session_policy = os.environ.get(
+                "OCTOS_ARC_SESSION_POLICY", "scc").strip().lower()
+            batch_group: list[int] = []
+            if node_batches and session_policy != "single":
+                scc_groups = session_group_batches(
+                    tree, node_batches, family_of)
+                if len(scc_groups) > 1:
+                    def _fam_id(bi: int) -> str:
+                        fam = family_of.get(
+                            str(node_batches[bi][0].get("id")))
+                        return str(fam.get("id")) if fam else ""
+                    log("[flow] dependency-aware session groups: "
+                        + " | ".join(
+                            "+".join(sorted({
+                                _fam_id(bi) for bi in group} - {""})) or "?"
+                            for group in scc_groups))
+                # 拓扑序重排:组间依赖先行,组内保持文档序。重排后组在
+                # 批序列中连续,边界判定才成立(sheet/github 实测与文档序
+                # 一致,一般图上这是正确性保证)。
+                node_batches = [node_batches[bi]
+                                for group in scc_groups for bi in group]
+                batch_group = [gi for gi, group in enumerate(scc_groups)
+                               for _ in group]
 
             for idx, batch in enumerate(node_batches, 1):
-                # A2 会话分段:每 SEGMENT_BATCHES 批重置 stdio 会话,切断
-                # O(n²) 历史重放(run-002 实测 1.35 亿 token 的主 driver)。
-                # 上下文经 planctl 磁盘重水合续命(envelope + repoMap 全量
-                # 重扫),丢失的对话细节由 HOST REPORT/REPO MAP 承接。
-                # env OCTOS_ARC_SEGMENT_BATCHES=0 关闭(回退单会话全程)。
                 segment_every = int(
-                    os.environ.get("OCTOS_ARC_SEGMENT_BATCHES", "5"))
-                if (idx > 1 and segment_every > 0
-                        and (idx - 1) % segment_every == 0):
+                    os.environ.get("OCTOS_ARC_SEGMENT_BATCHES", "0"))
+                if idx > 1 and segment_every > 0 \
+                        and (idx - 1) % segment_every == 0:
                     log(f"[flow] session segmentation: closing session "
                         f"before batch {idx} (every {segment_every})")
+                    driver.close()
+                    segment_digest_pending = True
+                elif (idx > 1 and batch_group
+                        and batch_group[idx - 1] != batch_group[idx - 2]):
+                    log(f"[flow] session boundary: closing session before "
+                        f"batch {idx} (dependency group "
+                        f"{batch_group[idx - 1] + 1})")
                     driver.close()
                     segment_digest_pending = True
                 # Finite-budget degrade: trim the batch tail while the
@@ -3599,7 +3822,7 @@ def main() -> int:
                 fam_ctx = describe_family_context(fam, batch) \
                     if fam is not None else ""
                 dep_ctx = collect_dependency_context(
-                    tree, batch, family_of)
+                    tree, batch, family_of, fixture_seeded_scenarios)
                 spec_parts = [
                     "THIS FAMILY — folder contracts (verbatim):",
                     fam_ctx,
@@ -3740,7 +3963,11 @@ def main() -> int:
                             if time_up():
                                 break
                             ng_t0 = time.time()
-                            driver.run(NODE_NUDGE_PROMPT, 420, 420)
+                            driver.run(
+                                NODE_NUDGE_PROMPT
+                                + batch_req_block(
+                                    batch, fixture_seeded_scenarios),
+                                420, 420)
                             if project_files_changed(output_dir, ng_t0):
                                 nudged = True
                                 log(f"[gate] {focus_id}: nudge {ng} "
@@ -3812,7 +4039,9 @@ def main() -> int:
                             r_wall = turn_wall(len(batch))
                             driver.run(REHEARSAL_REPAIR_PROMPT.format(
                                 error=r_err[-1200:],
-                                port=args.web_port, smoke=smoke_port),
+                                port=args.web_port, smoke=smoke_port)
+                                + batch_req_block(
+                                    batch, fixture_seeded_scenarios),
                                 min(node_timeout, r_wall), r_wall)
                             r_err, r_report = rehearse_node(
                                 output_dir, smoke_port, probe_list,
@@ -3912,7 +4141,9 @@ def main() -> int:
                                             if toolchain_cli is not None
                                             else None,
                                             final_spec_files(
-                                                g_run, output_dir))),
+                                                g_run, output_dir)))
+                                    + batch_req_block(
+                                        batch, fixture_seeded_scenarios),
                                     min(node_timeout, r_wall), r_wall)
                             elif g_run:
                                 log(f"[plan] regression green: "

@@ -2398,12 +2398,45 @@ fn appui_context_prompt_policy(llm_provider: &dyn octos_llm::LlmProvider) -> Pro
     PromptBuildPolicy {
         include_reasoning: false,
         supports_media: true,
-        max_prompt_token_estimate: None,
+        max_prompt_token_estimate: appui_prompt_pressure_token_cap(
+            appui_context_compact_threshold_tokens(llm_provider),
+        ),
         model_capability_id: format!(
             "{}/{}",
             llm_provider.provider_name(),
             llm_provider.model_id()
         ),
+    }
+}
+
+/// Sliding-window pressure cap (09-29 third-run cost fix): when active,
+/// the prompt builder tail-trims under a token cap — Tool outputs fold
+/// to `2×cap` bytes first, then whole removable groups drop from the
+/// head — WITHOUT a compaction generation bump (no whole-prompt rewrite,
+/// no full cache miss cliff). Env `OCTOS_PROMPT_PRESSURE_TOKENS`: unset
+/// → ride the compaction threshold (host pins both at 150K); `0`/empty
+/// → dormant (previous behavior); explicit value wins.
+fn appui_prompt_pressure_token_cap(default_tokens: usize) -> Option<usize> {
+    appui_prompt_pressure_token_cap_from(
+        std::env::var("OCTOS_PROMPT_PRESSURE_TOKENS").ok(),
+        default_tokens,
+    )
+}
+
+fn appui_prompt_pressure_token_cap_from(
+    raw: Option<String>,
+    default_tokens: usize,
+) -> Option<usize> {
+    match raw {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed == "0" {
+                None
+            } else {
+                trimmed.parse::<usize>().ok().map(|v| v.max(1))
+            }
+        }
+        None => Some(default_tokens.max(1)),
     }
 }
 
@@ -3076,7 +3109,9 @@ impl AppUiPromptContextBridge {
         PromptBuildPolicy {
             include_reasoning: false,
             supports_media: true,
-            max_prompt_token_estimate: None,
+            max_prompt_token_estimate: appui_prompt_pressure_token_cap(
+                Self::threshold_tokens(request),
+            ),
             model_capability_id: format!("{}/{}", request.provider_name, request.model_id),
         }
     }

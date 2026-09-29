@@ -139,17 +139,21 @@ class DependencyClosureTests(unittest.TestCase):
         batch = [n for n in main.flatten_atomic(TREE)
                  if n["id"] == "REQ-2-1"]
         ctx = main.collect_dependency_context(TREE, batch, fam_of)
-        # 依赖 REQ-1(跨家族 FOLDER)→ 契约块逐字
-        self.assertIn("[REQ-1 — Family One]", ctx)
+        # 依赖 REQ-1(跨家族 FOLDER)→ 双段契约逐字
+        self.assertIn("ID: REQ-1", ctx)
+        self.assertIn("Name: Family One", ctx)
+        self.assertIn("REQ CONTENT (verbatim):", ctx)
         self.assertIn("family one module contract", ctx)
 
-    def test_same_family_dependency_pruned(self):
+    def test_same_family_dependency_pruned_but_tail_carried(self):
         fam_of = main.family_index(TREE)
         batch = [n for n in main.flatten_atomic(TREE)
                  if n["id"] == "REQ-2-2"]
         ctx = main.collect_dependency_context(TREE, batch, fam_of)
-        # 依赖 REQ-2-1(同家族)→ 剪枝(已在本工单家族段)
-        self.assertEqual(ctx, "")
+        # 同族依赖 REQ-2-1 自身不输出(契约在本工单家族段),但传递闭包
+        # 穿透它:REQ-2-1 依赖的跨家族 REQ-1 进入闭包(09-29 语义)。
+        self.assertNotIn("ID: REQ-2-1", ctx)
+        self.assertIn("ID: REQ-1", ctx)
 
     def test_no_dependencies_returns_empty(self):
         fam_of = main.family_index(TREE)
@@ -163,6 +167,191 @@ class DependencyClosureTests(unittest.TestCase):
         n = node("REQ-3-1", dependencies=["REQ-99"])
         self.assertEqual(
             main.collect_dependency_context(TREE, [n], fam_of), "")
+
+    def test_dependency_cycle_terminates(self):
+        # 环:A→B→A 不死循环,双向都不重复输出。
+        tree = node("ROOT", "FOLDER", [
+            node("REQ-1", "FOLDER", [
+                node("REQ-1-1", description="a",
+                     dependencies=["REQ-2-1"])]),
+            node("REQ-2", "FOLDER", [
+                node("REQ-2-1", description="b",
+                     dependencies=["REQ-1-1"])]),
+        ])
+        fam_of = main.family_index(tree)
+        batch = [n for n in main.flatten_atomic(tree)
+                 if n["id"] == "REQ-1-1"]
+        ctx = main.collect_dependency_context(tree, batch, fam_of)
+        self.assertEqual(ctx.count("ID: REQ-2-1"), 1)
+        self.assertNotIn("ID: REQ-1-1", ctx)
+
+    def test_closure_truncates_with_marker(self):
+        # 深距离层超限(>12 节点)整层丢弃留标记;直接依赖永不截。
+        # 链方向:T-1 → X-00 → X-01 → …(每个节点依赖下一个)。
+        chain = []
+        for i in range(20):
+            nid = f"REQ-X-{i:02d}"
+            nxt = f"REQ-X-{i + 1:02d}" if i < 19 else None
+            chain.append(node(nid, description=f"desc {nid}",
+                              dependencies=[nxt] if nxt else None))
+        tree = node("ROOT", "FOLDER", [
+            node("REQ-T", "FOLDER", [
+                node("REQ-T-1", description="t",
+                     dependencies=["REQ-X-00"])]),
+            node("REQ-X", "FOLDER", chain),
+        ])
+        fam_of = main.family_index(tree)
+        batch = [n for n in main.flatten_atomic(tree)
+                 if n["id"] == "REQ-T-1"]
+        ctx = main.collect_dependency_context(tree, batch, fam_of)
+        self.assertIn("ID: REQ-X-00", ctx)      # 直接依赖保留
+        self.assertIn("closure truncated", ctx)  # 深层截断标记
+        self.assertNotIn("ID: REQ-X-19", ctx)    # 最深的被截
+
+    def test_real_sheet_closure_is_transitive(self):
+        # sheet 真树:REQ-5 家族闭包含 REQ-2/3/4 家族文本(传递)。
+        req_dir = Path(__file__).resolve().parent.parent / "tasks" / \
+            "hackathon--sheet"
+        if not (req_dir / "requirements.yaml").is_file():
+            self.skipTest("sheet task not present")
+        tree = main.load_requirement_tree(req_dir)
+        fam_of = main.family_index(tree)
+        batch = [n for n in main.flatten_atomic(tree)
+                 if str(n.get("id")).startswith("REQ-5")]
+        ctx = main.collect_dependency_context(tree, batch, fam_of)
+        for fam in ("REQ-1", "REQ-2", "REQ-3", "REQ-4"):
+            self.assertIn(f"ID: {fam}-", ctx,
+                          f"{fam} family text missing from closure")
+
+
+class DualSectionContractTests(unittest.TestCase):
+    """每轮执行双段契约:REQ CONTENT 与 VERIFICATION REQUIREMENTS 分立。"""
+
+    def test_describe_node_dual_sections(self):
+        n = node("REQ-9-1", description="build this",
+                 name="Node Nine")
+        n["scenarios"] = [{"name": "s1", "steps": [
+            {"keyword": "GIVEN", "content": "a seeded workbook"},
+            {"keyword": "THEN", "content": "the cell shows 1"}]}]
+        text = main.describe_node(n)
+        self.assertIn("REQ CONTENT (verbatim):", text)
+        self.assertIn("VERIFICATION REQUIREMENTS (verbatim", text)
+        self.assertIn("acceptance criteria", text)
+        self.assertIn("build this", text)
+        self.assertIn("GIVEN a seeded workbook", text)
+        self.assertIn("THEN the cell shows 1", text)
+        self.assertNotIn("Description:", text)
+        self.assertNotIn("Scenarios:", text)
+
+    def test_render_verbatim_nodes_covers_every_atomic(self):
+        blob = main.render_verbatim_nodes(TREE)
+        for n in main.flatten_atomic(TREE):
+            self.assertIn(f"ID: {n['id']}", blob)
+        self.assertIn("REQ CONTENT (verbatim):", blob)
+
+    def test_render_verbatim_nodes_carries_verification(self):
+        tree = node("ROOT", "FOLDER", [
+            node("REQ-1", "FOLDER", [
+                node("REQ-1-1", description="has scenarios")]),
+        ])
+        tree["children"][0]["children"][0]["scenarios"] = [
+            {"name": "s", "steps": [
+                {"keyword": "THEN", "content": "it works"}]}]
+        blob = main.render_verbatim_nodes(tree)
+        self.assertIn("VERIFICATION REQUIREMENTS (verbatim", blob)
+        self.assertIn("THEN it works", blob)
+
+    def test_node_prompt_template_binds_verification_text(self):
+        self.assertIn("SPEC DISCIPLINE", main.GOAL_FIRST_NODE_PROMPT_TEMPLATE)
+        self.assertIn("the TEXT wins", main.GOAL_FIRST_NODE_PROMPT_TEMPLATE)
+        self.assertIn("list each red chain",
+                      main.GOAL_FIRST_NODE_PROMPT_TEMPLATE)
+
+    def test_mycheck_example_carries_source_rule(self):
+        stage = main.stage_selftest_dir(Path(self.id().replace(".", "_")),
+                                        43101)
+        try:
+            text = (stage / "MY-CHECK.spec.ts.example").read_text()
+            self.assertIn("SOURCE RULE", text)
+            self.assertIn("never edit the spec to match",
+                          text)
+        finally:
+            import shutil
+            shutil.rmtree(stage, ignore_errors=True)
+
+
+class SessionGroupTests(unittest.TestCase):
+    """会话=依赖环:SCC 共组,组间拓扑序(文档序 tiebreak)。"""
+
+    def test_synthetic_tree_groups_per_family(self):
+        batches = main.group_families(TREE)
+        groups = main.session_group_batches(TREE, batches,
+                                            main.family_index(TREE))
+        self.assertEqual([[0], [1], [2]], groups)
+
+    def test_cycle_families_share_one_group(self):
+        tree = node("ROOT", "FOLDER", [
+            node("REQ-1", "FOLDER", [
+                node("REQ-1-1", description="a",
+                     dependencies=["REQ-2-1"])]),
+            node("REQ-2", "FOLDER", [
+                node("REQ-2-1", description="b",
+                     dependencies=["REQ-1-1"])]),
+        ])
+        batches = main.group_families(tree)
+        groups = main.session_group_batches(tree, batches,
+                                            main.family_index(tree))
+        self.assertEqual(1, len(groups))
+        self.assertEqual({0, 1}, set(groups[0]))
+
+    def test_forward_dependency_reorders_groups(self):
+        # 文档序 REQ-1 在前但依赖 REQ-2 → 拓扑序 REQ-2 组先行。
+        tree = node("ROOT", "FOLDER", [
+            node("REQ-1", "FOLDER", [
+                node("REQ-1-1", description="a",
+                     dependencies=["REQ-2-1"])]),
+            node("REQ-2", "FOLDER", [
+                node("REQ-2-1", description="b")]),
+        ])
+        batches = main.group_families(tree)
+        groups = main.session_group_batches(tree, batches,
+                                            main.family_index(tree))
+        self.assertEqual([[1], [0]], groups)
+
+    def test_real_sheet_two_groups(self):
+        req_dir = Path(__file__).resolve().parent.parent / "tasks" / \
+            "hackathon--sheet"
+        if not (req_dir / "requirements.yaml").is_file():
+            self.skipTest("sheet task not present")
+        tree = main.load_requirement_tree(req_dir)
+        batches = main.group_families(tree)
+        groups = main.session_group_batches(tree, batches,
+                                            main.family_index(tree))
+        # 2↔5 环经 5→3→2 把 3/4 吸入同一 SCC:{REQ-1} | {REQ-2,3,4,5}
+        self.assertEqual(2, len(groups))
+        self.assertEqual([0], groups[0])
+        self.assertEqual([1, 2, 3, 4], groups[1])
+
+    def test_real_github_singleton_groups_in_doc_order(self):
+        req_dir = Path(__file__).resolve().parent.parent / "tasks" / \
+            "hackathon--github"
+        if not (req_dir / "requirements.yaml").is_file():
+            self.skipTest("github task not present")
+        tree = main.load_requirement_tree(req_dir)
+        fam_of = main.family_index(tree)
+        batches = main.group_families(tree)
+        groups = main.session_group_batches(tree, batches, fam_of)
+        # github 家族图无环 → 6 个单家族组;大家族拆的多批留在自己组内,
+        # 组间保持文档序(依赖无前向冲突)。
+        self.assertEqual(6, len(groups))
+        fam_seq = []
+        for group in groups:
+            fams = {str(fam_of[str(batches[bi][0]["id"])]["id"])
+                    for bi in group}
+            self.assertEqual(1, len(fams), "one family per group")
+            fam_seq.append(next(iter(fams)))
+        self.assertEqual(
+            [f"REQ-{i}" for i in range(1, 7)], fam_seq)
 
 
 class RunScopeTests(unittest.TestCase):

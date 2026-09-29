@@ -3154,3 +3154,18 @@ fn prompt_reference_images_resolved_deduped_and_filtered() {
     assert_eq!(media.len(), 3);
     assert!(media.contains(&"uploads/upload-1.png".to_string()));
 }
+
+// Sliding-window pressure cap (09-29): unset rides the compaction
+// threshold; 0/empty stays dormant; explicit values win; garbage parses
+// to dormant (consistent with env_usize semantics).
+#[test]
+fn prompt_pressure_cap_env_resolution() {
+    use super::appui_prompt_pressure_token_cap_from as cap_from;
+    assert_eq!(cap_from(None, 150_000), Some(150_000));
+    assert_eq!(cap_from(None, 0), Some(1));
+    assert_eq!(cap_from(Some("0".into()), 150_000), None);
+    assert_eq!(cap_from(Some("  ".into()), 150_000), None);
+    assert_eq!(cap_from(Some("80000".into()), 150_000), Some(80_000));
+    assert_eq!(cap_from(Some(" 120000 ".into()), 150_000), Some(120_000));
+    assert_eq!(cap_from(Some("banana".into()), 150_000), None);
+}
