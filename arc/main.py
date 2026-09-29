@@ -30,17 +30,6 @@ Configuration is via environment variables:
                           AGENT_RUN_TIMEOUT_SECONDS is visible in the env —
                           then timeout − 3600 so the flow lands itself
                           before the outer runner kill)
-    OCTOS_STAGE_DEADLINE (generation-stage wall clock, "4h"/"1h30m"/
-                          "90m"/"7200"; default 0 = off. When it hits, NO
-                          new implementation batch starts — remaining nodes
-                          are marked skipped and the flow proceeds through
-                          final verification + postflight to a NORMAL
-                          exit-0 completion. The platform's sole "previous
-                          stage ended normally" criterion is the agent's
-                          exit code 0 (a timeout SIGKILL leaves
-                          exit_code:null AND skips every handover step).
-                          Orthogonal to OCTOS_TIME_BUDGET, which keeps
-                          governing the final pass.)
     OCTOS_NODE_WALL      (hard wall clock per turn, default 3600s —
                           STANDALONE, scaled by batch size at the call
                           sites: turn_wall(len(batch)); decoupled from the
@@ -92,18 +81,7 @@ SELFTEST_SUBDIR = "./ui-smoke"
 # 本地仿真不受它影响:env OCTOS_ARC_FAMILIES 设置时覆盖此值。
 # COMPETITION_FAMILY_SCOPE = "REQ-1"
 COMPETITION_FAMILY_SCOPE = ""
-# ═══════════════════════════════════════════════════════════════════
-# 生成阶段(骨架+批循环)墙钟 deadline(值形如 "4h"/"1h30m"/"90m"/"7200",
-# 纯数字=秒;空=关闭)。到点不再开启新批:未启动节点记 skipped,流程继续
-# 走 final verification → postflight → mark_run_completed → return 0。
-# "正常结束"对齐平台判据=agent 退出码 0;被外层超时 SIGKILL 的指纹是
-# agent-execution.json exit_code:null 且 postflight/db.run.json 清理全跳
-# ——自落地是唯一正道,deadline 保证生成阶段有界、收尾时间有保障。
-# 与 OCTOS_TIME_BUDGET 分层:deadline 只管停止开新批,final 仍归 budget 管;
-# 推荐配 deadline=外层时限−final 预留(如 6h 外层配 5h deadline)。
-# 本地仿真:env OCTOS_STAGE_DEADLINE 设置时覆盖此值。
-COMPETITION_STAGE_DEADLINE = "2h"
-# ═══════════════════════════════════════════════════════════════════
+
 _DEBUG_LOG_PATH: Path | None = None
 _DEBUG_LOG_LOCK = threading.Lock()
 
@@ -1916,32 +1894,6 @@ def parse_family_scope(raw: str | None) -> frozenset[str]:
     return frozenset(s.strip() for s in raw.split(",") if s.strip())
 
 
-def _parse_deadline(raw: str | None) -> int:
-    """"4h"/"1h30m"/"90m"/"7200" → 秒;空/"0"/"off"/解析失败 → 0(关闭)。
-
-    永不抛错:控制面参数解析失败按"未设置"处理并告警——deadline
-    缺席只是回到无界生成行为,不能让 run 起不来。
-    """
-    if not raw:
-        return 0
-    text = str(raw).strip().lower()
-    if not text or text in ("0", "off", "none"):
-        return 0
-    total = 0.0
-    matched = False
-    for value, unit in re.findall(r"(\d+(?:\.\d+)?)\s*([hms])", text):
-        total += float(value) * {"h": 3600.0, "m": 60.0, "s": 1.0}[unit]
-        matched = True
-    if matched:
-        return int(total)
-    try:
-        return max(0, int(float(text)))
-    except ValueError:
-        log(f"[flow] stage deadline value unparseable ({raw!r}); "
-            "stage deadline disabled")
-        return 0
-
-
 def _node_matches_scope(nid: str, scope: frozenset[str]) -> bool:
     """节点 id 命中范围:精确相等或以某个范围 id 为层级前缀(-/. 边界)。"""
     return any(nid == s or nid.startswith(s + "-") or nid.startswith(s + ".")
@@ -3196,17 +3148,6 @@ def main() -> int:
             "OCTOS_FINAL_RESERVE", str(max(300, budget // 9)) if budget else 0))
         node_floor = int(os.environ.get("OCTOS_NODE_FLOOR", "300"))
         t_run_start = time.time()
-        # 生成阶段 deadline:env 优先(OCTOS_STAGE_DEADLINE),烤入常量
-        # 兜底(平台无法传 env,与 COMPETITION_FAMILY_SCOPE 同一通道)。
-        _raw_deadline = os.environ.get("OCTOS_STAGE_DEADLINE")
-        if _raw_deadline is None:
-            _raw_deadline = COMPETITION_STAGE_DEADLINE
-        stage_deadline = _parse_deadline(_raw_deadline)
-        stage_deadline_hit = False
-        if stage_deadline:
-            log(f"[flow] stage deadline: {stage_deadline}s from run start "
-                "(no new implementation batch after it; final verification "
-                "proceeds normally)")
         # Smoke tests must NEVER use the grading port: round 21 was SIGTERMed
         # minutes after the final-verification turn started a server on
         # port 3000 — the runner appears to treat a live grading port as
@@ -3604,30 +3545,6 @@ def main() -> int:
             segment_digest_pending = False
 
             for idx, batch in enumerate(node_batches, 1):
-                # 生成阶段墙钟 deadline(正常收尾通道):到点不再开新批,
-                # 本批+后续批的节点全部按 skipped 记账(事件形态与预算
-                # 批尾修剪逐字对齐),流程继续 final verification →
-                # postflight → return 0——平台判"上一阶段正常结束"的
-                # 唯一标准就是退出码 0。
-                if (stage_deadline and not stage_deadline_hit
-                        and time.time() - t_run_start >= stage_deadline):
-                    skipped = [str(n.get("id"))
-                               for later in node_batches[idx - 1:]
-                               for n in later]
-                    log(f"[flow] stage deadline reached "
-                        f"({int(time.time() - t_run_start)}s >= "
-                        f"{stage_deadline}s); stopping before batch "
-                        f"{idx}/{len(node_batches)} — {len(skipped)} "
-                        "node(s) recorded as skipped; proceeding to final "
-                        "verification normally")
-                    for tid in skipped:
-                        events.mark_implementation_started(tid)
-                        events.mark_implementation_failed(
-                            tid, "skipped: stage deadline")
-                        skip_reasons[tid] = "skipped: stage deadline"
-                        failed.append(tid)
-                    stage_deadline_hit = True
-                    break
                 # A2 会话分段:每 SEGMENT_BATCHES 批重置 stdio 会话,切断
                 # O(n²) 历史重放(run-002 实测 1.35 亿 token 的主 driver)。
                 # 上下文经 planctl 磁盘重水合续命(envelope + repoMap 全量
@@ -4299,9 +4216,6 @@ def main() -> int:
 
         if failed:
             note = f"completed with {len(failed)} failed node(s): {', '.join(failed)}"
-            if stage_deadline_hit:
-                note += (" (stage deadline reached — unstarted nodes "
-                         "recorded as skipped, normal exit)")
             events.mark_run_completed(note)
         else:
             events.mark_run_completed("all requirement nodes implemented")

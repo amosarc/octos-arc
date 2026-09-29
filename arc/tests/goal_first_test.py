@@ -412,25 +412,6 @@ class GoalFirstRulesTests(unittest.TestCase):
             self.assertNotEqual(main._frontend_fingerprint(fe), fp1,
                                 "新增源文件必须改变指纹")
 
-    def test_stage_deadline_parsing(self):
-        # "4h"/"1h30m"/纯秒;空/"0"/"off"/garbage→0(关闭);永不抛。
-        # 烤入常量是提交期旋钮(正式提交改值重打包),测试只钉
-        # "当前值必须可解析",不钉具体值。
-        self.assertGreaterEqual(
-            main._parse_deadline(main.COMPETITION_STAGE_DEADLINE), 0)
-        self.assertEqual(main._parse_deadline("4h"), 14400)
-        self.assertEqual(main._parse_deadline("1h30m"), 5400)
-        self.assertEqual(main._parse_deadline("90m"), 5400)
-        self.assertEqual(main._parse_deadline("7200"), 7200)
-        self.assertEqual(main._parse_deadline(" 2h "), 7200)
-        self.assertEqual(main._parse_deadline("30s"), 30)
-        self.assertEqual(main._parse_deadline(""), 0)
-        self.assertEqual(main._parse_deadline(None), 0)
-        self.assertEqual(main._parse_deadline("0"), 0)
-        self.assertEqual(main._parse_deadline("off"), 0)
-        self.assertEqual(main._parse_deadline("banana"), 0)
-        self.assertEqual(main._parse_deadline("1.5h"), 5400)
-
     def test_prompt_templates_format_without_keyerror(self):
         # {grid} 字面量未转义曾让每批工单组装 KeyError('grid')(存量雷,
         # 09-28 随 CRUD 生成器退役顺手修复)——模板字面量花括号必须
