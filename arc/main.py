@@ -20,13 +20,6 @@ Configuration is via environment variables:
                   stripped from requirement text at yaml load, 09-29)
     OCTOS_PROVIDER  (override provider name, e.g. deepseek/openai/anthropic)
     OCTOS_MODEL     (override model name)
-    THINKING / OCTOS_THINKING
-                     (thinking switch, enum enabled|disabled, DEFAULT
-                      disabled — flows into the octos config like MODEL)
-    REASONING_EFFORT / OCTOS_REASONING_EFFORT
-                     (thinking depth, enum none|low|high|max; a level
-                      implies thinking on, "none"/"disabled" wins, unset
-                      follows THINKING)
     OCTOS_BIN       (path to the octos binary; default: ./bin/octos then PATH)
     OCTOS_MAX_ITERATIONS (default 500)
     OCTOS_NODE_TIMEOUT   (idle seconds per requirement node, default 1200)
@@ -86,6 +79,15 @@ SELFTEST_SUBDIR = "./ui-smoke"
 # 本地仿真不受它影响:env OCTOS_ARC_FAMILIES 设置时覆盖此值。
 # COMPETITION_FAMILY_SCOPE = "REQ-1"
 COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2,REQ-3"
+
+# 思考参数
+# config.json 的 model_thinking/model_reasoning_effort,内核按
+# ChatConfig.effective_thinking 解析:显式 off(disabled 或 none)绝对
+# 优先 > 分级档隐含开启 > enabled 无分级=模型默认深度。
+#   THINKING         "enabled" | "disabled"
+#   REASONING_EFFORT "" | "none" | "low" | "high" | "max"(空=不声明,跟随 THINKING)
+THINKING = "disabled"
+REASONING_EFFORT = "none"
 
 _DEBUG_LOG_PATH: Path | None = None
 _DEBUG_LOG_LOCK = threading.Lock()
@@ -1512,20 +1514,31 @@ def load_requirement_tree(req_dir: Path) -> dict:
     return data
 
 
-# 参考图记号剥离(09-29 裁决):`![alt](path)` 与悬空的整行
-# "Page reference:" 不再参与任何模型上下文——自动附图通道已退役
-# (内核 attach_prompt_reference_images 删除),记号留在文本里只会
-# 误导模型去找它看不了的图。reference/ 目录本身保留(平台任务夹具);
-# 需要视觉的调用方走显式媒体通道(params.media)+VISUAL_MODEL 路由。
+# 参考图记号剥离(09-29 裁决):yaml 的 "Page reference:" 节点
+# (标签 + 紧随其后的图记号行)不再参与任何模型上下文——自动附图
+# 通道已退役(内核 attach_prompt_reference_images 删除),记号留在
+# 文本里只会误导模型去找它看不了的图。按节点整段剥离,连同节点前的
+# 空行分隔一并收走,描述尾巴不留空白残行;reference/ 目录本身保留
+# (平台任务夹具);需要视觉的调用方走显式媒体通道(params.media)
+# +VISUAL_MODEL 路由。
 _IMAGE_MARK_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
-# 行尾悬空的 "Page reference:" 标签(图记号剥离后什么都不指)整段删除;
-# 独占一行与行中两种形态都覆盖。
-_PAGE_REF_LINE_RE = re.compile(r"[ \t]*Page reference:[ \t]*$", re.M)
+# 节点主形态(真实 yaml):标签独立成行、图记号整行紧随(可连续
+# 多行);标签出现在行中也认——从标签删到节点尾。
+_PAGE_REF_NODE_RE = re.compile(
+    r"(?:\n[ \t]*)*[ \t]*Page reference:[ \t]*"
+    r"(?:\n[ \t]*!\[[^\]]*\]\([^)]*\)[ \t]*)+")
+# 单行字符串形态(双引号 yaml/内联拼接):标签到行尾之间只有图记号。
+_PAGE_REF_INLINE_RE = re.compile(
+    r"[ \t]*Page reference:[ \t]*(?:!\[[^\]]*\]\([^)]*\)[ \t]*)+$", re.M)
+# 兜底:无标签散落的裸图记号,以及剥图后行尾悬空的标签。
+_PAGE_REF_DANGLING_RE = re.compile(r"[ \t]*Page reference:[ \t]*$", re.M)
 
 
 def _strip_text_marks(text: str) -> str:
-    stripped = _IMAGE_MARK_RE.sub(" ", text)
-    stripped = _PAGE_REF_LINE_RE.sub("", stripped)
+    stripped = _PAGE_REF_NODE_RE.sub("", text)
+    stripped = _PAGE_REF_INLINE_RE.sub("", stripped)
+    stripped = _IMAGE_MARK_RE.sub(" ", stripped)
+    stripped = _PAGE_REF_DANGLING_RE.sub("", stripped)
     return stripped
 
 
@@ -2386,27 +2399,22 @@ def build_octos_env(config_dir: Path) -> dict:
     }
     if provider not in ("openai", "deepseek", "anthropic") and base_url:
         config["base_url"] = base_url
-    # 思考参数透传(用户规格 2026-09-29):参考 MODEL/OCTOS_MODEL 的方式暴露
-    # THINKING/OCTOS_THINKING(enabled|disabled,默认 disabled)与
-    # REASONING_EFFORT/OCTOS_REASONING_EFFORT(none|low|high|max)。内核按
-    # ChatConfig.effective_thinking 解析:显式 off(thinking disabled 或 effort
-    # none)绝对优先,分级 effort 隐含开启,thinking enabled 无分级=模型默认
-    # 深度,两者都未设=关闭。宿主不再按 provider/model 名硬编码思考策略。
-    thinking = (os.environ.get("OCTOS_THINKING") or env.get("THINKING", "")).strip().lower()
-    if thinking:
-        if thinking not in ("enabled", "disabled"):
+    # 思考参数(用户裁决 2026-09-29:常量声明,不走 env)。内核按
+    # ChatConfig.effective_thinking 解析:显式 off(thinking disabled 或
+    # effort none)绝对优先 > 分级 effort 隐含开启 > thinking enabled
+    # 无分级=模型默认深度。宿主不按 provider/model 名硬编码思考策略。
+    # 改档位=改文件头部的 THINKING/REASONING_EFFORT 常量。
+    if THINKING not in ("enabled", "disabled"):
+        raise SystemExit(
+            f"THINKING constant must be 'enabled' or 'disabled', "
+            f"got: {THINKING!r}")
+    config["model_thinking"] = THINKING
+    if REASONING_EFFORT:
+        if REASONING_EFFORT not in ("none", "low", "high", "max"):
             raise SystemExit(
-                f"THINKING must be 'enabled' or 'disabled', got: {thinking!r}")
-        config["model_thinking"] = thinking
-    reasoning_effort = (
-        os.environ.get("OCTOS_REASONING_EFFORT") or env.get("REASONING_EFFORT", "")
-    ).strip().lower()
-    if reasoning_effort:
-        if reasoning_effort not in ("none", "low", "high", "max"):
-            raise SystemExit(
-                "REASONING_EFFORT must be one of none/low/high/max, "
-                f"got: {reasoning_effort!r}")
-        config["model_reasoning_effort"] = reasoning_effort
+                "REASONING_EFFORT constant must be one of none/low/high/max, "
+                f"got: {REASONING_EFFORT!r}")
+        config["model_reasoning_effort"] = REASONING_EFFORT
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     env["OCTOS_CONFIG_DIR"] = str(config_dir)

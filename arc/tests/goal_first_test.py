@@ -550,7 +550,15 @@ class SystemRowTests(unittest.TestCase):
                 "            steps:\n"
                 "              - keyword: THEN\n"
                 "                content: works "
-                "![shot](reference/after.png)\n",
+                "![shot](reference/after.png)\n"
+                "      - id: REQ-1-2\n"
+                "        name: N2\n"
+                "        type: ATOMIC\n"
+                "        description: |\n"
+                "          Real body.\n"
+                "\n"
+                "          Page reference:\n"
+                "          ![image](reference/sort.png)\n",
                 encoding="utf-8")
             tree = main.load_requirement_tree(req)
         blob = main.render_verbatim_nodes(tree)
@@ -563,6 +571,17 @@ class SystemRowTests(unittest.TestCase):
         self.assertIn("Global rules.", ctx)
         self.assertIn("Build it.", blob)
         self.assertIn("works", blob)
+        # 按 "Page reference:" 节点整段剥离:前置空行分隔随之收走,
+        # 描述尾部不留空白残行(旧实现留 "\n\n\n \n")。
+        nodes = {}
+
+        def collect(n):
+            nodes[n["id"]] = n
+            for c in n.get("children") or []:
+                collect(c)
+        collect(tree)
+        self.assertEqual(nodes["REQ-1-1"]["description"], "Build it.")
+        self.assertEqual(nodes["REQ-1-2"]["description"], "Real body.\n")
 
     def test_system_row_is_compact(self):
         ctx = main.build_system_row_context(TREE, self.RULES,
