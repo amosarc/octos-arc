@@ -1787,23 +1787,20 @@ def collect_dependency_context(tree: dict, batch: list[dict],
                                family_of: dict[str, dict],
                                seeded_scenarios: set[str] | frozenset | None
                                = None) -> str:
-    """本批节点 Depends on 闭包(跨家族部分,双段契约逐字)。
+    """本批节点 Depends on 闭包(不在本批的依赖,双段契约逐字)。
 
-    传递闭包按距离分轮展开(直接依赖优先,文档序 tiebreak);同族节点
-    只作穿越不作输出(其契约已在本工单家族段)。失控保护:输出节点
+    传递闭包按距离分轮展开(直接依赖优先,文档序 tiebreak);输出含跨族
+    与同族跨批(后者在大家族拆批后是唯一的契约在场源;family_of 参数
+    保留为调用方兼容)。失控保护:输出节点
     >12 或累计 >30K chars 时截断深距离层并留标记——直接依赖(距离 1)
     永不截。确定性遍历,零 LLM。
     """
-    node_by_id, fam_of_node = _node_family_index(tree)
-    current_fam = ""
-    for n in batch:
-        fam_node = family_of.get(str(n.get("id")))
-        if fam_node is not None:
-            current_fam = str(fam_node.get("id"))
-            break
+    node_by_id, _ = _node_family_index(tree)
     batch_ids = {str(n.get("id")) for n in batch}
-    # BFS 按距离分轮:frontier 全展开(含同族,保证传递链穿透),输出只
-    # 留跨家族且未见过的。
+    # BFS 按距离分轮:frontier 全展开,输出留不在本批的依赖——跨族照旧;
+    # 同族但跨批(github 实测 20 处,如 batch3 REQ-2-2-1→batch2 REQ-2-1-2)
+    # 也进闭包:旧"同族全剪"假设家族=单工单,大家族拆批后依赖节点的
+    # 双段原文在后来批次的工单里无处在场(09-29 二轮修复)。
     seen: set[str] = set(batch_ids)
     frontier = list(batch)  # 文档序
     by_distance: list[list[str]] = []
@@ -1820,8 +1817,7 @@ def collect_dependency_context(tree: dict, batch: list[dict],
                 if dep_node is None:
                     continue
                 next_frontier.append(dep_node)
-                if fam_of_node.get(dep_id) != current_fam:
-                    emitted.append(dep_id)
+                emitted.append(dep_id)
         if emitted:
             by_distance.append(emitted)
         frontier = next_frontier
@@ -1888,12 +1884,17 @@ def family_dependency_edges(tree: dict) -> dict[str, set[str]]:
 
 
 def session_group_batches(tree: dict, batches: list[list[dict]],
-                           family_of: dict[str, dict]) -> list[list[int]]:
-    """批索引按家族依赖图 SCC 分组,组间拓扑序(文档序 tiebreak)。
+                           family_of: dict[str, dict],
+                           policy: str = "family"
+                           ) -> list[list[int]]:
+    """批索引按家族依赖图分组,组间拓扑序(文档序 tiebreak)。
 
-    执行粒度裁决(09-29):相互依赖成环的家族共组共享会话;单向依赖
-    跨组由工单闭包双段注入承载(REQ CONTENT + VERIFICATION 原文在场)。
-    返回按执行顺序的组序列,每组是批索引列表(组内保持文档序)。
+    执行粒度裁决(09-29 二轮):policy=family(默认)——每家族一组各自
+    会话,依赖(含同族跨批/跨族/环)全部由工单闭包双段注入承载;组间
+    环容忍拓扑:就绪组取文档序最小,成环时破环取文档序最小并告警
+    (未满足依赖走闭包+回归谱)。policy=scc——互达成环的家族共组
+    共享会话(旧语义)。返回按执行顺序的组序列,每组是批索引列表
+    (组内保持文档序)。
     """
     def fam_of_batch(batch: list[dict]) -> str:
         for n in batch:
@@ -1913,6 +1914,30 @@ def session_group_batches(tree: dict, batches: list[list[dict]],
     edges = {a: {d for d in bs if d in present}
              for a, bs in family_dependency_edges(tree).items()
              if a in present}
+    if policy == "family":
+        # 每家族一组;组间环容忍 Kahn——无环时=纯拓扑,成环时破环并
+        # 告警(前向依赖由闭包双段注入+回归谱承载,与三跑文档序执行
+        # 同构,无新增风险面)。
+        groups = [[f] for f in fam_order]
+        dep_of = {f: set(edges.get(f, ())) for f in fam_order}
+        doc_index = {f: i for i, f in enumerate(fam_order)}
+        executed: set[str] = set()
+        order: list[str] = []
+        remaining = list(fam_order)
+        while remaining:
+            ready = [f for f in remaining if dep_of[f] <= executed]
+            pool = ready or remaining
+            pick = min(pool, key=lambda f: doc_index[f])
+            if not ready:
+                unmet = sorted(dep_of[pick] - executed)
+                log(f"[flow] session policy=family: dependency cycle "
+                    f"broken at {pick} (unmet deps {', '.join(unmet)} — "
+                    "carried by closure injection + regression)")
+            order.append(pick)
+            executed.add(pick)
+            remaining.remove(pick)
+        return [[bi for bi in range(len(batches)) if batch_fam[bi] == f]
+                for f in order]
     # 可达闭包(家族数 ≤ 十级,平方可接受)→ 互达即同 SCC。
     reach: dict[str, set[str]] = {}
     for f in fam_order:
@@ -3736,23 +3761,25 @@ def main() -> int:
             skip_reasons: dict[str, str] = {}
             node_done_notes: dict[str, str] = {}
             segment_digest_pending = False
-            # 会话策略(09-29 裁决):解析 yaml 感知家族依赖——相互依赖
-            # 成环(SCC)的家族共组共享会话;单向依赖跨组由工单闭包双段
-            # 注入(REQ CONTENT + VERIFICATION 原文)承载,独立家族各自
-            # 单会话执行。OCTOS_ARC_SESSION_POLICY=single 退回全程单会话;
-            # OCTOS_ARC_SEGMENT_BATCHES>0 为应急每 N 批盲切(旧路径)。
+            # 会话策略(09-29 二轮裁决):family(默认)——每家族一会话,
+            # 依赖(含同族跨批/跨族/环)全部由工单闭包双段注入(REQ
+            # CONTENT + VERIFICATION 原文)承载,组间环容忍拓扑(成环
+            # 破文档序并告警);scc——互达成环家族共组;single——全程
+            # 单会话。OCTOS_ARC_SEGMENT_BATCHES>0 为应急每 N 批盲切。
             session_policy = os.environ.get(
-                "OCTOS_ARC_SESSION_POLICY", "scc").strip().lower()
+                "OCTOS_ARC_SESSION_POLICY", "family").strip().lower()
             batch_group: list[int] = []
             if node_batches and session_policy != "single":
                 scc_groups = session_group_batches(
-                    tree, node_batches, family_of)
+                    tree, node_batches, family_of,
+                    policy=session_policy if session_policy == "scc"
+                    else "family")
                 if len(scc_groups) > 1:
                     def _fam_id(bi: int) -> str:
                         fam = family_of.get(
                             str(node_batches[bi][0].get("id")))
                         return str(fam.get("id")) if fam else ""
-                    log("[flow] dependency-aware session groups: "
+                    log(f"[flow] session groups (policy={session_policy}): "
                         + " | ".join(
                             "+".join(sorted({
                                 _fam_id(bi) for bi in group} - {""})) or "?"

@@ -145,15 +145,28 @@ class DependencyClosureTests(unittest.TestCase):
         self.assertIn("REQ CONTENT (verbatim):", ctx)
         self.assertIn("family one module contract", ctx)
 
-    def test_same_family_dependency_pruned_but_tail_carried(self):
+    def test_same_family_cross_batch_dep_included(self):
         fam_of = main.family_index(TREE)
+        # 批=[REQ-2-2](单节点批):同族依赖 REQ-2-1 不在本批 → 进闭包
+        # (09-29 二轮:旧"同族全剪"假设家族=单工单,大家族拆批后依赖
+        # 契约无处在场;github 实测 20 处同族跨批依赖)。
         batch = [n for n in main.flatten_atomic(TREE)
                  if n["id"] == "REQ-2-2"]
         ctx = main.collect_dependency_context(TREE, batch, fam_of)
-        # 同族依赖 REQ-2-1 自身不输出(契约在本工单家族段),但传递闭包
-        # 穿透它:REQ-2-1 依赖的跨家族 REQ-1 进入闭包(09-29 语义)。
-        self.assertNotIn("ID: REQ-2-1", ctx)
+        self.assertIn("ID: REQ-2-1", ctx)
+        # 传递尾巴:REQ-2-1 依赖的跨族 REQ-1 也在场。
         self.assertIn("ID: REQ-1", ctx)
+
+    def test_same_batch_dep_pruned(self):
+        fam_of = main.family_index(TREE)
+        # 批=[REQ-2-1, REQ-2-2](同批):批内依赖由 THIS BATCH 本身携带,
+        # 闭包只输出批外。
+        batch = [n for n in main.flatten_atomic(TREE)
+                 if n["id"] in ("REQ-2-1", "REQ-2-2")]
+        ctx = main.collect_dependency_context(TREE, batch, fam_of)
+        self.assertNotIn("ID: REQ-2-1\n", ctx)
+        self.assertNotIn("ID: REQ-2-2", ctx)
+        self.assertIn("ID: REQ-1", ctx)  # 批外跨族照旧
 
     def test_no_dependencies_returns_empty(self):
         fam_of = main.family_index(TREE)
@@ -222,6 +235,22 @@ class DependencyClosureTests(unittest.TestCase):
         for fam in ("REQ-1", "REQ-2", "REQ-3", "REQ-4"):
             self.assertIn(f"ID: {fam}-", ctx,
                           f"{fam} family text missing from closure")
+
+    def test_real_github_cross_batch_same_family_dep_in_closure(self):
+        # github 真树:batch3(REQ-2-2-*)依赖 batch2 的 REQ-2-1-2(同族
+        # 跨批)——其双段契约必须进闭包(旧"同族全剪"缺口,20 处)。
+        req_dir = Path(__file__).resolve().parent.parent / "tasks" / \
+            "hackathon--github"
+        if not (req_dir / "requirements.yaml").is_file():
+            self.skipTest("github task not present")
+        tree = main.load_requirement_tree(req_dir)
+        fam_of = main.family_index(tree)
+        batches = main.group_families(tree)
+        hit = next(b for b in batches
+                   if any(str(n.get("id")) == "REQ-2-2-1" for n in b))
+        ctx = main.collect_dependency_context(tree, hit, fam_of)
+        self.assertIn("ID: REQ-2-1-2", ctx)
+        self.assertIn("VERIFICATION REQUIREMENTS", ctx)
 
 
 class DualSectionContractTests(unittest.TestCase):
@@ -300,9 +329,25 @@ class SessionGroupTests(unittest.TestCase):
         ])
         batches = main.group_families(tree)
         groups = main.session_group_batches(tree, batches,
-                                            main.family_index(tree))
+                                            main.family_index(tree),
+                                            policy="scc")
         self.assertEqual(1, len(groups))
         self.assertEqual({0, 1}, set(groups[0]))
+
+    def test_family_policy_splits_cycle_in_doc_order(self):
+        # family 档(默认):环也拆成每家族一会话,文档序破环。
+        tree = node("ROOT", "FOLDER", [
+            node("REQ-1", "FOLDER", [
+                node("REQ-1-1", description="a",
+                     dependencies=["REQ-2-1"])]),
+            node("REQ-2", "FOLDER", [
+                node("REQ-2-1", description="b",
+                     dependencies=["REQ-1-1"])]),
+        ])
+        batches = main.group_families(tree)
+        groups = main.session_group_batches(tree, batches,
+                                            main.family_index(tree))
+        self.assertEqual([[0], [1]], groups)
 
     def test_forward_dependency_reorders_groups(self):
         # 文档序 REQ-1 在前但依赖 REQ-2 → 拓扑序 REQ-2 组先行。
@@ -326,11 +371,25 @@ class SessionGroupTests(unittest.TestCase):
         tree = main.load_requirement_tree(req_dir)
         batches = main.group_families(tree)
         groups = main.session_group_batches(tree, batches,
-                                            main.family_index(tree))
+                                            main.family_index(tree),
+                                            policy="scc")
         # 2↔5 环经 5→3→2 把 3/4 吸入同一 SCC:{REQ-1} | {REQ-2,3,4,5}
         self.assertEqual(2, len(groups))
         self.assertEqual([0], groups[0])
         self.assertEqual([1, 2, 3, 4], groups[1])
+
+    def test_real_sheet_family_policy_five_groups(self):
+        # family 档(默认):每家族一会话,文档序(环在 REQ-2 处破,与
+        # 三跑执行顺序一致)。
+        req_dir = Path(__file__).resolve().parent.parent / "tasks" / \
+            "hackathon--sheet"
+        if not (req_dir / "requirements.yaml").is_file():
+            self.skipTest("sheet task not present")
+        tree = main.load_requirement_tree(req_dir)
+        batches = main.group_families(tree)
+        groups = main.session_group_batches(tree, batches,
+                                            main.family_index(tree))
+        self.assertEqual([[0], [1], [2], [3], [4]], groups)
 
     def test_real_github_singleton_groups_in_doc_order(self):
         req_dir = Path(__file__).resolve().parent.parent / "tasks" / \
