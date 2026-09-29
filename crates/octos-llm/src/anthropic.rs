@@ -16,7 +16,7 @@ use crate::cache_manifest::{
     PromptCacheInputManifest, prompt_cache_features_enabled, without_cache_markers,
 };
 use crate::config::ChatConfig;
-use crate::config::ReasoningEffort;
+use crate::config::{EffectiveThinking, ReasoningEffort};
 use crate::provider::{LlmProvider, endpoint_label_from_base_url};
 use crate::types::{
     ChatResponse, ChatStream, ProviderMetadata, StopReason, StreamEvent, TokenUsage, ToolSpec,
@@ -178,9 +178,14 @@ impl AnthropicProvider {
         if cache.is_some() {
             apply_message_cache_breakpoint(&mut api_messages);
         }
-        let thinking = config
-            .reasoning_effort
-            .and_then(|effort| build_anthropic_thinking(effort, max_tokens));
+        // `thinking` + `reasoning_effort` resolution (user spec 2026-09-29):
+        // off — including the disabled default — and enabled-default-depth
+        // both omit the thinking block (Claude thinking is opt-in via the
+        // budget); a graded level maps to its budget.
+        let thinking = match config.effective_thinking() {
+            EffectiveThinking::Level(effort) => build_anthropic_thinking(effort, max_tokens),
+            EffectiveThinking::Off | EffectiveThinking::DefaultDepth => None,
+        };
         let (temperature, top_p, top_k) = self.sampling_fields(config);
         AnthropicRequest {
             model: &self.model,

@@ -51,6 +51,12 @@ pub struct Config {
     /// session/turn override → this → `gateway.reasoning_effort` → none.
     #[serde(default)]
     pub model_reasoning_effort: Option<octos_llm::ReasoningEffort>,
+    /// Primary model default thinking switch (`enabled`|`disabled`; default
+    /// disabled), exposed the model-parameter way (user spec 2026-09-29).
+    /// Precedence: this → `gateway.thinking` → none. Resolves with
+    /// `model_reasoning_effort` per `ChatConfig::effective_thinking`.
+    #[serde(default)]
+    pub model_thinking: Option<octos_llm::Thinking>,
 
     /// Custom base URL for the API endpoint.
     #[serde(default)]
@@ -755,11 +761,11 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub reasoning_effort: Option<octos_llm::ReasoningEffort>,
 
-    /// Follow-up-round reasoning effort (GLM-5.2+ first-round policy): the
-    /// first call of a conversation uses `reasoning_effort`, every later
-    /// round this. Unset ⇒ `reasoning_effort` applies to all rounds.
+    /// Binary thinking switch (`enabled`|`disabled`, default disabled) applied
+    /// to every turn. Resolves with `reasoning_effort` per
+    /// `ChatConfig::effective_thinking` (user spec 2026-09-29).
     #[serde(default)]
-    pub reasoning_effort_followup: Option<octos_llm::ReasoningEffort>,
+    pub thinking: Option<octos_llm::Thinking>,
 
     /// Sampling temperature override for chat LLM calls. When unset (the
     /// default), the built-in `ChatConfig` default (`0.0`, greedy) is used and
@@ -795,7 +801,7 @@ impl Default for GatewayConfig {
             session_timeout_secs: None,
             max_output_tokens: None,
             reasoning_effort: None,
-            reasoning_effort_followup: None,
+            thinking: None,
             llm_temperature: None,
             llm_sampling_params: None,
         }
@@ -1342,6 +1348,30 @@ pub fn detect_provider(model: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    /// The `thinking` / `reasoning_effort` params are exposed on config.json
+    /// the model-parameter way (user spec 2026-09-29): top-level
+    /// `model_thinking` + `model_reasoning_effort`, gateway fallbacks.
+    #[test]
+    fn thinking_params_parse_from_config_json() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"model_thinking": "enabled", "model_reasoning_effort": "low"}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.model_thinking, Some(octos_llm::Thinking::Enabled));
+        assert_eq!(
+            cfg.model_reasoning_effort,
+            Some(octos_llm::ReasoningEffort::Low)
+        );
+        let gw: Config =
+            serde_json::from_str(r#"{"gateway": {"thinking": "disabled"}}"#).unwrap();
+        assert_eq!(
+            gw.gateway.and_then(|g| g.thinking),
+            Some(octos_llm::Thinking::Disabled)
+        );
+        // Unknown enum values are rejected loudly, not silently defaulted.
+        assert!(serde_json::from_str::<Config>(r#"{"model_thinking": "on"}"#).is_err());
+    }
+
     /// `QueueMode::Latest` was renamed from `steer` (the word collides with
     /// `turn/steer`, which injects rather than discards). Existing configs
     /// and `/queue steer` must keep working; new ones use `latest`.

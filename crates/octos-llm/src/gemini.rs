@@ -432,20 +432,30 @@ fn build_gemini_generation_config(
     config: &ChatConfig,
     provider_label: &str,
 ) -> Result<GeminiGenerationConfig> {
-    use crate::config::{ReasoningEffort, ResponseFormat};
+    use crate::config::{EffectiveThinking, ReasoningEffort, ResponseFormat};
 
-    let thinking_config = config.reasoning_effort.map(|effort| {
-        let budget = match effort {
-            ReasoningEffort::Disabled => Some(0),
-            ReasoningEffort::Low => Some(1024),
-            ReasoningEffort::Medium => Some(8192),
-            // High and Max both let the model decide (unbounded thinking budget).
-            ReasoningEffort::High | ReasoningEffort::Max => None,
-        };
-        GeminiThinkingConfig {
-            thinking_budget: budget,
+    // `thinking` + `reasoning_effort` resolution (user spec 2026-09-29): off
+    // (the default) pins a zero budget, an enabled default depth leaves the
+    // thinkingConfig field off (provider default), a graded level maps to
+    // its budget.
+    let thinking_config = match config.effective_thinking() {
+        EffectiveThinking::Off => Some(GeminiThinkingConfig {
+            thinking_budget: Some(0),
+        }),
+        EffectiveThinking::DefaultDepth => None,
+        EffectiveThinking::Level(effort) => {
+            let budget = match effort {
+                ReasoningEffort::Disabled => unreachable!(),
+                ReasoningEffort::Low => Some(1024),
+                ReasoningEffort::Medium => Some(8192),
+                // High and Max both let the model decide (unbounded thinking budget).
+                ReasoningEffort::High | ReasoningEffort::Max => None,
+            };
+            Some(GeminiThinkingConfig {
+                thinking_budget: budget,
+            })
         }
-    });
+    };
 
     let (response_mime_type, response_schema) = match &config.response_format {
         Some(ResponseFormat::JsonObject) => (Some("application/json".into()), None),

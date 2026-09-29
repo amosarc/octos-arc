@@ -15,7 +15,7 @@ use crate::vision;
 use crate::cache_manifest::{
     PromptCacheInputManifest, prompt_cache_features_enabled, without_cache_markers,
 };
-use crate::config::ChatConfig;
+use crate::config::{ChatConfig, EffectiveThinking};
 use crate::provider::{LlmProvider, endpoint_label_from_base_url};
 use crate::sse::SseEvent;
 use crate::types::{
@@ -680,56 +680,51 @@ impl OpenAIProvider {
             }
         });
 
-        // Translate the provider-agnostic `reasoning_effort` into the chat-path
-        // request fields the model's ReasoningStyle expects. Enabled effort is
-        // emitted only for a declared style. Explicitly disabled reasoning is
-        // also forwarded to generic OpenAI-compatible endpoints because local
-        // servers such as Ollama accept the standard `reasoning_effort: "none"`.
-        //
-        // GLM-5.2+ first-round policy (user spec 2026-09-27): the FIRST round
-        // of a conversation (history carries no assistant message yet — the
-        // planning/scaffolding call) uses `reasoning_effort`; every follow-up
-        // round (tool-loop continuations) uses `reasoning_effort_followup`
-        // when set. An explicit `Disabled` always wins so the ARC thinking
-        // tiering (`tier_call_config`) keeps routine iterations off — a
-        // followup value must not re-enable them. History-based detection is
-        // stateless, so HTTP/400-retry legs of the same logical call classify
-        // identically, and a fresh session (new `octos chat` process or stdio
-        // session) naturally starts at round one again.
-        let first_round = !messages
-            .iter()
-            .any(|message| message.role == MessageRole::Assistant);
-        let configured_effort = match config.reasoning_effort {
-            Some(crate::config::ReasoningEffort::Disabled) => config.reasoning_effort,
-            Some(_) if !first_round => config.reasoning_effort_followup.or(config.reasoning_effort),
-            _ => config.reasoning_effort,
-        };
+        // Translate the provider-agnostic `thinking` + `reasoning_effort`
+        // params into the chat-path request fields the model's ReasoningStyle
+        // expects (user spec 2026-09-29; the GLM first-round/follow-up split
+        // was retired with it). Resolution lives on
+        // [`ChatConfig::effective_thinking`]: `thinking:"disabled"` (the
+        // default) and `reasoning_effort:"none"` both mean off, a graded
+        // effort implies on, and `thinking:"enabled"` without a grade is on
+        // at the provider's default depth. Enabled controls are emitted only
+        // for a declared style; off is also forwarded to generic
+        // OpenAI-compatible endpoints because local servers such as Ollama
+        // accept the standard `reasoning_effort: "none"`.
         let (reasoning_effort, thinking): (Option<&str>, Option<serde_json::Value>) =
-            match (configured_effort, content_hints.reasoning_style) {
-                (Some(effort), style) => {
-                    use crate::config::ReasoningEffort as RE;
-                    let enabled = || serde_json::json!({ "type": "enabled" });
+            match (config.effective_thinking(), content_hints.reasoning_style) {
+                (EffectiveThinking::Off, style) => {
                     let disabled = || serde_json::json!({ "type": "disabled" });
-                    match (effort, style) {
+                    match style {
                         // Toggle-based providers disable thinking through their
                         // native binary control and reject reasoning_effort.
-                        (
-                            RE::Disabled,
-                            ReasoningStyle::ThinkingToggle
-                            | ReasoningStyle::EffortAndThinkingToggle
-                            | ReasoningStyle::GlmGradedThinking,
-                        ) => (None, Some(disabled())),
+                        ReasoningStyle::ThinkingToggle
+                        | ReasoningStyle::EffortAndThinkingToggle
+                        | ReasoningStyle::GlmGradedThinking => (None, Some(disabled())),
                         // Kimi K3 has no documented off value. Omitting the
                         // control preserves the provider default.
-                        (
-                            RE::Disabled,
-                            ReasoningStyle::EffortLowHighMax | ReasoningStyle::EffortMaxOnly,
-                        ) => (None, None),
+                        ReasoningStyle::EffortLowHighMax | ReasoningStyle::EffortMaxOnly => {
+                            (None, None)
+                        }
                         // Standard and generic OpenAI-compatible endpoints use
                         // reasoning_effort:"none" to disable reasoning.
-                        (RE::Disabled, ReasoningStyle::Effort | ReasoningStyle::None) => {
-                            (Some("none"), None)
-                        }
+                        ReasoningStyle::Effort | ReasoningStyle::None => (Some("none"), None),
+                    }
+                }
+                // `thinking:"enabled"` with no grade: toggle styles get the
+                // binary on control; effort-field styles keep the provider
+                // default (nothing emitted).
+                (
+                    EffectiveThinking::DefaultDepth,
+                    ReasoningStyle::ThinkingToggle
+                    | ReasoningStyle::EffortAndThinkingToggle
+                    | ReasoningStyle::GlmGradedThinking,
+                ) => (None, Some(serde_json::json!({ "type": "enabled" }))),
+                (EffectiveThinking::DefaultDepth, _) => (None, None),
+                (EffectiveThinking::Level(effort), style) => {
+                    use crate::config::ReasoningEffort as RE;
+                    let enabled = || serde_json::json!({ "type": "enabled" });
+                    match (effort, style) {
                         // GLM-4.5+/5.x: binary thinking toggle, NO reasoning_effort.
                         (_, ReasoningStyle::ThinkingToggle) => (None, Some(enabled())),
                         // GLM-5.2+: graded effort (max|high|low — no medium
@@ -781,7 +776,6 @@ impl OpenAIProvider {
                         (_, ReasoningStyle::None) => (None, None),
                     }
                 }
-                _ => (None, None),
             };
 
         OpenAIRequest {
@@ -1953,24 +1947,24 @@ mod tests {
     }
 
     #[test]
-    fn glm_graded_first_round_max_followup_low() {
+    fn glm_graded_level_emits_effort_plus_toggle_every_round() {
         use crate::config::ReasoningEffort as RE;
         use serde_json::json;
         let p = OpenAIProvider::new("key", "glm-5.3-flash");
         let mut cfg = ChatConfig::default();
         cfg.reasoning_effort = Some(RE::Max);
-        cfg.reasoning_effort_followup = Some(RE::Low);
-        // First round (history has no assistant message): max + enabled.
+        // Round-blind (the first-round/follow-up split was retired): the
+        // same max + enabled pair whether or not history carries an
+        // assistant message.
         let first = [msg("plan the node")];
         let v = serde_json::to_value(p.build_request(&first, &[], &cfg, false)).unwrap();
         assert_eq!(v["reasoning_effort"], json!("max"), "{v}");
         assert_eq!(v["thinking"], json!({"type": "enabled"}), "{v}");
-        // Follow-up round (prior assistant message in history): low + enabled.
         let mut prior = msg("prior tool round");
         prior.role = MessageRole::Assistant;
         let later = [first[0].clone(), prior];
         let v2 = serde_json::to_value(p.build_request(&later, &[], &cfg, false)).unwrap();
-        assert_eq!(v2["reasoning_effort"], json!("low"), "{v2}");
+        assert_eq!(v2["reasoning_effort"], json!("max"), "{v2}");
         assert_eq!(v2["thinking"], json!({"type": "enabled"}), "{v2}");
     }
 
@@ -1987,43 +1981,51 @@ mod tests {
     }
 
     #[test]
-    fn glm_graded_disabled_wins_over_followup() {
+    fn glm_graded_thinking_disabled_wins_over_level() {
         use crate::config::ReasoningEffort as RE;
+        use crate::config::Thinking;
         use serde_json::json;
         let p = OpenAIProvider::new("key", "glm-5.3-flash");
+        // Explicit `thinking: "disabled"` is the master switch: a graded
+        // effort must not re-enable thinking under it.
         let mut cfg = ChatConfig::default();
-        // tier_call_config sets Disabled on routine iterations; a followup
-        // value must NOT re-enable thinking there.
-        cfg.reasoning_effort = Some(RE::Disabled);
-        cfg.reasoning_effort_followup = Some(RE::Low);
-        let mut prior = msg("prior tool round");
-        prior.role = MessageRole::Assistant;
-        let v = serde_json::to_value(
-            p.build_request(&[msg("hi"), prior], &[], &cfg, false),
-        )
-        .unwrap();
+        cfg.thinking = Some(Thinking::Disabled);
+        cfg.reasoning_effort = Some(RE::Low);
+        let v =
+            serde_json::to_value(p.build_request(&[msg("hi")], &[], &cfg, false)).unwrap();
         assert!(v.get("reasoning_effort").is_none(), "{v}");
         assert_eq!(v["thinking"], json!({"type": "disabled"}), "{v}");
+        // `reasoning_effort: "none"` is the off value of the effort family
+        // and also lands on disabled.
+        let mut cfg_none = ChatConfig::default();
+        cfg_none.reasoning_effort = Some(RE::Disabled);
+        let v2 = serde_json::to_value(
+            p.build_request(&[msg("hi")], &[], &cfg_none, false),
+        )
+        .unwrap();
+        assert!(v2.get("reasoning_effort").is_none(), "{v2}");
+        assert_eq!(v2["thinking"], json!({"type": "disabled"}), "{v2}");
     }
 
     #[test]
-    fn glm_graded_unconfigured_emits_nothing() {
+    fn glm_graded_unconfigured_defaults_to_disabled() {
         use serde_json::json;
         let p = OpenAIProvider::new("key", "glm-5.3-flash");
-        // No effort configured ⇒ nothing emitted (server-side default), for
-        // BOTH first and later rounds — and a followup-only config leaves the
-        // first round unemitted (base effort governs round one).
+        // Both params unset ⇒ the API default is thinking DISABLED: the
+        // binary off control is emitted, no effort field.
         let v = serde_json::to_value(
             p.build_request(&[msg("hi")], &[], &ChatConfig::default(), false),
         )
         .unwrap();
         assert!(v.get("reasoning_effort").is_none(), "{v}");
-        assert!(v.get("thinking").is_none(), "{v}");
+        assert_eq!(v["thinking"], json!({"type": "disabled"}), "{v}");
+        // `thinking: "enabled"` with no grade ⇒ on at provider default
+        // depth: enabled toggle, no effort field.
         let mut cfg = ChatConfig::default();
-        cfg.reasoning_effort_followup = Some(crate::config::ReasoningEffort::Low);
+        cfg.thinking = Some(crate::config::Thinking::Enabled);
         let v2 = serde_json::to_value(p.build_request(&[msg("hi")], &[], &cfg, false)).unwrap();
         assert!(v2.get("reasoning_effort").is_none(), "{v2}");
-        assert!(v2.get("thinking").is_none(), "{v2}");
+        assert_eq!(v2["thinking"], json!({"type": "enabled"}), "{v2}");
         // Legacy shapes unchanged: glm-4.5 with an effort → toggle only.
         let p45 = OpenAIProvider::new("key", "glm-4.5-air");
         let mut cfg45 = ChatConfig::default();
@@ -2032,6 +2034,58 @@ mod tests {
             serde_json::to_value(p45.build_request(&[msg("hi")], &[], &cfg45, false)).unwrap();
         assert!(v3.get("reasoning_effort").is_none(), "{v3}");
         assert_eq!(v3["thinking"], json!({"type": "enabled"}), "{v3}");
+    }
+
+    #[test]
+    fn deepseek_lane_default_disabled_and_level_emits_both() {
+        use crate::config::ReasoningEffort as RE;
+        use serde_json::json;
+        let p = OpenAIProvider::new("key", "deepseek-v4-flash");
+        // Default (unset) ⇒ thinking disabled, no effort field.
+        let v = serde_json::to_value(
+            p.build_request(&[msg("hi")], &[], &ChatConfig::default(), false),
+        )
+        .unwrap();
+        assert!(v.get("reasoning_effort").is_none(), "{v}");
+        assert_eq!(v["thinking"], json!({"type": "disabled"}), "{v}");
+        // A graded level implies on: effort + enabled toggle.
+        let mut cfg = ChatConfig::default();
+        cfg.reasoning_effort = Some(RE::Low);
+        let v2 =
+            serde_json::to_value(p.build_request(&[msg("hi")], &[], &cfg, false)).unwrap();
+        assert_eq!(v2["reasoning_effort"], json!("low"), "{v2}");
+        assert_eq!(v2["thinking"], json!({"type": "enabled"}), "{v2}");
+        // Toggle-only providers without a graded arm (glm-4.5) ignore the
+        // effort grade and still gate on the toggle.
+        let p45 = OpenAIProvider::new("key", "glm-4.5-air");
+        let v3 = serde_json::to_value(
+            p45.build_request(&[msg("hi")], &[], &cfg, false),
+        )
+        .unwrap();
+        assert!(v3.get("reasoning_effort").is_none(), "{v3}");
+        assert_eq!(v3["thinking"], json!({"type": "enabled"}), "{v3}");
+    }
+
+    #[test]
+    fn generic_lane_default_emits_effort_none() {
+        use serde_json::json;
+        // Undeclared/generic OpenAI-compatible models: the disabled default
+        // forwards `reasoning_effort: "none"` (the generic off control).
+        let p = OpenAIProvider::new("key", "some-custom-model");
+        let v = serde_json::to_value(
+            p.build_request(&[msg("hi")], &[], &ChatConfig::default(), false),
+        )
+        .unwrap();
+        assert_eq!(v["reasoning_effort"], json!("none"), "{v}");
+        assert!(v.get("thinking").is_none(), "{v}");
+        // Effort-style (o-series/gpt-5) models get the same generic off.
+        let p5 = OpenAIProvider::new("key", "gpt-5o");
+        let v2 = serde_json::to_value(
+            p5.build_request(&[msg("hi")], &[], &ChatConfig::default(), false),
+        )
+        .unwrap();
+        assert_eq!(v2["reasoning_effort"], json!("none"), "{v2}");
+        assert!(v2.get("thinking").is_none(), "{v2}");
     }
 
     #[test]

@@ -120,19 +120,28 @@ impl OpenAIResponsesProvider {
             body["tool_choice"] = tool_choice;
         }
 
-        // Reasoning effort maps to the reasoning object
-        if let Some(effort) = &config.reasoning_effort {
-            let effort_str = match effort {
-                crate::config::ReasoningEffort::Disabled => "none",
-                crate::config::ReasoningEffort::Low => "low",
-                crate::config::ReasoningEffort::Medium => "medium",
-                crate::config::ReasoningEffort::High => "high",
-                // The Responses API reasoning.effort has no "max"; clamp to high.
-                crate::config::ReasoningEffort::Max => "high",
-            };
-            body["reasoning"] = serde_json::json!({
-                "effort": effort_str,
-            });
+        // `thinking` + `reasoning_effort` resolution (user spec 2026-09-29):
+        // off — including the disabled default — maps to `reasoning.effort:
+        // "none"`; enabled-default-depth leaves the reasoning object off; a
+        // graded level maps to its effort string.
+        match config.effective_thinking() {
+            crate::config::EffectiveThinking::Off => {
+                body["reasoning"] = serde_json::json!({ "effort": "none" });
+            }
+            crate::config::EffectiveThinking::DefaultDepth => {}
+            crate::config::EffectiveThinking::Level(effort) => {
+                let effort_str = match effort {
+                    crate::config::ReasoningEffort::Disabled => unreachable!(),
+                    crate::config::ReasoningEffort::Low => "low",
+                    crate::config::ReasoningEffort::Medium => "medium",
+                    crate::config::ReasoningEffort::High => "high",
+                    // The Responses API reasoning.effort has no "max"; clamp to high.
+                    crate::config::ReasoningEffort::Max => "high",
+                };
+                body["reasoning"] = serde_json::json!({
+                    "effort": effort_str,
+                });
+            }
         }
 
         body

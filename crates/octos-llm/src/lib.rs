@@ -35,7 +35,7 @@ pub use cache_manifest::{
 pub use catalog::{ModelCatalogEntry, ModelType, QosCatalog};
 pub use config::{
     CacheRetention, ChatConfig, PromptCacheContext, ReasoningEffort, ResponseFormat,
-    SemanticCheckpointHint, ToolChoice,
+    SemanticCheckpointHint, Thinking, ToolChoice,
 };
 pub use context_override::ContextWindowOverride;
 pub use embedding::{EmbeddingProvider, OpenAIEmbedder};

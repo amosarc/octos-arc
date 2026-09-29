@@ -22,6 +22,13 @@ Configuration is via environment variables:
                   image-modality text-only fallback)
     OCTOS_PROVIDER  (override provider name, e.g. deepseek/openai/anthropic)
     OCTOS_MODEL     (override model name)
+    THINKING / OCTOS_THINKING
+                     (thinking switch, enum enabled|disabled, DEFAULT
+                      disabled — flows into the octos config like MODEL)
+    REASONING_EFFORT / OCTOS_REASONING_EFFORT
+                     (thinking depth, enum none|low|high|max; a level
+                      implies thinking on, "none"/"disabled" wins, unset
+                      follows THINKING)
     OCTOS_BIN       (path to the octos binary; default: ./bin/octos then PATH)
     OCTOS_MAX_ITERATIONS (default 500)
     OCTOS_NODE_TIMEOUT   (idle seconds per requirement node, default 1200)
@@ -2344,24 +2351,27 @@ def build_octos_env(config_dir: Path) -> dict:
     }
     if provider not in ("openai", "deepseek", "anthropic") and base_url:
         config["base_url"] = base_url
-    if provider == "deepseek":
-        # Rounds 34/36: even with 65536 output tokens, ~150s turns came back
-        # empty — far too short to exhaust the budget, so the reasoning
-        # spend itself is the problem (server-side clamp or runaway
-        # thinking). octos maps gateway.reasoning_effort onto DeepSeek V4's
-        # reasoning_effort + thinking toggle (only for api.deepseek.com
-        # routes, which is what the platform uses); "low" caps the
-        # reasoning spend so content actually gets emitted.
-        config["gateway"]["reasoning_effort"] = "low"
-    if "glm-5" in model:
-        # GLM-5.2+ 分级思考(用户规格 2026-09-27):thinking 二值开关 +
-        # reasoning_effort(max/high/low,medium 内核钳为 high)。策略=
-        # 首轮对话最高、非首轮 low:内核按"历史尚无 assistant 消息"判定
-        # 首轮(每个节点 turn 的新会话首轮=规划/搭架时刻),后续工具
-        # 循环轮走 reasoning_effort_followup。ARC tiering 的 Disabled
-        # 仍绝对优先(执行期关闭不被 followup 翻开)。
-        config["gateway"]["reasoning_effort"] = "max"
-        config["gateway"]["reasoning_effort_followup"] = "low"
+    # 思考参数透传(用户规格 2026-09-29):参考 MODEL/OCTOS_MODEL 的方式暴露
+    # THINKING/OCTOS_THINKING(enabled|disabled,默认 disabled)与
+    # REASONING_EFFORT/OCTOS_REASONING_EFFORT(none|low|high|max)。内核按
+    # ChatConfig.effective_thinking 解析:显式 off(thinking disabled 或 effort
+    # none)绝对优先,分级 effort 隐含开启,thinking enabled 无分级=模型默认
+    # 深度,两者都未设=关闭。宿主不再按 provider/model 名硬编码思考策略。
+    thinking = (os.environ.get("OCTOS_THINKING") or env.get("THINKING", "")).strip().lower()
+    if thinking:
+        if thinking not in ("enabled", "disabled"):
+            raise SystemExit(
+                f"THINKING must be 'enabled' or 'disabled', got: {thinking!r}")
+        config["model_thinking"] = thinking
+    reasoning_effort = (
+        os.environ.get("OCTOS_REASONING_EFFORT") or env.get("REASONING_EFFORT", "")
+    ).strip().lower()
+    if reasoning_effort:
+        if reasoning_effort not in ("none", "low", "high", "max"):
+            raise SystemExit(
+                "REASONING_EFFORT must be one of none/low/high/max, "
+                f"got: {reasoning_effort!r}")
+        config["model_reasoning_effort"] = reasoning_effort
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     env["OCTOS_CONFIG_DIR"] = str(config_dir)

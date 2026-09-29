@@ -66,13 +66,12 @@ pub struct ChatConfig {
     /// Anthropic thinking budget, Gemini thinkingConfig).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
-    /// Follow-up-round reasoning effort — GLM-5.2+ first-round policy: the
-    /// first call of a conversation (history has no assistant message yet)
-    /// uses `reasoning_effort`, every later round uses this. Unset ⇒
-    /// `reasoning_effort` applies to all rounds (legacy behavior). An
-    /// explicit `Disabled` `reasoning_effort` always wins over this.
+    /// Binary thinking switch (enabled/disabled), exposed next to
+    /// `reasoning_effort` the way `model` is exposed (user spec 2026-09-29).
+    /// Default (`None`) is DISABLED — see [`ChatConfig::effective_thinking`]
+    /// for how the two params resolve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort_followup: Option<ReasoningEffort>,
+    pub thinking: Option<Thinking>,
     /// Structured output format. When set, the model will return responses
     /// conforming to the given schema (JSON mode or JSON Schema).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -178,6 +177,51 @@ pub enum ReasoningEffort {
     Max,
 }
 
+/// Binary thinking switch (user spec 2026-09-29): `thinking` parameter
+/// exposed next to `reasoning_effort`, values `enabled`/`disabled`, default
+/// disabled. Independent of — and master over — the graded effort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Thinking {
+    Enabled,
+    Disabled,
+}
+
+/// Effective thinking state resolved from the `thinking` +
+/// `reasoning_effort` parameters (see [`ChatConfig::effective_thinking`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveThinking {
+    /// No reasoning: emit the provider's off control where one exists.
+    Off,
+    /// Reasoning on at the provider's default depth: toggle-based styles
+    /// emit the enabled toggle; effort-field styles emit nothing.
+    DefaultDepth,
+    /// Reasoning on at a graded level.
+    Level(ReasoningEffort),
+}
+
+impl ChatConfig {
+    /// Resolve the exposed `thinking` + `reasoning_effort` pair into the
+    /// per-request thinking state. Precedence:
+    ///
+    /// 1. `thinking: "disabled"` — or `reasoning_effort: "none"` — means
+    ///    off; an explicit off always wins.
+    /// 2. A graded effort (`low`/`high`/`max`) implies thinking on at that
+    ///    level, even when `thinking` is unset.
+    /// 3. `thinking: "enabled"` with no grade is on at the provider's
+    ///    default depth.
+    /// 4. Both unset (the API default) is OFF.
+    pub fn effective_thinking(&self) -> EffectiveThinking {
+        match (self.thinking, self.reasoning_effort) {
+            (Some(Thinking::Disabled), _)
+            | (_, Some(ReasoningEffort::Disabled))
+            | (None, None) => EffectiveThinking::Off,
+            (_, Some(level)) => EffectiveThinking::Level(level),
+            (Some(Thinking::Enabled), None) => EffectiveThinking::DefaultDepth,
+        }
+    }
+}
+
 impl Default for ChatConfig {
     fn default() -> Self {
         Self {
@@ -187,7 +231,7 @@ impl Default for ChatConfig {
             tool_choice: ToolChoice::Auto,
             stop_sequences: Vec::new(),
             reasoning_effort: None,
-            reasoning_effort_followup: None,
+            thinking: None,
             response_format: None,
             context_management: None,
             sampling_params: None,
@@ -320,6 +364,57 @@ mod tests {
     }
 
     #[test]
+    fn effective_thinking_resolution_table() {
+        use EffectiveThinking as ET;
+        let cfg = |thinking: Option<Thinking>, effort: Option<ReasoningEffort>| ChatConfig {
+            thinking,
+            reasoning_effort: effort,
+            ..ChatConfig::default()
+        };
+        // API default (both unset) is OFF.
+        assert_eq!(cfg(None, None).effective_thinking(), ET::Off);
+        // `thinking` is the master switch; an explicit off always wins.
+        assert_eq!(
+            cfg(Some(Thinking::Disabled), Some(ReasoningEffort::Max)).effective_thinking(),
+            ET::Off
+        );
+        // `reasoning_effort: "none"` is the effort family's off value.
+        assert_eq!(
+            cfg(Some(Thinking::Enabled), Some(ReasoningEffort::Disabled)).effective_thinking(),
+            ET::Off
+        );
+        // A graded level implies on at that level.
+        assert_eq!(
+            cfg(None, Some(ReasoningEffort::Low)).effective_thinking(),
+            ET::Level(ReasoningEffort::Low)
+        );
+        assert_eq!(
+            cfg(Some(Thinking::Enabled), Some(ReasoningEffort::Max)).effective_thinking(),
+            ET::Level(ReasoningEffort::Max)
+        );
+        // `thinking: "enabled"` with no grade is on at the provider default.
+        assert_eq!(
+            cfg(Some(Thinking::Enabled), None).effective_thinking(),
+            ET::DefaultDepth
+        );
+    }
+
+    #[test]
+    fn thinking_param_serde_values() {
+        assert_eq!(
+            serde_json::to_value(Thinking::Enabled).unwrap(),
+            serde_json::json!("enabled")
+        );
+        assert_eq!(
+            serde_json::to_value(Thinking::Disabled).unwrap(),
+            serde_json::json!("disabled")
+        );
+        let cfg: ChatConfig =
+            serde_json::from_str(r#"{"thinking": "enabled"}"#).unwrap();
+        assert_eq!(cfg.thinking, Some(Thinking::Enabled));
+    }
+
+    #[test]
     fn test_chat_config_serde_roundtrip() {
         let config = ChatConfig {
             model: None,
@@ -328,7 +423,7 @@ mod tests {
             tool_choice: ToolChoice::Required,
             stop_sequences: vec!["STOP".to_string()],
             reasoning_effort: None,
-            reasoning_effort_followup: None,
+            thinking: None,
             response_format: None,
             context_management: None,
             sampling_params: None,

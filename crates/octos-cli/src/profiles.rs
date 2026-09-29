@@ -1215,6 +1215,9 @@ pub(crate) fn config_from_profile(profile: &UserProfile) -> Config {
         model_temperature: primary.and_then(|selection| selection.temperature),
         model_top_p: primary.and_then(|selection| selection.top_p),
         model_reasoning_effort: primary.and_then(|selection| selection.reasoning_effort),
+        // `thinking` is config.json/operator-only (user spec 2026-09-29); the
+        // model-selection schema has no source for it yet.
+        model_thinking: None,
         base_url: primary.and_then(|selection| {
             selection
                 .route

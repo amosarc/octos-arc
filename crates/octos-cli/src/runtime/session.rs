@@ -691,11 +691,9 @@ pub(crate) fn configured_agent_defaults(profile: &ProfileRuntime) -> AgentConfig
                 .as_ref()
                 .and_then(|g| g.reasoning_effort)
         }),
-        reasoning_effort_followup: profile
-            .config
-            .gateway
-            .as_ref()
-            .and_then(|g| g.reasoning_effort_followup),
+        thinking: profile.config.model_thinking.or_else(|| {
+            profile.config.gateway.as_ref().and_then(|g| g.thinking)
+        }),
         ..Default::default()
     }
 }

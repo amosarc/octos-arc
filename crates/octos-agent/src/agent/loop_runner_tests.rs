@@ -1933,41 +1933,30 @@ fn build_chat_config_applies_temperature_override() {
     assert_eq!(chat.temperature, Some(0.7));
 }
 
-// --- ARC thinking tiering: routine iterations OFF, design moments ON ---
+// --- thinking param passthrough (user spec 2026-09-29) ---
 
-/// deepseek-v4 (EffortAndThinkingToggle) + glm-5.3 (ThinkingToggle) both
-/// translate `ReasoningEffort::Disabled` into `{"thinking":{"type":
-/// "disabled"}}` at the provider layer; the loop-side contract is only
-/// WHEN the effort gets set.
+/// The loop-side contract is a pure passthrough: AgentConfig's `thinking`
+/// and `reasoning_effort` land on every per-call ChatConfig unchanged —
+/// per-round tiering was retired with the followup policy.
 #[test]
-fn thinking_tier_disables_routine_but_keeps_design_iterations() {
+fn build_chat_config_applies_thinking_params() {
     use octos_llm::ReasoningEffort as RE;
-    let base = || ChatConfig::default();
+    use octos_llm::Thinking;
 
-    // n = 0 (default): policy off, config passes through untouched.
-    for iteration in [1u32, 3, 99] {
-        let cfg = tier_call_config(base(), iteration, false, 0);
-        assert_eq!(cfg.reasoning_effort, None, "off at iteration {iteration}");
-    }
-    // n = 2: iterations 1-2 keep profile reasoning (design moments)...
-    for iteration in [1u32, 2] {
-        let cfg = tier_call_config(base(), iteration, false, 2);
-        assert_eq!(cfg.reasoning_effort, None, "design ON at {iteration}");
-    }
-    // ...later execution iterations get Disabled...
-    for iteration in [3u32, 50] {
-        let cfg = tier_call_config(base(), iteration, false, 2);
-        assert_eq!(cfg.reasoning_effort, Some(RE::Disabled),
-                   "routine OFF at {iteration}");
-    }
-    // ...and reflection (routine=true) is always Disabled under the policy.
-    let cfg = tier_call_config(base(), 1, true, 2);
-    assert_eq!(cfg.reasoning_effort, Some(RE::Disabled));
-    // An explicitly configured effort is never overridden by the tier.
-    let mut explicit = base();
-    explicit.reasoning_effort = Some(RE::High);
-    let cfg = tier_call_config(explicit, 99, true, 2);
-    assert_eq!(cfg.reasoning_effort, Some(RE::High));
+    let cfg = AgentConfig {
+        thinking: Some(Thinking::Enabled),
+        reasoning_effort: Some(RE::Max),
+        ..AgentConfig::default()
+    };
+    let chat = build_chat_config(&cfg, false);
+    assert_eq!(chat.thinking, Some(Thinking::Enabled));
+    assert_eq!(chat.reasoning_effort, Some(RE::Max));
+
+    // Unset stays unset; the disabled DEFAULT is resolved downstream at
+    // `ChatConfig::effective_thinking`, not here.
+    let bare = build_chat_config(&AgentConfig::default(), false);
+    assert_eq!(bare.thinking, None);
+    assert_eq!(bare.reasoning_effort, None);
 }
 
 // --- #2174: conversation-loop recovery from a degenerate empty MaxTokens ---

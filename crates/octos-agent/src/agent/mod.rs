@@ -98,10 +98,10 @@ pub struct AgentConfig {
     /// Reasoning effort for thinking models. Flows into `ChatConfig::reasoning_effort`;
     /// providers translate it per model (no-op for models without a reasoning style).
     pub reasoning_effort: Option<octos_llm::ReasoningEffort>,
-    /// Follow-up-round reasoning effort (GLM-5.2+ first-round policy). Flows
-    /// into `ChatConfig::reasoning_effort_followup`; the first call of a
-    /// conversation uses `reasoning_effort`, later rounds use this.
-    pub reasoning_effort_followup: Option<octos_llm::ReasoningEffort>,
+    /// Binary thinking switch (enabled/disabled, default disabled). Flows
+    /// into `ChatConfig::thinking`; see `ChatConfig::effective_thinking`
+    /// for how it resolves with `reasoning_effort`.
+    pub thinking: Option<octos_llm::Thinking>,
     /// Suppress the generic auto-send loop for tool `files_to_send`.
     /// Background spawned workers rely on their outer workflow/session runtime
     /// to persist terminal results exactly once.
@@ -219,7 +219,7 @@ impl Default for AgentConfig {
             chat_temperature: None,
             chat_sampling_params: None,
             reasoning_effort: None,
-            reasoning_effort_followup: None,
+            thinking: None,
             suppress_auto_send_files: false,
             llm_first_token_grace: env_secs_or(
                 "OCTOS_LLM_FIRST_TOKEN_GRACE_SECS",
