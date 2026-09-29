@@ -243,6 +243,50 @@ def _segment_digest(node_done_notes: dict[str, str],
     return "\n".join(lines)[:2000]
 
 
+# 运行结束保留在原位的隐藏目录:workspace 仓库本体与宿主契约目录。
+# 其余隐藏目录(.octos/.npm/.cache 等内核与工具运行时产物)一律收进
+# octos/ ——交付面只见 app + .arc + .git,运行时残留全部归档可取证。
+_HIDDEN_KEEP_IN_PLACE = {".git", ".arc"}
+
+
+def _relocate_hidden_dirs(output_dir: Path) -> None:
+    """workspace 根下的散落隐藏目录统一收进可见的 octos/ 下。
+
+    .foo → octos/dot-foo(沿用 .octos→octos/dot-octos 的既有命名);
+    目标重名时追加 -2/-3 序号;.git/.arc 除外。移动而非复制——postflight
+    之后只剩平台 zip,原位留副本只会双倍进包。OSError 只告警,绝不
+    阻断交付。
+    """
+    moved = False
+    for entry in sorted(output_dir.iterdir()):
+        if not entry.name.startswith(".") or not entry.is_dir():
+            continue
+        if entry.name in _HIDDEN_KEEP_IN_PLACE:
+            continue
+        octos_dir = output_dir / "octos"
+        try:
+            octos_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return
+        base = "dot-" + entry.name.lstrip(".")
+        target = octos_dir / base
+        n = 2
+        while target.exists():
+            target = octos_dir / f"{base}-{n}"
+            n += 1
+        try:
+            shutil.move(str(entry), str(target))
+            print(f"[postflight] relocated {entry.name}/ -> "
+                  f"octos/{target.name}/", flush=True)
+            moved = True
+        except OSError as exc:
+            print(f"[postflight] could not relocate {entry.name}/: {exc}",
+                  flush=True)
+    if moved:
+        # 全部日志与运行时残留统一 octos/(state/logs/dot-*,09-29 收敛)。
+        log("[postflight] hidden runtime dirs archived under octos/")
+
+
 def _postflight_structure_check(output_dir: Path, web_port: int = 3000) -> None:
     """Diagnose and repair the deliverable layout the runner checks.
 
@@ -258,19 +302,9 @@ def _postflight_structure_check(output_dir: Path, web_port: int = 3000) -> None:
     time because a smoke-test server from a failed generation turn was still
     holding it.
     """
-    # 兜底:二进制若仍在 cwd 落了隐藏 .octos/(context-logs),收进可见的
-    # octos/ 下——全部日志统一落 octos/(state/logs/dot-octos),不再有
-    # 并行的 octos-logs/ 目录(09-29 收敛)。
-    hidden = output_dir / ".octos"
-    if hidden.is_dir():
-        target = output_dir / "octos" / "dot-octos"
-        if not target.exists():
-            try:
-                shutil.move(str(hidden), str(target))
-                print(f"[postflight] relocated .octos/ -> octos/dot-octos/",
-                      flush=True)
-            except OSError as exc:
-                print(f"[postflight] could not relocate .octos/: {exc}", flush=True)
+    # 兜底:扫描 workspace 根下全部隐藏目录(.octos context-logs、npm/
+    # 工具缓存等运行时产物)收进 octos/;.git/.arc 契约件除外。
+    _relocate_hidden_dirs(output_dir)
     tree_lines = []
     for root, dirs, files in os.walk(output_dir):
         dirs[:] = [d for d in dirs

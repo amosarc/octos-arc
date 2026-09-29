@@ -768,3 +768,51 @@ class HostRuntimeRegressionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
+
+
+class HiddenDirRelocationTests(unittest.TestCase):
+    """postflight 隐藏目录收编(09-29):workspace 根散落的隐藏运行时目录
+    统一收进 octos/,契约目录(.git/.arc)与可见交付件不动。"""
+
+    def test_relocates_hidden_dirs_into_octos(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            for d in (".octos", ".npm", ".cache"):
+                (out / d).mkdir()
+                (out / d / "f.txt").write_text("x", encoding="utf-8")
+            for keep in (".git", ".arc"):
+                (out / keep).mkdir()
+                (out / keep / "contract.txt").write_text("keep",
+                                                         encoding="utf-8")
+            main._relocate_hidden_dirs(out)
+            self.assertTrue((out / "octos/dot-octos/f.txt").is_file())
+            self.assertTrue((out / "octos/dot-npm/f.txt").is_file())
+            self.assertTrue((out / "octos/dot-cache/f.txt").is_file())
+            for d in (".octos", ".npm", ".cache"):
+                self.assertFalse((out / d).exists())
+            # 契约目录原位保留
+            self.assertTrue((out / ".git/contract.txt").is_file())
+            self.assertTrue((out / ".arc/contract.txt").is_file())
+
+    def test_collision_appends_counter(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            (out / "octos" / "dot-npm").mkdir(parents=True)
+            (out / "octos" / "dot-npm" / "old.txt").write_text(
+                "old", encoding="utf-8")
+            (out / ".npm").mkdir()
+            (out / ".npm" / "new.txt").write_text("new", encoding="utf-8")
+            main._relocate_hidden_dirs(out)
+            self.assertTrue((out / "octos/dot-npm/old.txt").is_file())
+            self.assertTrue((out / "octos/dot-npm-2/new.txt").is_file())
+            self.assertFalse((out / ".npm").exists())
+
+    def test_no_hidden_dirs_is_noop(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            (out / "frontend").mkdir()
+            main._relocate_hidden_dirs(out)
+            self.assertFalse((out / "octos").exists())
