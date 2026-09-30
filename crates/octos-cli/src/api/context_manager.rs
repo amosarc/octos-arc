@@ -2784,6 +2784,22 @@ impl ContextManager {
         } else {
             HashMap::new()
         };
+        // Page-snapshot folding: newest PAGE_SNAPSHOT_KEEP `# Page snapshot`
+        // tool outputs stay verbatim; every older one projects as a stub.
+        let snapshot_fold_ids: HashSet<TranscriptItemId> = if fold_page_snapshots_enabled() {
+            let mut snaps: Vec<&TranscriptItemId> = Vec::new();
+            for item in &self.items {
+                if let TranscriptItemKind::ToolOutput { envelope } = &item.kind {
+                    if is_page_snapshot_content(&envelope.model_visible_content) {
+                        snaps.push(&item.id);
+                    }
+                }
+            }
+            let keep_len = snaps.len().saturating_sub(PAGE_SNAPSHOT_KEEP);
+            snaps[..keep_len].iter().map(|id| (*id).clone()).collect()
+        } else {
+            HashSet::new()
+        };
         // Tool outputs are consumed by TRANSCRIPT ITEM ID, not by
         // tool_call_id: index-based provider ids (kimi `functions.foo:0`,
         // vllm `call_0`) legitimately repeat across turns, so a call must
@@ -2932,6 +2948,21 @@ impl ContextManager {
                                          view below. ({} bytes elided)",
                                         envelope.original_bytes
                                     )
+                                })
+                                .or_else(|| {
+                                    // Page-snapshot fold: an older snapshot
+                                    // collapses to a stub; the latest
+                                    // PAGE_SNAPSHOT_KEEP stay verbatim.
+                                    snapshot_fold_ids
+                                        .contains(&tool_item_id)
+                                        .then(|| {
+                                            format!(
+                                                "[STALE PAGE SNAPSHOT] read earlier in this \
+                                                 session — superseded by the latest page \
+                                                 snapshot(s) below. ({} bytes elided)",
+                                                envelope.original_bytes
+                                            )
+                                        })
                                 });
                             let is_folded = folded.is_some();
                             let mut msg = message(
@@ -3453,6 +3484,28 @@ fn fold_stale_reads_enabled() -> bool {
 
 fn fold_stale_reads_enabled_from(value: Option<&str>) -> bool {
     value != Some("0")
+}
+
+/// Page-snapshot folding (09-29 run forensics): Playwright failure dumps
+/// (`# Page snapshot` aria trees, one per red test) rode along in replayed
+/// history at full weight — 286 snapshots in one 3-family run, ~4KB each,
+/// re-paid by every later call though only the freshest carry debugging
+/// value. Keep the latest [`PAGE_SNAPSHOT_KEEP`] verbatim; fold every older
+/// one to a one-line stub. Same ledger discipline as stale-read folding;
+/// `OCTOS_FOLD_PAGE_SNAPSHOTS=0` disables.
+const PAGE_SNAPSHOT_KEEP: usize = 2;
+const PAGE_SNAPSHOT_PREFIX: &str = "# Page snapshot";
+
+fn fold_page_snapshots_enabled() -> bool {
+    fold_page_snapshots_enabled_from(std::env::var("OCTOS_FOLD_PAGE_SNAPSHOTS").ok().as_deref())
+}
+
+fn fold_page_snapshots_enabled_from(value: Option<&str>) -> bool {
+    value != Some("0")
+}
+
+fn is_page_snapshot_content(content: &str) -> bool {
+    content.starts_with(PAGE_SNAPSHOT_PREFIX)
 }
 
 /// Fold key for a read_file call: `(normalized path, view)`. The path drops
@@ -4666,6 +4719,49 @@ mod tests {
         assert!(fold_stale_reads_enabled_from(Some("1")));
         assert!(fold_stale_reads_enabled_from(Some("off-but-not-zero")));
         assert!(fold_stale_reads_enabled_from(None));
+    }
+
+    #[test]
+    fn for_prompt_folds_older_page_snapshots_keeping_latest_two() {
+        let mut manager = ContextManager::new("s", None);
+        manager.record_message(&Message::user("go"));
+        for i in 1..=4 {
+            manager.record_message(&assistant_tool_call(&format!("call_s{i}")));
+            manager.record_tool_output(
+                &format!("call_s{i}"),
+                "bash",
+                &format!("# Page snapshot\n```yaml\n- generic [ref=e{i}]: button"),
+            );
+        }
+        manager.record_message(&assistant_tool_call("call_plain"));
+        manager.record_tool_output("call_plain", "bash", "PLAIN TOOL OUTPUT");
+
+        let frame = manager.for_prompt(&PromptBuildPolicy::default());
+        assert!(
+            tool_row(&frame, "call_s1").starts_with("[STALE PAGE SNAPSHOT]"),
+            "{}",
+            tool_row(&frame, "call_s1")
+        );
+        assert!(
+            tool_row(&frame, "call_s2").starts_with("[STALE PAGE SNAPSHOT]"),
+            "{}",
+            tool_row(&frame, "call_s2")
+        );
+        assert!(tool_row(&frame, "call_s3").starts_with("# Page snapshot"));
+        assert!(tool_row(&frame, "call_s4").starts_with("# Page snapshot"));
+        // 非快照输出永不折叠;两条折叠计入 truncated 遥测。
+        assert_eq!(tool_row(&frame, "call_plain"), "PLAIN TOOL OUTPUT");
+        assert_eq!(frame.report.truncated_item_ids.len(), 2);
+    }
+
+    #[test]
+    fn page_snapshot_folding_env_parsing_and_prefix_rule() {
+        assert!(!fold_page_snapshots_enabled_from(Some("0")));
+        assert!(fold_page_snapshots_enabled_from(Some("1")));
+        assert!(fold_page_snapshots_enabled_from(None));
+        assert!(is_page_snapshot_content("# Page snapshot\n```yaml"));
+        assert!(!is_page_snapshot_content("  # Page snapshot"));
+        assert!(!is_page_snapshot_content("plain curl output"));
     }
 
     #[test]

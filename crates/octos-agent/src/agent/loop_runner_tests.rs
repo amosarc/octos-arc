@@ -781,6 +781,28 @@ fn latest_tool_batch_contains_picks_up_shell_in_mixed_batch() {
     assert!(latest_tool_batch_contains(&messages, "read_file"));
 }
 
+/// The `bash` alias must satisfy a `shell`-family target: the model-facing
+/// name is preserved verbatim in tool results, so an exact-name match would
+/// leave the ARC-style lanes (models call `bash`) invisible to the spiral
+/// recovery gate and splice (09-30 forensics).
+#[test]
+fn latest_tool_batch_shell_target_matches_bash_alias() {
+    let messages = vec![
+        Message::user("repair"),
+        assistant_with_calls(vec![
+            tool_call("call_bash", "bash", serde_json::json!({"cmd": "ls"})),
+            tool_call("call_read", "read_file", serde_json::json!({"path": "x"})),
+        ]),
+        tool_out("call_bash", "a\nb"),
+        tool_out("call_read", "{ \"x\": 1 }"),
+    ];
+
+    assert!(latest_tool_batch_contains(&messages, "shell"));
+    assert!(latest_tool_batch_contains(&messages, "bash"));
+    // Non-shell targets stay exact — the alias family must not leak.
+    assert!(!latest_tool_batch_contains(&messages, "read_filex"));
+}
+
 /// Regression for the 2026-05-10 mini1 incident. A session that
 /// accumulated a 4-call shell streak with failures in turn N must NOT
 /// have turn N+1 force-ended when turn N+1 (a) starts with a fresh
@@ -1413,18 +1435,19 @@ fn loop_detected_terminal_message_is_user_facing_and_non_empty() {
 
 #[tokio::test]
 async fn doom_loop_aborts_turn_when_third_identical_call_arrives() {
-    // #1765 doom-loop guard: when the LLM issues the SAME tool call
-    // (same name + identical arguments JSON) 3 times in a row, the
-    // conversation loop must abort the turn with a clear message
-    // instead of issuing the next LLM call.
+    // #1765 r2 two-stage doom guard: the 3rd identical call is the SOFT
+    // fire — the call is skipped and a synthetic result warns the model;
+    // the 4th identical call (the model looped anyway) is the second fire
+    // and terminates the turn.
     //
     // We assert via:
-    //   - The terminal `content` matches `doom_loop_terminal_message`
-    //     (proves the doom guard fired, not the older two-stage
-    //     warn-then-terminate cycle path).
-    //   - The mock LLM was called EXACTLY 3 times: calls 1 and 2
-    //     execute the tool; the 3rd identical call trips the guard and
-    //     no further LLM call is issued.
+    //   - The terminal `content` matches `doom_loop_terminal_message(.., 4)`
+    //     (proves the doom guard escalated, not the cycle path).
+    //   - The mock LLM was called EXACTLY 4 times: calls 1 and 2 execute
+    //     the tool; the 3rd trips the guard into soft recovery (no 4th
+    //     execution); the 4th issues the terminal.
+    //   - The soft warning actually reached the conversation: the turn log
+    //     carries a synthetic Tool row with the `[DOOM GUARD]` body.
     //   - The flag (`is_loop_detected_recently`) is set after the run.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("loopy.txt"), b"x").unwrap();
@@ -1452,18 +1475,112 @@ async fn doom_loop_aborts_turn_when_third_identical_call_arrives() {
 
     assert_eq!(
         result.content,
-        doom_loop_terminal_message("read_file", 3),
-        "expected the doom-loop abort message when the 3rd identical \
-             call arrives"
+        doom_loop_terminal_message("read_file", 4),
+        "expected the doom-loop abort message when the 4th identical \
+             call follows the ignored soft warning"
     );
     assert!(agent.is_loop_detected_recently());
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|m| m.role == MessageRole::Tool && m.content.contains("[DOOM GUARD]")),
+        "the soft-fire synthetic result must reach the conversation log"
+    );
 
     let total_calls = provider.calls.load(AtomicOrdering::SeqCst);
     assert_eq!(
-        total_calls, 3,
-        "expected exactly 3 LLM calls — the doom guard must stop the \
-             loop instead of issuing a 4th; got {total_calls}"
+        total_calls, 4,
+        "expected exactly 4 LLM calls — soft recovery on the 3rd identical \
+             call, terminal on the 4th; got {total_calls}"
     );
+}
+
+/// LLM mock that always returns the SAME `bash` call with an idempotent
+/// verification command — the benign verify-repeat shape from the 09-30
+/// github run forensics (build / restart / curl repeats killing turns).
+struct LoopingVerifyProvider {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl LlmProvider for LoopingVerifyProvider {
+    async fn chat(
+        &self,
+        _messages: &[Message],
+        _tools: &[octos_llm::ToolSpec],
+        _config: &octos_llm::ChatConfig,
+    ) -> Result<ChatResponse> {
+        self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+        Ok(ChatResponse::tool_use(vec![ToolCall {
+            id: "call_verify".to_string(),
+            name: "bash".to_string(),
+            arguments: serde_json::json!({"cmd": "pwd"}),
+            metadata: None,
+        }]))
+    }
+
+    fn model_id(&self) -> &str {
+        "mock"
+    }
+
+    fn provider_name(&self) -> &str {
+        "mock"
+    }
+}
+
+#[tokio::test]
+async fn idempotent_verify_repeat_never_doom_aborts_within_cap() {
+    // 09-30 github forensics: 5 of 7 doom kills were benign SUCCESSFUL
+    // verify repeats (`npm run build` / restart / curl — commands the work
+    // order itself mandates after every edit). The exempt shape must be
+    // nudged and skipped, never doom-terminated, through
+    // IDEMPOTENT_VERIFY_DOOM_CAP repeats. Past the cap the doom ladder
+    // resumes (soft, then terminal), so the turn still cannot loop forever.
+    //
+    // The command must SUCCEED when executed: a failing verify repeat is a
+    // retry spiral and the shell-spiral recovery ladder (now alias-fixed to
+    // see `bash`) owns it instead — that path has its own tests.
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(LoopingVerifyProvider {
+        calls: AtomicUsize::new(0),
+    });
+    let provider_arc: Arc<dyn LlmProvider> = provider.clone();
+    let tools = ToolRegistry::with_builtins(dir.path());
+    let agent = boot_agent(
+        "verify-loop",
+        dir.path(),
+        provider_arc,
+        tools,
+        crate::AgentConfig {
+            max_iterations: 30,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let result = agent
+        .process_message("where are we", &[], vec![])
+        .await
+        .expect("process_message should return Ok");
+
+    // cap 5 → nudges at streaks 3..=5 (3 skipped issuances), then the doom
+    // ladder: soft at streak 6, terminal at streak 7.
+    assert_eq!(
+        result.content,
+        doom_loop_terminal_message("bash", 7),
+        "an exempt verify loop must survive the cap and only terminal on \
+             the second post-cap doom fire"
+    );
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|m| m.role == MessageRole::Tool && m.content.contains("[VERIFY REPEAT]")),
+        "the verify-repeat nudge must reach the conversation log"
+    );
+    let total_calls = provider.calls.load(AtomicOrdering::SeqCst);
+    assert_eq!(total_calls, 7, "streaks 3-5 nudged, 6 soft, 7 terminal");
 }
 #[tokio::test]
 async fn run_task_keeps_success_when_workspace_has_no_policy() {

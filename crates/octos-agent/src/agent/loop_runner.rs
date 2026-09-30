@@ -25,7 +25,7 @@ use super::{Agent, AssistantSegmentProvenance, ConversationResponse, TASK_REPORT
 use crate::harness_errors::HarnessError;
 use crate::harness_events::write_event_to_sink;
 use crate::hooks::{HookEvent, HookPayload, HookResult};
-use crate::loop_detect::LoopDetector;
+use crate::loop_detect::{is_shell_family_tool, LoopDetector};
 use crate::progress::ProgressEvent;
 use crate::prompt_context::PromptContextPhase;
 use crate::tools::{TURN_ATTACHMENT_CTX, TurnAttachmentContext};
@@ -1423,15 +1423,49 @@ impl Agent {
                                 // shell output from a retry spiral is a
                                 // strictly better outcome than a doom abort.
                                 let doom_streak = loop_detector.record_doom(&tc.name, &tc.arguments);
-                                let cycle_warning = if doom_streak.is_some() {
+                                let verify_hint = loop_detector.take_verify_hint();
+                                // While a verify nudge is pending the detector
+                                // suppressed a doom signal for an exempt shape;
+                                // an all-identical streak is also a cycle-1
+                                // pattern, so the cycle detector must stay
+                                // silent or it would terminate what the
+                                // exemption protects.
+                                let cycle_warning = if doom_streak.is_some() || verify_hint.is_some()
+                                {
                                     None
                                 } else {
                                     loop_detector.record(&tc.name, &tc.arguments)
                                 };
-                                if doom_streak.is_none() && cycle_warning.is_none() {
+                                if doom_streak.is_none()
+                                    && cycle_warning.is_none()
+                                    && verify_hint.is_none()
+                                {
                                     continue;
                                 }
                                 warn!("loop detected — breaking agent loop");
+                                // Benign verify-repeat nudge (09-30 github
+                                // forensics): an idempotent verification command
+                                // repeating with identical args is the work
+                                // order's own rebuild/restart/probe rhythm, not
+                                // a spiral. Skip the redundant execution and say
+                                // why — never abort here; the detector caps the
+                                // streak at IDEMPOTENT_VERIFY_DOOM_CAP, after
+                                // which the normal doom ladder resumes.
+                                if let Some(hint) = verify_hint {
+                                    warn!(
+                                        tool = %tc.name,
+                                        "idempotent verify repeat — skipping re-execution with a nudge"
+                                    );
+                                    self.emit_cost_update(&turn, &response, attributed_cost);
+                                    inject_loop_detected_synthetic_results_with_log(
+                                        &mut messages,
+                                        &response,
+                                        &hint,
+                                        self,
+                                        Some(&mut turn_output_log),
+                                    );
+                                    continue 'agent_loop;
+                                }
                                 {
                                     let spiral_iteration = turn.iteration();
                                     if let Some(outcome) = self
@@ -1524,20 +1558,39 @@ impl Agent {
                                         });
                                     }
                                     self.emit_cost_update(&turn, &response, attributed_cost);
-                                    // #1765 v1 escalation: the doom guard
-                                    // aborts the turn with a clear model-and-
-                                    // user-facing message — no further LLM
-                                    // call, no execution of the tripping
-                                    // call. (Interactive continue/edit
-                                    // options are follow-up work; v1
-                                    // deliberately avoids a new AppUI
-                                    // approval kind.)
+                                    // #1765 r2 two-stage doom recovery (09-30
+                                    // github forensics: 7/7 work-order turns
+                                    // died to the v1 hard abort, 5 of them on
+                                    // benign verify repeats). First fire in
+                                    // the turn: skip the tripping call, inject
+                                    // a synthetic result, and give the model
+                                    // ONE more iteration to reroute — the same
+                                    // ladder the cycle-warning path below uses.
+                                    // Second fire (the model repeated the
+                                    // identical call after the warning):
+                                    // terminal abort, no execution of the
+                                    // tripping call.
                                     if let Some(streak) = doom_streak {
-                                        self.mark_loop_detected_recently();
+                                        if !self.is_loop_detected_recently() {
+                                            self.mark_loop_detected_recently();
+                                            warn!(
+                                                tool = %tc.name,
+                                                streak,
+                                                "doom loop detected — soft recovery: skipping the tripping call and injecting a synthetic result (#1765 r2)"
+                                            );
+                                            inject_loop_detected_synthetic_results_with_log(
+                                                &mut messages,
+                                                &response,
+                                                &doom_soft_warning(&tc.name, streak),
+                                                self,
+                                                Some(&mut turn_output_log),
+                                            );
+                                            continue 'agent_loop;
+                                        }
                                         warn!(
                                             tool = %tc.name,
                                             streak,
-                                            "doom loop detected — aborting turn before the next LLM call (#1765)"
+                                            "doom loop detected AGAIN after soft recovery — aborting turn before the next LLM call (#1765 r2)"
                                         );
                                         return Ok(ConversationResponse {
                                             content: doom_loop_terminal_message(
@@ -2850,6 +2903,13 @@ impl Agent {
                 if let Some(hint) = loop_detector.record_result(name, args, &result_before_hint) {
                     message.content.push_str(&hint);
                 }
+                // Error-streak guidance: result-ONLY signature — catches
+                // contract-blind patch loops where every retry varies its
+                // args but lands on the same failing line (74 identical
+                // PUT-400s in one ARC run).
+                if let Some(hint) = loop_detector.record_error_streak(&result_before_hint) {
+                    message.content.push_str(&hint);
+                }
                 loop_detector.record_green_stop(name, args, &result_before_hint);
                 if let Some(hint) = loop_detector.record_file_mutation(
                     name,
@@ -3112,14 +3172,34 @@ fn merge_tool_messages_in_order(
     ordered
 }
 
+/// Content markers of synthetic loop-guard tool results injected by the
+/// doom/verify/cycle recovery paths. They pair with a real tool_call_id but
+/// never carry a real exit status, so result-shape heuristics (spiral
+/// detector, success parsing) must skip them rather than read the guard
+/// text as a failed command output.
+fn is_synthetic_loop_guard_content(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    trimmed.starts_with("[DOOM GUARD]")
+        || trimmed.starts_with("[VERIFY REPEAT]")
+        || trimmed.starts_with("[LOOP DETECTED]")
+}
+
 fn recover_shell_retry(
     messages: &[Message],
     min_shell_streak: usize,
-) -> Option<ShellRetryRecovery> {
-    let recent = recent_tool_results(messages, min_shell_streak * 3);
+) -> Option<ShellRetryRecovery> {    let recent = recent_tool_results(messages, min_shell_streak * 3);
     let shell_results: Vec<&str> = recent
         .iter()
-        .filter(|(tool_name, _)| *tool_name == "shell")
+        // `bash`/`exec_command` are registered aliases of `shell`; the
+        // model-facing name is preserved verbatim in tool results, so an
+        // exact "shell" match silently skipped every alias-named lane (ARC
+        // models call `bash`) — the spiral recovery never engaged there.
+        .filter(|(tool_name, _)| is_shell_family_tool(tool_name))
+        // Synthetic loop-guard rows (doom/verify/cycle injections) pair with
+        // a real tool_call_id but carry guard text instead of an exit status
+        // — counting them as shell results lets every skipped repeat poison
+        // the failure counts and fire this detector on phantom failures.
+        .filter(|(_, content)| !is_synthetic_loop_guard_content(content))
         .map(|(_, content)| content.as_str())
         .collect();
 
@@ -3224,7 +3304,7 @@ fn max_identical_failed_shell_signature(messages: &[Message], limit: usize) -> u
             continue;
         };
         seen += 1;
-        if tool_name == "shell" && !is_successful_shell_output(&message.content) {
+        if is_shell_family_tool(&tool_name) && !is_successful_shell_output(&message.content) {
             if let Some(key) = resolve_shell_command_key(messages, idx) {
                 *command_counts.entry(key).or_default() += 1;
             }
@@ -3260,9 +3340,12 @@ fn resolve_shell_command_key(messages: &[Message], tool_msg_index: usize) -> Opt
                 .iter()
                 .find(|tool_call| tool_call.id == tool_call_id)
                 .map(|tool_call| {
+                    // `bash` alias carries the command under `cmd`;
+                    // `shell`/`exec_command` under `command`.
                     tool_call
                         .arguments
                         .get("command")
+                        .or_else(|| tool_call.arguments.get("cmd"))
                         .and_then(|value| value.as_str())
                         .map(|command| command.split_whitespace().collect::<Vec<_>>().join(" "))
                         .unwrap_or_else(|| tool_call.arguments.to_string())
@@ -3396,7 +3479,17 @@ fn latest_tool_batch_index(messages: &[Message], target: &str) -> Option<usize> 
         if msg.role != MessageRole::Tool {
             return None;
         }
-        if resolve_tool_name(messages, idx) == Some(target) {
+        // `shell` targets match the whole alias family ("bash"/"exec_command"
+        // are registered aliases sharing the command policy) — an exact-name
+        // match silently skipped alias-named lanes where the spiral recovery
+        // gate and splice must still engage.
+        let matches = match resolve_tool_name(messages, idx) {
+            Some(name) => {
+                name == target || (target == "shell" && is_shell_family_tool(&name))
+            }
+            None => false,
+        };
+        if matches {
             return Some(idx);
         }
     }
@@ -3526,12 +3619,27 @@ fn inject_loop_detected_synthetic_results_with_log(
     }
 }
 
+/// #1765 r2: first-fire soft warning for the doom guard. The tripping call
+/// is skipped (NOT executed) and this text rides the synthetic tool result,
+/// giving the model one iteration to reroute before the terminal escalation
+/// in [`doom_loop_terminal_message`].
+fn doom_soft_warning(tool_name: &str, streak: usize) -> String {
+    format!(
+        "[DOOM GUARD] The `{tool_name}` tool has now been called {streak} times in a row \
+         with IDENTICAL arguments. This issuance was NOT executed. Repeating the exact \
+         same call cannot produce a different result — act on the results already in \
+         this conversation, vary the call meaningfully, or move on."
+    )
+}
+
 /// #1765: terminal message returned when the doom-loop guard fires —
 /// the model issued the same tool call (same name + identical arguments
 /// JSON) [`crate::loop_detect::DOOM_LOOP_THRESHOLD`]+ times in a row.
-/// The text is both model-facing (it lands in session history, so the
-/// model can change course next turn) and user-facing (it is the
-/// assistant reply for the aborted turn).
+/// Reached on the SECOND doom fire of a turn: the first fire injects a
+/// soft [`doom_soft_warning`] instead (unless the shell-spiral recovery
+/// claimed the streak first). The text is both model-facing (it lands in
+/// session history, so the model can change course next turn) and
+/// user-facing (it is the assistant reply for the aborted turn).
 fn doom_loop_terminal_message(tool_name: &str, streak: usize) -> String {
     format!(
         "[DOOM LOOP DETECTED] The `{tool_name}` tool was called {streak} times in a row \

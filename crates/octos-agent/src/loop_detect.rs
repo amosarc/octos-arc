@@ -27,8 +27,145 @@ pub const NO_PROGRESS_HINT: &str = "\n\n[NO PROGRESS] You have now called this t
 
 const PEER_POLLING_HINT: &str = "\n\n[PEER POLLING] Three consecutive reads returned the same peer snapshot. Peer work is asynchronous: this does not prove failure or that a later read cannot change. Do not busy-wait. Reflect on the reported peer state, do independent work or use an available bounded wait, and gather fresh evidence before claiming completion.";
 
+/// Error-streak guidance (09-29 run forensics: 74 identical PUT-400
+/// results across ~12 minutes — the model varied its curl args every
+/// retry, so the (name, args, result) no-progress detector above never
+/// fired, and it died in a contract-blind patch loop). Result-ONLY
+/// signature: identical failing first line repeated N times in a row →
+/// one-shot guidance hint. Generic by design — no task content.
+pub const ERROR_STREAK_HINT: &str = "\n\n[REPEATED FAILURE] The last several tool results failed with the SAME error. Stop retrying the same fix. Re-read the authoritative requirement text for the operation you are working on, check whether a validation rule or endpoint contract from a DIFFERENT operation leaked into this one, and change approach — or finish the turn with an explicit report of the blocking error.";
+
+/// `OCTOS_ERROR_STREAK_N` — consecutive identical failing first lines that
+/// arm the hint (default 8, clamped 3..=50). `OCTOS_ERROR_STREAK_NUDGE=0`
+/// disables the whole detector.
+fn error_streak_threshold() -> usize {
+    if std::env::var("OCTOS_ERROR_STREAK_NUDGE").ok().as_deref() == Some("0") {
+        return usize::MAX;
+    }
+    std::env::var("OCTOS_ERROR_STREAK_N")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(3, 50))
+        .unwrap_or(8)
+}
+
+/// Failure-shaped first lines only: a streak of identical SUCCESSFUL
+/// outputs (a poll returning the same tree) must not arm the hint.
+fn first_line_looks_like_error(first_line: &str) -> bool {
+    let lower = first_line.to_ascii_lowercase();
+    ["error", "failed", "failure", "fatal", "panic", "denied",
+     "exception", "traceback", " 400", " 401", " 403", " 404", " 409",
+     " 422", " 429", " 500", " 502", " 503"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
 fn is_peer_polling_tool(tool_name: &str) -> bool {
     matches!(tool_name, "peer_gather" | "peer_list")
+}
+
+/// Shell-family tool names (`bash` and `exec_command` are registered
+/// aliases of `shell` — see `registry.rs` `policy_equivalent_tool_names`).
+/// The model-facing name is preserved verbatim end-to-end, so command
+/// extraction must accept the whole family or alias-named lanes (ARC models
+/// call `bash` with a `cmd` key) are invisible to every command-aware guard.
+pub(crate) fn is_shell_family_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "shell" | "bash" | "exec_command")
+}
+
+/// Command string behind a shell-family tool call: `ShellTool` carries it
+/// under `command`, the `bash` alias under `cmd`, `exec_command` under
+/// `command`. Trimmed; empty strings are rejected.
+pub(crate) fn shell_command_of<'a>(
+    tool_name: &'a str,
+    args: &'a serde_json::Value,
+) -> Option<&'a str> {
+    if !is_shell_family_tool(tool_name) {
+        return None;
+    }
+    args.get("command")
+        .or_else(|| args.get("cmd"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|cmd| !cmd.is_empty())
+}
+
+/// Doom suppression cap for idempotent verification commands: consecutive
+/// identical repeats up to this streak length are nudged, never aborted;
+/// past the cap the normal doom ladder (soft recovery, then terminal)
+/// applies again so even an exempt shape cannot loop forever.
+pub(crate) const IDEMPOTENT_VERIFY_DOOM_CAP: usize = 5;
+
+/// Idempotent verification shapes (09-30 github run forensics): 5 of 7
+/// doom kills were consecutive identical repeats of benign verify commands
+/// (frontend build, host restart script, curl page probes, source greps)
+/// that the work order itself mandates after every edit — args-only doom
+/// detection structurally mis-reads that workflow. Allow-list of read-only
+/// or build/restart shapes; anything not listed keeps the normal doom
+/// semantics. Heredoc writes (`cat >`) and tee are excluded up front —
+/// they look like reads but mutate files.
+pub(crate) fn command_is_idempotent_verification(command: &str) -> bool {
+    if command.contains("cat >") || command.contains("cat >>") || command.contains("tee ") {
+        return false;
+    }
+    if command.contains("curl")
+        && ![
+            "-X POST",
+            "-X PUT",
+            "-X PATCH",
+            "-X DELETE",
+            "--data",
+            "-d ",
+            "--upload",
+            "-T ",
+        ]
+        .iter()
+        .any(|flag| command.contains(flag))
+    {
+        return true;
+    }
+    [
+        "npm run build",
+        "vite build",
+        "restart-server.sh",
+        "git status",
+        "git diff",
+        "git log",
+        "git show",
+        "git branch",
+        "ls ",
+        "grep ",
+        "cat ",
+        "head ",
+        "tail ",
+        "wc ",
+        "find ",
+        "python3 -c",
+        "node -e",
+        "node -p",
+        "pwd",
+        "which ",
+        "node --version",
+        "npm --version",
+        "npm test",
+        "cargo build",
+        "cargo check",
+        "cargo test",
+        "playwright test",
+    ]
+    .iter()
+    .any(|marker| command.contains(marker))
+}
+
+/// Model-facing nudge for a benign verify repeat (armed on every
+/// suppressed repeat up to [`IDEMPOTENT_VERIFY_DOOM_CAP`]).
+fn verify_repeat_hint(streak: usize) -> String {
+    format!(
+        "\n\n[VERIFY REPEAT] The same command has now been issued {streak} times \
+in a row; this issuance was NOT executed. Repeating it cannot produce a \
+different result — act on the recorded output, or change the command \
+meaningfully if you genuinely need new information."
+    )
 }
 
 /// #1765: number of consecutive identical tool calls (same name +
@@ -134,6 +271,16 @@ pub struct LoopDetector {
     /// green stop. 0 disables the batch criterion (identical double green
     /// still applies).
     green_spec_count_threshold: usize,
+    /// Error-streak state (see [`ERROR_STREAK_HINT`]): signature of the
+    /// current consecutive first-line streak, its length, and whether the
+    /// one-shot hint already fired for this streak.
+    error_streak_sig: Option<u64>,
+    error_streak_len: usize,
+    error_streak_fired: bool,
+    error_streak_threshold: usize,
+    /// One-shot nudge pending for the current idempotent-verify doom streak
+    /// (see [`IDEMPOTENT_VERIFY_DOOM_CAP`] and [`Self::record_doom`]).
+    pending_verify_hint: Option<String>,
 }
 
 impl LoopDetector {
@@ -159,6 +306,11 @@ impl LoopDetector {
                 .and_then(|value| value.parse::<usize>().ok())
                 .map(|value| value.min(64))
                 .unwrap_or(2),
+            error_streak_sig: None,
+            error_streak_len: 0,
+            error_streak_fired: false,
+            error_streak_threshold: error_streak_threshold(),
+            pending_verify_hint: None,
         }
     }
 
@@ -223,20 +375,22 @@ impl LoopDetector {
             self.green.green_specs.clear();
             return;
         }
-        let Some(command) = args
-            .get("command")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|cmd| !cmd.is_empty())
-        else {
+        let Some(command) = shell_command_of(tool_name, args) else {
             return;
         };
         // The host's staged suites are both green-run carriers: the
         // acceptance specs (`.arc/acceptance`) and the UI contract smoke
-        // (`.arc/ui-smoke`). The smoke suite greens too (requirements-only
-        // tasks have no acceptance specs) — without this arm the model kept
-        // re-running an already-green smoke, burning wall clock.
-        if !command.contains(".arc/acceptance") && !command.contains(".arc/ui-smoke") {
+        // (`.arc/ui-smoke`). The model's own self-test specs are a third
+        // carrier: requirements-only tasks stage them at the workspace root
+        // (`./ui-smoke/playwright.config.ts`), and the 09-30 github run
+        // showed every self-test green went unseen by this matcher (the
+        // path carries no `.arc/` prefix and the bash alias carries the
+        // command under `cmd`, not `command`) — so the double-green stop
+        // never armed for the only real browser verification such runs have.
+        if !command.contains(".arc/acceptance")
+            && !command.contains(".arc/ui-smoke")
+            && !command.contains("ui-smoke/playwright.config.ts")
+        {
             return;
         }
         let Some(passed) = parse_green_summary(result) else {
@@ -300,6 +454,17 @@ impl LoopDetector {
     /// or past the threshold (not just the first) so a caller that
     /// defers the abort once — e.g. because the shell-spiral recovery
     /// path owns the streak — still gets a signal on the next repeat.
+    ///
+    /// Idempotent-verification exemption: a shell-family command matching
+    /// [`command_is_idempotent_verification`] suppresses the doom signal
+    /// up to [`IDEMPOTENT_VERIFY_DOOM_CAP`] repeats, arming a nudge on
+    /// EVERY suppressed repeat (retrieved via [`Self::take_verify_hint`]).
+    /// The caller must skip the cycle detector while a hint is pending —
+    /// an all-identical streak is otherwise a cycle-1 pattern and the
+    /// cycle ladder would terminate what the exemption is trying to
+    /// protect. 09-30 github forensics: 5 of 7 turn kills were benign
+    /// verify repeats (build / restart / curl / grep) that the work order
+    /// itself mandates after every edit.
     pub fn record_doom(&mut self, tool_name: &str, args: &serde_json::Value) -> Option<usize> {
         if is_peer_polling_tool(tool_name) {
             // An asynchronous read breaks a consecutive mutating-call streak;
@@ -314,8 +479,27 @@ impl LoopDetector {
         } else {
             self.doom_last_signature = Some(sig);
             self.doom_streak = 1;
+            self.pending_verify_hint = None;
+        }
+        if self.doom_streak >= 3 {
+            if let Some(command) = shell_command_of(tool_name, args) {
+                if command_is_idempotent_verification(command)
+                    && self.doom_streak <= IDEMPOTENT_VERIFY_DOOM_CAP
+                {
+                    self.pending_verify_hint = Some(verify_repeat_hint(self.doom_streak));
+                    return None;
+                }
+            }
         }
         (self.doom_streak >= DOOM_LOOP_THRESHOLD).then_some(self.doom_streak)
+    }
+
+    /// Take the idempotent-verify nudge armed by [`Self::record_doom`],
+    /// if any. Cleared on take and on any signature change. While a hint
+    /// fires, the caller must ALSO skip the cycle detector (see
+    /// [`Self::record_doom`]).
+    pub fn take_verify_hint(&mut self) -> Option<String> {
+        self.pending_verify_hint.take()
     }
 
     /// Record a tool call and check for repeating patterns.
@@ -429,6 +613,40 @@ impl LoopDetector {
             return Some(NO_PROGRESS_HINT.to_string());
         }
         None
+    }
+
+    /// Result-only error-streak detection (see [`ERROR_STREAK_HINT`]).
+    ///
+    /// Hashes the FIRST LINE of each tool result and tracks how many
+    /// CONSECUTIVE results share it. Varying args (each retry a slightly
+    /// different command) evade the (name, args, result) no-progress
+    /// detector above; an identical failing first line does not. Fires
+    /// once per streak — a signature change resets both the counter and
+    /// the fired flag.
+    pub fn record_error_streak(&mut self, result: &str) -> Option<String> {
+        let threshold = self.error_streak_threshold;
+        if threshold == usize::MAX {
+            return None;
+        }
+        let first_line = result.lines().next().unwrap_or("");
+        let mut hasher = DefaultHasher::new();
+        first_line.hash(&mut hasher);
+        let sig = hasher.finish();
+        if self.error_streak_sig == Some(sig) {
+            self.error_streak_len += 1;
+        } else {
+            self.error_streak_sig = Some(sig);
+            self.error_streak_len = 1;
+            self.error_streak_fired = false;
+        }
+        if self.error_streak_fired
+            || self.error_streak_len < threshold
+            || !first_line_looks_like_error(first_line)
+        {
+            return None;
+        }
+        self.error_streak_fired = true;
+        Some(ERROR_STREAK_HINT.to_owned())
     }
 
     /// Check if the window contains a repeating pattern of the given cycle length.
@@ -553,6 +771,88 @@ mod tests {
             .take_green_stop_signal()
             .expect("ui-smoke double green must arm");
         assert_eq!(signal.passed, 1);
+    }
+
+    #[test]
+    fn root_ui_smoke_selftest_via_bash_alias_arms_green_stop() {
+        // 09-30 github forensics: the model's own self-test specs live at the
+        // workspace ROOT (`./ui-smoke/…`, no `.arc/` prefix) and run through
+        // the `bash` alias whose command rides the `cmd` key — the old
+        // matcher (`.arc/ui-smoke` substring + `command` key only) never saw
+        // them, so the double-green stop never armed for the only real
+        // browser verification requirements-only runs have.
+        let mut detector = LoopDetector::new(10);
+        let cmd = "node cli.js test --config ./ui-smoke/playwright.config.ts \
+                   req-1-1-1.spec.ts";
+        detector.record_green_stop("bash", &json!({ "cmd": cmd }), GREEN_OUT);
+        detector.record_green_stop("bash", &json!({ "cmd": cmd }), GREEN_OUT);
+        let signal = detector
+            .take_green_stop_signal()
+            .expect("root ui-smoke self-test double green must arm");
+        assert_eq!(signal.passed, 1);
+    }
+
+    // ---------- idempotent-verify doom exemption ----------
+
+    const BUILD_CMD: &str = "cd /workspace/template && npm run build --prefix frontend 2>&1 | tail -5";
+
+    fn record_doom_cmd(detector: &mut LoopDetector, cmd: &str) -> Option<usize> {
+        detector.record_doom("bash", &json!({ "cmd": cmd }))
+    }
+
+    #[test]
+    fn idempotent_verify_repeat_suppresses_doom_through_cap() {
+        let mut detector = LoopDetector::new(10);
+        for streak in 1..=5 {
+            let fired = record_doom_cmd(&mut detector, BUILD_CMD);
+            assert!(fired.is_none(), "streak {streak} must not doom-fire");
+            if streak >= 3 {
+                let hint = detector
+                    .take_verify_hint()
+                    .expect("every suppressed repeat arms the nudge");
+                assert!(hint.contains("[VERIFY REPEAT]"));
+                assert!(hint.contains(&streak.to_string()));
+            } else {
+                assert!(detector.take_verify_hint().is_none());
+            }
+        }
+        // Past the cap the normal doom ladder resumes.
+        assert_eq!(record_doom_cmd(&mut detector, BUILD_CMD), Some(6));
+    }
+
+    #[test]
+    fn verify_hint_resets_on_signature_change() {
+        let mut detector = LoopDetector::new(10);
+        for _ in 0..3 {
+            record_doom_cmd(&mut detector, BUILD_CMD);
+        }
+        assert!(detector.take_verify_hint().is_some());
+        // A different command resets the streak (and any pending hint).
+        assert!(record_doom_cmd(&mut detector, "git status").is_none());
+        assert!(detector.take_verify_hint().is_none());
+        // A fresh streak re-arms the nudge at 3.
+        for _ in 0..3 {
+            record_doom_cmd(&mut detector, BUILD_CMD);
+        }
+        assert!(detector.take_verify_hint().is_some());
+    }
+
+    #[test]
+    fn mutating_and_data_shaped_commands_keep_doom() {
+        // `cat >` is a file write in verify clothing.
+        let mut detector = LoopDetector::new(10);
+        let cat_cmd = "cat > /tmp/spec.ts << 'EOF'\nbody\nEOF";
+        for _ in 0..2 {
+            assert!(record_doom_cmd(&mut detector, cat_cmd).is_none());
+        }
+        assert_eq!(record_doom_cmd(&mut detector, cat_cmd), Some(3));
+        // Data-ful curl is a mutation, not a probe.
+        let mut detector = LoopDetector::new(10);
+        let post_cmd = "curl -X POST http://127.0.0.1:3100/api/auth/login -d '{...}'";
+        for _ in 0..2 {
+            assert!(record_doom_cmd(&mut detector, post_cmd).is_none());
+        }
+        assert_eq!(record_doom_cmd(&mut detector, post_cmd), Some(3));
     }
 
     #[test]
@@ -847,5 +1147,54 @@ mod tests {
             assert!(d.record_doom("read_file", &json!({"path": "a"})).is_none());
             assert!(d.record_doom("read_file", &json!({"path": "b"})).is_none());
         }
+    }
+
+    #[test]
+    fn error_streak_fires_once_per_streak_when_args_vary() {
+        // 09-29 实录形态:每次重试 args 都变((name,args,result) 检测器
+        // 哑火),但失败【首行】相同——细节(报文尾巴)在后续行演进。
+        // 默认阈值 8。首行本身变化则不构成连击(设计如此)。
+        let mut d = LoopDetector::new(10);
+        for i in 0..7 {
+            assert!(
+                d.record_error_streak(&format!(
+                    "Error: PUT /api/workbooks/wb-1 -> 400\nattempt {i} detail"
+                ))
+                .is_none(),
+                "no fire at {i}"
+            );
+        }
+        let hint = d.record_error_streak(
+            "Error: PUT /api/workbooks/wb-1 -> 400\nattempt 7 detail",
+        );
+        assert!(hint.is_some(), "expected error-streak hint at 8");
+        assert!(hint.unwrap().contains("REPEATED FAILURE"));
+        // 同一连击只 fire 一次;签名变化(成功行)重置。
+        assert!(d
+            .record_error_streak(
+                "Error: PUT /api/workbooks/wb-1 -> 400\nattempt 8 detail",
+            )
+            .is_none());
+        assert!(d.record_error_streak("{\"ok\":true}").is_none());
+    }
+
+    #[test]
+    fn error_streak_ignores_success_shaped_and_resets_on_change() {
+        let mut d = LoopDetector::new(10);
+        // 成功形状的首行(无错误词汇)永不触发
+        for _ in 0..12 {
+            assert!(d.record_error_streak("total 60 drwxr-xr-x 12 root root").is_none());
+        }
+        // 连击中途换签名 → 计数重置
+        for _ in 0..5 {
+            assert!(d
+                .record_error_streak("Error: connection refused")
+                .is_none());
+        }
+        for _ in 0..5 {
+            assert!(d.record_error_streak("fatal: not a git repository").is_none());
+        }
+        // 各自只有 5 连,均不到 8
+        assert!(d.record_error_streak("Error: connection refused").is_none());
     }
 }
