@@ -35,7 +35,11 @@ COORD_RE = re.compile(r"\b([A-Z]{1,3}[1-9][0-9]{0,3})\b")
 # 坐标,kind 判定被带偏成 sheet、种子账号零编译)。
 _QUARTER_TOKEN_RE = re.compile(r"\b[Qq][1-4]\b(?!\d)")
 
-_MAX_EXTRA_RULES = 2900
+# 上限只做失控保护,不做内容裁剪预算:github 全量 FIXTURE 段 ~2930 字符,
+# 2900 曾恰好把尾句腰斩("scratch test scripts belong in /tmp, never
+# inside .arc/acceptance." 断半)——系统行常驻文本必须整句收尾。
+# 改文本后跑 goal_first_test 的不截断钉子确认仍在余量内。
+_MAX_EXTRA_RULES = 3200
 
 
 # ---------------------------------------------------------------- 提取
