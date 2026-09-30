@@ -65,6 +65,14 @@ under frontend/src/features/<name>.jsx, App.jsx a thin assembly layer). \
 Keep frontend/src/main.jsx, frontend/src/app/store.jsx \
 (useResource('<resource>')) and frontend/src/app/api.js working as the \
 backend client — extend them, never fork shared state into features. \
+ACCESSIBLE-NAME UNIQUENESS: on any single rendered page, no two \
+interactive controls may share the same accessible name, and a page's \
+own primary action (e.g. a form's submit) must not be shadowed by a \
+same-named global control (topbar, menu) — the hidden grader resolves \
+controls with strict canonical locators (getByRole(role, { name })), \
+which DIE on ambiguity and lose the whole scenario. When a page needs a \
+control whose name collides with a global one, hide or rename the \
+global one on that page. \
 TOOLBOX (optional, unwired): frontend/src/app/ui.jsx ships proven \
 shapes — NativeSelect (dropdowns = native <select>, graders use \
 selectOption), AppDialog (native <dialog> modals), AccountTrigger \

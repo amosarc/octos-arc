@@ -88,8 +88,10 @@ EOF
 #  遥测共享,main.py 顶层依赖,漏打即启动崩)
 # (visual_ref.py 已退役(2026-09-28):参考图由内核在含图工单的 turn 直接
 #  作为 user 消息媒体附件,宿主预描述通道删除)
-# (09-27 目标优先定则:ui_smoke/flow_suite 宿主自写验收套件已删除——
-#  测试用例由模型根据需求自生成,宿主只落盘 .arc/ui-smoke 最小骨架)
+# (flow_suite 二度删除(09-30 终裁):比赛全自动无人工环节,流验证只能
+#  由模型自生成自验证(SELF-TEST CONTRACT,spec 先行+逐句锚定需求原文);
+#  宿主硬编码流走查类别整体不要——09-27 判"宿主自写验收",09-30 判
+#  "硬编码不可靠且应模型自生成",宿主侧只做运行时治理不做内容决策)
 # public-tests 不进包(2026-09-26 正式比赛决策):平台挂载 /workspace/tests
 # 或 ARCBENCH_TESTS_DIR 优先生效;两者皆缺的任务走 no-staged-specs 的
 # 模型自测契约(main.py locate_acceptance_tests 的包内回落分支因此休眠)。

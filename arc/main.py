@@ -72,7 +72,7 @@ SELFTEST_SUBDIR = "./ui-smoke"
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 比赛提交范围(平台无法传 env,正式提交改这里后重打包;详见 arc/SCOPE.md)
+# 比赛提交范围(arc/SCOPE.md)
 #   "REQ-1"        → 只实现并提交 REQ-1 家族(快迭代/分段提交)
 #   "REQ-1,REQ-3"  → 任意家族/子家族/原子 id 组合
 #   ""             → 全量(最终冲分提交务必改回这里!)
@@ -86,8 +86,78 @@ COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2,REQ-3"
 # 优先 > 分级档隐含开启 > enabled 无分级=模型默认深度。
 #   THINKING         "enabled" | "disabled"
 #   REASONING_EFFORT "" | "none" | "low" | "high" | "max"(空=不声明,跟随 THINKING)
-THINKING = "disabled"
-REASONING_EFFORT = "none"
+THINKING = "enabled"
+REASONING_EFFORT = "max"
+# 修复类短轮(syntax/rehearsal/spec 回归修复,自含错误摘要)降档:深度思考
+# 对窄修复不成比例地烧输出预算与墙钟。骨架 nudge/NODE_NUDGE 依赖会话连续
+# 性,留在主 driver 工作档。
+THINKING_REPAIR = "enabled"
+REASONING_EFFORT_REPAIR = "low"
+
+# 内核基础提示词运行时覆盖(load_prompt("gateway") 通道:$HOME/.octos/
+# prompts/gateway.md 存在即整体替换内置 gateway_default.txt,零编译)。
+# 内置文本向全量工具集描述规则,ARC 的 OCTOS_TOOL_ALLOWLIST 只放行 7 个
+# 工具——Subagents/Memory 两节与 glob/code_structure/diff_edit/apply_patch/
+# view_image/spawn/save_memory/recall/ask_user_question 等点名全是幻影
+# (每请求固定 token 地板 + 选择摩擦 + 调用必败)。此覆盖与 7 工具对齐;
+# 内置文件与其测试不动。
+_GATEWAY_PROMPT_OVERRIDE = """\
+You are an expert software engineering agent working directly in the user's workspace. You accomplish tasks by calling tools — reading real code, making real edits, and running real commands — never by guessing or simulating results. Reply directly; never narrate or say "Thinking".
+
+## Tool Discipline
+
+- READ BEFORE WRITE. Before editing any file, read the relevant region with `read_file` (or locate it with `grep` / `list_dir`). Never edit code you have not seen.
+- Batch independent read-only calls (`read_file`, `grep`, `list_dir`) in a single response — they run in parallel. Do not spread independent lookups across turns.
+- Prefer the dedicated tools over shell: `read_file`, `grep`, `list_dir`. Use `bash` only when a dedicated tool cannot do the job.
+- For edits use the smallest sufficient tool: `edit_file` for surgical changes; `write_file` only for new files or full rewrites.
+- For multi-step work, maintain a plan with `update_plan`: emit the checklist once at task start, tick items as they complete, and do not restate the plan on later turns.
+- This session is unattended — no user will answer questions. When blocked or uncertain, state the assumption you are making and continue; do not stop to ask.
+
+## Code Output Style
+
+- Code written to files must be pure code: no explanations, no prose blocks, no comments or docstrings, no usage examples or sample data.
+- Keep code compact: no blank lines, no debug logging, no speculative abstractions or scaffolding for imagined future needs.
+- Write the smallest implementation that satisfies the requirement; reuse existing helpers in the project instead of duplicating logic.
+
+## Verification
+
+- After changing code, run the relevant build and tests via `bash` — whatever the project uses.
+- Report honest results: quote real command output or a faithful summary of it. NEVER invent, simulate, or "reconstruct" diffs, test output, or command results. Never claim a build or test passed unless you ran it and saw it pass.
+- If a command fails, say it failed and include the real error. Do not silently substitute an alternative outcome.
+- If something cannot be verified in this environment, say so explicitly.
+
+## Communication
+
+- Plain, factual tone. Lead with what was done, then evidence (tests run, output), then risks or follow-ups. Start tool work immediately; do not restate the task or plan in prose before acting. No preamble or closing pleasantries in final answers.
+- No markdown-heavy chatter in status replies: while work is in progress, at most one short status line per turn.
+"""
+
+
+def install_gateway_prompt_override(log) -> None:
+    """把 7 工具对齐的基础提示词落到内核运行时覆盖位(幂等)。
+
+    内核 load_prompt("gateway") 读 $HOME/.octos/prompts/gateway.md,存在
+    即用之,否则回落编译进二进制的 gateway_default.txt。写入失败不致命
+    (回落内置文本,只是多付幻影工具描述)。OCTOS_GATEWAY_OVERRIDE=0
+    显式关闭(运维保留内置文本)。
+    """
+    if os.environ.get("OCTOS_GATEWAY_OVERRIDE", "") == "0":
+        log("[prompt] gateway.md override disabled (OCTOS_GATEWAY_OVERRIDE=0)")
+        return
+    base = Path.home() / ".octos" / "prompts"
+    target = base / "gateway.md"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        if target.exists() and \
+                target.read_text(encoding="utf-8") == _GATEWAY_PROMPT_OVERRIDE:
+            return
+        target.write_text(_GATEWAY_PROMPT_OVERRIDE, encoding="utf-8")
+        log(f"[prompt] gateway.md base-prompt override installed at {target} "
+            "(7-tool aligned; Subagents/Memory/phantom tools removed)")
+    except OSError as exc:
+        log(f"[prompt] gateway.md override not installed ({exc}); "
+            "kernel falls back to the compiled base prompt")
+
 
 _DEBUG_LOG_PATH: Path | None = None
 _DEBUG_LOG_LOCK = threading.Lock()
@@ -838,9 +908,8 @@ def _pw_lg_cli() -> Path | None:
 def stage_selftest_dir(output_dir: Path, smoke_port: int,
                        cli_hint: str | None = None) -> Path:
     """落盘模型自测所需的最小骨架(非规则、非用例):playwright config +
-    MY-CHECK 示例。内核 shell guard 只放行
-    `test --config ui-smoke/playwright.config.ts` 形状的命令——
-    模型自写 spec 后以显式文件参数挂该 config 运行。幂等。"""
+    MY-CHECK 示例。该 config 是最顺手的标准跑法(双绿自动停机);
+    Playwright 用法本身不再受限。幂等。"""
     stage = Path(output_dir) / SELFTEST_SUBDIR
     stage.mkdir(parents=True, exist_ok=True)
     cfg = ("import { defineConfig } from '@playwright/test';\n"
@@ -856,8 +925,8 @@ def stage_selftest_dir(output_dir: Path, smoke_port: int,
 // text (the node's scenarios are the oracle), then run it with an
 // explicit file argument:
 //   node <cli> test --config ui-smoke/playwright.config.ts MY-CHECK.spec.ts
-// That form is allowed by the kernel (inline `node -e` browser scripts
-// are not), re-runnable, and green-stop-visible.
+// That form is the convenient standard (re-runnable and green-stop-visible);
+// any other Playwright invocation style is yours to choose as well.
 //
 // LOCATOR RULE — requirement phrasing maps to ROLES, exactly:
 //   "A region named X"      => getByRole('region', { name: X })
@@ -891,11 +960,12 @@ test('my check - name what this verifies', async ({ page }) => {
   // const editor = page.getByRole('region', { name: 'Editor' });
   // await expect(editor.getByRole('combobox', { name: 'Rows' })).toBeVisible();
   //
-  // Example: the second selection gesture (click anchor, Shift-click end):
-  // await page.getByRole('gridcell', { name: 'A1', exact: true }).click();
-  // await page.getByRole('gridcell', { name: 'C5', exact: true })
+  // Example: the second selection gesture (click anchor, Shift-click end)
+  // on whatever multi-select surface the requirement names:
+  // await page.getByRole('option', { name: 'First item', exact: true }).click();
+  // await page.getByRole('option', { name: 'Third item', exact: true })
   //           .click({ modifiers: ['Shift'] });
-  // await expect(page.getByRole('gridcell', { name: 'B3', exact: true }))
+  // await expect(page.getByRole('option', { name: 'Second item', exact: true }))
   //           .toHaveAttribute('aria-selected', 'true');
   expect(true).toBe(true);
 });
@@ -908,46 +978,119 @@ test('my check - name what this verifies', async ({ page }) => {
     return stage
 
 
-def build_selftest_note(cli_path: str | None) -> str:
-    """节点/收尾提示词附带的模型自测指引(替代原宿主 UI SMOKE RUN)。"""
-    if cli_path:
-        cmd = (f"node {cli_path} test --config "
-               f"{SELFTEST_SUBDIR}/playwright.config.ts "
-               "<your-spec>.spec.ts")
-    else:
-        cmd = (f"npx --yes @playwright/test test --config "
-               f"{SELFTEST_SUBDIR}/playwright.config.ts "
-               "<your-spec>.spec.ts")
-    return (
-        "\nSELF-TEST (you author the tests): derive your own Playwright "
-        "specs from the requirement text — each node's scenarios ARE the "
-        "test oracle (GIVEN = arrange, WHEN = act, THEN = assert, verbatim "
-        "quoted strings = exact accessible names). Write specs ONLY under "
-        f"{SELFTEST_SUBDIR}/ (copy MY-CHECK.spec.ts.example as a starting "
-        "point; never inside .arc/ — host-owned, read-only) and run them "
-        "with an explicit file argument:\n"
-        f"  {cmd}\n"
-        "That command shape is sanctioned; raw browser scripts and "
-        "browserless guessing are not. Red = the flow fails on the RUNNING "
-        "app — fix the app, then rerun.\n"
-        "SEED RESET (before each self-test round): run "
-        "`rm -f backend/data/db.run.json && sh .arc/host/restart-server.sh` "
-        "from the workspace root — earlier turns and spec runs leave "
-        "runtime data behind, and arrange steps that assume the seeded "
-        "state then fail with false reds on perfectly good code.\n"
-        "SELF-TEST FIDELITY RULES (how the hidden grader differs from a "
-        "hand-walk): 1) LOCATORS ARE ROLES — a requirement phrase "
-        "\"A region named X\" means getByRole('region', { name: X }), "
-        "\"a dialog named X\" means getByRole('dialog', { name: X }); "
-        "getByText/getByLabel on a role-less div is a false green (the "
-        "grader's role locator is what runs). 2) TEST BOTH GESTURES — "
-        "every selection-driven flow needs a drag variant AND a "
-        "click+Shift-click variant (a Shift-collapsing handler passes "
-        "drag-only tests and still loses the family); every dialog flow "
-        "needs the mouse path AND Enter/Escape. 3) ASSERT STATE, NOT "
-        "PRESENCE — verify the observable result (aria-selected states, "
-        "persisted-then-reloaded values, computed results), not that "
-        "controls exist.\n")
+# build_selftest_note 已下沉到提示词区(与工单模板同处)——09-29 减法
+# 合并后它是自测装置契约的唯一出处(见 GOAL_FIRST_NODE_PROMPT_TEMPLATE
+# 之后的定义)。
+
+# 模型自测取证(09-30):从内核 context-logs 的 tools.jsonl 复原每条
+# playwright 运行的通过/失败计数。tools.jsonl 行形如
+# {"kind":"tool_call","tool":"bash","args":{"cmd":...},"output":...,"ts":...}。
+_SELFTEST_CMD_RE = re.compile(r"playwright\s+test|playwright\.config\.ts"
+                              r"|\.spec\.ts\b")
+_SELFTEST_PASS_RE = re.compile(r"(\d+)\s+passed")
+_SELFTEST_FAIL_RE = re.compile(r"(\d+)\s+failed")
+
+
+def _collect_selftest_evidence(output_dir: Path) -> dict | None:
+    """复原模型自测的末次结果(宿主侧事后解析,零模型负担)。
+
+    final-verification.json 的 selftest 键 = 每条 .spec.ts 的末次
+    {passed, failed, ts} + 运行总数 + 最后一条运行摘要。context-logs
+    在 final 链时位于 .octos/(postflight 才搬进 octos/dot-octos/),
+    两处都兜。找不到任何自测运行返回 None。"""
+    roots = [Path(output_dir) / ".octos" / "context-logs",
+             Path(output_dir) / "octos" / "dot-octos" / "context-logs"]
+    runs: list[dict] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for tools_file in sorted(root.glob("*/tools.jsonl")):
+            text = tools_file.read_text(encoding="utf-8", errors="replace")
+            for line in text.splitlines():
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("kind") != "tool_call":
+                    continue
+                args = rec.get("args") or {}
+                cmd = str(args.get("cmd") or args.get("command") or "")
+                if not _SELFTEST_CMD_RE.search(cmd):
+                    continue
+                out = str(rec.get("output") or "")
+                passed = _SELFTEST_PASS_RE.findall(out)
+                failed = _SELFTEST_FAIL_RE.findall(out)
+                runs.append({
+                    "ts": rec.get("ts"),
+                    "cmd": cmd[:200],
+                    "specs": sorted({t for t in cmd.split()
+                                     if t.endswith(".spec.ts")}),
+                    "passed": int(passed[-1]) if passed else None,
+                    "failed": int(failed[-1]) if failed else None,
+                })
+    if not runs:
+        return None
+    per_spec: dict[str, dict] = {}
+    for run in runs:
+        for spec in run["specs"]:
+            per_spec[spec] = {"passed": run["passed"],
+                              "failed": run["failed"],
+                              "ts": run["ts"]}
+    return {"runs": len(runs), "last": runs[-1], "specs": per_spec}
+
+
+def _selftest_baseline(output_dir: Path) -> dict[str, int]:
+    """各 context-logs/tools.jsonl 的当前字节偏移(T1 基线)。
+
+    批 turn 开始前取基线,turn 结束后增量扫描——比解析时间戳稳健
+    (格式免约定),新出现的会话文件按偏移 0 全量计入。
+    """
+    marks: dict[str, int] = {}
+    for root in (Path(output_dir) / ".octos" / "context-logs",
+                 Path(output_dir) / "octos" / "dot-octos" / "context-logs"):
+        if not root.is_dir():
+            continue
+        for tools_file in sorted(root.glob("*/tools.jsonl")):
+            try:
+                marks[str(tools_file)] = tools_file.stat().st_size
+            except OSError:
+                pass
+    return marks
+
+
+def _selftest_ran_since(output_dir: Path, marks: dict[str, int]) -> bool:
+    """基线之后是否出现过自测命令运行(T1:零运行=过程纪律缺口)。
+
+    只认"测试运行过没有"这一过程事实,不读结果——红绿与场景预期
+    (含预期拒绝)的裁决归模型自测闭环。
+    """
+    roots = (Path(output_dir) / ".octos" / "context-logs",
+             Path(output_dir) / "octos" / "dot-octos" / "context-logs")
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for tools_file in sorted(root.glob("*/tools.jsonl")):
+            offset = marks.get(str(tools_file), 0)
+            try:
+                if tools_file.stat().st_size <= offset:
+                    continue
+                with tools_file.open("rb") as fh:
+                    fh.seek(offset)
+                    tail = fh.read().decode("utf-8", errors="replace")
+            except OSError:
+                continue
+            for line in tail.splitlines():
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("kind") != "tool_call":
+                    continue
+                args = rec.get("args") or {}
+                cmd = str(args.get("cmd") or args.get("command") or "")
+                if _SELFTEST_CMD_RE.search(cmd):
+                    return True
+    return False
 
 
 # ------------------------------------------------- requirement message bridge
@@ -1024,14 +1167,18 @@ def _ensure_host_toolchain(log) -> Path | None:
 def _run_staged_playwright(output_dir: Path, smoke_port: int,
                            tests_dir: Path | None,
                            extra_ports: list | None = None,
-                           spec_files: list[str] | None = None) -> tuple | None:
+                           spec_files: list[str] | None = None,
+                           grep_pattern: str | None = None) -> tuple | None:
     """Tier-2 (OCTOS_ARC_HOST_GRADE=1, default off): run the staged
     Playwright suite against the smoke port. Returns (passed, failed), or
     None when the environment cannot run it (no npx/browsers) — callers
     treat None as "not attempted", never as a verdict.
     spec_files: optional basename filter — run only those staged specs
     (the post-batch regression passes the COMPLETED nodes' specs; the
-    full-suite form stays for final verification)."""
+    full-suite form stays for final verification).
+    grep_pattern: optional title regex (--grep) — the flow-walk gate uses
+    it to run only completed nodes' walks out of the one shared spec
+    file (unimplemented nodes' walks are legitimately red mid-run)."""
     if tests_dir is None or not tests_dir.is_dir():
         return None
     import urllib.request
@@ -1061,6 +1208,8 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
                "test", "--reporter=json"]
         if spec_files:
             cmd.extend(f for f in spec_files if f)
+        if grep_pattern:
+            cmd.extend(["--grep", grep_pattern])
         # The config imports '@playwright/test' — resolution walks up from
         # run_dir, so link the local-grader tree in.
         try:
@@ -1072,6 +1221,8 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
         cmd = ["npx", "--yes", "@playwright/test", "test", "--reporter=json"]
         if spec_files:
             cmd.extend(f for f in spec_files if f)
+        if grep_pattern:
+            cmd.extend(["--grep", grep_pattern])
     # Boot the app on the smoke port for the duration of the run; specs
     # derive their origin from E2E_BASE_URL (default hardcodes 3301) —
     # set it explicitly, and dual-listen spec base ports as a fallback.
@@ -1472,6 +1623,17 @@ NODE_NUDGE_PROMPT = (
     "frontend files with your file-writing tools. Do not just analyze, "
     "observe, or announce plans.")
 
+# T1 自测在跑检查的中性 nudge(09-30):只陈述过程事实(改了文件但零
+# 自测运行),不预设任何失败形态;"expected outcome" 措辞天然涵盖预期
+# 拒绝类场景(THEN 断言拒绝行为本身,见核验矩阵)。
+SELFTEST_NUDGE_PROMPT = (
+    "Your last turn changed project files, but no self-test run was "
+    "recorded for it. Write the spec for this batch's nodes from their "
+    "scenarios (GIVEN = arrange, WHEN = act, THEN = assert) and run it "
+    "against the RUNNING app with the SELF-TEST command — a red spec "
+    "means the app does not yet match the scenario's expected outcome; "
+    "fix the app until the spec is green, then finish the turn.")
+
 
 def batch_req_block(batch: list[dict],
                     seeded_scenarios: set[str] | frozenset | None = None
@@ -1511,6 +1673,17 @@ def load_requirement_tree(req_dir: Path) -> dict:
         raise ValueError(f"invalid requirements.yaml in {req_dir}")
     _strip_reference_image_marks(data)
     _attach_source_lines(data, raw)
+    _annotate_ancestor_folder_deps(data, ())
+    marked = _mark_templated_scenarios(data)
+    if marked:
+        print(f"[req] {marked} node(s) flagged: scenario steps are "
+              "template placeholders (description is the flow contract)",
+              flush=True)
+    boiler = _mark_boilerplate_scenarios(data)
+    if boiler:
+        print(f"[req] {boiler} scenario(s) flagged: WHEN/THEN steps are "
+              "cross-node placeholder boilerplate (GIVEN data contracts "
+              "kept, REQ CONTENT is the flow contract)", flush=True)
     return data
 
 
@@ -1522,16 +1695,22 @@ def load_requirement_tree(req_dir: Path) -> dict:
 # (平台任务夹具);需要视觉的调用方走显式媒体通道(params.media)
 # +VISUAL_MODEL 路由。
 _IMAGE_MARK_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+# 标签变体白名单(09-30 取证:github 26/47 节点用 "Screenshot reference:",
+# sheet 用 "Page reference:"——只认前者会留悬空标签,误导模型找已剥的图)。
+# 仅匹配这些"<名词> reference:"形态;散文句中出现的 "reference:" 不受影响。
+_REF_LABEL_RE = r"(?:Page|Screenshot|Image|Figure) reference:"
 # 节点主形态(真实 yaml):标签独立成行、图记号整行紧随(可连续
 # 多行);标签出现在行中也认——从标签删到节点尾。
 _PAGE_REF_NODE_RE = re.compile(
-    r"(?:\n[ \t]*)*[ \t]*Page reference:[ \t]*"
+    r"(?:\n[ \t]*)*[ \t]*" + _REF_LABEL_RE + r"[ \t]*"
     r"(?:\n[ \t]*!\[[^\]]*\]\([^)]*\)[ \t]*)+")
 # 单行字符串形态(双引号 yaml/内联拼接):标签到行尾之间只有图记号。
 _PAGE_REF_INLINE_RE = re.compile(
-    r"[ \t]*Page reference:[ \t]*(?:!\[[^\]]*\]\([^)]*\)[ \t]*)+$", re.M)
+    r"[ \t]*" + _REF_LABEL_RE + r"[ \t]*(?:!\[[^\]]*\]\([^)]*\)[ \t]*)+$",
+    re.M)
 # 兜底:无标签散落的裸图记号,以及剥图后行尾悬空的标签。
-_PAGE_REF_DANGLING_RE = re.compile(r"[ \t]*Page reference:[ \t]*$", re.M)
+_PAGE_REF_DANGLING_RE = re.compile(
+    r"[ \t]*" + _REF_LABEL_RE + r"[ \t]*$", re.M)
 
 
 def _strip_text_marks(text: str) -> str:
@@ -1593,6 +1772,25 @@ def _attach_source_lines(tree: dict, raw: str) -> None:
             attach(child, child_end)
 
     attach(tree, total)
+
+
+def _annotate_ancestor_folder_deps(node: dict, inherited: tuple) -> None:
+    """沿 parent 链累积 FOLDER 级 dependencies,标到 ATOMIC 节点。
+
+    消费方=collect_dependency_context(闭包起点并入,09-30 封堵换 yaml
+    丢失面);与节点自身 dependencies 去重(后者由既有 BFS 距离 1 承载,
+    不双发)。root 的 dependencies 同律向下传播(整树级依赖)。
+    """
+    deps = tuple(str(d) for d in node.get("dependencies") or [])
+    if str(node.get("type") or "").upper() == "ATOMIC":
+        own = set(deps)
+        node["_ancestor_folder_deps"] = [
+            d for d in dict.fromkeys(inherited) if d not in own]
+        return
+    merged = tuple(dict.fromkeys(inherited + deps))
+    for child in node.get("children") or []:
+        if isinstance(child, dict):
+            _annotate_ancestor_folder_deps(child, merged)
 
 
 def flatten_atomic(node: dict, out: list | None = None) -> list[dict]:
@@ -1660,35 +1858,209 @@ _VERIFICATION_LABEL = (
     "acceptance criteria; a grader walks them end-to-end in a real "
     "browser; every step must pass):")
 
+_TEMPLATED_NOTE = (
+    "VERIFICATION REQUIREMENTS: this task's scenario steps for this node "
+    "are template placeholders — the REQ CONTENT description above is the "
+    "authoritative flow contract; the grader walks the operations it "
+    "names end-to-end in a real browser. GIVEN lines below carry the "
+    "data contracts.")
+
+# 场景模板填充检测(09-29 sheet 取证:sheet 题 WHEN/THEN 为模板占位串,
+# github 题为真步骤——必须逐节点自适应,不能任务级开关)。判据:场景
+# 文本(场景名+步骤 content)某个 3-gram 出现 ≥5 次、不出现在节点
+# description、出现在场景名里、且词汇不是节点自身标题的子集——最后一
+# 条是关键判别:github 真步骤的合法重复来自"场景名/WHEN 按真名引用
+# 本工作流"(重复 gram ⊆ 节点名),模板垃圾的占位短语与真名无关。
+# 保守阈值,两份真实 yaml 离线校验:sheet 23-24/24 命中,github 0 误标。
+_TEMPLATED_GRAM = 3
+_TEMPLATED_MIN_COUNT = 5
+_WORD_RE = re.compile(r"[a-z0-9']+")
+
+
+def _ngrams(text: str, n: int) -> list[tuple[str, ...]]:
+    words = _WORD_RE.findall(text.lower())
+    return [tuple(words[i:i + n]) for i in range(len(words) - n + 1)]
+
+
+def _node_scenarios_templated(node: dict) -> bool:
+    desc = str(node.get("description") or "")
+    desc_grams = set(_ngrams(desc, _TEMPLATED_GRAM))
+    title_words = set(_WORD_RE.findall(
+        str(node.get("name") or "").lower()))
+    counts: dict[tuple[str, ...], int] = {}
+    name_grams: set[tuple[str, ...]] = set()
+    for sc in node.get("scenarios") or []:
+        name_grams |= set(_ngrams(str(sc.get("name", "")),
+                                  _TEMPLATED_GRAM))
+        chunks = [str(sc.get("name", ""))]
+        for step in sc.get("steps") or []:
+            if isinstance(step, dict):
+                chunks.append(str(step.get("content", "")))
+        for chunk in chunks:
+            for gram in _ngrams(chunk, _TEMPLATED_GRAM):
+                counts[gram] = counts.get(gram, 0) + 1
+    for gram, count in counts.items():
+        if count < _TEMPLATED_MIN_COUNT or gram in desc_grams \
+                or gram not in name_grams:
+            continue
+        if set(gram).issubset(title_words):
+            continue  # 节点真名的合法回声(github 场景名引用工作流名)
+        return True
+    return False
+
+
+def _mark_templated_scenarios(tree: dict) -> int:
+    """load 期逐 ATOMIC 节点打标(只加 _scenarios_templated,不改 steps
+    原文——播种编译/流走查 GIVEN 刮取/闭包等下游消费方继续读原文);
+    渲染层(describe_node)按标记分支。返回命中节点数。"""
+    marked = 0
+    for folder in (tree or {}).get("children") or []:
+        if not isinstance(folder, dict):
+            continue
+        stack = [folder]
+        while stack:
+            node = stack.pop()
+            for child in node.get("children") or []:
+                if isinstance(child, dict):
+                    stack.append(child)
+            if str(node.get("type", "")).upper() == "ATOMIC" \
+                    and node.get("scenarios") \
+                    and _node_scenarios_templated(node):
+                node["_scenarios_templated"] = True
+                marked += 1
+    return marked
+
+
+# 场景级占位骨架检测(09-30 github 法医:47 节点里 23 个是混合形态——
+# 场景 1 为真步骤、场景 2+ 是平台生成的占位骨架("signs in … follows the
+# visible controls for the <title> workflow" / "displays the required
+# headings …" / "After refreshing … persisted"),节点级检测器按设计放行
+# 标题回声,36/100 个占位场景以 "VERIFICATION REQUIREMENTS (verbatim)"
+# 名义进工单(~10.6K token 噪声 + 假验收信号)。判据通用、零词表:非
+# GIVEN 步骤文本剥种子尾/引号值/标题短语后,同一骨架逐字出现在 ≥4 个
+# 节点 = 占位;场景的【全部】非 GIVEN 步骤都是占位才打标(有一步真
+# 内容就整体保留,宁漏勿杀)。离线校验:github 恰好 36/36 与标记口径
+# 一致、0 假阳;sheet 的命中与节点级判定冗余无害。
+_SCEN_BOILER_MIN_NODES = 4
+_SCEN_BOILER_MIN_LEN = 40
+_SCEN_QUOTED_RE = re.compile(r"`[^`]*`|\"[^\"]*\"|“[^”]*”|”|'[^']*'")
+_SCEN_SEED_TAIL_RE = re.compile(r"seed values:.*$", re.I | re.S)
+
+
+def _norm_step_skeleton(content: str, title: str) -> str:
+    text = _SCEN_SEED_TAIL_RE.sub("", content)
+    text = _SCEN_QUOTED_RE.sub(" ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text.lower())
+    if title:
+        title_norm = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+        if title_norm:
+            text = text.replace(title_norm, " ")
+    return " ".join(text.split())
+
+
+def _iter_atomic_nodes(tree: dict):
+    for folder in (tree or {}).get("children") or []:
+        if not isinstance(folder, dict):
+            continue
+        stack = [folder]
+        while stack:
+            node = stack.pop()
+            for child in node.get("children") or []:
+                if isinstance(child, dict):
+                    stack.append(child)
+            if str(node.get("type", "")).upper() == "ATOMIC":
+                yield node
+
+
+def _mark_boilerplate_scenarios(tree: dict) -> int:
+    nodes = list(_iter_atomic_nodes(tree))
+    nodes_per_norm: dict[str, set[str]] = {}
+    scen_norms: dict[tuple[str, int], list[str]] = {}
+    for node in nodes:
+        title = str(node.get("name") or "")
+        for idx, sc in enumerate(node.get("scenarios") or []):
+            norms = [
+                _norm_step_skeleton(str(step.get("content", "")), title)
+                for step in (sc.get("steps") or [])
+                if isinstance(step, dict)
+                and str(step.get("keyword", "")).upper() != "GIVEN"
+            ]
+            scen_norms[(str(node.get("id")), idx)] = norms
+            for norm in norms:
+                if len(norm) > _SCEN_BOILER_MIN_LEN:
+                    nodes_per_norm.setdefault(norm, set()).add(
+                        str(node.get("id")))
+    boiler = {norm for norm, ids in nodes_per_norm.items()
+              if len(ids) >= _SCEN_BOILER_MIN_NODES}
+    marked = 0
+    for node in nodes:
+        nid = str(node.get("id"))
+        for idx, sc in enumerate(node.get("scenarios") or []):
+            norms = scen_norms[(nid, idx)]
+            # 判定只认 boiler 集合(跨节点重复);短骨架不投票也不被判
+            # 占位——短真步骤("The list updates.")必须照常渲染。
+            if norms and all(norm in boiler for norm in norms):
+                sc["_steps_templated"] = True
+                marked += 1
+    return marked
+
 
 def describe_node(node: dict,
-                  seeded_scenarios: set[str] | frozenset | None = None
-                  ) -> str:
+                  seeded_scenarios: set[str] | frozenset | None = None,
+                  verification: str = "full") -> str:
     # 双段契约:REQ CONTENT(实现什么)与 VERIFICATION REQUIREMENTS(怎么算
     # 过)显式分立——不混在描述里,执行者每轮都清楚两件事的原文。
+    # verification="full":双段全量(工单/闭包/骨架地图);="data-only":
+    # 只保留场景名+GIVEN 数据契约,WHEN/THEN 不进(骨架轮判据用不到
+    # THEN 断言,却要为每个节点付全额场景文本并永久驻留历史)。
     lines = [f"ID: {node.get('id')}", f"Name: {node.get('name', '')}"]
     if node.get("description"):
         lines.append("REQ CONTENT (verbatim):")
         lines.append(_indent_block(str(node["description"]), "  "))
     scenarios = node.get("scenarios") or []
     if scenarios:
-        lines.append(_VERIFICATION_LABEL)
+        templated = bool(node.get("_scenarios_templated"))
+        if verification == "full":
+            lines.append(_TEMPLATED_NOTE if templated
+                         else _VERIFICATION_LABEL)
+        else:
+            lines.append(
+                "SCENARIO DATA CONTRACTS (GIVEN arrange material; the "
+                "graded WHEN/THEN steps ride with each node's family "
+                "work order):")
         for sc in scenarios:
             lines.append(f"  - {sc.get('name', 'scenario')}")
             key = f"{node.get('id')}::{sc.get('name', 'scenario')}"
             seeded = bool(seeded_scenarios) and key in seeded_scenarios
+            steps_templated = templated or bool(sc.get("_steps_templated"))
             for step in sc.get("steps") or []:
-                if isinstance(step, dict):
-                    kw = str(step.get("keyword", ""))
-                    if seeded and kw.upper() == "GIVEN":
-                        # 宿主已按该 GIVEN 编译种子落盘 db.json——提示词
-                        # 收敛为一行指针,值以 FOCUS 段/db.json 为准(省 token)。
-                        lines.append(
-                            "      GIVEN fixtures seeded by host into "
-                            "backend/data/db.json — verify addressable on "
-                            "the running app")
-                        continue
-                    lines.append(f"      {kw} {step.get('content', '')}")
+                if not isinstance(step, dict):
+                    continue
+                kw = str(step.get("keyword", ""))
+                if verification == "data-only" and kw.upper() != "GIVEN":
+                    continue
+                if steps_templated and verification == "full" \
+                        and kw.upper() != "GIVEN":
+                    # 模板节点/占位场景:GIVEN 是数据契约保留;WHEN/THEN
+                    # 是占位垃圾,由注记统一说明,不逐条渲染。
+                    continue
+                if seeded and kw.upper() == "GIVEN":
+                    # 宿主已按该 GIVEN 编译种子落盘 db.json——提示词
+                    # 收敛为一行指针,值以 FOCUS 段/db.json 为准(省 token)。
+                    lines.append(
+                        "      GIVEN fixtures seeded by host into "
+                        "backend/data/db.json — verify addressable on "
+                        "the running app")
+                    continue
+                lines.append(f"      {kw} {step.get('content', '')}")
+            if (verification == "full" and steps_templated
+                    and not templated and sc.get("_steps_templated")):
+                # 场景级占位(节点本身不是模板):一句话交代去向,不冒充
+                # 验收判据。
+                lines.append(
+                    "      (WHEN/THEN steps omitted — platform placeholder "
+                    "boilerplate; this scenario re-walks the workflow above "
+                    "signed in. GIVEN lines carry the data contract.)")
     deps = node.get("dependencies") or []
     if deps:
         lines.append(f"Depends on: {', '.join(map(str, deps))}")
@@ -1696,15 +2068,20 @@ def describe_node(node: dict,
 
 
 def render_verbatim_nodes(tree: dict,
-                          seeded_scenarios: set[str] | frozenset | None = None
+                          seeded_scenarios: set[str] | frozenset | None = None,
+                          verification: str = "full"
                           ) -> str:
     """全量 atomic 节点双段拼接(REQ CONTENT + VERIFICATION REQUIREMENTS)。
 
     骨架轮全量注入源:auth/数据端点契约决策直接以原文在场,不依赖地图
     指针自读(09-29 sheet run:骨架轮裸猜 /api/signin 被排练门抓住返修)。
+    verification="data-only"(骨架轮专用):骨架的决策面是 auth/数据端点/
+    外壳结构——THEN 断言对它零贡献,场景 WHEN/THEN 全部不进,只保留
+    GIVEN 数据契约。
     """
     return "\n\n".join(
-        describe_node(n, seeded_scenarios) for n in flatten_atomic(tree))
+        describe_node(n, seeded_scenarios, verification)
+        for n in flatten_atomic(tree))
 
 
 # ------------------------------------------------------- goal-first context
@@ -1881,7 +2258,11 @@ def collect_dependency_context(tree: dict, batch: list[dict],
 
     传递闭包按距离分轮展开(直接依赖优先,文档序 tiebreak);输出含跨族
     与同族跨批(后者在大家族拆批后是唯一的契约在场源;family_of 参数
-    保留为调用方兼容)。失控保护:输出节点
+    保留为调用方兼容)。BFS 起点并入批节点祖先 FOLDER 的 dependencies
+    (09-30:FOLDER 级依赖边已进会话排序图 family_dependency_edges,闭包
+    注入漏了——若某 yaml 的 FOLDER 独立声明跨族依赖而无 ATOMIC 重述,
+    依赖契约将无处在场;当前两份真题 FOLDER 边全被 ATOMIC 重述,零
+    行为变化,纯健壮性封堵)。失控保护:输出节点
     >12 或累计 >30K chars 时截断深距离层并留标记——直接依赖(距离 1)
     永不截。确定性遍历,零 LLM。
     """
@@ -1892,8 +2273,31 @@ def collect_dependency_context(tree: dict, batch: list[dict],
     # 也进闭包:旧"同族全剪"假设家族=单工单,大家族拆批后依赖节点的
     # 双段原文在后来批次的工单里无处在场(09-29 二轮修复)。
     seen: set[str] = set(batch_ids)
-    frontier = list(batch)  # 文档序
-    by_distance: list[list[str]] = []
+    # 距离 1 起始集 = 批节点自身 deps + 祖先 FOLDER deps(两源都是
+    # "文本直接声明"的依赖,同享永不截断;标注期已对自身 deps 去重)。
+    first_round: list[str] = []
+    frontier: list[dict] = []
+
+    def _expand(deps) -> None:
+        for dep in deps:
+            dep_id = str(dep)
+            if dep_id in seen:
+                continue
+            seen.add(dep_id)
+            dep_node = node_by_id.get(dep_id)
+            if dep_node is None:
+                continue
+            frontier.append(dep_node)
+            first_round.append(dep_id)
+
+    for n in batch:
+        _expand(n.get("dependencies") or [])
+        _expand(n.get("_ancestor_folder_deps") or [])
+    by_distance: list[list[str]] = [first_round] if first_round else []
+    # BFS 按距离分轮:frontier 全展开,输出留不在本批的依赖——跨族照旧;
+    # 同族但跨批(github 实测 20 处,如 batch3 REQ-2-2-1→batch2 REQ-2-1-2)
+    # 也进闭包:旧"同族全剪"假设家族=单工单,大家族拆批后依赖节点的
+    # 双段原文在后来批次的工单里无处在场(09-29 二轮修复)。
     while frontier:
         next_frontier: list[dict] = []
         emitted: list[str] = []
@@ -2351,8 +2755,13 @@ def _ignore_logs_in_workspace_git(output_dir: Path) -> None:
             encoding="utf-8")
 
 
-def build_octos_env(config_dir: Path) -> dict:
-    """Prepare env + minimal config.json for non-interactive octos."""
+def build_octos_env(config_dir: Path, *, thinking: str | None = None,
+                    effort: str | None = None) -> dict:
+    """Prepare env + minimal config.json for non-interactive octos.
+
+    thinking/effort 缺省取工作档常量(THINKING/REASONING_EFFORT);修复类
+    短轮传修复档(THINKING_REPAIR/REASONING_EFFORT_REPAIR)。
+    """
     env = os.environ.copy()
     api_key = env.get("OPENAI_API_KEY", "")
     base_url = env.get("OPENAI_BASE_URL", "")
@@ -2403,18 +2812,21 @@ def build_octos_env(config_dir: Path) -> dict:
     # ChatConfig.effective_thinking 解析:显式 off(thinking disabled 或
     # effort none)绝对优先 > 分级 effort 隐含开启 > thinking enabled
     # 无分级=模型默认深度。宿主不按 provider/model 名硬编码思考策略。
-    # 改档位=改文件头部的 THINKING/REASONING_EFFORT 常量。
-    if THINKING not in ("enabled", "disabled"):
+    # 改档位=改文件头部的 THINKING/REASONING_EFFORT 常量;修复类短轮
+    # 由调用方传 THINKING_REPAIR/REASONING_EFFORT_REPAIR。
+    thinking = THINKING if thinking is None else thinking
+    effort = REASONING_EFFORT if effort is None else effort
+    if thinking not in ("enabled", "disabled"):
         raise SystemExit(
             f"THINKING constant must be 'enabled' or 'disabled', "
-            f"got: {THINKING!r}")
-    config["model_thinking"] = THINKING
-    if REASONING_EFFORT:
-        if REASONING_EFFORT not in ("none", "low", "high", "max"):
+            f"got: {thinking!r}")
+    config["model_thinking"] = thinking
+    if effort:
+        if effort not in ("none", "low", "high", "max"):
             raise SystemExit(
                 "REASONING_EFFORT constant must be one of none/low/high/max, "
-                f"got: {REASONING_EFFORT!r}")
-        config["model_reasoning_effort"] = REASONING_EFFORT
+                f"got: {effort!r}")
+        config["model_reasoning_effort"] = effort
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     env["OCTOS_CONFIG_DIR"] = str(config_dir)
@@ -2461,12 +2873,12 @@ def build_octos_env(config_dir: Path) -> dict:
     # rate on both axes; operator-provided values still win (setdefault).
     env.setdefault("OCTOS_CONVERGENCE_LLM_CALLS", "40")
     env.setdefault("OCTOS_CONVERGENCE_SECS", "600")
-    # Hard-refuse hand-rolled inline browser verifiers (kernel bash guard,
-    # escape hatch `# octos:allow-browser`). run6/run7: the model wrote
-    # `node -e` chromium scripts 87/78 times despite the prompt ban — the
-    # third documented case of soft constraints not binding flash-tier
-    # models. The sanctioned verifier is the SPEC RUN command.
-    env.setdefault("OCTOS_DENY_BROWSER_SCRIPTS", "1")
+    # Inline browser verifiers: UNRESTRICTED by operator decision (09-30).
+    # The kernel bash guard stays compiled but is no longer armed here —
+    # the model may verify with any Playwright invocation style it chooses
+    # (set OCTOS_DENY_BROWSER_SCRIPTS=1 to re-arm, escape hatch
+    # `# octos:allow-browser`). run6/run7 history that motivated the guard:
+    # `node -e` chromium scripts 87/78 times per run despite the prompt ban.
     # Refuse FULL-SUITE acceptance runs (no .spec.ts filter): keep-25-run7
     # had 7 hand-assembled full runs ×~111s that could never go green while
     # sibling nodes were unimplemented. The host's Tier-2 chain owns
@@ -2836,7 +3248,7 @@ class OctosDriver:
 
 # ---------------------------------------------------------------- prompts
 # goal-first 骨架轮:模板已在位可启动,但 App 外壳/路由/家族文件结构由
-# 代理依需求地图自建。db.json 种子保护条款是数据契约。
+# Agent依需求地图自建。db.json 种子保护条款是数据契约。
 GOAL_FIRST_SKELETON_PROMPT = """\
 Lay this application's skeleton — you own frontend/src AND the backend \
 API (backend/src/routes/). The host substrate (src/app.js, src/index.js, \
@@ -2844,9 +3256,11 @@ src/database/store.js, src/lib/util.js) already boots — never rewrite \
 those files (the host boots the server for you before the \
 implementation turns; if you start it yourself to verify, port \
 {smoke} only). \
-Work from the REQUIREMENTS MAP in your system prompt:
-1) The backend API in backend/src/routes/: implement auth (sign-in \
-for the accounts the requirements name) and the core data endpoints \
+Work from the APP OUTLINE in your system prompt:
+1) The backend API in backend/src/routes/: implement auth ONLY if the \
+requirements name sign-in or named accounts (when the scenarios run \
+unauthenticated, skip auth scaffolding entirely — no login wall in \
+front of graded flows) and the core data endpoints \
 the map's families share, with Express on top of the host substrate \
 (src/lib/session.js = session mechanics, src/lib/crud.js = optional \
 generic REST factory, src/database/store.js = seed/query/tx store — \
@@ -2876,14 +3290,19 @@ run). Stop every server you started when done.
 # goal-first 家族工单:深度实现(真实可操作功能,浏览器走场景流才是判
 # 官)+ frontend/src 全域所有权 + 无 40-ops 帽。地图与本家族全文在
 # node_spec 头部注入(见主循环组装处)。
+# 09-29 减法重构:自测契约四处堆叠(模板 VERIFICATION/SPEC DISCIPLINE/
+# NO_STAGED_SPECS_NOTE/selftest_note)合并——模板只留纪律层(SPEC
+# DISCIPLINE + 两句新规),机制层(目录/命令/种子重置/保真规则)唯一
+# 出处=build_selftest_note;TOOLBOX 删除(系统行 HOST CONTRACT 已有)。
 GOAL_FIRST_NODE_PROMPT_TEMPLATE = """\
 Implement requirement family {node_id} DEEP — goal-first: every node in \
 this work order must become a REAL, operable feature. A grader in a \
 real browser walks each scenario end-to-end; strings on the page \
 without a working flow score zero. The pinned HOST CONTRACT applies \
-exactly; the THIS BATCH section below carries this work order's \
-requirement nodes — their scenarios ARE the acceptance signals. Do \
-not commit.\
+exactly (its TOOLBOX section catalogs the proven helpers — ui.jsx \
+shapes, grid/formula/csv/undo/router, session/crud); the THIS BATCH \
+section below carries this work order's requirement nodes — their \
+scenarios ARE the acceptance signals. Do not commit.\
 Definition of done: every scenario of every node in this work order \
 walks through on the RUNNING app; every GIVEN fixture is addressable \
 (the account signs in, the object opens, cell/field values match \
@@ -2895,55 +3314,101 @@ live in backend/src/routes/ (yours to extend freely); never touch the \
 host-owned backend substrate listed in the HOST CONTRACT (src/app.js, \
 src/index.js, src/database/store.js, src/lib/util.js).\
 PORT DISCIPLINE: NEVER bind port {port}. The app is ALREADY RUNNING, \
-host-managed, on port {smoke} — verify by curl directly; do NOT start \
-your own server. After editing backend/src run \
-`sh .arc/host/restart-server.sh` (host-provided) to pick changes up; \
-after editing frontend run `npm run build --prefix frontend` — the \
-running server serves the fresh dist immediately, no restart needed.\
-VERIFICATION: after each node, turn its scenarios into YOUR OWN \
-Playwright spec (GIVEN = arrange, WHEN = act, THEN = assert; quoted \
-strings = exact accessible names), keep it under ui-smoke/ (never \
-inside .arc/ — host-owned, read-only), and run it via the SELF-TEST \
-command against the RUNNING app (or curl the API directly) — scenario \
-flows actually walking, not string presence, are the verdict.\
-SPEC DISCIPLINE: derive every spec sentence-by-sentence from the \
-VERIFICATION REQUIREMENTS text above — dialog names, control labels, \
-and quoted error strings must match the requirement text verbatim. \
-When the running app and the requirement text disagree, the TEXT wins: \
-fix the app, never edit the spec to match the implementation. End the \
-turn only when every VERIFICATION REQUIREMENT walks green on the \
-running app; if some cannot, list each red chain explicitly in your \
-closing message.\
-TOOLBOX (optional, unwired): frontend/src/app/ui.jsx ships proven \
-shapes (NativeSelect/AppDialog/AccountTrigger/SingleError/FieldError/\
-useContextMenu+Menu/Region — render <Region label="X"> for a \
-requirement phrase "A region named X", a div with aria-label has no \
-region role — and FixedGrid), \
-frontend/src/app/grid.js the useGrid selection kernel (pass \
-grid={{grid}} and click / Shift-click-extend / drag / aria-selected are \
-handled) plus compareValues for type-aware sorts, \
-frontend/src/app/formula.js a cell formula engine \
-(displayValue/evalFormula/adjustFormula), frontend/src/app/csv.js \
-RFC4180 parse + byte-exact stringify + TSV paste + download/import \
-file helpers + clipboard copy, \
-frontend/src/app/undo.js a snapshot undo/redo stack hook, \
-frontend/src/app/router.js hash routing for deep links; on the \
-backend src/lib/session.js (session mechanics — you wire the routes) \
-and src/lib/crud.js (optional generic REST factory, mounted per \
-collection, hooks carry your validation) — use them or roll your own; \
-the requirement text is the only authority.\
+host-managed, on port {smoke} — do NOT start your own server. After \
+editing backend/src run `sh .arc/host/restart-server.sh` \
+(host-provided) to pick changes up; after editing frontend run \
+`npm run build --prefix frontend` — the running server serves the \
+fresh dist immediately, no restart needed.\
+SPEC DISCIPLINE: turn each node's scenarios into YOUR OWN Playwright \
+spec and WRITE THE SPEC BEFORE IMPLEMENTING the node — derive it \
+sentence-by-sentence from {spec_anchor} (GIVEN = arrange, WHEN = act, \
+THEN = assert; quoted strings = exact accessible names), watch it red, \
+then implement until it walks green on the RUNNING app — scenario \
+flows actually walking, not string presence, are the verdict. Dialog \
+names, control labels, and quoted error strings must match the \
+requirement text verbatim. When the running app and the requirement \
+text disagree, the TEXT wins: fix the app, never edit the spec to \
+match the implementation. End the turn only when every scenario walks \
+green; if some cannot, list each red chain explicitly in your closing \
+message.\
+FLOW FIDELITY: the grader walks ONLY the operations the requirement \
+text names, in the order it names them — never make a step mandatory \
+that the text does not describe (an extra required field, dialog, or \
+confirmation breaks every scenario at that step).\
+VALIDATION SCOPE: a validation rule binds only the operation whose \
+requirement text states it — never reuse one operation's rule (e.g. a \
+rename's non-empty check) in another operation's pipeline.\
 REGRESSION SCOPE: re-check only the families you touched this turn.\
 
 {node_spec}"""
 
-NO_STAGED_SPECS_NOTE = """\
+def build_selftest_note(cli_path: str | None, smoke: int = 0) -> str:
+    """requirements-only 任务的自测装置契约(机制层唯一出处)。
 
-VERIFICATION (no staged specs — you author the tests): this task has NO acceptance specs on disk — the graded tests are hidden and derived from the requirement text. YOU write the tests: derive Playwright specs from each node's scenarios (GIVEN = arrange, WHEN = act, THEN = assert; quoted strings are exact accessible names) ONLY under \
-{selftest_dir}/ (never write inside .arc/ — host-owned, read-only) — copy MY-CHECK.spec.ts.example as a starting point — and run them with the SELF-TEST command below against the RUNNING app (port {smoke}). Red = the real flow fails — fix the app, then rerun. \
-Never spawn a raw browser or inline browser script; the sanctioned \
-command shape only. Between turns, also verify by curling the API and \
-rebuilding the frontend.\
-"""
+    09-29 减法合并:原 NO_STAGED_SPECS_NOTE(VERIFICATION 头/自写测试/
+    MY-CHECK/red=fix/禁 raw browser)与本函数(命令形状/种子重置/保真
+    规则)在同一张工单堆叠且互相重复——现只此一块。纪律层(SPEC
+    DISCIPLINE/spec 先行/TEXT wins)在工单模板,不在此重复;curl 只许
+    排查不许作流验证(原两处 curl 授权删除——func 200 ≠ 浏览器流绿)。
+    """
+    if cli_path:
+        cmd = (f"node {cli_path} test --config "
+               f"{SELFTEST_SUBDIR}/playwright.config.ts "
+               "<your-spec>.spec.ts")
+    else:
+        cmd = (f"npx --yes @playwright/test test --config "
+               f"{SELFTEST_SUBDIR}/playwright.config.ts "
+               "<your-spec>.spec.ts")
+    port_note = f" (port {smoke})" if smoke else ""
+    return (
+        "\nSELF-TEST CONTRACT (no staged specs — you author the tests): "
+        "the graded tests are hidden and derived from the requirement "
+        "text — YOUR specs are the only pre-delivery verification, and "
+        "each node's scenarios ARE the test oracle (GIVEN = arrange, "
+        "WHEN = act, THEN = assert; verbatim quoted strings = exact "
+        "accessible names). Write specs ONLY under "
+        f"{SELFTEST_SUBDIR}/ (copy MY-CHECK.spec.ts.example as a "
+        "starting point; never inside .arc/ — host-owned, read-only) "
+        "and run them against the RUNNING app"
+        f"{port_note}. How you invoke Playwright is yours to choose — "
+        "custom configs, batch runs, raw scripts, all fine; the standard "
+        "one-liner below stays the most convenient (explicit file "
+        "argument = fast, re-runnable, and an identical green twice "
+        "auto-stops the turn):\n"
+        f"  {cmd}\n"
+        "curl the API only to inspect responses while debugging — never "
+        "as flow-level verification (a green API response does not mean "
+        "the browser flow walks). Red = the flow fails on the RUNNING "
+        "app — fix the app, then rerun. Debug specs you write while "
+        "chasing a red are scratch: delete them (or rename to "
+        "zz-debug-*) once the node is green, so ui-smoke/ ships only "
+        "meaningful per-node coverage.\n"
+        "SEED RESET (before each self-test round): run "
+        "`rm -f backend/data/db.run.json && sh .arc/host/restart-server.sh` "
+        "from the workspace root — earlier turns and spec runs leave "
+        "runtime data behind, and arrange steps that assume the seeded "
+        "state then fail with false reds on perfectly good code.\n"
+        "SELF-TEST FIDELITY RULES (how the hidden grader differs from a "
+        "hand-walk): 1) LOCATORS ARE ROLES — a requirement phrase "
+        "\"A region named X\" means getByRole('region', { name: X }), "
+        "\"a dialog named X\" means getByRole('dialog', { name: X }); "
+        "getByText/getByLabel on a role-less div is a false green (the "
+        "grader's role locator is what runs). 2) TEST BOTH GESTURES — "
+        "every selection-driven flow needs a drag variant AND a "
+        "click+Shift-click variant (a Shift-collapsing handler passes "
+        "drag-only tests and still loses the family); every dialog flow "
+        "needs the mouse path AND Enter/Escape. 3) ASSERT STATE, NOT "
+        "PRESENCE — verify the observable result (aria-selected states, "
+        "persisted-then-reloaded values, computed results), not that "
+        "controls exist; for any flow with sign-in, reload the page "
+        "mid-flow and assert the signed-in identity survives (session "
+        "restore). 4) THE GRADER LOCATOR IS STRICT AND CANONICAL — if "
+        "your own spec needs exact:/container-scoping or other "
+        "disambiguation to reach a control, that almost always means two "
+        "controls on the page share an accessible name. That is an APP "
+        "defect: rename/hide/scope the control in the app. The grader "
+        "cannot disambiguate; your spec can — so a green spec built on a "
+        "workaround is a false green.\n")
 
 BATCH_DIRECTIVE_NO_SPEC = """\
 
@@ -2971,9 +3436,9 @@ VERIFICATION_RULES = (
     "the SPEC RUN command is the primary way; for anything else write "
     "your OWN Playwright spec from the requirement text (copy "
     f"{SELFTEST_SUBDIR}/MY-CHECK.spec.ts.example, edit it) and run it "
-    "with an explicit file argument via the SELF-TEST command — that "
-    "form is allowed, re-runnable, and green-stop-visible. Never spawn "
-    "a raw browser or inline browser script. NEVER revert project "
+    "against the running app — the SELF-TEST one-liner with an explicit "
+    "file argument is the convenient standard form, and how you invoke "
+    "Playwright beyond it is yours to choose. NEVER revert project "
     "files with git checkout/reset/restore — the repo is host-managed "
     "for traceability; when a check fails, fix forward with edits.\n")
 def build_spec_run_cmd(cli_path: str | None,
@@ -3214,7 +3679,20 @@ in frontend/, then start the backend with PORT={smoke}, confirm it binds, \
 and STOP it afterwards. NEVER bind port {port} yourself — the runner \
 terminates the run if it sees a server there while you are still working. \
 Write the fix now — do not just describe it.\
-"""
+{retry_note}"""
+
+# P1-2a(09-30):同一批的修复轮第 2 次仍在红=上一种修法没生效——追加换
+# 策略指令,不再让模型重复同一补丁形状(sheet 法医"重复失败不升级")。
+# 中性措辞:重锚需求原文,不预设任何失败形态。
+REHEARSAL_REPAIR_RETRY_NOTE = (
+    "\n\nNOTE: a previous repair attempt for this SAME failure already "
+    "ran and the error is still here — the fix approach itself is not "
+    "working. Do not repeat the same kind of patch. Re-derive the "
+    "affected chain from the requirement text in THIS BATCH's contract "
+    "below, check what your last edit actually changed on disk, and take "
+    "a different approach.\n")
+
+REHEARSAL_REPAIR_FIRST_NOTE = "\n"
 
 SPEC_REGRESSION_REPAIR_PROMPT = """\
 A full staged regression run just found previously-green tests that are \
@@ -3247,6 +3725,9 @@ def main() -> int:
                         default=int(os.environ.get("ARCBENCH_WEB_PORT",
                                                    os.environ.get("ARC_WEB_PORT", "3000"))))
     args = parser.parse_args()
+
+    # 内核基础提示词 7 工具对齐覆盖(在任何 octos 会话启动前落位)。
+    install_gateway_prompt_override(log)
 
     # Diagnostics (no secrets): which model endpoint did the runner inject?
     _key = os.environ.get("OPENAI_API_KEY", "")
@@ -3580,17 +4061,22 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001 — 基线缺失只降级检查
                 log(f"[fixture] seed integrity baseline unavailable: {exc}")
         # ---- 模型自测骨架 staging(09-27 目标优先定则) ----
-        # 宿主不再编写验收用例(ui_smoke 契约套件/flow_suite 流套件已
-        # 删除)——测试用例由模型根据需求原文自己生成。宿主只落盘内核
-        # 放行命令形状所需的最小骨架:playwright.config.ts + MY-CHECK
-        # 示例。凭据前奏等由模型按各自 spec 自行 arrange。
+        # 测试用例由模型根据需求原文自己生成。宿主只落盘内核放行命令
+        # 形状所需的最小骨架:playwright.config.ts + MY-CHECK 示例。
+        # 凭据前奏等由模型按各自 spec 自行 arrange。
         selftest_note = ""
         stage_selftest_dir(output_dir, smoke_port)
         selftest_note = build_selftest_note(
-            str(toolchain_cli) if toolchain_cli is not None else None)
+            str(toolchain_cli) if toolchain_cli is not None else None,
+            smoke=smoke_port)
         log("[plan] self-test skeleton staged "
             f"({SELFTEST_SUBDIR}/playwright.config.ts + example); "
             "tests are model-authored from the requirement text")
+        # 流级验证定则(09-27 删除宿主自写验收,09-30 强化):比赛全自动
+        # 无人工环节,流验证只能由模型自生成自验证(SELF-TEST CONTRACT,
+        # spec 先行+逐句锚定需求原文);宿主硬编码走查/探针类别整体不要
+        # (faó4c80 删 flow_suite,09-30 复活后再度拆除)——宿主侧只做
+        # 运行时治理(rehearsal/排练门/端口看门狗),不做内容决策。
         # extra_rules 全局契约:确定性渲染(静态 manifest → 每轮字节相同,
         # 缓存律),经稳定 CONTRACT 段常驻;节点 GIVEN 走 FOCUS validation 前缀。
         fixture_rules = fixture_manifest.render_extra_rules(
@@ -3717,6 +4203,34 @@ def main() -> int:
             events_log=events_log_path,
             system_context=system_row_ctx or None,
         )
+        # 修复类短轮专用 driver(思考降档,见 THINKING_REPAIR):独立
+        # config_dir(低档 config.json)+ 独立 profile 目录(新会话必建
+        # 新 profile 定则)+ 同一系统行上下文。适用面=自含错误摘要的修复
+        # turn(syntax/rehearsal/spec 回归);nudge 类依赖会话连续性,留
+        # 主 driver。懒创建,首次修复时才起。
+        repair_driver: OctosDriver | None = None
+        repair_config_dir = Path(tempfile.mkdtemp(prefix="octos-config-repair-"))
+        repair_data_dir = Path(tempfile.mkdtemp(prefix="octos-profile-repair-"))
+
+        def get_repair_driver() -> OctosDriver:
+            nonlocal repair_driver
+            if repair_driver is None:
+                repair_env = build_octos_env(
+                    repair_config_dir,
+                    thinking=THINKING_REPAIR,
+                    effort=REASONING_EFFORT_REPAIR)
+                repair_env["OCTOS_HOME"] = str(repair_data_dir)
+                repair_env["PORT"] = str(smoke_port)
+                repair_driver = OctosDriver(
+                    octos_bin, output_dir, repair_env, repair_data_dir,
+                    max_iter,
+                    events_log=events_log_path,
+                    system_context=system_row_ctx or None,
+                )
+                log(f"[flow] repair driver online (thinking="
+                    f"{THINKING_REPAIR}, effort={REASONING_EFFORT_REPAIR})")
+            return repair_driver
+
         # envelope/系统行通道删除——契约随分层装配走
         # (全局层在系统行,模块层在工单);进度账本是宿主本地 dict(供工单
         # 进度行/分段摘要/事件标记消费)。
@@ -3747,22 +4261,25 @@ def main() -> int:
                     break
                 t0 = time.time()
                 # 全局层(地图/契约/播种契约)已常驻系统行;骨架轮决策面
-                # (auth/数据端点契约)再以全量双段原文直接在场——不依赖
-                # "按行号自读"指针(09-29 sheet run:骨架轮裸猜
-                # /api/signin,排练门返修 22 调用)。
+                # (auth/数据端点契约)以 REQ CONTENT + GIVEN 数据契约在场
+                # —不依赖"按行号自读"指针(09-29 sheet run:骨架轮裸猜
+                # /api/signin,排练门抓住返修 22 调用)。WHEN/THEN 断言对
+                # 骨架决策零贡献却不进(此前全量 blob 占会话 1 成本 ~1/3,
+                # 判分条件随各家族工单到达)。
                 sk_prompt = GOAL_FIRST_SKELETON_PROMPT.format(
                     port=args.web_port, smoke=smoke_port) \
                     + "\nSYSTEM ROW: the full requirements map, host " \
                     "contract and fixture contract are installed in " \
                     "your system prompt (byte-stable) — work from " \
                     "them directly." \
-                    + "\n\nALL REQUIREMENTS — REQ CONTENT + VERIFICATION " \
-                    "REQUIREMENTS (verbatim from requirements.yaml; the " \
-                    "auth and data contracts you lay now must satisfy " \
-                    "these; family work orders re-carry their own " \
-                    "scope):\n\n" \
+                    + "\n\nALL REQUIREMENTS — REQ CONTENT + scenario " \
+                    "GIVEN data contracts (verbatim from " \
+                    "requirements.yaml; the auth and data contracts you " \
+                    "lay now must satisfy these; graded scenarios and " \
+                    "family work orders arrive per family):\n\n" \
                     + render_verbatim_nodes(tree,
-                                            fixture_seeded_scenarios)
+                                            fixture_seeded_scenarios,
+                                            verification="data-only")
                 if tests_dir:
                     sk_prompt += "\n" + ACCEPTANCE_STAGED_NOTE
                 sk_wall = turn_wall(1)
@@ -3810,7 +4327,8 @@ def main() -> int:
                         for rg_attempt in range(1, 3):
                             if time_up():
                                 break
-                            driver.run(syntax_repair_prompt(syn), 420, 420)
+                            get_repair_driver().run(
+                                syntax_repair_prompt(syn), 420, 420)
                             syn = js_syntax_errors(output_dir)
                             if not syn:
                                 log(f"[gate] syntax repaired "
@@ -3957,8 +4475,20 @@ def main() -> int:
                     progress_line,
                 ]
                 node_spec = "\n\n".join(x for x in spec_parts if x)
+                # SPEC DISCIPLINE 推导锚点按本批节点分叉(09-29:sheet 类
+                # 任务场景步是模板占位,真契约在 description;github 类是
+                # 真步骤,锚 VERIFICATION 文本)。逐批判定,同批一致。
+                batch_templated = any(
+                    n.get("_scenarios_templated") for n in batch)
+                spec_anchor = (
+                    "the REQ CONTENT descriptions above — this batch's "
+                    "scenario steps are template placeholders; the "
+                    "descriptions are the authoritative flow contract"
+                    if batch_templated else
+                    "the VERIFICATION REQUIREMENTS text above")
                 base_prompt = GOAL_FIRST_NODE_PROMPT_TEMPLATE.format(
                     node_id=focus_id, node_spec=node_spec,
+                    spec_anchor=spec_anchor,
                     port=args.web_port, smoke=smoke_port)
                 batch_specs = sorted(
                     {f for nid in batch_ids
@@ -3972,11 +4502,7 @@ def main() -> int:
                         if toolchain_cli is not None else None,
                         batch_specs)
                 else:
-                    node_prompt = base_prompt \
-                        + NO_STAGED_SPECS_NOTE.format(
-                            smoke=smoke_port,
-                            selftest_dir=SELFTEST_SUBDIR) \
-                        + selftest_note
+                    node_prompt = base_prompt + selftest_note
                 if len(batch) > 1:
                     node_prompt += (
                         BATCH_DIRECTIVE.format(
@@ -4010,6 +4536,7 @@ def main() -> int:
                 except Exception:
                     pre_batch_head = None
                 batch_turn_ok = True
+                st_baseline = None
                 if driver.auth_exhausted:
                     # Gateway burned its credential budget (tb-trace-001:
                     # 55% of wall clock陪跑 auth failures). Stop paying
@@ -4028,6 +4555,12 @@ def main() -> int:
                             f"({driver.auth_failures})")
                 else:
                     wall = turn_wall(len(batch))
+                    # T1 基线:requirements-only 批 turn 前记 tools.jsonl
+                    # 偏移,turn 后增量判"自测运行过没有"(零运行=过程
+                    # 纪律缺口,见 SELFTEST_NUDGE_PROMPT 注释)。
+                    st_baseline = (_selftest_baseline(output_dir)
+                                   if not (tests_dir and batch_specs)
+                                   else None)
                     ok, text = driver.run(node_prompt, min(node_timeout, wall), wall)
                 batch_turn_ok = ok
                 log(f"[flow] batch {focus_id} {'ok' if ok else 'FAILED'} "
@@ -4092,6 +4625,21 @@ def main() -> int:
                                     nid, "turn made no file changes")
                                 failed.append(nid)
                             continue
+                if (ok and st_baseline is not None
+                        and project_files_changed(output_dir, t0)
+                        and not _selftest_ran_since(output_dir, st_baseline)):
+                    # T1:文件变了但零自测运行——SPEC DISCIPLINE 的宿主侧
+                    # 过程事实(只看"测试发生过没有",不读结果;忠实度由
+                    # spec 先行+文本锚定承担)。一次中性 nudge,主会话
+                    # (需本轮实现上下文)。
+                    log(f"[gate] {focus_id}: files changed but no "
+                        "self-test run recorded; nudging to test")
+                    if not time_up():
+                        driver.run(
+                            SELFTEST_NUDGE_PROMPT
+                            + batch_req_block(
+                                batch, fixture_seeded_scenarios),
+                            420, 420)
                 syn = js_syntax_errors(output_dir)
                 if syn:
                     log(f"[gate] {focus_id}: {len(syn)} JS syntax "
@@ -4099,7 +4647,8 @@ def main() -> int:
                     for rg_attempt in range(1, 3):
                         if time_up():
                             break
-                        driver.run(syntax_repair_prompt(syn), 420, 420)
+                        get_repair_driver().run(
+                            syntax_repair_prompt(syn), 420, 420)
                         syn = js_syntax_errors(output_dir)
                         if not syn:
                             log(f"[gate] {focus_id} syntax repaired "
@@ -4150,9 +4699,14 @@ def main() -> int:
                             if time_up():
                                 break
                             r_wall = turn_wall(len(batch))
-                            driver.run(REHEARSAL_REPAIR_PROMPT.format(
-                                error=r_err[-1200:],
-                                port=args.web_port, smoke=smoke_port)
+                            get_repair_driver().run(
+                                REHEARSAL_REPAIR_PROMPT.format(
+                                    error=r_err[-1200:],
+                                    port=args.web_port, smoke=smoke_port,
+                                    retry_note=(
+                                        REHEARSAL_REPAIR_RETRY_NOTE
+                                        if fix_attempt > 1
+                                        else REHEARSAL_REPAIR_FIRST_NOTE))
                                 + batch_req_block(
                                     batch, fixture_seeded_scenarios),
                                 min(node_timeout, r_wall), r_wall)
@@ -4245,7 +4799,7 @@ def main() -> int:
                                     f"{g_run[1]}f — repairing while the "
                                     "context is hot")
                                 r_wall = turn_wall(len(batch))
-                                driver.run(
+                                get_repair_driver().run(
                                     SPEC_REGRESSION_REPAIR_PROMPT.format(
                                         failed=", ".join(g_run[2] or []),
                                         smoke=smoke_port,
@@ -4262,7 +4816,120 @@ def main() -> int:
                                 log(f"[plan] regression green: "
                                     f"{g_run[0]}p/{g_run[1]}f")
 
-
+            # P1-2b(09-30):blocked 批终局前重试 pass——此前 blocked 节点
+            # 只有 final LLM 轮/post-final 探针两条翻案路,从未有专门
+            # 重试(sheet 法医"重复失败不升级"的批级补齐)。一遍为限,
+            # 每批一个 turn(fresh 会话+活排练错误+双段契约闭包),
+            # remaining() 撑不起 final 预留即整段跳过。中性措辞:重锚
+            # 需求原文,不预设失败形态(预期拒绝类场景随 THEN 作断言)。
+            if not driver.auth_exhausted:
+                blocked_batches = [
+                    b for b in node_batches
+                    if any(plan_statuses.get(str(n.get("id"))) == "blocked"
+                           for n in b)]
+                for rb in blocked_batches:
+                    if remaining() <= final_reserve + node_floor * len(rb):
+                        log("[flow] blocked retry skipped: budget tail "
+                            "too thin")
+                        break
+                    r_ids = [str(n.get("id")) for n in rb]
+                    r_focus = r_ids[0]
+                    log(f"[flow] blocked retry pass: {r_focus} "
+                        f"({len(r_ids)} node(s))")
+                    # 活错误:先彩排拿当前红项,修复轮带真实证据。
+                    r_err, _r_report = rehearse_node(
+                        output_dir, smoke_port, probe_list, spec_ports_extra,
+                        fixture_probe_list(), seed_rows=seed_rows_expected)
+                    if r_err is None:
+                        # 探针已绿(如 final 前状态自愈):直接翻案。
+                        for nid in r_ids:
+                            plan_statuses[nid] = "done"
+                            if nid in failed:
+                                failed.remove(nid)
+                                events.mark_implementation_done(
+                                    nid, "recovered before blocked retry")
+                                node_done_notes[nid] = \
+                                    "recovered before blocked retry"
+                        continue
+                    r_fam = family_of.get(r_ids[0])
+                    r_spec_parts = ["THIS FAMILY — folder contracts "
+                                    "(verbatim):",
+                                    describe_family_context(r_fam, rb)
+                                    if r_fam else ""]
+                    r_dep = collect_dependency_context(
+                        tree, rb, family_of, fixture_seeded_scenarios)
+                    if r_dep:
+                        r_spec_parts += ["CROSS-FAMILY DEPENDENCIES "
+                                         "(Depends on closure, verbatim):",
+                                         r_dep]
+                    r_spec_parts += [
+                        "THIS BATCH — requirement nodes (verbatim):",
+                        "\n\n".join(describe_node(n, fixture_seeded_scenarios)
+                                   for n in rb),
+                        _progress_ledger_line(family_of, plan_statuses,
+                                              only=family_scope or None),
+                    ]
+                    r_prompt = (
+                        "BLOCKED RETRY: this family's earlier work order "
+                        "ended, but the app keeps failing the host's "
+                        "startup/route rehearsal. Current rehearsal "
+                        "error:\n" + r_err[-1200:] + "\n\nRe-derive this "
+                        "family's implementation from the THIS BATCH "
+                        "contract below — the requirement text is the "
+                        "authority (quoted names and error strings "
+                        "verbatim). Fix the RUNNING app, then verify with "
+                        "your own spec.\n"
+                        + GOAL_FIRST_NODE_PROMPT_TEMPLATE.format(
+                            node_id=r_focus,
+                            node_spec="\n\n".join(
+                                x for x in r_spec_parts if x),
+                            spec_anchor=(
+                                "the REQ CONTENT descriptions above — this "
+                                "batch's scenario steps are template "
+                                "placeholders; the descriptions are the "
+                                "authoritative flow contract"
+                                if any(n.get("_scenarios_templated")
+                                       for n in rb) else
+                                "the VERIFICATION REQUIREMENTS text above"),
+                            port=args.web_port, smoke=smoke_port)
+                        + (build_spec_run_cmd(
+                            str(toolchain_cli)
+                            if toolchain_cli is not None else None,
+                            sorted({f for nid in r_ids
+                                    for f in (spec_map.get(nid) or [])}))
+                           if tests_dir else selftest_note))
+                    driver.close()  # fresh 会话:不带旧批的失败上下文
+                    r_wall = turn_wall(len(rb))
+                    r_ok, _r_text = driver.run(
+                        r_prompt, min(node_timeout, r_wall), r_wall)
+                    runtime.git.commit(
+                        f"{r_focus} (blocked retry): "
+                        + "; ".join(str(n.get("name", "")) for n in rb))
+                    syn = js_syntax_errors(output_dir)
+                    if syn:
+                        get_repair_driver().run(syntax_repair_prompt(syn),
+                                                420, 420)
+                        syn = js_syntax_errors(output_dir)
+                    if not syn:
+                        r_err2, _ = rehearse_node(
+                            output_dir, smoke_port, probe_list,
+                            spec_ports_extra, fixture_probe_list(),
+                            seed_rows=seed_rows_expected)
+                        if r_err2 is None:
+                            for nid in r_ids:
+                                plan_statuses[nid] = "done"
+                                if nid in failed:
+                                    failed.remove(nid)
+                                    events.mark_implementation_done(
+                                        nid, "recovered via blocked retry")
+                                    node_done_notes[nid] = \
+                                        "recovered via blocked retry"
+                            log(f"[plan] blocked retry {r_focus}: GREEN")
+                        else:
+                            log(f"[plan] blocked retry {r_focus}: still "
+                                f"red ({r_err2.splitlines()[0][:120]})")
+                    if time_up():
+                        break
 
             # Final verification pass; octos leaves the port free.
             ok, text = False, "skipped: time budget"
@@ -4390,9 +5057,7 @@ def main() -> int:
                             if toolchain_cli is not None else None,
                             final_spec_files(tier2_run, output_dir))
                     else:
-                        final_prompt += NO_STAGED_SPECS_NOTE.format(
-                            smoke=smoke_port,
-                            selftest_dir=SELFTEST_SUBDIR)
+                        final_prompt += selftest_note
                     _ensure_dev_server(output_dir, smoke_port,
                                        spec_ports_extra, log)
                     log("[flow] final verification turn starting (slim, "
@@ -4488,9 +5153,22 @@ def main() -> int:
                             ok = True
                             text = ("post-final rehearsal green after "
                                     "repair turn")
+                # 自测取证锚点(09-30 github 法医):平台 runner 上 Tier-2
+                # 恒不可用(spec_run=None),模型自测是唯一真浏览器验证——
+                # 从内核 context-logs 的 tools.jsonl 复原每条 spec 的末次
+                # 结果,把"模型自述绿"升级为随 zip 带回的事实记录。
+                try:
+                    st = _collect_selftest_evidence(output_dir)
+                    if st:
+                        hs["selftest"] = st
+                        log(f"[plan] selftest evidence: {st['runs']} "
+                            f"playwright run(s), {len(st['specs'])} spec(s)")
+                except Exception as exc:  # 取证绝不挡 final 链
+                    log(f"[plan] selftest evidence collect failed: {exc}")
                 # final 验证仪表落盘(自留取证件,随工作区带回):Tier-1
-                # rehearsal 报告/Tier-2 两轮计数/page-health 红项——平台
-                # 不下发失败明细,这里是唯一的宿主侧验真记录。
+                # rehearsal 报告/Tier-2 两轮计数/page-health 红项/模型自测
+                # 末次结果——平台不下发失败明细,这里是唯一的宿主侧验真
+                # 记录。
                 try:
                     hs_dir = output_dir / "octos"
                     hs_dir.mkdir(parents=True, exist_ok=True)
@@ -4528,7 +5206,11 @@ def main() -> int:
                 ok_r, text_r = driver.run(
                     REHEARSAL_REPAIR_PROMPT.format(
                         error=err[-1200:], port=args.web_port,
-                        smoke=smoke_port),
+                        smoke=smoke_port,
+                        retry_note=(
+                            REHEARSAL_REPAIR_RETRY_NOTE
+                            if rehearsal > 1
+                            else REHEARSAL_REPAIR_FIRST_NOTE)),
                     420, 420,
                 )
                 log(f"[rehearsal] repair turn "
@@ -4538,6 +5220,10 @@ def main() -> int:
         finally:
             watchdog_stop.set()
             driver.close()
+            if repair_driver is not None:
+                repair_driver.close()
+                shutil.rmtree(repair_data_dir, ignore_errors=True)
+                shutil.rmtree(repair_config_dir, ignore_errors=True)
         # A budget-skipped final pass says nothing about node tests — the
         # platform's own Playwright run is the verdict there, so leave the
         # nodes unmarked instead of blanket-failing the ones that landed.
