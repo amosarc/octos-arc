@@ -2522,6 +2522,52 @@ def _progress_ledger_line(family_of: dict[str, dict],
     return "PROGRESS (family ledger, document order): " + ", ".join(parts)
 
 
+def build_work_order_spec(tree: dict, batch: list[dict],
+                          family_of: dict[str, dict],
+                          seeded_scenarios: set[str] | frozenset | None,
+                          statuses: dict[str, str],
+                          scope: frozenset[str] | None = None
+                          ) -> tuple[str, str]:
+    """工单正文 + SPEC DISCIPLINE 推导锚点(唯一出处)。
+
+    主循环批 turn 与 blocked-retry pass 共用——此前 retry 侧是手工复制
+    且已漂移(缺系统行 NOTE)。段序:家族契约 → 依赖闭包 → 批节点 →
+    NOTE(系统行常驻层指针)→ 进度账本行。scope=运行范围时账本只列
+    范围内家族。
+    spec_anchor 按本批节点分叉(09-29):sheet 类任务场景步是模板占位,
+    真契约在 REQ CONTENT;github 类是真步骤,锚 VERIFICATION 文本。
+    """
+    fam = family_of.get(str(batch[0].get("id")))
+    parts = [
+        "THIS FAMILY — folder contracts (verbatim):",
+        describe_family_context(fam, batch) if fam is not None else "",
+    ]
+    dep_ctx = collect_dependency_context(tree, batch, family_of,
+                                         seeded_scenarios)
+    if dep_ctx:
+        parts += ["CROSS-FAMILY DEPENDENCIES (Depends on closure, "
+                  "verbatim):", dep_ctx]
+    parts += [
+        "THIS BATCH — requirement nodes (verbatim):",
+        "\n\n".join(describe_node(n, seeded_scenarios) for n in batch),
+        "NOTE: the full requirements map, host contract and fixture "
+        "contract are installed in your system prompt (byte-stable) — "
+        "they bind exactly as if quoted here. Cross-family detail "
+        "beyond the closure above: read THAT section of "
+        "requirements/requirements.yaml by heading id.",
+        _progress_ledger_line(family_of, statuses, only=scope or None),
+    ]
+    node_spec = "\n\n".join(x for x in parts if x)
+    batch_templated = any(n.get("_scenarios_templated") for n in batch)
+    spec_anchor = (
+        "the REQ CONTENT descriptions above — this batch's scenario "
+        "steps are template placeholders; the descriptions are the "
+        "authoritative flow contract"
+        if batch_templated else
+        "the VERIFICATION REQUIREMENTS text above")
+    return node_spec, spec_anchor
+
+
 # ------------------------------------------------------- run scope (灵活范围)
 #
 # 首跑/快迭代机制:OCTOS_ARC_FAMILIES 限定本次 run 只实现哪些家族(逗号
@@ -2807,13 +2853,15 @@ def build_octos_env(config_dir: Path, *, thinking: str | None = None,
     # llm.jsonl——分层装配的前缀缓存验证基建(逐字节比对系统行/前缀;
     # 磁盘代价 KB 级/轮)。
     env.setdefault("OCTOS_CONTEXT_LOG", "1")
-    # 滑动窗口双管(09-29 三跑:单会话累积到 631K 才压缩一次,整表重写=
-    # 全额缓存 miss,60M cache_read 主导成本)。①压缩阈值从"窗口 70%"
-    # (deepseek 大窗口下形同虚设)钉到 150K;②内核压力淘汰(PromptBuild
-    # Policy 的 max_prompt_token_estimate)同值激活——按 token 帽做尾部
-    # 感知淘汰,不动压缩代数,悬崖变斜坡。运维显式 export 仍优先。
+    # 滑动窗口(09-29 三跑:单会话累积到 631K 才压缩一次,整表重写=
+    # 全额缓存 miss,60M cache_read 主导成本)。压缩阈值钉 150K——对大
+    # 窗口 lane(agnes 512K,内核推导 358K)是收紧;09-30 起内核把 env
+    # 值 clamp 到窗口×7/10(min 语义,ui_protocol_transport.rs 的
+    # appui_compact_threshold_tokens_for):小窗口/unknown 模型(默认
+    # 128K→89.6K)自动回落,压缩与压力双闸不再悬在窗口之上。压力淘汰
+    # 不显式设 env——内核 unset 语义=跟随压缩阈值,自动继承同一 clamp;
+    # 显式钉值反而绕过 clamp。运维显式 export 仍优先。
     env.setdefault("OCTOS_CONTEXT_COMPACT_THRESHOLD_TOKENS", "150000")
-    env.setdefault("OCTOS_PROMPT_PRESSURE_TOKENS", "150000")
     # Any npm/npx the model runs inside the runner goes to the China mirror;
     # npmjs.org is slow/unreliable from the ARC runner network.
     env.setdefault("npm_config_registry", "https://registry.npmmirror.com")
@@ -4397,48 +4445,11 @@ def main() -> int:
                 # blocked=blocked;否则 active/pending),随工单下发——
                 # planctl 退役后全局进度的唯一载体。范围 run 只列范围
                 # 内家族(范围外不制造"永远 pending"的噪音)。
-                progress_line = _progress_ledger_line(
-                    family_of, plan_statuses,
-                    only=family_scope or None)
                 # 分层装配:全局层(地图+契约+播种契约)常驻系统行;
                 # 工单=模块层(本家族全子树)+依赖闭包+批节点+进度。
-                fam = family_of.get(batch_ids[0])
-                fam_ctx = describe_family_context(fam, batch) \
-                    if fam is not None else ""
-                dep_ctx = collect_dependency_context(
-                    tree, batch, family_of, fixture_seeded_scenarios)
-                spec_parts = [
-                    "THIS FAMILY — folder contracts (verbatim):",
-                    fam_ctx,
-                ]
-                if dep_ctx:
-                    spec_parts += [
-                        "CROSS-FAMILY DEPENDENCIES (Depends on "
-                        "closure, verbatim):", dep_ctx]
-                spec_parts += [
-                    "THIS BATCH — requirement nodes (verbatim):",
-                    "\n\n".join(describe_node(n, fixture_seeded_scenarios)
-                               for n in batch),
-                    "NOTE: the full requirements map, host contract "
-                    "and fixture contract are installed in your "
-                    "system prompt (byte-stable) — they bind exactly "
-                    "as if quoted here. Cross-family detail beyond "
-                    "the closure above: read THAT section of "
-                    "requirements/requirements.yaml by heading id.",
-                    progress_line,
-                ]
-                node_spec = "\n\n".join(x for x in spec_parts if x)
-                # SPEC DISCIPLINE 推导锚点按本批节点分叉(09-29:sheet 类
-                # 任务场景步是模板占位,真契约在 description;github 类是
-                # 真步骤,锚 VERIFICATION 文本)。逐批判定,同批一致。
-                batch_templated = any(
-                    n.get("_scenarios_templated") for n in batch)
-                spec_anchor = (
-                    "the REQ CONTENT descriptions above — this batch's "
-                    "scenario steps are template placeholders; the "
-                    "descriptions are the authoritative flow contract"
-                    if batch_templated else
-                    "the VERIFICATION REQUIREMENTS text above")
+                node_spec, spec_anchor = build_work_order_spec(
+                    tree, batch, family_of, fixture_seeded_scenarios,
+                    plan_statuses, scope=family_scope or None)
                 base_prompt = GOAL_FIRST_NODE_PROMPT_TEMPLATE.format(
                     node_id=focus_id, node_spec=node_spec,
                     spec_anchor=spec_anchor,
@@ -4804,24 +4815,9 @@ def main() -> int:
                                 node_done_notes[nid] = \
                                     "recovered before blocked retry"
                         continue
-                    r_fam = family_of.get(r_ids[0])
-                    r_spec_parts = ["THIS FAMILY — folder contracts "
-                                    "(verbatim):",
-                                    describe_family_context(r_fam, rb)
-                                    if r_fam else ""]
-                    r_dep = collect_dependency_context(
-                        tree, rb, family_of, fixture_seeded_scenarios)
-                    if r_dep:
-                        r_spec_parts += ["CROSS-FAMILY DEPENDENCIES "
-                                         "(Depends on closure, verbatim):",
-                                         r_dep]
-                    r_spec_parts += [
-                        "THIS BATCH — requirement nodes (verbatim):",
-                        "\n\n".join(describe_node(n, fixture_seeded_scenarios)
-                                   for n in rb),
-                        _progress_ledger_line(family_of, plan_statuses,
-                                              only=family_scope or None),
-                    ]
+                    r_node_spec, r_anchor = build_work_order_spec(
+                        tree, rb, family_of, fixture_seeded_scenarios,
+                        plan_statuses, scope=family_scope or None)
                     r_prompt = (
                         "BLOCKED RETRY: this family's earlier work order "
                         "ended, but the app keeps failing the host's "
@@ -4834,16 +4830,8 @@ def main() -> int:
                         "your own spec.\n"
                         + GOAL_FIRST_NODE_PROMPT_TEMPLATE.format(
                             node_id=r_focus,
-                            node_spec="\n\n".join(
-                                x for x in r_spec_parts if x),
-                            spec_anchor=(
-                                "the REQ CONTENT descriptions above — this "
-                                "batch's scenario steps are template "
-                                "placeholders; the descriptions are the "
-                                "authoritative flow contract"
-                                if any(n.get("_scenarios_templated")
-                                       for n in rb) else
-                                "the VERIFICATION REQUIREMENTS text above"),
+                            node_spec=r_node_spec,
+                            spec_anchor=r_anchor,
                             port=args.web_port, smoke=smoke_port)
                         + (build_spec_run_cmd(
                             str(toolchain_cli)

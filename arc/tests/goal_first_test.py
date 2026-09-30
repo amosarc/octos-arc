@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import fixture_manifest  # noqa: E402
 import main  # noqa: E402
 import plan_envelope  # noqa: E402
 from scaffold import manifest as sc  # noqa: E402
@@ -670,6 +671,32 @@ class SystemRowTests(unittest.TestCase):
                 "stable content")
 
 
+class FixtureRulesTruncationTests(unittest.TestCase):
+    """FIXTURE 段常驻系统行(字节稳定层),必须整句收尾:截断上限只做
+    失控保护,不允许静默腰斩内容——github 全量段 ~2930 字符,2900 帽
+    曾恰好把尾句 "scratch test scripts belong in /tmp, never inside
+    .arc/acceptance." 断半。"""
+
+    def _render(self, stats):
+        return fixture_manifest.render_extra_rules({"e2e_envs": []}, stats)
+
+    def test_graph_text_ends_with_complete_sentence(self):
+        text = self._render({"kind": "graph", "seeded": 1,
+                             "uncovered": 0, "arrange": 0,
+                             "canonical": False})
+        self.assertIn("scratch test scripts belong in /tmp, never "
+                      "inside .arc/acceptance.", text)
+        self.assertTrue(text.endswith("."), text[-80:])
+        self.assertLess(len(text), fixture_manifest._MAX_EXTRA_RULES)
+
+    def test_sheet_text_unaffected_and_complete(self):
+        text = self._render({"kind": "sheet", "seeded": 0,
+                             "uncovered": 0, "arrange": 9,
+                             "canonical": True})
+        self.assertTrue(text.endswith("."), text[-80:])
+        self.assertLess(len(text), fixture_manifest._MAX_EXTRA_RULES)
+
+
 class GoalFirstRulesTests(unittest.TestCase):
     def test_goal_first_rules_name_every_contract_path(self):
         for name in sc.RULES_MUST_NAME:
@@ -1229,6 +1256,49 @@ class HostRuntimeRegressionTests(unittest.TestCase):
             real.parent.mkdir(parents=True)
             real.write_text("x", encoding="utf-8")
             self.assertTrue(main.project_files_changed(out, t))
+
+
+class WorkOrderSpecTests(unittest.TestCase):
+    """build_work_order_spec:批 turn 与 blocked-retry pass 共用的工单装配
+    (此前 retry 侧手工复制且缺系统行 NOTE——漂移修复的回归钉)。"""
+
+    def _spec(self, batch_ids, statuses=None, scope=None, tree=None):
+        src = tree or TREE
+        batch = [n for n in main.flatten_atomic(src)
+                 if str(n["id"]) in batch_ids]
+        return main.build_work_order_spec(
+            src, batch, main.family_index(src), frozenset(),
+            statuses or {}, scope)
+
+    def test_sections_in_order_with_note_and_ledger(self):
+        spec, anchor = self._spec(["REQ-2-1"],
+                                  statuses={"REQ-2-1": "active"})
+        # 段序:家族契约 → 依赖闭包 → 批节点 → NOTE → 账本行
+        self.assertLess(spec.index("THIS FAMILY"),
+                        spec.index("CROSS-FAMILY"))
+        self.assertLess(spec.index("CROSS-FAMILY"), spec.index("THIS BATCH"))
+        self.assertLess(spec.index("THIS BATCH"), spec.index("NOTE:"))
+        self.assertLess(spec.index("NOTE:"),
+                        spec.index("PROGRESS (family ledger"))
+        # 家族契约逐字 + 依赖闭包逐字 + 批节点逐字,NOTE 恒在场
+        # (blocked-retry 此前缺 NOTE 的漂移由此钉住)
+        self.assertIn("family two module contract", spec)
+        self.assertIn("family one module contract", spec)
+        self.assertIn("d21", spec)
+        self.assertEqual(anchor, "the VERIFICATION REQUIREMENTS text above")
+
+    def test_anchor_forks_on_templated_batch(self):
+        tree = json.loads(json.dumps(TREE))
+        for n in main.flatten_atomic(tree):
+            n["_scenarios_templated"] = True
+        _, anchor = self._spec(["REQ-2-1"], tree=tree)
+        self.assertIn("REQ CONTENT descriptions above", anchor)
+        self.assertIn("template placeholders", anchor)
+
+    def test_scope_limits_ledger_families(self):
+        spec, _ = self._spec(["REQ-1-1-1"], scope=frozenset({"REQ-1"}))
+        self.assertIn("REQ-1:pending", spec)
+        self.assertNotIn("REQ-2:", spec)
 
 
 if __name__ == "__main__":
