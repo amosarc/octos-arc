@@ -62,6 +62,7 @@ from arcbench_agent_runtime import AgentRuntime  # noqa: E402
 import clock  # noqa: E402  (时间戳单一时钟源:北京时间 UTC+8)
 import fixture_manifest  # noqa: E402  (夹具契约提取/宿主种子编译)
 import plan_envelope  # noqa: E402
+import rejection_audit  # noqa: E402  (拒绝文案引用审计:发明 400 保险网)
 import scaffold  # noqa: E402  (宿主脚手架包:模板/清单/schema 编译唯一公开面)
 
 # 只保留:①工具链 CLI 发现(下述 _pw_* 助手);②被内核放行的自测命令
@@ -1966,6 +1967,8 @@ def describe_node(node: dict,
     # verification="full":双段全量(工单/闭包/骨架地图);="data-only":
     # 只保留场景名+GIVEN 数据契约,WHEN/THEN 不进(骨架轮判据用不到
     # THEN 断言,却要为每个节点付全额场景文本并永久驻留历史)。
+    # GIVEN 恒原文(09-30 定则);seeded_scenarios 参数已随"宿主播种→
+    # 指针"机制退役保留占位,不再消费。
     lines = [f"ID: {node.get('id')}", f"Name: {node.get('name', '')}"]
     if node.get("description"):
         lines.append("REQ CONTENT (verbatim):")
@@ -1983,8 +1986,6 @@ def describe_node(node: dict,
                 "work order):")
         for sc in scenarios:
             lines.append(f"  - {sc.get('name', 'scenario')}")
-            key = f"{node.get('id')}::{sc.get('name', 'scenario')}"
-            seeded = bool(seeded_scenarios) and key in seeded_scenarios
             steps_templated = templated or bool(sc.get("_steps_templated"))
             for step in sc.get("steps") or []:
                 if not isinstance(step, dict):
@@ -1997,14 +1998,11 @@ def describe_node(node: dict,
                     # 模板节点/占位场景:GIVEN 是数据契约保留;WHEN/THEN
                     # 是占位垃圾,由注记统一说明,不逐条渲染。
                     continue
-                if seeded and kw.upper() == "GIVEN":
-                    # 宿主已按该 GIVEN 编译种子落盘 db.json——提示词
-                    # 收敛为一行指针,值以 FOCUS 段/db.json 为准(省 token)。
-                    lines.append(
-                        "      GIVEN fixtures seeded by host into "
-                        "backend/data/db.json — verify addressable on "
-                        "the running app")
-                    continue
+                # 09-30 定则:GIVEN 原样进上下文,不许指针化——曾把 seeded
+                # 场景的 GIVEN 换成"已播种进 db.json"一行指针,演员断言
+                # ("An organization Owner is signed in")随之离开模型上下
+                # 文,REQ-2/3 整族死在登录第一步(github 09-30 法医)。种子
+                # 由模型按需求实现后该分支自然消失,此处物理删除防回流。
                 lines.append(f"      {kw} {step.get('content', '')}")
             if (verification == "full" and steps_templated
                     and not templated and sc.get("_steps_templated")):
@@ -3266,21 +3264,25 @@ the map's families share, with Express on top of the host substrate \
 (src/lib/session.js = session mechanics, src/lib/crud.js = optional \
 generic REST factory, src/database/store.js = seed/query/tx store — \
 see the HOST CONTRACT) — \
-backend/data/db.json is the seeded database (expose its rows; NEVER \
-delete or rename them). Declare every account you provision in \
+backend/data/db.json ships EMPTY: the seed database is YOUR \
+implementation from the requirement's data: section and every scenario \
+GIVEN line (verbatim contract — names, roles, ownership, visibility, \
+relationships). Expose every requirement-named entity through your \
+API. Declare every account you provision in \
 backend/data/seed-accounts.json as [{{"username","password","path"?}}].
-2) Fixture records the FIXTURE CONTRACT lists as still unseeded go into \
-backend/data/db.json (the host already compiled every machine-readable \
-data:/GIVEN fixture into it — NEVER delete or rename those rows).
+2) Implement the seed NOW, in this turn: every entity the \
+requirements' data: section and GIVEN lines name goes into \
+backend/data/db.json — the family turns arrange their specs against \
+it, and a missing entity fails those families at arrange.
 3) The frontend shell: src/app/App.jsx layout/routing as the outline \
 demands, plus one self-contained feature file per requirement family \
 under frontend/src/features/<name>.jsx whose header comment lists that \
 family's REQ ids (empty components are fine — the family work orders \
 fill them).
 The outline is the app map: when a contract spans families, read THAT \
-section of requirements/requirements.yaml by its heading — never \
-re-derive seed data from the yaml (the fixture contract is in your \
-system prompt and the seeded db.json). \
+section of requirements/requirements.yaml by its heading — the seed \
+you write must come from the yaml's data: section and GIVEN lines, \
+never invented. \
 JavaScript/JSX only; dependencies are preinstalled — never run npm \
 install. Do not commit; the harness handles git.
 PORT DISCIPLINE: run any dev/test server ONLY on port {smoke}; NEVER \
@@ -3323,7 +3325,13 @@ fresh dist immediately, no restart needed.\
 SPEC DISCIPLINE: turn each node's scenarios into YOUR OWN Playwright \
 spec and WRITE THE SPEC BEFORE IMPLEMENTING the node — derive it \
 sentence-by-sentence from {spec_anchor} (GIVEN = arrange, WHEN = act, \
-THEN = assert; quoted strings = exact accessible names), watch it red, \
+THEN = assert; quoted strings = exact accessible names). Each node's \
+FIRST spec case walks its description literally: arrange exactly what \
+its GIVEN states — sign in as the actor the GIVEN names and realize \
+the seeded data it names — then click what it names, \
+fill ONLY the fields it names (an input the text does not mention \
+stays untouched), assert what it promises — error paths and edge \
+cases come after that case, never instead of it. Watch it red, \
 then implement until it walks green on the RUNNING app — scenario \
 flows actually walking, not string presence, are the verdict. Dialog \
 names, control labels, and quoted error strings must match the \
@@ -3336,9 +3344,20 @@ FLOW FIDELITY: the grader walks ONLY the operations the requirement \
 text names, in the order it names them — never make a step mandatory \
 that the text does not describe (an extra required field, dialog, or \
 confirmation breaks every scenario at that step).\
-VALIDATION SCOPE: a validation rule binds only the operation whose \
-requirement text states it — never reuse one operation's rule (e.g. a \
-rename's non-empty check) in another operation's pipeline.\
+VALIDATION SCOPE — CITE BEFORE YOU REJECT: implement a rejection (a \
+4xx, a validation error, a disabled submit) only where the requirement \
+text states it — find the exact sentence and copy it into a code \
+comment at the check (`// REQ-<id>: "<sentence>"`); if the text \
+mandates the rejection but quotes no exact message, cite the mandating \
+sentence and end the comment with `(message unspecified in text)`. No \
+mandating sentence at all means the operation must SUCCEED, with \
+absent or empty input \
+taking a neutral default (an auto-generated name, a blank field). A \
+described failure UX is not a trigger: never invent a failing input to \
+justify an error path the text promises but never conditions, and \
+never bind one operation's rejection to another operation. List every \
+rejection rule you implemented with its REQ citation in your closing \
+message.\
 REGRESSION SCOPE: re-check only the families you touched this turn.\
 
 {node_spec}"""
@@ -3544,20 +3563,10 @@ re-run whole suites and never re-verify chains that already passed. \
 Fix what is broken; do not rebuild what works. Do not commit.\
 """
 
-ACCEPTANCE_STAGED_NOTE = """\
-TEST LAYOUT (host-managed, two directories, no exceptions): the official \
-Playwright specs live READ-ONLY at .arc/acceptance/ — never edit, copy, \
-move, or delete anything there (the host re-stages them from a pristine \
-source and re-runs them itself; tampering only wastes your wall clock). \
-YOUR OWN specs live ONLY under ui-smoke/ (sanctioned config: \
-ui-smoke/playwright.config.ts). The staged spec files themselves are \
-the operational index of routes, roles, labels, testids, and per-test \
-action chains — your system prompt carries the requirements map and \
-the fixture contract, not the specs. Implement against the spec files, \
-and when anything fails or a detail is ambiguous, re-read the exact \
-spec under .arc/acceptance/ — it is the ground truth. Where the \
-requirement text disagrees, the spec wins.\
-"""
+# 09-30: ACCEPTANCE_STAGED_NOTE 整块退役——"Implement against the spec
+# files / the spec wins" 与工单 "the TEXT wins" 逐字对立,是发明规则经
+# staged spec 跨会话固化的教义通道(sheet 09-30 95×400 法医)。staged
+# specs 的回归套件地位已并入系统行权威句(plan_envelope.py)。
 
 
 
@@ -3971,9 +3980,6 @@ def main() -> int:
         # 2026-09-27 起有 staged specs 的任务同样落盘:隐藏评测 spec 通常
         # 多于 staged 公共 spec,final 的十类探针是对它们的附加防线
         # (节点轮自检命令仍只发给无 specs 任务,避免与 SPEC RUN 抢注意力)。
-        # NOTE staging 必须在 fixture materialize 之后(下方):auth 前奏
-        # 从 db.json/播种结果取登录账号,2026-09-26 github run 的 staging
-        # 早于播种 → auth=null → 33 条登录态字符串全部误报红,收尾被带偏。
         # 宿主模板无条件落盘：平台在 agent 退出后强制检查 workspace 的
         # frontend/ 与 backend/，与 plan 能力、验收测试是否定位到均无关；
         # 落盘是确定性本地写文件，skeleton 轮只负责在模板之上补全。
@@ -4016,16 +4022,15 @@ def main() -> int:
         # 直接写 backend/data/db.json,skeleton 轮模型只补语义关系;解析不了
         # 的条目进 uncovered 报告降级为 FOCUS GIVEN 清单。模型已写过种子
         # (非空 collections)绝不覆盖(重跑安全)。
+        # 宿主播种退役(09-30 定则):db.json 由模型按需求的 data: 段与
+        # GIVEN 行自己实现(GIVEN 原样进上下文);宿主只做机械推导
+        # (compile_seed 纯函数)供探针/完整性基线/统计——不落盘任何内容。
         fixture_compiled: dict | None = None
         try:
-            fixture_compiled = fixture_manifest.materialize(
-                output_dir, fixture_data)
-        except Exception as exc:  # noqa: BLE001 — 种子失败不阻断主流程
-            log(f"[fixture] seed materialization failed: {exc}")
-        if fixture_compiled is None:
-            log("[fixture] db.json already carries seed rows; "
-                "host seeding skipped")
-        elif fixture_compiled["db"]:
+            fixture_compiled = fixture_manifest.compile_seed(fixture_data)
+        except Exception as exc:  # noqa: BLE001 — 基线失败不阻断主流程
+            log(f"[fixture] seed compilation failed: {exc}")
+        if fixture_compiled and fixture_compiled["db"]:
             try:
                 arc_dir = output_dir / ".arc"
                 arc_dir.mkdir(parents=True, exist_ok=True)
@@ -4042,25 +4047,18 @@ def main() -> int:
                     encoding="utf-8")
             except OSError as exc:
                 log(f"[fixture] manifest write failed: {exc}")
-            log(f"[fixture] host seed kind={fixture_compiled['kind']} "
+            log(f"[fixture] seed expectation kind={fixture_compiled['kind']} "
                 f"rows={ {k: len(v) for k, v in fixture_compiled['db'].items()} } "
                 f"covered_nodes={len(fixture_compiled['covered'])} "
-                f"uncovered={len(fixture_compiled['uncovered'])}")
+                f"uncovered={len(fixture_compiled['uncovered'])} "
+                "(model implements db.json from the requirement text)")
         else:
             log("[fixture] no machine-compilable fixtures; contract rides "
-                "in FOCUS GIVEN lists")
-        # 种子完整性基线(文件级检查用):materialize 落盘成功时直接取
-        # 编译产物;跳过(db.json 已有种子,重跑场景)时 compile_seed
-        # 纯函数重算——预期行清单与落盘路径无关。
+                "in GIVEN lines (verbatim in prompts)")
+        # 种子完整性基线(文件级检查用):compile_seed 纯函数,与落盘无关。
         seed_rows_expected: dict = {}
         if fixture_compiled and fixture_compiled.get("db"):
             seed_rows_expected = fixture_compiled["db"]
-        elif fixture_data:
-            try:
-                seed_rows_expected = fixture_manifest.compile_seed(
-                    fixture_data).get("db") or {}
-            except Exception as exc:  # noqa: BLE001 — 基线缺失只降级检查
-                log(f"[fixture] seed integrity baseline unavailable: {exc}")
         # ---- 模型自测骨架 staging(09-27 目标优先定则) ----
         # 测试用例由模型根据需求原文自己生成。宿主只落盘内核放行命令
         # 形状所需的最小骨架:playwright.config.ts + MY-CHECK 示例。
@@ -4096,11 +4094,9 @@ def main() -> int:
             (fixture_compiled or {}).get("covered") or ())
         fixture_arranged_nodes = frozenset(
             (fixture_compiled or {}).get("arrange") or ())
-        fixture_seeded_scenarios = frozenset(
-            f"{nid}::{sname}"
-            for nid, snames in ((fixture_compiled or {}).get("covered")
-                                or {}).items()
-            for sname in snames)
+        # 09-30 定则:GIVEN 恒原文,指针机制随宿主播种一起退役——集合
+        # 恒空仅为兼容 describe_node 的既有参数位。
+        fixture_seeded_scenarios = frozenset()
 
         def fixture_probe_list() -> list[dict]:
             """夹具探针:模型自报账号(seed-accounts.json)登录可达。
@@ -4282,7 +4278,17 @@ def main() -> int:
                                             fixture_seeded_scenarios,
                                             verification="data-only")
                 if tests_dir:
-                    sk_prompt += "\n" + ACCEPTANCE_STAGED_NOTE
+                    # 09-30: ACCEPTANCE_STAGED_NOTE("the spec wins")退役 —
+                    # 系统行权威句已统一为 text wins(staged spec 只是回归
+                    # 套件);spec-wins 教义冲突是 09-30 sheet 95×400 发明
+                    # 规则跨会话固化的放大链,勿回流。
+                    sk_prompt += "\nTEST LAYOUT (host-managed, two " \
+                        "directories, no exceptions): the official " \
+                        "Playwright specs live READ-ONLY at " \
+                        ".arc/acceptance/ — never edit, copy, move, or " \
+                        "delete anything there. YOUR OWN specs live ONLY " \
+                        "under ui-smoke/ (sanctioned config: " \
+                        "ui-smoke/playwright.config.ts)."
                 sk_wall = turn_wall(1)
                 skeleton_ok, skeleton_text = driver.run(
                     sk_prompt, min(node_timeout, sk_wall), sk_wall)
@@ -4935,6 +4941,34 @@ def main() -> int:
                         hs["page_health"] = "clean"
                         log("[plan] page-health clean")
 
+                # 发明拒绝规则保险网(09-30 sheet 95×400 法医):静态
+                # 扫描后端 4xx 文案回查 requirements.yaml 引用。turn 前
+                # 一次(红项注入 final 轮),turn 后一次(入 final 链
+                # 仪表);审计绝不挡 final 链。
+                req_text_for_audit = ""
+                for _cand in (dest_req, output_dir / "requirements"):
+                    _f = _cand / "requirements.yaml"
+                    if not _f.exists():
+                        _f = _cand / "requirements.yml"
+                    if _f.exists():
+                        try:
+                            req_text_for_audit = _f.read_text(
+                                encoding="utf-8")
+                            break
+                        except OSError:
+                            pass
+                rej_result: dict = {}
+                if req_text_for_audit:
+                    try:
+                        rej_result = rejection_audit.audit(
+                            output_dir, req_text_for_audit)
+                        if rej_result["red_count"]:
+                            log(f"[plan] rejection audit RED: "
+                                f"{rej_result['red_count']} uncited "
+                                f"rejection literal(s)")
+                    except Exception as exc:  # 审计绝不挡 final 链
+                        log(f"[plan] rejection audit failed: {exc}")
+
                 _prune_acceptance_junk(output_dir, tests_dir, log)
                 # 09-27 定则:宿主不再跑自写浏览器套件——跳过 final LLM 轮
                 # 的门只剩 Tier-1 探针绿 + Tier-2 staged specs(任务自带
@@ -4985,6 +5019,11 @@ def main() -> int:
                             f"{tier2_run[0]} staged specs PASS on port "
                             f"{smoke_port}. Do not re-run suites; spot-check "
                             "one chain if you must, then end the turn.")
+                    if rej_result.get("red_count"):
+                        # 发明拒绝规则 → 评分器流程步死亡的静态实证,直接
+                        # 交给 final 轮修(引用或改默认成功)。
+                        final_prompt += rejection_audit.audit_prompt_block(
+                            rej_result)
 
                     # Filtered to the red tests' own specs (or all staged
                     # files as fallback): the final turn never needs the
@@ -5106,10 +5145,18 @@ def main() -> int:
                             f"playwright run(s), {len(st['specs'])} spec(s)")
                 except Exception as exc:  # 取证绝不挡 final 链
                     log(f"[plan] selftest evidence collect failed: {exc}")
+                # 拒绝文案审计 turn 后复扫:final 轮修没修,以磁盘现状为
+                # 准入仪表(与 page-health/selftest 同级的宿主侧验真记录)。
+                if req_text_for_audit:
+                    try:
+                        hs["rejection_audit"] = rejection_audit.audit(
+                            output_dir, req_text_for_audit)
+                    except Exception as exc:  # 审计绝不挡 final 链
+                        log(f"[plan] rejection audit record failed: {exc}")
                 # final 验证仪表落盘(自留取证件,随工作区带回):Tier-1
                 # rehearsal 报告/Tier-2 两轮计数/page-health 红项/模型自测
-                # 末次结果——平台不下发失败明细,这里是唯一的宿主侧验真
-                # 记录。
+                # 末次结果/拒绝文案审计——平台不下发失败明细,这里是唯一
+                # 的宿主侧验真记录。
                 try:
                     hs_dir = output_dir / "octos"
                     hs_dir.mkdir(parents=True, exist_ok=True)

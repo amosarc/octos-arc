@@ -1301,5 +1301,65 @@ class WorkOrderSpecTests(unittest.TestCase):
         self.assertNotIn("REQ-2:", spec)
 
 
+class SeedOwnershipTests(unittest.TestCase):
+    """09-30 定则:宿主播种退役——GIVEN 原样进上下文,种子(db.json)
+    由模型按需求的 data: 段与 GIVEN 行实现;宿主只留 compile_seed 纯
+    函数做探针/完整性基线。真凶回放:seeded GIVEN 曾被换成一行指针,
+    演员断言离开模型上下文,REQ-2/3 整族死在登录第一步。"""
+
+    def test_describe_node_keeps_given_verbatim_for_seeded_scenarios(self):
+        node = {"id": "REQ-2-2-1", "name": "n", "type": "ATOMIC",
+                "description": "desc",
+                "scenarios": [{"name": "s", "steps": [
+                    {"keyword": "GIVEN",
+                     "content": "An organization Owner is signed in"},
+                    {"keyword": "WHEN", "content": "w"}]}]}
+        for mode in ("full", "data-only"):
+            blob = main.describe_node(
+                node, seeded_scenarios=frozenset({"REQ-2-2-1::s"}),
+                verification=mode)
+            self.assertIn("GIVEN An organization Owner is signed in", blob)
+            self.assertNotIn("seeded by host", blob)
+
+    def test_materialize_retired(self):
+        self.assertFalse(hasattr(fixture_manifest, "materialize"))
+
+    def test_fixture_rules_model_owned_seed(self):
+        rules = fixture_manifest.render_extra_rules(
+            {"e2e_envs": []},
+            {"kind": "graph", "seeded": 2, "canonical": False,
+             "uncovered": 0, "arrange": 0})
+        self.assertIn("YOU implement the seed", rules)
+        self.assertIn("ROLE-ACTOR ACCOUNTS", rules)
+        self.assertIn("login-probe", rules)
+        self.assertIn("cannot sign in fails every scenario", rules)
+        # 写死规则不得回流:kebab 观测名单/宿主代述播种
+        self.assertNotIn("org-owner", rules)
+        self.assertNotIn("evidence not law", rules)
+        self.assertNotIn("The host seeded", rules)
+        self.assertLessEqual(
+            len(rules), fixture_manifest._MAX_EXTRA_RULES)
+
+    def test_skeleton_prompt_carries_seed_obligation(self):
+        p = main.GOAL_FIRST_SKELETON_PROMPT.format(port=3000, smoke=3100)
+        self.assertIn("backend/data/db.json ships EMPTY", p)
+        self.assertIn("Implement the seed NOW", p)
+        self.assertIn("never invented", p)
+        self.assertNotIn("never re-derive", p)
+        self.assertNotIn("host already compiled", p)
+
+    def test_github_given_verbatim_smoke(self):
+        req_dir = (Path(__file__).resolve().parent.parent / "tasks"
+                   / "hackathon--github")
+        if not (req_dir / "requirements.yaml").exists():
+            self.skipTest("github task file not present")
+        tree = main.load_requirement_tree(req_dir)
+        target = next(n for n in main.flatten_atomic(tree)
+                      if n.get("id") == "REQ-2-2-1")
+        blob = main.describe_node(target, verification="full")
+        self.assertIn("Owner is signed in", blob)
+        self.assertNotIn("seeded by host", blob)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

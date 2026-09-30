@@ -35,10 +35,12 @@ WIPE_GLOBS = ("*.spec.ts", "support")
 HOST_STACK_RULES_GOAL_FIRST = """\
 HOST CONTRACT (goal-first: the requirement text is the authoritative \
 product contract — quoted names are exact accessible names, quoted \
-rules bind verbatim, and the scenarios are the test oracle; where \
-staged specs exist they remain ground truth. The host documents its \
-data-plane substrate below and authors NO behavioral rules — you \
-derive the behavior and the tests from the requirement text):
+rules bind verbatim, and the scenarios are the test oracle; staged \
+specs are a regression suite, not authority — where a staged spec \
+disagrees with the requirement text, the text wins and the spec gets \
+fixed. The host documents its data-plane substrate below and authors \
+NO behavioral rules — you derive the behavior and the tests from the \
+requirement text):
 STACK: React(Vite) frontend + Express backend, PREBUILT BY THE HOST — \
 the backend already runs. Host-owned (never rewrite): src/app.js + \
 src/index.js (bootstrap; PORT + ARC_EXTRA_PORTS; serves frontend/dist), \
@@ -112,10 +114,10 @@ frontend/src/features/README.md carries the GRID EDITOR KERNEL \
 PATTERN — grid-like families build on ONE shared selection/editing \
 state model instead of re-implementing it per feature.
 FIXTURE CONTRACT (graded, not demo data): the `data:` section + every \
-scenario GIVEN line are the graded seed contract, already compiled into \
-backend/data/db.json. Names may carry a unique suffix, but roles, \
-ownership, visibility, relationships match VERBATIM; NEVER delete or rename seeded rows \
-or collections, and expose every seeded row through your API. Scenarios that MODIFY data each need their OWN fresh \
+scenario GIVEN line are the graded seed contract — YOU implement \
+backend/data/db.json from them. Names may carry a unique suffix, but roles, \
+ownership, visibility, relationships match VERBATIM; never drop a GIVEN \
+entity, and expose every requirement-named entity through your API. Scenarios that MODIFY data each need their OWN fresh \
 preconfigured instance (never share one mutable fixture across \
 scenarios). Files/commits are the single source of truth: branches \
 store head references only, NEVER duplicate whole file trees per \

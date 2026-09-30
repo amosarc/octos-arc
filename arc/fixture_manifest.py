@@ -1037,38 +1037,36 @@ def render_extra_rules(manifest: dict, stats: dict | None = None) -> str:
         "FIXTURE CONTRACT (graded, not demo data): the requirement's data: "
         "section and every scenario GIVEN line are the graded seed "
         "contract — names, roles, ownership, visibility, and relationships "
-        "must match VERBATIM. The host "
-        "seeded the machine-compilable part into backend/data/db.json: "
-        "NEVER delete or rename seeded rows/collections; expose every "
-        "seeded row through your API.",
+        "must match VERBATIM. backend/data/db.json ships EMPTY: YOU "
+        "implement the seed from the requirement's data: section and "
+        "every GIVEN line; never drop a GIVEN entity, and expose every "
+        "requirement-named entity through your API.",
     ]
     if seeded_n:
         parts.append(
-            f"{seeded_n} seeded account(s) from the requirement text are in "
-            "the seed with their exact emails and scrypt-hashed passwords — "
-            "auth must verify them from the seed; tests sign in with the "
-            "plaintext passwords quoted in the GIVEN lines.")
+            f"{seeded_n} account(s) are named by the requirement text with "
+            "exact emails and passwords — put them in your seed "
+            "(scrypt-hashed via store.hash; auth verifies them from the "
+            "seed); tests sign in with the plaintext passwords quoted in "
+            "the GIVEN lines.")
     if stats.get("kind") in ("graph", "mixed"):
-        # 角色账号是模型的地盘:宿主只给契约信号+平台观测证据,
-        # 建哪些账号/叫什么/什么关系由模型推理决定(09-28 定则:
-        # 宿主写死合成账号与平台真值必然错位,github 真跑 24 个
-        # 角色账号登录全 400、REQ-2~6 整族零分)。
+        # 角色账号是模型的地盘:宿主只给契约信号,建哪些账号/叫什么/
+        # 什么关系由模型从需求原文推理决定(09-28 定则:宿主写死合成
+        # 账号与平台真值必然错位;09-30 二跑法医:义务在场但模型只播
+        # 3 个自选名——演员断言在 GIVEN 原文里,GIVEN 已恒原文进上下
+        # 文,宿主不再代述任何名单)。
         parts.append(
-            "ROLE-ACTOR ACCOUNTS (graded, you decide them): the hidden e2e "
-            "signs in via the standard form as EVERY actor any atomic "
-            "requirement describes — including roles no GIVEN names as an "
-            "account (organization owner, repository admin, pull-request "
-            "reviewer, branch-protection admin, fork user...). Enumerate "
-            "those actors, provision sign-in-capable accounts (unique "
-            "username, @example.test email, verified, the standard "
-            "compliant password the sign-in lines quote), and wire "
+            "ROLE-ACTOR ACCOUNTS (graded, you decide them): every actor "
+            "your scope's GIVEN lines and descriptions sign in as — named "
+            "humans AND role phrases (a repository Admin, the organization "
+            "Owner) — must be able to sign in: provision one "
+            "sign-in-capable account per distinct actor (unique username, "
+            "@example.test email, verified, the standard compliant "
+            "password the sign-in lines quote) and wire "
             "ownership/membership/grants so each role's stated permissions "
-            "hold. Observed in a real graded run (2026-09-28, evidence not "
-            "law): bare kebab-case usernames — org-owner, repo-admin, "
-            "pr-reviewer, protection-admin, issue-author, fork-user and 18 "
-            "more — all with the quoted standard password; derive coverage "
-            "from the requirement text, not that list. Declare EVERY "
-            "pre-provisioned account in backend/data/seed-accounts.json "
+            "hold; a GIVEN actor that cannot sign in fails every scenario "
+            "of that node at arrange. Declare EVERY pre-provisioned "
+            "account in backend/data/seed-accounts.json "
             'as [{"username","password","path"?,"body"?,"note"}] — the host '
             "login-probe POSTs to each entry's path (default "
             "/api/auth/login; body defaults to username+password JSON and "
@@ -1079,13 +1077,13 @@ def render_extra_rules(manifest: dict, stats: dict | None = None) -> str:
         # 明示,否则模型把宿主编的约定也当需求原文背。
         parts.append(
             "Seed rows named by the requirement are verbatim contract; "
-            "rows it does not name (placeholder comments, fill-in author, "
-            "status, or label assignments) are host filler so flows have "
-            "data to render — wherever filler can disagree with the "
+            "rows it does not name are yours to fill so flows have data "
+            "to render — wherever filler can disagree with the "
             "requirement text, the requirement text wins.")
     if is_canonical and is_sheetish:
         parts.append(
-            "The seeded workbook is CANONICAL and FINAL: never rewrite it, "
+            "The workbook you seed from the data:/GIVEN contract is "
+            "CANONICAL and FINAL: never rewrite it, "
             "never create another workbook with the same name, and never "
             "suffix seeded names (graded lookups match names exactly and "
             "uniquely). Scenario-specific cell states that conflict with "
@@ -1132,36 +1130,7 @@ def render_extra_rules(manifest: dict, stats: dict | None = None) -> str:
 
 # ------------------------------------------------ 落盘/读取(宿主 IO 面最小)
 
-def materialize(output_dir, manifest: dict) -> dict | None:
-    """宿主种子落盘(幂等,保守):db.json 仍为空占位时才写;返回
-    compile_seed 结果供流控记账,跳过时返回 None。模型已写过种子
-    (非空 collections)绝不覆盖。09-28 CRUD 生成器退役:schema.json
-    starter 不再落盘(数据模型归模型,宿主只播种契约数据)。"""
-    import json
-    from pathlib import Path
-
-    compiled = compile_seed(manifest)
-    if not compiled["db"]:
-        return compiled  # 无可编译行(仅报告用),不落盘
-
-    data_dir = Path(output_dir) / "backend" / "data"
-    db_file = data_dir / "db.json"
-    existing = {}
-    if db_file.exists():
-        try:
-            existing = json.loads(db_file.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001 — 占位/坏 JSON 同样按空处理
-            existing = {}
-    if any(existing.get("collections", {}).values()):
-        return None  # 已有种子(模型或上一轮写过)——不覆盖
-    merged = {"collections": dict(existing.get("collections") or {})}
-    for name, rows in compiled["db"].items():
-        merged["collections"].setdefault(name, [])
-        have = {r.get("id") for r in merged["collections"][name]}
-        merged["collections"][name].extend(
-            r for r in rows if r.get("id") not in have)
-    data_dir.mkdir(parents=True, exist_ok=True)
-    db_file.write_text(
-        json.dumps(merged, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8")
-    return compiled
+# 09-30 定则:materialize(宿主种子落盘)整体退役——db.json 由模型按
+# 需求的 data: 段与 GIVEN 行自己实现(配合 GIVEN 原样进上下文),宿主
+# 只保留 compile_seed 纯函数供探针/完整性基线/统计(机械需求推导=
+# 治理,非内容决策)。
