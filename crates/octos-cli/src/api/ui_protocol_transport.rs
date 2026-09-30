@@ -2196,7 +2196,16 @@ fn appui_compact_threshold_tokens_for(
     env_override: Option<usize>,
     derived_threshold: usize,
 ) -> usize {
-    env_override.map_or_else(|| derived_threshold.max(1), |requested| requested.max(1))
+    // 09-30 window-defense clamp: an env threshold above window×7/10 used
+    // to apply verbatim, which left BOTH gates (compaction and the pressure
+    // cap riding it) idle above the real window on small-window lanes —
+    // the ledger kept growing until the provider started rejecting. The
+    // override is a tightening knob only: below the derived value it wins,
+    // above it the window-derived ceiling applies.
+    match env_override {
+        Some(requested) => requested.max(1).min(derived_threshold.max(1)),
+        None => derived_threshold.max(1),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2414,7 +2423,9 @@ fn appui_context_prompt_policy(llm_provider: &dyn octos_llm::LlmProvider) -> Pro
 /// to `2×cap` bytes first, then whole removable groups drop from the
 /// head — WITHOUT a compaction generation bump (no whole-prompt rewrite,
 /// no full cache miss cliff). Env `OCTOS_PROMPT_PRESSURE_TOKENS`: unset
-/// → ride the compaction threshold (host pins both at 150K); `0`/empty
+/// → ride the compaction threshold (host pins the threshold at 150K; the
+/// kernel clamps any override to window×7/10 — 09-30 window defense — so
+/// the riding cap inherits the clamp); `0`/empty
 /// → dormant (previous behavior); explicit value wins.
 fn appui_prompt_pressure_token_cap(default_tokens: usize) -> Option<usize> {
     appui_prompt_pressure_token_cap_from(
@@ -3095,13 +3106,17 @@ impl AppUiPromptContextBridge {
     }
 
     fn threshold_tokens(request: &PromptContextRequest) -> usize {
+        let derived = (request.context_window as usize
+            * APPUI_CONTEXT_COMPACT_RATIO_NUMERATOR
+            / APPUI_CONTEXT_COMPACT_RATIO_DENOMINATOR)
+            .max(1);
         std::env::var("OCTOS_CONTEXT_COMPACT_THRESHOLD_TOKENS")
             .ok()
             .and_then(|raw| raw.parse::<usize>().ok())
-            .unwrap_or_else(|| {
-                (request.context_window as usize * APPUI_CONTEXT_COMPACT_RATIO_NUMERATOR
-                    / APPUI_CONTEXT_COMPACT_RATIO_DENOMINATOR)
-                    .max(1)
+            .map_or(derived, |requested| {
+                // Same tightening-only clamp as
+                // appui_compact_threshold_tokens_for (09-30 window defense).
+                requested.max(1).min(derived)
             })
     }
 

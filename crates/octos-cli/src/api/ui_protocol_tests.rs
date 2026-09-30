@@ -3135,3 +3135,23 @@ fn prompt_pressure_cap_env_resolution() {
     assert_eq!(cap_from(Some(" 120000 ".into()), 150_000), Some(120_000));
     assert_eq!(cap_from(Some("banana".into()), 150_000), None);
 }
+
+// 09-30 window-defense clamp: the env threshold override is a tightening
+// knob only. Above window×7/10 it clamps down (both gates used to idle
+// above the real window on small-window lanes); below it wins verbatim;
+// the no-env fallback is unchanged.
+#[test]
+fn compact_threshold_env_clamps_to_window_derived_ceiling() {
+    use super::appui_compact_threshold_tokens_for as threshold_for;
+    // 128K-window lane: host pin 150K sits above the derived ceiling and
+    // must clamp down to it.
+    assert_eq!(threshold_for(Some(150_000), 89_600), 89_600);
+    // 512K-window lane: host pin 150K is below the derived 358_400 — the
+    // tightening semantics are unchanged.
+    assert_eq!(threshold_for(Some(150_000), 358_400), 150_000);
+    // No env: derived value verbatim (zero behavior change).
+    assert_eq!(threshold_for(None, 358_400), 358_400);
+    // Degenerate inputs stay >= 1.
+    assert_eq!(threshold_for(Some(0), 0), 1);
+    assert_eq!(threshold_for(None, 0), 1);
+}
