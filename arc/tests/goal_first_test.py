@@ -1368,7 +1368,7 @@ class DumpRuntimePromptsTests(unittest.TestCase):
             td = Path(td_s)
             self._fake_workspace(td)
             summary = main.dump_runtime_prompts(td)
-            prompts = td / "prompts"
+            prompts = td / "octos" / "prompts"
             self.assertEqual(summary["turns"], 3)
             self.assertTrue(summary["system_prompt"])
             self.assertTrue(summary["agents_md"])
@@ -1398,7 +1398,7 @@ class DumpRuntimePromptsTests(unittest.TestCase):
             summary = main.dump_runtime_prompts(td)
         self.assertEqual(summary, {"turns": 0, "system_prompt": False,
                                    "agents_md": False})
-        self.assertFalse((Path(td_s) / "prompts").exists())
+        self.assertFalse((Path(td_s) / "octos" / "prompts").exists())
 
     def test_agents_fallback_to_profile_file_when_section_missing(self):
         import main
@@ -1414,7 +1414,7 @@ class DumpRuntimePromptsTests(unittest.TestCase):
             summary = main.dump_runtime_prompts(td)
             self.assertTrue(summary["agents_md"])
             self.assertEqual(
-                (td / "prompts" / "AGENTS.md").read_text(
+                (td / "octos" / "prompts" / "AGENTS.md").read_text(
                     encoding="utf-8"),
                 "injected system row")
 
@@ -1429,7 +1429,7 @@ class DumpRuntimePromptsTests(unittest.TestCase):
                 (3, 1, self._sys_text(), "TASK: next turn")])
             main.dump_runtime_prompts(td)
             main.dump_runtime_prompts(td)  # 幂等:整体重建,不翻倍
-            prompts = td / "prompts"
+            prompts = td / "octos" / "prompts"
             self.assertEqual(sorted(p.name for p in prompts.glob("turn-*")),
                              ["turn-001.md", "turn-002.md"])
             self.assertIn("TASK: retry me",

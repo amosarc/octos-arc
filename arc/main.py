@@ -377,7 +377,7 @@ def dump_runtime_prompts(output_dir: Path) -> dict:
                         rows.append((mtime, int(row.get("seq") or 0), row))
             except (OSError, ValueError, TypeError, AttributeError):
                 continue
-        prompts_dir = output_dir / "prompts"
+        prompts_dir = output_dir / "octos" / "prompts"
         if prompts_dir.exists():
             shutil.rmtree(prompts_dir, ignore_errors=True)
         prompts_dir.mkdir(parents=True, exist_ok=True)
@@ -4977,7 +4977,7 @@ def main() -> int:
         _ensure_eval_telemetry(output_dir)
         _pc = dump_runtime_prompts(output_dir)
         log(f"[prompts] captured {_pc['turns']} turn prompt(s) -> "
-            f"{output_dir / 'prompts'}")
+            f"{output_dir / 'octos' / 'prompts'}")
         _handover_pristine_seed(output_dir)
         return 0
     except Exception as exc:  # platform judges by events, not exit code
