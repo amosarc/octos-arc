@@ -1,9 +1,7 @@
-// crud.js — 可选 REST 工厂(纯库,绝不自动挂载):模型对需要的每个集合
-// 显式 mount(app, '<collection>', opts);注册在本库之前的同名自定义路由
-// 优先(express 注册序),挂完可继续加端点。行为规则全走钩子——校验规则、
-// 错误文案(需求逐字串)、行可见性、列表过滤、落库前变换都由模型提供;
-// 本库只供统一管道:默认 CRUD 端点、{errors:[{field,msg}]} 错误形状、
-// 坏载荷一律 4xx 永不 5xx。
+// crud.js — optional REST factory (pure lib, never auto-mounts):
+// mount(app, '<collection>', opts) for default CRUD endpoints; custom
+// routes registered before mount take precedence. Bad payloads are 4xx,
+// never 5xx; validation and messages come from your hooks.
 const store = require('../database/store');
 const U = require('./util');
 const plain = (b) => (b && typeof b === 'object' && !Array.isArray(b) ? b : {});

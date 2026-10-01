@@ -9,11 +9,9 @@ node 冒烟用动态 import 断言)。
 from __future__ import annotations
 
 CSV_JS = """\
-// csv.js — 表格文本与文件 I/O(纯函数,零依赖):RFC4180 CSV 解析、
-// 字节精确序列化(无 BOM、必要才加引号、引号成对转义)、TSV 剪贴板
-// 解析、浏览器下载触发。导入容忍并剥除 BOM;导出绝不写 BOM(评测按
-// 字节断言)。解析失败(引号不闭合)返回 {error},错误文案由调用方按
-// 需求原文给。
+// csv.js — CSV/TSV parse & serialize (pure, zero-dep): RFC4180, BOM
+// stripped on import and never written on export, download trigger.
+// Parse failure returns {error}; the caller supplies the message.
 const stripBom = (s) => (s.charCodeAt(0) === 0xfeff ? s.slice(1) : s);
 function splitRows(text, delim) {
   const rows = [[]];
@@ -94,11 +92,9 @@ export async function copyText(text) {
 """
 
 UNDO_JS = """\
-// undo.js — 快照式撤销栈 hook(纯机制):调用方在"每次修改前"push()
-// (快照函数由你给——把整个状态 blob 序列化,值/结构/规则/配置一类
-// 操作全覆盖);undo()/redo() 返回旧/新快照,由你写回状态并走正常持久
-// 化(撤销后状态随常规保存跨刷新存活)。新修改清空 redo 栈;canUndo/
-// canRedo 驱动按钮禁用态(Disabled 是暂态,永不禁死提交)。
+// undo.js — snapshot undo/redo stack hook: push() before each
+// mutation (you supply the snapshot fn), undo()/redo() return snapshots
+// for you to write back; canUndo/canRedo drive button disabled states.
 import { useCallback, useRef, useState } from 'react';
 
 export function useUndoRedo(getSnapshot, cap = 50) {
@@ -134,9 +130,8 @@ export function useUndoRedo(getSnapshot, cap = 50) {
 """
 
 ROUTER_JS = """\
-// router.js — hash 路由纯机制:parseRoute 纯函数(可单测)+ useHashRoute
-// hook(hashchange 监听;navigate 触发;刷新/直达/后退一致)。路由表、
-// 路径形状与页面归属全由调用方定(如 #/wb/<id> 深链)。
+// router.js — hash routing: parseRoute (pure) + useHashRoute hook;
+// route table and path shapes are yours (e.g. #/wb/<id> deep links).
 import { useEffect, useState } from 'react';
 
 export function parseRoute(hash) {

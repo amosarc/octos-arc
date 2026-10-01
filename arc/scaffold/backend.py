@@ -33,12 +33,9 @@ exports.now = () => new Date().toISOString();
 """
 
 SESSION_JS = """\
-// session.js — 会话机制助手(纯库,不挂路由):登录/登出/me 路由由模型自行
-// 接线;会话行存 store 的 'sessions' 集合——server 重启保留 db.run.json,
-// 会话随之中存续(graded contract: "sessions survive server restart");
-// 仅冷启动(无 run 文件)才从种子重建=干净会话面(交付前宿主删 run 文件,
-// 评测从种子起;种子由模型按需求实现)。hash/verify 转出口令哈希——模型
-// 种子里的口令一律经 store.hash 生成,直接 verify 兼容。
+// session.js — session mechanics helper (pure lib): login/logout/me
+// routes are yours to wire on the store; hash/verify re-export password
+// hashing for the accounts you seed.
 const store = require('../database/store');
 const U = require('./util');
 const COOKIE = 'arc_session';
@@ -52,12 +49,10 @@ exports.verify = store.verify;
 """
 
 CRUD_JS = """\
-// crud.js — 可选 REST 工厂(纯库,绝不自动挂载):模型对需要的每个集合
-// 显式 mount(app, '<collection>', opts);注册在本库之前的同名自定义路由
-// 优先(express 注册序),挂完可继续加端点。行为规则全走钩子——校验规则、
-// 错误文案(需求逐字串)、行可见性、列表过滤、落库前变换都由模型提供;
-// 本库只供统一管道:默认 CRUD 端点、{errors:[{field,msg}]} 错误形状、
-// 坏载荷一律 4xx 永不 5xx。
+// crud.js — optional REST factory (pure lib, never auto-mounts):
+// mount(app, '<collection>', opts) for default CRUD endpoints; custom
+// routes registered before mount take precedence. Bad payloads are 4xx,
+// never 5xx; validation and messages come from your hooks.
 const store = require('../database/store');
 const U = require('./util');
 const plain = (b) => (b && typeof b === 'object' && !Array.isArray(b) ? b : {});
@@ -107,13 +102,10 @@ exports.mount = (app, name, opts) => {
 """
 
 STORE_JS = """\
-// store.js — 种子/运行时双文件 db:db.json 是模型维护的种子(交付干净、git 跟踪),
-// db.run.json 承载运行时状态:无 run 文件时从种子初始化,有则原样加载——
-// 写入与会话跨 server 重启存活(需求侧持久化事实)。「回到种子起点」
-// 由宿主在彩排/Tier-2/评测每次 boot 前删 run 文件达成,交付前同样删它
-// (zip 只带干净种子);不是本 store 的重启行为。
-// 集合 CRUD、通用查询(query:where/sort/分页)、原子多写事务(tx)、每作用域
-// 自增序号(nextSeq)、唯一索引(小写比较)、scrypt;进程内单例。
+// store.js — seed/run dual-file db: db.json is the seed (ships clean),
+// db.run.json is runtime state (initialized from the seed on first boot,
+// then persists across restarts; never ships). Collections CRUD,
+// query/sort/page, tx with rollback, nextSeq, scrypt hash/verify.
 const fs = require('fs'); const path = require('path'); const crypto = require('crypto');
 const DATA = path.join(__dirname, '..', '..', 'data');
 const SEED_FILE = path.join(DATA, 'db.json');
@@ -150,9 +142,7 @@ APP_JS = """\
 const path = require('path'); const fs = require('fs'); const express = require('express'); const U = require('./lib/util');
 const app = express();
 try { require('./lib/eval-telemetry').mount(app); } catch { /* telemetry best-effort, never blocks the app */ }
-// 2mb: workbook/document states travel whole in the entity JSON (an
-// imported CSV becomes part of the row) — a small body cap turns a large
-// import into a 413 the frontend reports as a content failure.
+// 2mb body cap: an imported CSV travels inside the entity JSON.
 app.use(express.json({ limit: '2mb' }));
 app.use((req, res, next) => { req.cookies = U.cookies(req); next(); });
 app.get('/api/health', (req, res) => U.json(res, 200, { ok: true }));
@@ -172,9 +162,8 @@ module.exports = app;
 # 由 postflight 写入的 marker 行切分。
 # 09-29:路径从 octos-logs/ 收敛进 octos/logs/(全部日志统一 octos/ 一处)。
 EVAL_TELEMETRY_JS = """\
-// eval-telemetry.js — host-owned runtime telemetry (best-effort, never throws).
-// Appends one JSON line per /api request (and frontend error reports) to
-// <workspace>/octos/logs/eval-traffic.jsonl. Pure fs, no dependencies.
+// eval-telemetry.js — host-owned telemetry (best-effort): appends /api
+// traffic and frontend errors to <workspace>/octos/logs/eval-traffic.jsonl.
 const fs = require('fs');
 const path = require('path');
 const LOG = path.join(__dirname, '..', '..', '..', 'octos', 'logs', 'eval-traffic.jsonl');

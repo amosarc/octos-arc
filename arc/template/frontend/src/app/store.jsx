@@ -3,11 +3,9 @@ import React, {
 } from 'react';
 import { api } from './api.js';
 
-// Shared-data layer: every backend resource is loaded through
-// useResource('<resource>') so shared entities live in ONE place instead
-// of being duplicated (and drifting) inside individual features.
-// Features read `items` and call create/update/remove; the host backend
-// (schema-driven engine) serves the REST endpoints.
+// Shared-data layer: load backend resources through
+// useResource('<resource>') so shared entities live in one place; features
+// read `items` and call create/update/remove.
 const DataContext = createContext(null);
 
 export function DataProvider({ children }) {

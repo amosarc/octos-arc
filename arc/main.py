@@ -3250,7 +3250,9 @@ GOAL_FIRST_TURN_COMPLETION = (
     "\nAfter implementing: generate Playwright automation tests for "
     "these scenarios and run them against the RUNNING app (port "
     "{smoke}); fix the app and re-test until green, then finish the "
-    "turn.")
+    "turn. End the turn only when this batch's scenarios walk green on "
+    "the running app — never end mid-investigation: a closing message "
+    "that announces future work is an incomplete turn.")
 
 BOOTSTRAP_PREAMBLE = """\
 BOOTSTRAP (first turn of the run only): (a) implement the seed — \

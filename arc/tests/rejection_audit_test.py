@@ -183,6 +183,10 @@ class DisciplinePinsTest(unittest.TestCase):
         self.assertIn("generate Playwright automation tests", c)
         self.assertIn("fix the app", c)
         self.assertIn("port 3100", c)
+        # 09-30 真跑三次 premature wrap-up(366s/1006s/1360s 零进展收工)
+        # 后的完成定义锚(用户拍板"加"):宣布未来工作≠完成回合。
+        self.assertIn("never end mid-investigation", c)
+        self.assertIn("announces future work is an incomplete turn", c)
 
     def test_system_row_demotes_staged_specs(self):
         import plan_envelope

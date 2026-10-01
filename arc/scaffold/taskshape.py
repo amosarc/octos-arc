@@ -97,12 +97,10 @@ def _feature_stub(stub: dict) -> str:
     order = _work_order(stub["nodes"])
     return "\n".join([
         f"// {stub['slug']}.jsx — HOST-PRE-CREATED stub for one requirement",
-        "// family (fill this file IN PLACE; keep the default export; add",
-        "// sibling files when a sub-domain warrants, and wire/rearrange",
-        "// mounts in src/app/App.jsx). The grid kernel pattern for grid-",
-        "// like families is in frontend/src/features/README.md.",
-        "// This family covers:",
+        "// family. This family covers:",
         *order,
+        "// Fill in place; keep the default export; wire mounts in"
+        " src/app/App.jsx.",
         "import React from 'react';",
         "",
         f"export default function {stub['component']}() {{",
@@ -115,10 +113,9 @@ def _route_stub(stub: dict) -> str:
     order = _work_order(stub["nodes"])
     return "\n".join([
         f"// routes/{stub['slug']}.js — HOST-PRE-CREATED stub for this",
-        "// requirement family's task-specific endpoints. Register them on",
-        "// the passed app; store/lib helpers per the HOST CONTRACT. This",
-        "// family covers:",
+        "// requirement family's endpoints. This family covers:",
         *order,
+        "// Register them on the passed app.",
         "module.exports = (app) => {",
         "  // this family's endpoints",
         "};",

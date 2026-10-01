@@ -1,8 +1,6 @@
-// undo.js — 快照式撤销栈 hook(纯机制):调用方在"每次修改前"push()
-// (快照函数由你给——把整个状态 blob 序列化,值/结构/规则/配置一类
-// 操作全覆盖);undo()/redo() 返回旧/新快照,由你写回状态并走正常持久
-// 化(撤销后状态随常规保存跨刷新存活)。新修改清空 redo 栈;canUndo/
-// canRedo 驱动按钮禁用态(Disabled 是暂态,永不禁死提交)。
+// undo.js — snapshot undo/redo stack hook: push() before each
+// mutation (you supply the snapshot fn), undo()/redo() return snapshots
+// for you to write back; canUndo/canRedo drive button disabled states.
 import { useCallback, useRef, useState } from 'react';
 
 export function useUndoRedo(getSnapshot, cap = 50) {

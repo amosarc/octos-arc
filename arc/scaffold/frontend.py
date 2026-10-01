@@ -63,11 +63,9 @@ FRONTEND_APP_JSX = """\
 import React from 'react';
 import { DataProvider } from './store.jsx';
 
-// ASSEMBLY LAYER — the only file that wires features together.
-// Per requirement: add ONE import of its feature component and mount it.
-// The FIRST requirement usually lays out the page structure here; after
-// that, keep edits to imports + mounts. Business logic NEVER lives here —
-// it goes in frontend/src/features/<name>.jsx (self-contained).
+// ASSEMBLY LAYER — the only file that wires features together: add ONE
+// import + mount per requirement family. Business logic lives in
+// frontend/src/features/<name>.jsx (self-contained).
 export default function App() {
   return (
     <DataProvider>
@@ -85,11 +83,9 @@ import React, {
 } from 'react';
 import { api } from './api.js';
 
-// Shared-data layer: every backend resource is loaded through
-// useResource('<resource>') so shared entities live in ONE place instead
-// of being duplicated (and drifting) inside individual features.
-// Features read `items` and call create/update/remove; the host backend
-// (schema-driven engine) serves the REST endpoints.
+// Shared-data layer: load backend resources through
+// useResource('<resource>') so shared entities live in one place; features
+// read `items` and call create/update/remove.
 const DataContext = createContext(null);
 
 export function DataProvider({ children }) {
@@ -249,93 +245,31 @@ FEATURES_README = """\
 
 Each requirement domain lives in its own self-contained file here
 (<name>.jsx, default export). This README is HOST-OWNED (read-only).
-The host PRE-CREATES one stub per requirement family at initialization
-(headers list the family's REQ ids as a work order); fill them in place
-and add sibling files freely — the division is a starting grid, not a cage.
+Stubs are pre-created per requirement family (REQ ids in the headers) —
+fill them in place and add sibling files freely.
 
 ## Grid editor kernel pattern (spreadsheet-like tasks)
 
-The kernel is HOST-SHIPPED CODE, not a pattern to re-derive. Import it and
-the graded interaction semantics hold by construction:
+Import the host-shipped kernel instead of re-deriving selection
+semantics:
 
 ```jsx
-// frontend/src/app/grid.js (host-owned): useGrid + geometry helpers
-import { useGrid, rectOf, inRectangle, rangeCoords } from '../app/grid.js';
+import { useGrid } from '../app/grid.js';
 
 const grid = useGrid({ initial: 'A1', onSelect: persistSelection });
-// FixedGrid wires click/SHIFT-click-extend/drag/aria-selected for you:
 <FixedGrid name="Worksheet grid" grid={grid} rows={30} cols={12}
            textAt={(coord) => displayValue(cells, coord)} />
 ```
 
-- aria-selected is derived from anchor/focus for the WHOLE rendered grid —
-  never maintain a per-cell Set (a Set capped at the render extent ships
-  stale aria state the moment the grid grows).
-- Task layer stays yours: in your own onCellClick (runs BEFORE the kernel
-  handler) commit a pending edit; persist via onSelect(anchor, focus);
-  drive the editing input with beginEdit/setDraft/commitEdit/cancelEdit
-  (Enter commits, Escape cancels).
-- FORMULAS: import the engine from ../app/formula.js — displayValue(cells,
-  coord) for the grid, evalFormula for checks, adjustFormula for
-  copy/paste, shiftRefsOnRowChange/shiftRefsOnColChange for row/column
-  operations. Do NOT hand-roll an evaluator: hand-rolled ones have shipped
-  #ERROR! on =SUM(A1:A3)*2, on spaces (=A1 + B1), on unary minus and on
-  nested calls; this engine handles all of them plus the graded error
-  vocabulary (#DIV/0!, #REF!, #NAME?, #ERROR!).
-
-Rules the graders assert verbatim (see your INTERACTION SEMANTICS section):
-- Escape cancels an uncommitted edit; Enter commits.
-- aria-selected must be true on EVERY gridcell inside the current
-  rectangle and false outside (the kernel derives this; keep it true when
-  you hand-roll a grid instead).
-- One visible error element per failure, exact message strings from the
-  requirement.
-- REGION CONTRACT: a requirement phrase "A region named X" is the ARIA
-  region role — render <Region label="X"> (frontend/src/app/ui.jsx) so
-  getByRole('region', { name: X }) resolves. A <div aria-label> has NO
-  region role and the grader's locator times out (an entire pivot family
-  died exactly this way).
-- DIALOG CONTRACT: prefer the NATIVE <dialog> element — keep a ref,
-  call ref.current.showModal() to open and ref.current.close() to
-  dismiss; Escape, backdrop click handling, and focus trapping come
-  with the platform for free (never hand-roll an overlay). Every
-  dialog closes on Escape AND on cancel/overlay click, and its confirm
-  button carries the requirement's EXACT name ("Delete", not "Delete
-  worksheet"). An undismissable overlay blocks every later grader
-  step; a misnamed confirm is never found.
-- SELECTION CONTRACT (built into the useGrid kernel): Shift-click
-  EXTENDS the selection and a plain click replaces it — never write a
-  click handler that collapses a shift-extend (sort / filter / validation
-  / pivot ranges all read the selection anchor, so one collapsing handler
-  breaks five requirement families; this exact bug shipped twice).
-- GRID SIZING: size FixedGrid from the data you must SHOW plus margin —
-  derive rows/cols from the seeded/imported extent (e.g.
-  max(26, maxRow + 6) × max(10, maxCol + 4)); a grid smaller than the
-  imported data hides rows/columns no test can reach.
-- GRID COMPLETENESS: the grid renders its FULL structure — visible
-  columnheader cells (column letters) and rowheader cells (row
-  numbers) around role="gridcell" cells named by coordinate. A grid
-  that renders only the data region fails every structural step.
-- DROPDOWN CONTRACT: dropdowns are native <select> with real <option>
-  labels (graders use getByRole('combobox') + selectOption). Never a
-  custom div dropdown — without full ARIA combobox semantics it is
-  invisible to every selector.
-- MENU CONTRACT: right-click/header menus use the host's useContextMenu +
-  Menu (frontend/src/app/ui.jsx): role=menu with menuitem buttons whose
-  labels are the requirement's EXACT strings ("Insert 1 row above", not
-  "Insert row"), closing on Escape AND outside click. FixedGrid already
-  routes onContextMenu/onColumnHeaderMenu/onRowHeaderMenu into this —
-  hand-rolled positioned divs drift on every one of those axes.
-- SUBMIT ENABLEMENT: a submit/save button becomes ENABLED once the
-  required fields are filled. Disabled is a transient state (Undo with
-  an empty stack), never permanent — a permanently disabled submit can
-  never be clicked by a test.
-- Downloaded/exported files are byte-exact: no UTF-8 BOM, exact CSV
-  quoting.
-
-Keep feature files additive: a later requirement EXTENDS the state model
-(import it) instead of forking it — the post-batch regression runs every
-completed feature's specs against your changes.
+The kernel derives click / SHIFT-click-extend / drag selection and
+whole-grid aria-selected; your own onCellClick runs before it (commit a
+pending edit there) and onSelect(anchor, focus) persists. Editing goes
+through beginEdit/setDraft/commitEdit/cancelEdit (Enter commits, Escape
+cancels). Formulas come from ../app/formula.js (displayValue,
+evalFormula, adjustFormula, shiftRefs*); interactive primitives
+(dialog, dropdown, region, menus, field errors) from ../app/ui.jsx.
+Keep feature files additive: a later requirement EXTENDS the state
+model instead of forking it.
 """
 
 # UI kit(09-27 契合度定论 S3):满分形态从提示词规则下沉为代码——
@@ -351,14 +285,11 @@ FRONTEND_UI_JSX = """\
 import React, { useEffect, useRef } from 'react';
 import { inRectangle } from './grid.js';
 
-// UI KIT — the graded shapes, by construction. The hidden specs drive the
-// app with Playwright role/label locators: getByRole with EXACT accessible
-// names, getByLabel, selectOption on native selects, strict-mode single
-// matches. Use these primitives wherever the requirement matches; hand-
-// rolled substitutes have shipped single-digit scores twice.
+// UI kit — primitives shaped for Playwright role/label locators (exact
+// accessible names, getByLabel, native selects, strict-mode single
+// matches). Prefer them over hand-rolled substitutes.
 
-// Dropdowns: native <select> — graders call selectOption; a custom div
-// dropdown is invisible to it (a hand-rolled combo lost a whole REQ family).
+// Dropdown: native <select> (graders call selectOption).
 export function NativeSelect({ label, value, onChange, options, id }) {
   const fid = id || 'sel-' + label;
   return (
@@ -372,9 +303,7 @@ export function NativeSelect({ label, value, onChange, options, id }) {
   );
 }
 
-// Modals: native <dialog> + showModal() — Escape, backdrop dismissal and
-// focus trapping come free; an undismissable overlay blocks every later
-// grader step.
+// Modal: native <dialog> + showModal() — Escape/backdrop/focus included.
 export function AppDialog({ name, open, onClose, children }) {
   const ref = useRef(null);
   useEffect(() => {
@@ -388,23 +317,16 @@ export function AppDialog({ name, open, onClose, children }) {
   );
 }
 
-// REGION: requirement phrase "A region named X" => <Region label="X">.
-// <section> carries the implicit ARIA region role, so the grader's
-// getByRole('region', { name: X }) resolves. A plain <div aria-label>
-// has NO role — that exact miss stalled an entire pivot family (every
-// scenario timed out at the editor the step after creating it).
+// Region: requirement phrase "A region named X" => <Region label="X">
+// (<section> carries the ARIA region role).
 export function Region({ label, children, ...rest }) {
   return (
     <section aria-label={label} {...rest}>{children}</section>
   );
 }
 
-// Signed-in identity: the username must be its OWN exact-text element
-// inside the account trigger (graders assert getByText(username,
-// {exact:true}) and click it to open the menu — a "Welcome, {user}"
-// heading fails every exact-text locator). Pass the trigger's accessible
-// name from the REQUIREMENT via label; without it the button is named by
-// the username span itself (still exact-text clickable).
+// AccountTrigger: renders the signed-in username as its own exact-text
+// element; pass `label` (from the requirement) to name the trigger.
 export function AccountTrigger({ username, onOpen, label }) {
   const props = label ? { 'aria-label': label } : {};
   return (
@@ -414,19 +336,14 @@ export function AccountTrigger({ username, onOpen, label }) {
   );
 }
 
-// Exactly ONE error element at a time — two matching elements is a
-// strict-mode violation. Render this per form, never per field next to a
-// form-level summary.
+// SingleError: exactly ONE error element at a time (strict mode).
 export function SingleError({ message }) {
   if (!message) return null;
   return <div role="alert" className="form-error">{message}</div>;
 }
 
-// PER-FIELD parallel errors (registration-style forms): several invalid
-// fields submitted together must show ALL their messages at once ("must
-// show ... together, rather than revealing only one"), each field owning
-// exactly ONE element beside it. errors is the backend {errors:[{field,
-// msg}]} shape (src/lib/crud.js emits it verbatim).
+// FieldError/byField: per-field errors from the backend
+// {errors:[{field,msg}]} shape — all invalid fields show messages together.
 export const byField = (errors, field) =>
   (errors || []).filter((e) => e && e.field === field).slice(0, 1);
 export function FieldError({ errors, field }) {
@@ -435,12 +352,8 @@ export function FieldError({ errors, field }) {
   return <div role="alert" className="error-text">{first.msg}</div>;
 }
 
-// MENUS (row/column-header menus, worksheet options, right-click grids):
-// role=menu with menuitem buttons carrying EXACT labels from the
-// requirement, closing on Escape AND outside click. FixedGrid already
-// routes onContextMenu / onColumnHeaderMenu / onRowHeaderMenu here —
-// useContextMenu captures the event point, Menu renders the popup.
-// items: [{label, onSelect}] — label IS the accessible name (verbatim).
+// Context menus: role=menu + menuitem buttons labelled verbatim; close
+// on Escape and outside click. items: [{label, onSelect}].
 export function useContextMenu() {
   const [menu, setMenu] = React.useState(null);
   const open = (e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); };
@@ -477,8 +390,7 @@ export function Menu({ menu, onClose, items }) {
   );
 }
 
-// Column letters beyond Z wrap to AA, AB, ... — no artificial column cap
-// (a capped grid dies the first time a grader clicks past it).
+// Column letters wrap past Z (AA, AB, ...) — no artificial column cap.
 const colLetters = (n) => {
   const out = [];
   for (let i = 0; i < Math.max(1, n); i++) {
@@ -490,25 +402,14 @@ const colLetters = (n) => {
   return out;
 };
 
-// Spreadsheet-shaped grid: FIXED-SIZE (empty cells beyond the data region
-// stay selectable — a data-sized grid killed ~7 requirements in one run;
-// size it from the seeded/imported data extent plus margin, never smaller
-// than 40 rows × 20 cols — the reference apps show a LARGE empty grid
-// around the data, and graders address cells well beyond the seeded
-// extent).
-// role=grid + columnheaders named by LETTER + rowheaders by ROW NUMBER +
-// gridcells whose accessible name is the coordinate (A1). name and
-// multiselectable come FROM THE REQUIREMENT (its quoted grid name and
-// selection contract).
-//
-// Selection: pass the useGrid kernel as `grid` (from ./grid.js) and the
-// built-in handlers give plain-click select, SHIFT-click extend, drag
-// rectangle and whole-grid aria-selected with ZERO wiring on your side;
-// your own on* callbacks still fire first (commit a pending edit there).
-// Without `grid`, the legacy `selected` Set keeps working. `editing` is
-// the kernel's editing object {coord, draft} rendered as a cell input.
-// headerExtra/cellExtra decorate headers/cells (filter buttons, dropdown
-// triggers); rowHidden(r) hides filtered rows without deleting them.
+// FixedGrid: spreadsheet-shaped grid, FIXED SIZE — empty cells beyond the
+// data stay selectable; never smaller than 40 rows x 20 cols, sized from
+// the seeded/imported extent plus margin. role=grid, columnheaders by
+// letter, rowheaders by number, gridcell names = coordinate (A1).
+// Pass the useGrid kernel (./grid.js) as `grid`: click/SHIFT-extend/drag
+// selection and whole-grid aria-selected come built in; your own on*
+// callbacks fire first. headerExtra/cellExtra decorate cells; rowHidden
+// filters rows without deleting them.
 export function FixedGrid({ name, rows = 40, cols = 20, multiselectable = true,
                             textAt, selected, grid,
                             onCellClick, onCellDown, onCellEnter,

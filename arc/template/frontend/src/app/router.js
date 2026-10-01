@@ -1,6 +1,5 @@
-// router.js — hash 路由纯机制:parseRoute 纯函数(可单测)+ useHashRoute
-// hook(hashchange 监听;navigate 触发;刷新/直达/后退一致)。路由表、
-// 路径形状与页面归属全由调用方定(如 #/wb/<id> 深链)。
+// router.js — hash routing: parseRoute (pure) + useHashRoute hook;
+// route table and path shapes are yours (e.g. #/wb/<id> deep links).
 import { useEffect, useState } from 'react';
 
 export function parseRoute(hash) {

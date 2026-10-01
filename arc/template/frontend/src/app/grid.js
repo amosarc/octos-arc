@@ -1,17 +1,7 @@
-// Grid selection kernel — HOST-SHIPPED. Wire it ONCE and the graded
-// interaction semantics hold by construction:
-//   const grid = useGrid({ initial: 'A1', onSelect: persistSelection });
-//   <FixedGrid name="Worksheet grid" grid={grid} ... />
-// Built-in (do NOT re-implement, do NOT wrap with a collapsing handler):
-//   plain click selects one cell; SHIFT-click EXTENDS the rectangle from
-//   the anchor (a collapsing click handler breaks every range flow —
-//   sort/filter/validation/pivot all read the selection); dragging builds
-//   the rectangle and reports it on mouseup; aria-selected is derived from
-//   anchor/focus for the WHOLE rendered grid (no per-cell Set to maintain).
-// Task layer stays yours: commit a pending edit in your own onCellClick
-// BEFORE the kernel selects (agent callbacks run first), persist via
-// onSelect(anchor, focus), and drive the editing input through
-// beginEdit/setDraft/commitEdit/cancelEdit (Enter commits, Escape cancels).
+// Grid selection/edit kernel: const grid = useGrid({ initial: 'A1',
+// onSelect: persistSelection }) and pass it to FixedGrid — click select,
+// SHIFT-click extend from the anchor, drag rectangle, whole-grid
+// aria-selected. Your own onCellClick runs before the kernel selects.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 export const colNum = (s) => String(s).toUpperCase().split('').reduce(
