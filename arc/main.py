@@ -66,10 +66,8 @@ import plan_envelope  # noqa: E402
 import rejection_audit  # noqa: E402  (拒绝文案引用审计:发明 400 保险网)
 import scaffold  # noqa: E402  (宿主脚手架包:模板/清单/schema 编译唯一公开面)
 
-# 只保留:①工具链 CLI 发现(下述 _pw_* 助手);②被内核放行的自测命令
-# 形状所需的 e2e/playwright.config.ts 最小骨架(工作区根,脱离平台 .arc
-# 命名空间;09-30 由 ui-smoke 改名——"smoke"暗示浅检查,而纪律要求的是
-# 全场景走查 E2E;内核绿停 matcher 双载体兼容)。
+# 模型自测骨架目录名(e2e/):承载 playwright 工具链发现与被内核放行的
+# 自测命令;放工作区根,脱离平台 .arc 命名空间。
 PLATFORM_PW_VERSION = "1.57.0"
 SELFTEST_SUBDIR = "./e2e"
 
@@ -96,11 +94,9 @@ REASONING_EFFORT = "max"
 THINKING_REPAIR = "enabled"
 REASONING_EFFORT_REPAIR = "low"
 
-# 内核基础提示词运行时覆盖(load_prompt("gateway") 通道:$HOME/.octos/
-# prompts/gateway.md 存在即整体替换内置 gateway_default.txt,零编译)。
-# 内置文本向全量工具集描述规则,ARC 的 OCTOS_TOOL_ALLOWLIST 只放行 7 个
-# 工具——Subagents/Memory 两节与 glob/code_structure/diff_edit/apply_patch/
-# view_image/spawn/save_memory/recall/ask_user_question 等点名全是幻影
+# 内核基础提示词运行时覆盖:$HOME/.octos/prompts/gateway.md 存在即整体
+# 替换内置 gateway_default.txt(零编译)。内置文本面向全量工具集,与 ARC
+# 放行的 7 个工具不符,故 ARC 始终注入下述覆盖文本。
 
 # gateway base(pi 风格):一句身份 + 单行祈使 bullet,不解释理由;
 # 行为法则的详细判据在系统行 RULES & ARCHITECTURE,此处不重复。
@@ -305,9 +301,8 @@ def _segment_digest(node_done_notes: dict[str, str],
     while len("\n".join(lines)) > 1900 and len(lines) > 3:
         lines.pop()
     if has_seeds:
-        # 09-30 宿主播种退役后的中性句:种子是模型的实现义务,宿主只
-        # 声明"按 GIVEN 行覆盖"的验证基线;仲裁条款(需求原文 wins)
-        # 只在有种子可仲裁时才有意义。
+        # 中性句:种子是模型的实现义务,宿主只声明"按 GIVEN 行覆盖"的
+        # 验证基线;仲裁条款(需求原文 wins)只在有种子可仲裁时才有意义。
         lines.append(
             "backend/data/db.json must carry the seed implemented from "
             "the GIVEN lines (plus a data: section if present) — verify it "
@@ -493,9 +488,8 @@ def _postflight_structure_check(
 
 def _free_web_port(web_port: int) -> None:
     """Best-effort kill of whatever still listens on the app port."""
-    # NOTE: log only when a PID was really killed — a bare
-    # `lsof | xargs -r kill` pipeline exits 0 even with an empty port,
-    # and a misleading "freed" line cost us a wrong diagnosis in round 22.
+    # Log only when a PID was really killed: a bare `lsof | xargs -r kill`
+    # exits 0 even with an empty port and would log a misleading "freed".
     try:
         pids = subprocess.run(["lsof", "-ti", f":{web_port}"],
                               capture_output=True, text=True,
@@ -623,10 +617,8 @@ def _rehearse_startup(output_dir: Path, smoke_port: int, *,
         out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
         return r.returncode, out[-1500:]
 
-    # 1. Frontend build (the runner builds before serving) — cached on the
-    # source fingerprint: unchanged sources + existing dist skip the
-    # rebuild (per-batch rehearsals otherwise burn 30-60s each rebuilding
-    # the same tree).
+    # Frontend build, cached on source fingerprint: unchanged sources +
+    # existing dist skip the rebuild.
     if (frontend / "package.json").exists():
         fp = _frontend_fingerprint(frontend)
         if (_REHEARSAL_FP.get(str(frontend)) == fp
@@ -755,13 +747,10 @@ def _probe_routes_on(smoke_port: int, probes: list, extra_ports: list,
             problems.append(f"extra port {port} not listening: {exc}")
     report["routes"] = rows
 
-    # Generic input-validation probes (host-computed, no business
-    # semantics): empty body and one oversized field on each POST route.
-    # Recorded as FACTS, never RED: the goal-first contract derives
-    # behavior rules from the requirement text, and the host no longer
-    # enforces a server-side-validation discipline of its own (09-27
-    # 定则). A 5xx row still lands in the report (and in final-
-    # verification.json) for the model and operator to read.
+    # Generic input-validation probes (empty body + one oversized field
+    # per POST route): recorded as FACTS, never RED — validation rules
+    # belong to the requirement text, not the host. 5xx rows land in the
+    # report for the model and operator to read.
     vprobes = plan_envelope.build_validation_probes(probes)
     vrows = []
     for vp in vprobes:
@@ -1069,8 +1058,8 @@ test('my check - name what this verifies', async ({ page }) => {
 
 # 之后的定义)。
 
-# 模型自测取证(09-30):从内核 context-logs 的 tools.jsonl 复原每条
-# playwright 运行的通过/失败计数。tools.jsonl 行形如
+# 模型自测取证:从内核 context-logs 的 tools.jsonl 复原每条
+# playwright 运行的通过/失败计数。行形如
 # {"kind":"tool_call","tool":"bash","args":{"cmd":...},"output":...,"ts":...}。
 _SELFTEST_CMD_RE = re.compile(r"playwright\s+test|playwright\.config\.ts"
                               r"|\.spec\.ts\b")
@@ -1124,12 +1113,6 @@ def _collect_selftest_evidence(output_dir: Path) -> dict | None:
                               "failed": run["failed"],
                               "ts": run["ts"]}
     return {"runs": len(runs), "last": runs[-1], "specs": per_spec}
-
-
-# ------------------------------------------------- requirement message bridge
-# (2026-09-28 退役:引号消息提取的唯一消费方是 codegen 的确定性消息桥
-# ——CRUD 生成器退役后无消费方,sidecar 与正则一并删除。需求逐字串
-# 的消费方回到模型自己读需求原文。)
 
 
 def _ensure_host_toolchain(log) -> Path | None:
@@ -1215,15 +1198,14 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
     if tests_dir is None or not tests_dir.is_dir():
         return None
     import urllib.request
-    # 09-27:run 目录移出交付工作区(旧路径 output_dir/local-grader/
-    # host-tier2 会把宿主 scratch 留给评测看到)——纯 host scratch,
-    # tempdir 承载,finally 清理。
+    # 纯 host scratch:tempdir 承载、finally 清理,不进交付工作区
+    # (留在 output_dir 会被评测看到)。
     grader = Path(tempfile.mkdtemp(prefix="octos-tier2-"))
     run_dir = grader / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
     shutil.copytree(tests_dir, run_dir / "tests", dirs_exist_ok=True)
-    # config 与 runner 亲写版逐字段同构(镜像取证:10s/10s/workers1/
-    # retries0/headless/screenshot off/trace off)。
+    # config 与生产 runner 亲写版逐字段同构(10s/10s/workers1/retries0/
+    # headless/screenshot off/trace off)。
     cfg = ("import { defineConfig } from '@playwright/test';\n"
            "export default defineConfig({ testDir: './tests',\n"
            "  fullyParallel: false, workers: 1,\n"
@@ -1233,8 +1215,8 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
            f"'http://127.0.0.1:{smoke_port}', "
            "headless: true, screenshot: 'off', trace: 'off' } });\n")
     (run_dir / "playwright.config.ts").write_text(cfg, encoding="utf-8")
-    # 镜像全局优先(评测同引擎);开发机兜底 local-grader;npx --yes 拉
-    # latest 的浏览器漂移是 run4/run5 旧伤,只作最后兜底。
+    # 镜像全局优先(评测同引擎);开发机 local-grader 兜底;裸装钉版本
+    # 只作最后兜底(npx latest 有浏览器漂移)。
     lg_cli = _pw_lg_cli()
     if lg_cli is not None:
         cmd = [shutil.which("node") or "node", str(lg_cli),
@@ -1260,13 +1242,9 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
     # derive their origin from E2E_BASE_URL (default hardcodes 3301) —
     # set it explicitly, and dual-listen spec base ports as a fallback.
     _stop_dev_server(smoke_port)
-    # Always start from the SEED: a leftover db.run.json (our own previous
-    # regression/Tier-2 pass archived/pinned notes) would shift every
-    # state-dependent test's precondition between runs — run11's eval
-    # timeouts were exactly this. Deleting it makes each staged run
-    # (regression, Tier-2 first pass, rerun-after-fix) start identically,
-    # which is also what makes the guardrail's first-vs-rerun comparison
-    # fair.
+    # Always start from the SEED: a leftover db.run.json would shift
+    # every state-dependent precondition between staged runs, and make
+    # the first-vs-rerun comparison unfair.
     _reset_runtime_seed(output_dir)
     backend = output_dir / "backend"
     env = plan_envelope.rehearsal_boot_env(os.environ, smoke_port,
@@ -1618,7 +1596,7 @@ def project_files_changed(output_dir: Path, since: float) -> bool:
     slack).
     """
     # requirements/ 不计入:需求原文是只读真值,模型往里写文件不得
-    # 洗白零工作轮(09-28 审计)。
+    # 洗白零工作轮。
     for sub in ("backend", "frontend"):
         root = output_dir / sub
         if not root.is_dir():
@@ -1690,17 +1668,14 @@ def load_requirement_tree(req_dir: Path) -> dict:
     return data
 
 
-# 参考图记号剥离(09-29 裁决):yaml 的 "Page reference:" 节点
-# (标签 + 紧随其后的图记号行)不再参与任何模型上下文——自动附图
-# 通道已退役(内核 attach_prompt_reference_images 删除),记号留在
-# 文本里只会误导模型去找它看不了的图。按节点整段剥离,连同节点前的
-# 空行分隔一并收走,描述尾巴不留空白残行;reference/ 目录本身保留
-# (平台任务夹具);需要视觉的调用方走显式媒体通道(params.media)
-# +VISUAL_MODEL 路由。
+# 参考图记号剥离:yaml 的 "Page reference:" 节点(标签+紧随图记号行)
+# 不参与任何模型上下文——自动附图通道已退役,记号留着只会误导模型去
+# 找它看不了的图。按节点整段剥离,连同节点前的空行分隔一并收走,不留
+# 空白残行;reference/ 目录本身保留(平台任务夹具);需要视觉的调用方
+# 走显式媒体通道(params.media)+VISUAL_MODEL 路由。
 _IMAGE_MARK_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
-# 标签变体白名单(09-30 取证:github 26/47 节点用 "Screenshot reference:",
-# sheet 用 "Page reference:"——只认前者会留悬空标签,误导模型找已剥的图)。
-# 仅匹配这些"<名词> reference:"形态;散文句中出现的 "reference:" 不受影响。
+# 标签变体白名单:两份真题分别用 "Page/Screenshot reference:",只认其一
+# 会留悬空标签;仅匹配"<名词> reference:"形态,散文句中的 reference: 不受影响。
 _REF_LABEL_RE = r"(?:Page|Screenshot|Image|Figure) reference:"
 # 节点主形态(真实 yaml):标签独立成行、图记号整行紧随(可连续
 # 多行);标签出现在行中也认——从标签删到节点尾。
@@ -1856,13 +1831,10 @@ def group_siblings(tree: dict, max_batch: int) -> list[list[dict]]:
     return batches
 
 
-# 场景模板填充检测(09-29 sheet 取证:sheet 题 WHEN/THEN 为模板占位串,
-# github 题为真步骤——必须逐节点自适应,不能任务级开关)。判据:场景
-# 文本(场景名+步骤 content)某个 3-gram 出现 ≥5 次、不出现在节点
-# description、出现在场景名里、且词汇不是节点自身标题的子集——最后一
-# 条是关键判别:github 真步骤的合法重复来自"场景名/WHEN 按真名引用
-# 本工作流"(重复 gram ⊆ 节点名),模板垃圾的占位短语与真名无关。
-# 保守阈值,两份真实 yaml 离线校验:sheet 23-24/24 命中,github 0 误标。
+# 场景模板填充检测(逐节点自适应,不可任务级开关:sheet 题 WHEN/THEN
+# 为模板占位串、github 题为真步骤)。判据:场景文本某 3-gram 出现
+# ≥5 次、不在节点 description、在场景名里、且词汇不是节点标题子集——
+# 最后一条为关键判别(真步骤的合法重复恒 ⊆ 节点名)。
 _TEMPLATED_GRAM = 3
 _TEMPLATED_MIN_COUNT = 5
 _WORD_RE = re.compile(r"[a-z0-9']+")
@@ -1922,16 +1894,10 @@ def _mark_templated_scenarios(tree: dict) -> int:
     return marked
 
 
-# 场景级占位骨架检测(09-30 github 法医:47 节点里 23 个是混合形态——
-# 场景 1 为真步骤、场景 2+ 是平台生成的占位骨架("signs in … follows the
-# visible controls for the <title> workflow" / "displays the required
-# headings …" / "After refreshing … persisted"),节点级检测器按设计放行
-# 标题回声,36/100 个占位场景以 "VERIFICATION REQUIREMENTS (verbatim)"
-# 名义进工单(~10.6K token 噪声 + 假验收信号)。判据通用、零词表:非
-# GIVEN 步骤文本剥种子尾/引号值/标题短语后,同一骨架逐字出现在 ≥4 个
-# 节点 = 占位;场景的【全部】非 GIVEN 步骤都是占位才打标(有一步真
-# 内容就整体保留,宁漏勿杀)。离线校验:github 恰好 36/36 与标记口径
-# 一致、0 假阳;sheet 的命中与节点级判定冗余无害。
+# 场景级占位骨架检测:节点级检测器按设计放行标题回声,混合形态节点
+# (场景 1 真步骤、场景 2+ 平台占位骨架)要靠场景级补检。判据通用、
+# 零词表:非 GIVEN 步骤剥种子尾/引号值/标题短语后,同一骨架逐字出现
+# 于 ≥4 节点 = 占位;场景全部非 GIVEN 步骤皆占位才打标(宁漏勿杀)。
 _SCEN_BOILER_MIN_NODES = 4
 _SCEN_BOILER_MIN_LEN = 40
 _SCEN_QUOTED_RE = re.compile(r"`[^`]*`|\"[^\"]*\"|“[^”]*”|”|'[^']*'")
@@ -2119,8 +2085,8 @@ def build_system_row_context(tree: dict, rules_text: str,
             + ", ".join(sorted(scope))
             + " — out-of-scope families get no work orders, no "
             "implementation, and no seed data this run.")
-    # 图片记号防线已上移到 load_requirement_tree 的载入剥离(09-29):
-    # 树在进任何渲染器之前已无 ![...](...) 记号,此处不再重复防御。
+    # 图片记号防线已上移到 load_requirement_tree 的载入剥离:树在进任何
+    # 渲染器之前已无 ![...](...) 记号,此处不再重复防御。
     return "\n\n".join(parts)
 
 
@@ -2338,8 +2304,7 @@ def session_group_batches(tree: dict, batches: list[list[dict]],
              if a in present}
     if policy == "family":
         # 每家族一组;组间环容忍 Kahn——无环时=纯拓扑,成环时破环并
-        # 告警(前向依赖由闭包双段注入+回归谱承载,与三跑文档序执行
-        # 同构,无新增风险面)。
+        # 告警(前向依赖由闭包双段注入+回归兜底承载)。
         groups = [[f] for f in fam_order]
         dep_of = {f: set(edges.get(f, ())) for f in fam_order}
         doc_index = {f: i for i, f in enumerate(fam_order)}
@@ -2352,11 +2317,9 @@ def session_group_batches(tree: dict, batches: list[list[dict]],
             pick = min(pool, key=lambda f: doc_index[f])
             if not ready:
                 unmet = sorted(dep_of[pick] - executed)
-                # 措辞如实的 A 案(09-30 核验):sheet 真题节点级声明无环
-                # (REQ-2-1-1 → REQ-5-3-1 → REQ-5-1-2/2-1 → REQ-2-1-2/1-4
-                # 是单向链),家族投影才成 ⇄ 伪环——日志点名这是家族粒度
-                # 投影,不是需求自相矛盾;机制面照旧(前向依赖=闭包注入
-                # +pending 标注+最小面指令,LAW 8 回归兜底)。
+                # 节点级声明无环,家族投影才成 ⇄ 伪环——日志点名这是
+                # 家族粒度投影,不是需求自相矛盾;前向依赖由闭包注入
+                # +回归兜底承载。
                 log(f"[flow] session policy=family: dependency cycle "
                     f"broken at {pick} (unmet deps {', '.join(unmet)} — "
                     "family-granularity projection, node-level DAG is "
@@ -2583,12 +2546,9 @@ def _download_octos(dest_dir: Path) -> str:
             return False
 
     ok = tarball_ok()
-    # The runner sits behind a CN network path that mangles GitHub's HTTP/2
-    # streams (curl 92 PROTOCOL_ERROR), stalls connections entirely, and has
-    # stopped accepting direct GitHub connections altogether in recent runs.
-    # Try the public gh-proxy mirrors FIRST (they deliver in ~6-11 min), keep
-    # the direct URL as last resort; fail fast on stalls (--speed-limit) and
-    # resume partial bytes with `-C -`.
+    # The runner's CN network path mangles GitHub HTTP/2 (curl 92) and
+    # stalls direct downloads: try gh-proxy mirrors first, direct URL
+    # last; fail fast on stalls (--speed-limit), resume partial bytes.
     mirrors = [
         f"{prefix}/{url}"
         for prefix in ("https://ghfast.top", "https://gh-proxy.com")
@@ -2599,14 +2559,9 @@ def _download_octos(dest_dir: Path) -> str:
         mirror = mirrors[(attempt - 1) % len(mirrors)]
         log(f"[octos] download attempt {attempt} ({mirror}) ...")
         if shutil.which("curl"):
-            # -sS: no progress meter — the platform log endpoint caps stdout
-            # (~200KB) and curl's per-second redraws would push the real
-            # diagnostics (and later eval errors) past the cap.
-            # --http1.1: the runner's path to GitHub kills HTTP/2 streams
-            # mid-download (curl 92 PROTOCOL_ERROR); HTTP/1.1 + `-C -`
-            # resume survives it.
-            # timeout=600: round 15 showed a stalled connection can hold for
-            # the full subprocess timeout; kill it and rotate mirrors instead.
+            # -sS: the platform log endpoint caps stdout (~200KB) — no
+            # progress redraws. --http1.1 + `-C -` resume: survives the
+            # path's HTTP/2 kills. timeout=600: kill stalls, rotate mirrors.
             try:
                 subprocess.run(
                     ["curl", "-fsSL", "--http1.1", "-C", "-",
@@ -2733,24 +2688,17 @@ def build_octos_env(config_dir: Path, *, thinking: str | None = None,
         "model": model,
         "sandbox": {"allow_network": True},
         "memory": {"refresh": {"enabled": False}},
-        #  Root cause (octos source): when ChatConfig.
-        # max_tokens is unset, octos sends no max_tokens for deepseek-family
-        # models, so the provider's tiny default (4096) applies — the
-        # reasoning model spends the whole budget on reasoning_content and
-        # returns finish_reason=length with no content and no tool calls.
-        # gateway.max_output_tokens feeds AgentConfig.chat_max_tokens.
-        # 32768 proved insufficient headroom in round 34 (six consecutive
-        # ~150s turns of pure reasoning, empty content); raised to 65536.
+        # With max_tokens unset, deepseek-family providers apply a tiny
+        # default that a reasoning model burns entirely on
+        # reasoning_content (finish_reason=length, empty content).
+        # gateway.max_output_tokens feeds AgentConfig.chat_max_tokens
+        # and needs real headroom.
         "gateway": {"max_output_tokens": 131072},
     }
     if provider not in ("openai", "deepseek", "anthropic") and base_url:
         config["base_url"] = base_url
-    # 思考参数(用户裁决 2026-09-29:常量声明,不走 env)。内核按
-    # ChatConfig.effective_thinking 解析:显式 off(thinking disabled 或
-    # effort none)绝对优先 > 分级 effort 隐含开启 > thinking enabled
-    # 无分级=模型默认深度。宿主不按 provider/model 名硬编码思考策略。
-    # 改档位=改文件头部的 THINKING/REASONING_EFFORT 常量;修复类短轮
-    # 由调用方传 THINKING_REPAIR/REASONING_EFFORT_REPAIR。
+    # 思考参数=文件头常量(不走 env);修复类短轮由调用方传
+    # THINKING_REPAIR/REASONING_EFFORT_REPAIR。
     thinking = THINKING if thinking is None else thinking
     effort = REASONING_EFFORT if effort is None else effort
     if thinking not in ("enabled", "disabled"):
@@ -2767,22 +2715,17 @@ def build_octos_env(config_dir: Path, *, thinking: str | None = None,
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     env["OCTOS_CONFIG_DIR"] = str(config_dir)
-    # 600s keeps genuine long thinks alive while the
-    # 1200s overall call cap still bounds a dead connection. NOTE the old
-    # OCTOS_DISABLE_STREAMING=1 here was dead — no kernel consumer exists;
-    # streaming works fine on the arc-bench gateway and is now kept.
+    # 600s keeps genuine long thinks alive; the kernel's overall call
+    # cap still bounds a dead connection.
     env.setdefault("OCTOS_LLM_STREAM_IDLE_SECS", "600")
     env.setdefault("OCTOS_LLM_FIRST_TOKEN_GRACE_SECS", "480")
-    # Run 50d049b049bd (2026-09-11): inside the ARC runner container the
-    # default Workspace-Write sandbox could not exec node/npm ("Permission
-    # denied"), so the model spent 813s / 3.8M tokens simulating tests it
-    # could not run. The container is already the isolation boundary, so
-    # disable octos' inner sandbox there (honoured by `octos serve --solo`).
+    # In the ARC runner container the default Workspace-Write sandbox
+    # cannot exec node/npm; the container is already the isolation
+    # boundary, so disable the inner sandbox (`octos serve --solo`).
     env.setdefault("OCTOS_DANGER_FULL_ACCESS", "1")
-    # 工具 spec 收窄:平台实跑 trace(github 二跑 + sheet,合计 1333 次
-    # 工具调用)只出现过 9 个工具;其余 ~28 个内置 spec 是每请求固定
-    # token 地板 + 选择摩擦。白名单把模型可见 spec 收到证据支撑的集合,
-    # 隐藏工具仍注册(内部调用不受影响)。运维显式 export 优先于此默认。
+    # 工具 spec 收窄:平台 trace 实证模型只用 9 个工具,其余内置 spec
+    # 是每请求固定 token 地板+选择摩擦;隐藏工具仍注册(内部调用不受
+    # 影响)。运维显式 export 优先(setdefault)。
     env.setdefault(
         "OCTOS_TOOL_ALLOWLIST",
         "bash,read_file,edit_file,write_file,grep,list_dir,update_plan",
@@ -2791,55 +2734,36 @@ def build_octos_env(config_dir: Path, *, thinking: str | None = None,
     # llm.jsonl——分层装配的前缀缓存验证基建(逐字节比对系统行/前缀;
     # 磁盘代价 KB 级/轮)。
     env.setdefault("OCTOS_CONTEXT_LOG", "1")
-    # 滑动窗口(09-29 三跑:单会话累积到 631K 才压缩一次,整表重写=
-    # 全额缓存 miss,60M cache_read 主导成本)。压缩阈值钉 150K——对大
-    # 窗口 lane(agnes 512K,内核推导 358K)是收紧;09-30 起内核把 env
-    # 值 clamp 到窗口×7/10(min 语义,ui_protocol_transport.rs 的
-    # appui_compact_threshold_tokens_for):小窗口/unknown 模型(默认
-    # 128K→89.6K)自动回落,压缩与压力双闸不再悬在窗口之上。压力淘汰
-    # 不显式设 env——内核 unset 语义=跟随压缩阈值,自动继承同一 clamp;
+    # 压缩阈值钉 150K(对大窗口 lane 是收紧);内核把 env 值 clamp 到
+    # 窗口×7/10(min 语义),小窗口/unknown 模型自动回落。压力淘汰
+    # 不显式设 env——内核 unset 语义=跟随压缩阈值自动继承同一 clamp,
     # 显式钉值反而绕过 clamp。运维显式 export 仍优先。
     env.setdefault("OCTOS_CONTEXT_COMPACT_THRESHOLD_TOKENS", "150000")
     # Any npm/npx the model runs inside the runner goes to the China mirror;
     # npmjs.org is slow/unreliable from the ARC runner network.
     env.setdefault("npm_config_registry", "https://registry.npmmirror.com")
     env.setdefault("NPM_CONFIG_REGISTRY", "https://registry.npmmirror.com")
-    # Convergence reflection intervals (kernel convergence.rs defaults 20
-    # calls / 300s). keep-25 runs showed reflections fire ONLY in runaway
-    # turns (0 in every ≤34-iteration turn; 2-10 in the 51-136 tail) and a
-    # reflection can never end a turn (it always continues the loop) — it is
-    # a queued LLM round trip of pure queue-latency cost. Halve the fire
-    # rate on both axes; operator-provided values still win (setdefault).
+    # Kernel defaults(20 calls/300s)fire reflections only in runaway
+    # turns, and a reflection can never end a turn — pure queue-latency
+    # cost. Halve the fire rate on both axes; operator values still win.
     env.setdefault("OCTOS_CONVERGENCE_LLM_CALLS", "40")
     env.setdefault("OCTOS_CONVERGENCE_SECS", "600")
-    # Inline browser verifiers: UNRESTRICTED by operator decision (09-30).
-    # The kernel bash guard stays compiled but is no longer armed here —
-    # the model may verify with any Playwright invocation style it chooses
-    # (set OCTOS_DENY_BROWSER_SCRIPTS=1 to re-arm, escape hatch
-    # `# octos:allow-browser`). run6/run7 history that motivated the guard:
-    # `node -e` chromium scripts 87/78 times per run despite the prompt ban.
-    # Refuse FULL-SUITE acceptance runs (no .spec.ts filter): keep-25-run7
-    # had 7 hand-assembled full runs ×~111s that could never go green while
-    # sibling nodes were unimplemented. The host's Tier-2 chain owns
-    # full-suite verification; escape hatch `# octos:allow-full-suite`.
+    # Inline browser verifiers UNRESTRICTED: the kernel bash guard stays
+    # compiled but is not armed here — any Playwright invocation style is
+    # allowed (OCTOS_DENY_BROWSER_SCRIPTS=1 re-arms; escape hatch
+    # `# octos:allow-browser`). Full-suite acceptance runs stay refused —
+    # the host's Tier-2 chain owns full-suite verification (escape hatch
+    # `# octos:allow-full-suite`).
     env.setdefault("OCTOS_DENY_FULL_SPEC_RUN", "1")
-    # Refuse reads of the host trace/debug subset under .arc (own event log,
-    # node_states, debug/stdout/stderr, host-plan): hg-github-001 spent its
-    # session-segment turns mining those files to reconstruct prior sessions
-    # instead of editing. Sanctioned carriers are SEGMENT DIGEST / HOST
-    # REPORT; .arc/acceptance + .arc/host + fixture-manifest stay readable;
-    # escape hatch `# octos:allow-trace-read`.
+    # Refuse reads of the host trace/debug subset under .arc (own event
+    # log, node_states, debug/stdout/stderr, host-plan): sessions get
+    # reconstructed from them instead of edited. Sanctioned carriers are
+    # SEGMENT DIGEST / HOST REPORT; .arc/acceptance + .arc/host +
+    # fixture-manifest stay readable; escape hatch `# octos:allow-trace-read`.
     env.setdefault("OCTOS_DENY_TRACE_READ", "1")
-    # Compaction threshold: octos derives it as context_window × 7/10. agnes
-    # (512k window, 64k max output) used to fall back to the 128k unknown-
-    # model default → an 89.6k threshold that re-trimmed long turns nowhere
-    # near capacity; octos-llm/context.rs now reports agnes's real window, so
-    # the threshold derives to ~358k and no env override is needed. An
-    # explicit OCTOS_CONTEXT_COMPACT_THRESHOLD_TOKENS from the operator
-    # would still win (setdefault) if a run ever needs one.
-    # examples/core-mod: a bundle-root EXTRA_RULES.md becomes extra system-
-    # prompt rules when a patched core honors OCTOS_ARC_EXTRA_RULES; the
-    # official release ignores the variable, so shipping the file is harmless.
+    # Bundle-root EXTRA_RULES.md becomes extra system-prompt rules when a
+    # patched core honors OCTOS_ARC_EXTRA_RULES; the official release
+    # ignores the variable, so shipping the file is harmless.
     rules_file = Path(__file__).resolve().parent / "EXTRA_RULES.md"
     if rules_file.is_file() and "OCTOS_ARC_EXTRA_RULES" not in env:
         env["OCTOS_ARC_EXTRA_RULES"] = rules_file.read_text(encoding="utf-8")[:8000]
@@ -2930,24 +2854,21 @@ class OctosDriver:
         self.data_dir = data_dir
         self.max_iterations = max_iterations
         self.events_log = events_log
-        # Auth-failure ledger across turns: once the gateway has failed
-        # credentials often enough, further LLM turns are skipped and the
-        # host rehearsal/verification chain takes over (it judges disk
-        # state without the LLM). 0 disables the limit.
+        # Auth-failure ledger: past the limit, further LLM turns are
+        # skipped and the host rehearsal/verification chain (LLM-free)
+        # takes over. 0 disables the limit.
         self.auth_failures = 0
         self.auth_fail_limit = int(os.environ.get("OCTOS_AUTH_FAIL_LIMIT", "6") or 0)
         # The frame stream must never break a turn: open("a") does not
-        # create parent dirs, so make sure the contract dir exists up front
-        # (runner-events.jsonl normally creates it first, this covers the
-        # degenerate ordering).
+        # create parent dirs, so ensure the contract dir exists up front.
         try:
             events_log.parent.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
         self._session = None
-        # 09-27 planctl 退役(与 pi 对齐):内核不再有 plan 模式,宿主不再
-        # 发 [arc-plan] envelope——契约/需求地图/进度账本全部印进工单
-        # 正文(自含工单),会话分段后由 _segment_digest + 自含工单续命。
+        # planctl 已退役:内核不再有 plan 模式,宿主不发 [arc-plan]
+        # envelope——契约/需求地图/进度账本全部印进自含工单正文,会话
+        # 分段后由 _segment_digest + 自含工单续命。
 
     @property
     def auth_exhausted(self) -> bool:
@@ -2959,9 +2880,9 @@ class OctosDriver:
             # the runner; log() dual-writes so it lands in the report capture.
             log(f"[core-mod] {params.get('line', '')}")
         if method == "message/reasoning_delta":
-            # run11: a reasoning-tier provider streamed 387K reasoning
-            # deltas — 90% of an 80MB trace for content the host never
-            # renders. Keep the frame stream to tool/turn/message traffic.
+            # Reasoning-tier providers can stream hundreds of KB of
+            # reasoning deltas the host never renders — keep the frame
+            # stream to tool/turn/message traffic.
             return
         try:
             with self.events_log.open("a", encoding="utf-8") as fh:
@@ -3006,25 +2927,16 @@ class OctosDriver:
         log(f"[flow] turn ended: reason={_turn_end_reason(ok, text)}")
         if not ok and self._orphaned_turn(text):
             # The kernel-side turn may still be live (idle/wall cut) or the
-            # process is already dead; either way a follow-up turn/start on
+            # process already dead; either way a follow-up turn/start on
             # this session would collide, so reset before the next turn.
-            # (Transient retries already do this mid-run; this covers the
-            # plain-failure path too — 2026-09-20 it silently degraded the
-            # next node to one-shot chat mode.)
             self.close()
         return ok, text
 
     def _run_with_heartbeat(self, fn, wall: int | None = None,
                             cancel: threading.Event | None = None
                             ) -> tuple[bool, str]:
-        """Run a turn in a thread, logging a keepalive line every 30s.
-
-        Round 21 was SIGTERMed ~7 min into a silent final-verification turn.
-        Two candidate triggers: the runner kills on stalled log output, or it
-        watches the grading port and kills once a server answers there (the
-        stronger hypothesis — earlier 7.5-min silent turns survived, and
-        there is no stage time cap: round 20 generated for 44 min). The
-        keepalive covers the first; OCTOS_SMOKE_PORT covers the second.
+        """Run a turn in a thread, logging a keepalive line every 30s —
+        the runner kills on stalled log output, so silence needs a pulse.
 
         `wall` caps the whole call: on expiry we set `cancel` (no further
         retries / chat fallback) and kill the session so the worker's
@@ -3069,11 +2981,10 @@ class OctosDriver:
     @staticmethod
     def _auth_failure(text: str) -> bool:
         """Credential-shaped failures (vs connection-shaped): 401/403/
-        authentication. Round 22/23 taught us the platform-injected key can
-        rotate and RECOVER mid-run, so these stay retryable — but on a
-        shorter backoff, and counted toward OCTOS_AUTH_FAIL_LIMIT so a
-        gateway that stays broken stops burning the shared wall clock
-        (tb-trace-001: 55% of wall time陪跑 auth/connection failures)."""
+        authentication. The platform-injected key can rotate and recover
+        mid-run, so these stay retryable — shorter backoff, and counted
+        toward OCTOS_AUTH_FAIL_LIMIT so a permanently broken gateway
+        stops burning the shared wall clock."""
         lowered = text.lower()
         return any(k in lowered for k in (
             "403", "authentication failed", "401", "unauthorized",
@@ -3086,16 +2997,13 @@ class OctosDriver:
             "temporarily unavailable", "503", "502", "429", "rate limit",
             "timeout", "timed out", "connection reset", "overloaded",
             "failed to send", "streaming request",
-            # keep-25-run1: agnes 线流式中途断连,整节点 209s 报废——
             # "connection closed" 既非 reset 也非 orphaned(会话可原地续),
             # 短退避重试即可救回。
             "connection closed", "connection_closed", "connection aborted",
             "econnreset", "socket hang up",
-            # Round 22: the platform-injected key returned HTTP 403
-            # "Authentication failed" mid-run after ~25 min of working
-            # requests; round 23 got HTTP 401 "无效的令牌" from the start.
-            # A short retry window lets a rotated/recovered key save the
-            # run instead of failing every remaining turn in 0s.
+            # Platform-injected keys rotate/recover mid-run; a short
+            # retry window lets a recovered key save the run instead of
+            # failing every remaining turn in 0s.
             "403", "authentication failed", "401", "unauthorized"))
 
     @staticmethod
@@ -3142,12 +3050,9 @@ class OctosDriver:
                 self.close()
                 ok, text = fn(prompt)
             else:
-                # Session is alive and idle (e.g. an API burst ended the
-                # turn with turn/error). Restarting from a blank session
-                # forfeits all in-progress work — the 2026-09-16
-                # ticket-booking baseline burned 4 sessions and 94
-                # re-orientation read_file calls this way. Continue the
-                # SAME session with a short recovery instruction instead.
+                # Session alive and idle: restarting blank forfeits all
+                # in-progress work. Continue the SAME session with a
+                # short recovery instruction instead.
                 followup = (
                     "Your previous turn was interrupted by a transient "
                     f"provider error ({text[:160]}). Re-check the current "
@@ -3246,12 +3151,9 @@ def build_spec_run_cmd(cli_path: str | None,
     """
     files = " ".join(f for f in (spec_files or []) if f)
     tail = f" {files}" if files else ""
-    # 冷启动前缀(评测同构):评测链每轮都是 清运行态 → 重建前端 → 从种子
-    # 起服 → 跑 specs;本地绿必须出自同一起点(run11/8/7 的 greenButRed
-    # 主形态=热状态+旧 dist 绿、评测冷启动红;run13 全绿 run 自发形成这
-    # 套仪式,这里机制化)。语义:rm 永不失败;build 失败则整链停止(模型
-    # 先看到构建错误,不浪费一次 spec run);restart 失败容忍(脚本缺席
-    # 时对现有服务跑,boot.log 有细节)。
+    # 冷启动前缀(评测同构):清运行态 → 重建前端 → 从种子起服 → 跑
+    # specs;本地绿必须出自同一起点(热状态+旧 dist 的绿,评测冷启动会红)。
+    # rm 永不失败;build 失败整链停止(先见构建错误);restart 失败容忍。
     cold_start = ("rm -f backend/data/db.run.json && "
                   "npm run build --prefix frontend && "
                   "sh .arc/host/restart-server.sh >/dev/null 2>&1; ")
@@ -3301,13 +3203,6 @@ def final_spec_files(tier2_run, output_dir: Path) -> list[str] | None:
         if any(t in text for t in titles):
             hits.append(name)
     return hits or all_specs
-
-# 09-30: ACCEPTANCE_STAGED_NOTE 整块退役——"Implement against the spec
-# files / the spec wins" 与工单 "the TEXT wins" 逐字对立,是发明规则经
-# staged spec 跨会话固化的教义通道(sheet 09-30 95×400 法医)。staged
-# specs 的回归套件地位已并入系统行权威句(plan_envelope.py)。
-
-
 
 
 def locate_acceptance_tests(tree: dict, bundle_dir: Path) -> Path | None:
@@ -3383,8 +3278,8 @@ def stage_acceptance_runtime(stage_dir: Path, smoke_port: int,
         "export default defineConfig({ testDir: '.',\n"
         "  fullyParallel: false, workers: 1, retries: 0,\n"
         "  timeout: 10_000, expect: { timeout: 10_000 },\n"
-        # 09-27 镜像取证:生产 runner 亲写 config 的 use 段逐字段
-        # 对齐(headless/screenshot/trace)——同构到字段级。
+        # 生产 runner 亲写 config 的 use 段逐字段对齐
+        # (headless/screenshot/trace)——同构到字段级。
         "  use: { baseURL: "
         f"'http://127.0.0.1:{smoke_port}', "
         "headless: true, screenshot: 'off', trace: 'off' } });\n",
@@ -3455,12 +3350,11 @@ def main() -> int:
     print(f"[env] ARCBENCH_TASK_DIR={os.environ.get('ARCBENCH_TASK_DIR', '<unset>')}", flush=True)
     print(f"[env] argv requirement_path={args.requirement_path}", flush=True)
 
-    # Raw LLM probe: bypass octos entirely and hit the injected endpoint with
-    # a minimal chat.completions request, so we can tell a dead endpoint
-    # apart from an octos request-shape problem. Never logs the key.
-    # The platform proxy occasionally 500s ("上游负载") for minutes at a
-    # time; gate on it (up to ~10 min) instead of burning generation turns
-    # against a dead endpoint.
+    # Raw LLM probe: bypass octos and hit the injected endpoint with a
+    # minimal chat.completions request — distinguishes a dead endpoint
+    # from an octos request-shape problem; never logs the key. The
+    # platform proxy sometimes 500s for minutes at a time: gate on it
+    # (up to ~10 min) instead of burning generation turns.
     if _key and os.environ.get("OPENAI_BASE_URL"):
         import urllib.request as _ur
         probe_body = json.dumps({
@@ -3528,10 +3422,8 @@ def main() -> int:
         if not atomic_nodes:
             raise ValueError("no ATOMIC requirement nodes found")
         # 运行范围解析前置——scope 影响后续所有装配决策(工单/账本/
-        # Tier-2 判定面/参考图归属)。
-        # 范围解析优先级:env 显式 > COMPETITION_FAMILY_SCOPE(烤入默认)。
-        # 平台提交无法传 env → 正式范围改 main.py 顶部常量后重打包
-        # (见 arc/SCOPE.md);本地仿真用 env-file 覆盖,"all"/"*" 显式全量。
+        # Tier-2 判定面/参考图归属)。优先级:env 显式 > 烤入常量;
+        # 平台无法传 env → 正式范围改常量后重打包(见 arc/SCOPE.md)。
         _raw_scope = os.environ.get("OCTOS_ARC_FAMILIES")
         if _raw_scope is None:
             _raw_scope = COMPETITION_FAMILY_SCOPE
@@ -3573,12 +3465,10 @@ def main() -> int:
         runtime.git.ensure_repo()
 
         octos_bin = find_octos()
-        # 工单正文,内核只做驱动与治理(shell guard/折叠/迭代帽照旧)。
-        # 家族工单:一个顶层家族一次交给代理连贯深实现(超大家族沿子家族
-        # 边界切)。OCTOS_ARC_FAMILIES=运行范围(首跑/快迭代):只实现列出
-        # 的家族(任意层级前缀,"REQ-1"/"REQ-2-3"/原子 id 均可,逗号分隔),
-        # 范围外家族不生成工单/不计进度/不进 Tier-2;未设置=全量。
-        # (family_scope/family_of 已前置。)
+        # 内核只做驱动与治理(shell guard/折叠/迭代帽照旧),契约全在
+        # 工单正文。家族工单:一个顶层家族一次交给代理连贯深实现(超大
+        # 家族沿子家族边界切)。OCTOS_ARC_FAMILIES=运行范围:范围外家族
+        # 不生成工单/不计进度/不进 Tier-2;未设置=全量。
         family_batch_max = int(
             os.environ.get("OCTOS_ARC_FAMILY_BATCH_MAX", "6"))
         node_batches = group_families(tree, family_batch_max)
@@ -3599,11 +3489,10 @@ def main() -> int:
             "familie(s)")
         max_batch = max((len(b) for b in node_batches), default=1)
         # Iteration-cap coupling: a healthy node needs 3-40 kernel
-        # iterations (keep-25 data, median ~15), so a batch of B legitimately
-        # needs up to ~40×B. The profile cap is session-wide, so scale it to
-        # the LARGEST batch before the session bootstraps: max(env, 40×B).
-        # Batch 2 keeps the validated cap 100; 3→120, 4→160. The runaway
-        # fuse still trips (≥136-class tails stay bounded).
+        # iterations, so a batch of B legitimately needs up to ~40×B.
+        # The profile cap is session-wide — set max(env, 40×largest
+        # batch) before the session bootstraps; the runaway fuse still
+        # trips on slow tails.
         cap_env = os.environ.get("OCTOS_TURN_MAX_ITERATIONS", "").strip()
         cap_base = int(cap_env) if cap_env else 100
         os.environ["OCTOS_TURN_MAX_ITERATIONS"] = str(
@@ -3614,29 +3503,17 @@ def main() -> int:
                 f"turn cap {os.environ['OCTOS_TURN_MAX_ITERATIONS']}")
         max_iter = int(os.environ.get("OCTOS_MAX_ITERATIONS", "500"))
         # Idle budget (resets on EVERY protocol event, so a slow-but-
-        # streaming turn is never cut): tightened 1200→600 after
-        # tb-trace-001, where dead-gateway turns sat silent for 20 minutes
-        # before the idle cut — twice the worst observed provider TTFB
-        # (~218s median lane) is still generous.
+        # streaming turn is never cut): 600s ≈ 2× the worst observed
+        # provider TTFB, while still cutting turns that sit silent for
+        # many minutes.
         node_timeout = int(os.environ.get("OCTOS_NODE_TIMEOUT", "600"))
-        # Wall-clock budget for the whole generation flow. 2026-09-21:
-        # default switched to 0 (UNLIMITED) by operator decision — long
-        # tasks need far more than the old ~90-minute window. The original
-        # rationale (exit cleanly before the platform's SIGTERM, round 21)
-        # is now covered per-turn instead: the iteration cap, green-stop
-        # fuse, doom guard and idle timeout bound every turn, so a run
-        # without a total budget still makes bounded, observable progress.
-        # A positive OCTOS_TIME_BUDGET restores the finite-budget path
-        # (node skipping, final-tail reservation) verbatim.
-        #
-        # Soft-landing default (hg-github-001 lesson, 2026-09-25): with no
-        # explicit budget the only stop is the OUTER runner kill (12h in
-        # the sim) — being killed mid-flight skips postflight entirely and
-        # db.run.json ships, so eval boots from stale runtime state (the
-        # run11 root cause). When the outer timeout is visible in the
-        # environment, derive the budget as timeout − 3600 (1h margin for
-        # final verification + postflight + eval boot) so the flow lands
-        # itself.
+        # Total-budget gate: default UNLIMITED — the per-turn bounds
+        # (iteration cap, green-stop, doom guard, idle timeout) keep
+        # progress bounded without one. When an outer runner timeout is
+        # visible, derive OCTOS_TIME_BUDGET = timeout − 3600 so the flow
+        # lands itself cleanly: a mid-flight kill skips postflight and
+        # ships a stale db.run.json. A positive budget restores the
+        # finite path (node skipping, final-tail reservation).
         if "OCTOS_TIME_BUDGET" not in os.environ:
             outer_timeout = os.environ.get("ARCBENCH_AGENT_TIMEOUT") or \
                 os.environ.get("AGENT_RUN_TIMEOUT_SECONDS")
@@ -3650,26 +3527,21 @@ def main() -> int:
                 except ValueError:
                     pass
         budget = int(os.environ.get("OCTOS_TIME_BUDGET", "0"))
-        # Per-turn hard wall. Decoupled from the budget (it used to be
-        # budget*0.45): standalone default 3600s per single node/batch-1,
-        # scaled by batch size at the call sites. It exists to bound a
-        # turn that stays inside its iteration cap but crawls (100 slow
-        # iterations × 60s stalls ≈ 100 min); a wall-cut turn lands on
-        # disk and recovers through the rehearsal/repair loop.
+        # Per-turn hard wall, decoupled from the budget: bounds a turn
+        # that stays inside its iteration cap but crawls. A wall-cut turn
+        # lands on disk and recovers through the rehearsal loop.
         node_wall = int(os.environ.get("OCTOS_NODE_WALL", "3600"))
         final_reserve = int(os.environ.get(
             "OCTOS_FINAL_RESERVE", str(max(300, budget // 9)) if budget else 0))
         node_floor = int(os.environ.get("OCTOS_NODE_FLOOR", "300"))
         t_run_start = time.time()
-        # Smoke tests must NEVER use the grading port: round 21 was SIGTERMed
-        # minutes after the final-verification turn started a server on
-        # port 3000 — the runner appears to treat a live grading port as
-        # "agent finished" and kills the process.
+        # Smoke tests must NEVER use the grading port: the runner treats a
+        # live grading port as "agent finished" and kills the process.
         smoke_port = int(os.environ.get(
             "OCTOS_SMOKE_PORT", str(plan_envelope.SMOKE_PORT)))
         if smoke_port == args.web_port:
             smoke_port += 1
-        # planctl: stage specs read-only + host scaffold (E-flip) + the
+        # planctl: stage specs read-only + host scaffold + the
         # spec→node map for the envelope.
         spec_map: dict = {}
         scaffolded: list[str] = []
@@ -3681,7 +3553,7 @@ def main() -> int:
         if os.environ.get("OCTOS_ARC_PREWARM", "1") != "0":
             toolchain_cli = _ensure_host_toolchain(log)
         # (The final-verification SPEC RUN command is built at the final
-        # check, filtered to the Tier-2 red tests' own spec files — see
+        # check, filtered to the red tests' own specs — see
         # final_spec_files; the unfiltered full-suite form is the host's
         # Tier-2 job and the kernel guard refuses it.)
         if tests_dir:
@@ -3698,18 +3570,12 @@ def main() -> int:
             spec_ports_extra = sorted(
                 {p for p in spec_base_ports(tests_dir)
                  if p not in (args.web_port, smoke_port)})
-        # UI 契约冒烟(hackathon--sheet 3 分根因的修复通道):requirements-only
-        # 任务的宿主验证原本止步 HTTP 层,而模型被禁止跑浏览器——六类 UI
-        # 契约缺陷全盲。模型自测骨架落盘工作区根 e2e/(09-28 起脱离 .arc),并
-        # 下发与 SPEC RUN 同构的被批准自检命令;批末做静态轻检,final 跑
-        # 完整爬虫+修复循环。内核三道 guard 对该命令形状结构性放行
-        # (shell.rs ui_smoke_run_command_shape_passes_every_guard)。
-        # 2026-09-27 起有 staged specs 的任务同样落盘:隐藏评测 spec 通常
-        # 多于 staged 公共 spec,final 的十类探针是对它们的附加防线
-        # (节点轮自检命令仍只发给无 specs 任务,避免与 SPEC RUN 抢注意力)。
-        # 宿主模板无条件落盘：平台在 agent 退出后强制检查 workspace 的
-        # frontend/ 与 backend/，与 plan 能力、验收测试是否定位到均无关；
-        # 落盘是确定性本地写文件，skeleton 轮只负责在模板之上补全。
+        # 模型自测骨架落盘工作区根 e2e/:requirements-only 任务的宿主验证
+        # 止步 HTTP 层,浏览器级验证只能靠模型自测——下发与 SPEC RUN 同构
+        # 的被批准自检命令(内核 guard 对该命令形状结构性放行),批末静态
+        # 轻检。有 staged specs 的任务同样落盘:隐藏评测 spec 通常多于
+        # staged 公开 spec,final 探针是附加防线。宿主模板无条件落盘:
+        # 平台在 agent 退出后强制检查 frontend/ 与 backend/。
         if os.environ.get("OCTOS_ARC_HOST_SCAFFOLD", "1") != "0":
             scaffolded = scaffold.scaffold(output_dir)
             log(f"[plan] host scaffold wrote {len(scaffolded)} file(s): "
@@ -3749,9 +3615,9 @@ def main() -> int:
         # 直接写 backend/data/db.json,skeleton 轮模型只补语义关系;解析不了
         # 的条目进 uncovered 报告降级为 FOCUS GIVEN 清单。模型已写过种子
         # (非空 collections)绝不覆盖(重跑安全)。
-        # 宿主播种退役(09-30 定则):db.json 由模型按需求的 data: 段与
-        # GIVEN 行自己实现(GIVEN 原样进上下文);宿主只做机械推导
-        # (compile_seed 纯函数)供探针/完整性基线/统计——不落盘任何内容。
+        # 宿主播种已退役:db.json 由模型按需求的 data: 段与 GIVEN 行自己
+        # 实现(GIVEN 原样进上下文);宿主只做机械推导(compile_seed 纯
+        # 函数)供探针/完整性基线/统计——不落盘任何内容。
         fixture_compiled: dict | None = None
         try:
             fixture_compiled = fixture_manifest.compile_seed(fixture_data)
@@ -3786,20 +3652,17 @@ def main() -> int:
         seed_rows_expected: dict = {}
         if fixture_compiled and fixture_compiled.get("db"):
             seed_rows_expected = fixture_compiled["db"]
-        # ---- 模型自测骨架 staging(09-27 目标优先定则) ----
-        # 测试用例由模型根据需求原文自己生成。宿主只落盘内核放行命令
-        # 形状所需的最小骨架:playwright.config.ts + MY-CHECK 示例。
-        # 凭据前奏等由模型按各自 spec 自行 arrange。
+        # ---- 模型自测骨架 staging:测试用例由模型按需求原文自生成,
+        # 宿主只落盘内核放行命令形状所需的最小骨架(playwright.config.ts
+        # + MY-CHECK 示例);凭据前奏等由模型自行 arrange。 ----
         stage_selftest_dir(output_dir, smoke_port)
         # 自测命令/契约已收编进系统行 RULES & ARCHITECTURE(两形式);
         # 此处只落盘 e2e 配置骨架。
         log("[plan] self-test skeleton staged "
             f"({SELFTEST_SUBDIR}/playwright.config.ts + example)")
-        # 流级验证定则(09-27 删除宿主自写验收,09-30 强化):比赛全自动
-        # 无人工环节,流验证只能由模型自生成自验证(SELF-TEST CONTRACT,
-        # spec 先行+逐句锚定需求原文);宿主硬编码走查/探针类别整体不要
-        # (faó4c80 删 flow_suite,09-30 复活后再度拆除)——宿主侧只做
-        # 运行时治理(rehearsal/排练门/端口看门狗),不做内容决策。
+        # 流级验证定则:比赛全自动无人工环节,流验证由模型自生成自验证
+        # (SELF-TEST CONTRACT,spec 先行+逐句锚定需求原文);宿主不做
+        # 内容决策,只做运行时治理(rehearsal 门/端口看门狗)。
         # extra_rules 全局契约:确定性渲染(静态 manifest → 每轮字节相同,
         # 缓存律),经稳定 CONTRACT 段常驻;节点 GIVEN 走 FOCUS validation 前缀。
         fixture_stats = {
@@ -3821,8 +3684,8 @@ def main() -> int:
             (fixture_compiled or {}).get("covered") or ())
         fixture_arranged_nodes = frozenset(
             (fixture_compiled or {}).get("arrange") or ())
-        # 09-30 定则:GIVEN 恒原文,指针机制随宿主播种一起退役——集合
-        # 09-30:GIVEN 恒原文后该集合已无消费方,置空保留参数位。
+        # GIVEN 恒原文(需求原文是唯一判分依据);宿主种子/指针机制退役后
+        # 该集合已无消费方,置空保留参数位。
         fixture_seeded_scenarios = frozenset()
 
         def fixture_probe_list() -> list[dict]:
@@ -3872,11 +3735,9 @@ def main() -> int:
 
         def time_up() -> bool:
             return remaining() <= 0
-        # 日志分两层: 平台契约 .arc/ 承载宿主可消费的追踪(协议帧流
-        # octos-events.jsonl、debug.log, 与 agent-arc-based 的 runtime
-        # 交互方式对齐——agent 只追加原始数据, 聚合渲染全在宿主侧);
-        # octos/ 继续收自留调试件(二进制状态、dev-server 日志),
-        # 与 backend/ 同级可见, 不用 .octos 这类隐藏目录。
+        # 日志分两层:.arc/ 承载平台契约追踪(协议帧流、debug.log;agent
+        # 只追加原始数据,聚合渲染在宿主侧);octos/ 收自留调试件(二进制
+        # 状态、dev-server 日志),与 backend/ 同级,不用隐藏目录。
         logs_dir = output_dir / "octos"
         logs_dir.mkdir(parents=True, exist_ok=True)
         _ignore_logs_in_workspace_git(output_dir)
@@ -3904,17 +3765,14 @@ def main() -> int:
         env = build_octos_env(config_dir)
         # --data-dir 只覆盖 chat 模式;stdio 模式读环境变量,双保险。
         env["OCTOS_HOME"] = str(data_dir)
-        # Make the smoke port the INHERITED default for anything the agent
-        # starts: generated apps read `process.env.PORT || <grading port>`,
-        # so a bare `npm start` inside a turn would otherwise bind the
-        # grading port and get us SIGTERMed (round 21; round 33 died the
-        # same way 3 minutes into the final check). An explicit
-        # `PORT=xxx npm start` from the prompt still wins over this.
+        # Smoke port = inherited default PORT for anything the agent
+        # starts: generated apps read `process.env.PORT || <grading
+        # port>`, so a bare `npm start` would bind the grading port and
+        # get the run killed. Explicit `PORT=xxx npm start` still wins.
         env["PORT"] = str(smoke_port)
         # Independent seatbelt: reap anything that binds the grading port
-        # during generation. The runner's own port watch takes minutes to
-        # fire (round 21), this polls every 5s, so we win the race against
-        # any accidental bind the prompt didn't prevent.
+        # during generation — polls every 5s, faster than the runner's
+        # own port watch.
         watchdog_stop = threading.Event()
         watchdog = threading.Thread(
             target=_port_watchdog,
@@ -3928,10 +3786,8 @@ def main() -> int:
             system_context=system_row_ctx or None,
         )
         # 修复类短轮专用 driver(思考降档,见 THINKING_REPAIR):独立
-        # config_dir(低档 config.json)+ 独立 profile 目录(新会话必建
-        # 新 profile 定则)+ 同一系统行上下文。适用面=自含错误摘要的修复
-        # turn(syntax/rehearsal/spec 回归);nudge 类依赖会话连续性,留
-        # 主 driver。懒创建,首次修复时才起。
+        # config/profile 目录(新会话必建新 profile)+ 同一系统行上下文。
+        # 适用面=自含错误摘要的修复 turn(syntax/spec 回归)。懒创建。
         repair_driver: OctosDriver | None = None
         repair_config_dir = Path(tempfile.mkdtemp(prefix="octos-config-repair-"))
         repair_data_dir = Path(tempfile.mkdtemp(prefix="octos-profile-repair-"))
@@ -3955,9 +3811,8 @@ def main() -> int:
                     f"{THINKING_REPAIR}, effort={REASONING_EFFORT_REPAIR})")
             return repair_driver
 
-        # envelope/系统行通道删除——契约随分层装配走
-        # (全局层在系统行,模块层在工单);进度账本是宿主本地 dict(供工单
-        # 进度行/分段摘要/事件标记消费)。
+        # 契约随分层装配走(全局层在系统行,模块层在工单);进度账本是
+        # 宿主本地 dict(供工单进度行/分段摘要/事件标记消费)。
         plan_statuses: dict[str, str] = {
             str(n.get("id")): "pending" for n in atomic_nodes}
         # Staged specs of every node whose batch rehearsal-greened so far —
@@ -3969,10 +3824,9 @@ def main() -> int:
         batch_specs: list[str] = []
 
         try:
-            # 09-30 定则:骨架轮退役(用户裁决:有模板时骨架轮就是
-            # REQ-1 的正式轮)——首家族批 turn 携带 BOOTSTRAP 前言(种子/
-            # 共享 API 面/家族 stub 在位);无脚手架路径(配置关模板)需
-            # 恢复骨架机器,此处显式报错防静默裸跑。
+            # 骨架轮已退役:有模板时首家族批 turn 携带 BOOTSTRAP 前言
+            # (种子/共享 API 面/家族 stub 在位);无脚手架路径需恢复骨架
+            # 机器,显式报错防静默裸跑。
             if not template_ready:
                 raise RuntimeError(
                     "OCTOS_ARC_HOST_SCAFFOLD=0 requires the legacy skeleton "
@@ -3983,15 +3837,14 @@ def main() -> int:
             failed: list[str] = []
             # skip 节点的真实原因(deadline/budget/auth)——终局 test 事件
             # 用它,而不是误导性的 "final verification did not pass"
-            # (skip 的节点从未被验证过;09-29 event-hygiene)。
+            # (skip 的节点从未被验证过)。
             skip_reasons: dict[str, str] = {}
             node_done_notes: dict[str, str] = {}
             segment_digest_pending = False
-            # 会话策略(09-29 二轮裁决):family(默认)——每家族一会话,
-            # 依赖(含同族跨批/跨族/环)全部由工单闭包双段注入(REQ
-            # CONTENT + VERIFICATION 原文)承载,组间环容忍拓扑(成环
-            # 破文档序并告警);scc——互达成环家族共组;single——全程
-            # 单会话。OCTOS_ARC_SEGMENT_BATCHES>0 为应急每 N 批盲切。
+            # 会话策略:family(默认)每家族一会话,依赖全由工单闭包双段
+            # 注入承载,组间环容忍拓扑(成环破文档序并告警);scc=互达
+            # 成环家族共组;single=全程单会话。OCTOS_ARC_SEGMENT_BATCHES>0
+            # 为应急每 N 批盲切。
             session_policy = os.environ.get(
                 "OCTOS_ARC_SESSION_POLICY", "family").strip().lower()
             batch_group: list[int] = []
@@ -4048,11 +3901,9 @@ def main() -> int:
                 if not batch:
                     continue
                 batch_ids = [str(n.get("id")) for n in batch]
-                # P0(wire.rs 精确匹配 step id):"id1 + id2" 复合串会让内核
-                # drop 整个 envelope——默认 batch=2 时几乎每个节点 turn 的
-                # PLAN/FOCUS/validation 都装不上(github 2 分根因之一)。
-                # 批次锚定首节点;其余成员 status 已逐个 active,完整契约
-                # 仍由节点提示词正文(node_spec)携带。
+                # 批次锚定首节点(内核精确匹配 step id,"id1 + id2" 复合串
+                # 会让内核 drop 整个 envelope);其余成员 status 已逐个
+                # active,完整契约仍由节点提示词正文携带。
                 focus_id = batch_ids[0]
                 for nid in batch_ids:
                     events.mark_design_started(nid)
@@ -4062,12 +3913,10 @@ def main() -> int:
                 t0 = time.time()
                 for nid in batch_ids:
                     plan_statuses[nid] = "active"
-                # 进度账本行:家族级状态(全家族节点 done=done;任一
-                # blocked=blocked;否则 active/pending),随工单下发——
-                # planctl 退役后全局进度的唯一载体。范围 run 只列范围
-                # 内家族(范围外不制造"永远 pending"的噪音)。
-                # 分层装配:全局层(地图+契约+播种契约)常驻系统行;
-                # 工单=模块层(本家族全子树)+依赖闭包+批节点+进度。
+                # 进度账本行:家族级状态随工单下发(planctl 退役后全局
+                # 进度的唯一载体);范围 run 只列范围内家族。分层装配:
+                # 全局层(地图+契约+播种契约)常驻系统行;工单=模块层
+                # (本家族全子树)+依赖闭包+批节点+进度。
                 node_prompt = build_turn_features(
                     tree, batch, family_of, parent_of,
                     statuses=plan_statuses)
@@ -4090,21 +3939,19 @@ def main() -> int:
                 node_prompt += GOAL_FIRST_TURN_COMPLETION.format(
                     smoke=smoke_port)
                 if segment_digest_pending:
-                    # P3:分段后首 turn 的正版记忆——逐节点完成笔记,
-                    # 替代模型翻 .arc 考古(见注入点注释)。
-                    # flag 不在此清:该 turn 若死于流错误/墙钟(hg-github-
-                    # 001 死过 3 个 turn),重试与后续批仍要拿到摘要;
-                    # 直到本批某个 turn 真正成功才在下方清掉。
+                    # 分段后首 turn 的正版记忆——逐节点完成笔记,替代
+                    # 模型翻 .arc 考古。flag 不在此清:该 turn 若死于流
+                    # 错误/墙钟,重试与后续批仍要拿到摘要;本批某个 turn
+                    # 真正成功才在下方清掉。
                     node_prompt += _segment_digest(
                         node_done_notes, plan_statuses,
                         has_seeds=bool(seed_rows_expected))
                 if template_ready:
                     _ensure_dev_server(output_dir, smoke_port,
                                        spec_ports_extra, log)
-                # Batch guardrail checkpoint: a cut turn's half-finished
-                # files used to linger (and even get committed) for the
-                # next batch to build on. On a failed batch that cannot be
-                # repaired, the tree rolls back here instead.
+                # Batch guardrail checkpoint: a failed batch that cannot be
+                # repaired rolls back to this head instead of letting the
+                # next batch build on half-finished files.
                 try:
                     pre_batch_head = runtime.git.run(
                         ["rev-parse", "HEAD"]).stdout.strip()
@@ -4113,11 +3960,9 @@ def main() -> int:
                 batch_turn_ok = True
                 main_turn_reason = "not run: auth exhausted"
                 if driver.auth_exhausted:
-                    # Gateway burned its credential budget (tb-trace-001:
-                    # 55% of wall clock陪跑 auth failures). Stop paying
-                    # for LLM turns; the rehearsal branch below already
-                    # verifies what is on disk and the final-verification
-                    # chain grades without the LLM.
+                    # Gateway burned its credential budget: stop paying for
+                    # LLM turns; the rehearsal + final-verification chains
+                    # grade disk state without the LLM.
                     log(f"[flow] batch {focus_id} skipped: auth failure "
                         f"limit reached ({driver.auth_failures}); "
                         "rehearsing disk state instead")
@@ -4150,15 +3995,13 @@ def main() -> int:
                             nid, "turn ended failed: " + text[-200:])
                         failed.append(nid)
                 if ok and not project_files_changed(output_dir, t0):
-                    # Lazy turn: protocol ok, zero disk progress. Spec
-                    # FIRST: run13 showed 4/19 "lazy" turns were actually
-                    # verification-only completions — the requirement was
-                    # already implemented by an earlier batch's overflow
-                    # and the turn's single tool was the batch SPEC RUN
-                    # going green. Files-changed is the wrong judge; the
-                    # specs are the contract (host-computes: we run the
-                    # batch's staged specs ourselves, green = done, red =
-                    # genuinely lazy → batch failed).
+                    # Lazy turn: protocol ok, zero disk progress. Files-
+                    # changed is the wrong judge — a turn whose only tool
+                    # was the batch SPEC RUN going green is a legitimate
+                    # verification-only completion (the requirement was
+                    # already implemented earlier). The specs are the
+                    # contract: we run the batch's staged specs ourselves —
+                    # green = accept, red = genuinely lazy → batch failed.
                     if tests_dir and batch_specs:
                         v_run = _run_staged_playwright(
                             output_dir, smoke_port, tests_dir,
@@ -4209,11 +4052,9 @@ def main() -> int:
                         except Exception as exc:
                             log(f"[plan] syntax-gate rollback failed: {exc}")
                     continue
-                # N1(09-29 修复):失败 turn 不再无条件打"实现完成"事件——
-                # auth 耗尽跳过的批什么都没跑、wall 切断的批语义未定,
-                # done 标记只属于成功 turn 或 rehearsal 恢复路径(下方)。
-                # commit 保持无条件:切断轮已落盘的文件仍需入库留痕,
-                # 由 rehearsal 门裁决其成色。
+                # done 标记只属于成功 turn 或 rehearsal 恢复路径(下方)——
+                # 失败 turn 不打"实现完成"。commit 无条件:切断轮已落盘
+                # 文件仍需入库留痕,由 rehearsal 门裁决其成色。
                 if ok:
                     for nid in batch_ids:
                         events.mark_implementation_done(nid, text[-500:] or None)
@@ -4222,10 +4063,9 @@ def main() -> int:
                     f"{focus_id} (implement): "
                     + "; ".join(str(n.get("name", "")) for n in batch))
                 if not time_up():
-                    # A-flip: the HOST verifies whatever landed (build +
-                    # boot + route probes + extra ports) — once per batch,
-                    # read-only. Red stays red: the batch goes blocked and
-                    # the final LLM turn is its only repair chance.
+                    # The HOST verifies whatever landed (build + boot +
+                    # route probes + extra ports) — once per batch,
+                    # read-only. Red stays red: the batch goes blocked.
                     r_err, r_report = rehearse_node(
                         output_dir, smoke_port, probe_list,
                         spec_ports_extra, fixture_probe_list(),
@@ -4236,12 +4076,11 @@ def main() -> int:
                     batch_state = "done" if r_err is None else "blocked"
                     if (r_err is not None and not batch_turn_ok
                             and pre_batch_head):
-                        # Failed (cut) turn whose half-finished state could
-                        # not even be repaired to a green rehearsal: ship
-                        # it back to the pre-batch baseline instead of
-                        # letting the next batch build on broken ground.
-                        # (A green rehearsal still recovers the cut batch —
-                        # wall-cut turns are often 90% done on disk.)
+                        # A cut turn whose half-finished state stayed red:
+                        # ship the pre-batch baseline instead of letting
+                        # the next batch build on broken ground. (A green
+                        # rehearsal still recovers the cut batch — wall-cut
+                        # turns are often 90% done on disk.)
                         try:
                             runtime.git.run(
                                 ["reset", "--hard", pre_batch_head])
@@ -4278,29 +4117,20 @@ def main() -> int:
                             and not time_up()
                             and os.environ.get("OCTOS_ARC_HOST_GRADE",
                                                "1") != "0"):
-                        # Post-batch incremental regression (run8: 12 of 18
-                        # failures were later batches breaking earlier,
-                        # already-green features through shared files).
-                        # Tiered blast radius: only a batch that touched
-                        # SHARED files (app assembly/store/api, main.jsx,
-                        # backend/src) pays for a staged regression of the
-                        # COMPLETED nodes' specs — a features-only batch is
-                        # isolated by construction.
+                        # Post-batch incremental regression: later batches
+                        # can break earlier, already-green features through
+                        # shared files. Blast radius = the COMPLETED nodes'
+                        # specs, paid for by ANY source change — the model
+                        # funnels requirements into big feature files, so
+                        # a features/ edit IS a shared-component edit.
+                        # Only run artifacts (local-grader/, test-results/,
+                        # .arc, .octos, data, dist) stay exempt.
                         try:
                             changed = runtime.git.run([
                                 "diff", "--name-only", pre_batch_head,
                                 "HEAD"]).stdout.split()
                         except Exception:
                             changed = []
-                        # ANY source change pays for the regression over
-                        # the completed set — run12 taught that a
-                        # "features-only" batch is NOT low risk: the model
-                        # funnels every requirement into ONE big feature
-                        # file, so a features/ edit IS a shared-component
-                        # edit (a NoteCard restructure there broke 12 specs
-                        # that only the 35-minute final turn caught). Only
-                        # run artifacts (local-grader/, test-results/,
-                        # .arc, .octos, data, dist) stay exempt.
                         source_changed = [
                             p for p in changed if p and (
                                 p.startswith("frontend/src/")
@@ -4385,11 +4215,11 @@ def main() -> int:
                         if tier2_run else "[plan] Tier-2 unavailable; "
                                           "recorded as None")
 
-                # Host page-health probe (09-28 sheet forensics): the
-                # minimum browser check for ANY task — requirements-only
-                # tasks ship no staged specs, so without this nothing
-                # host-owned ever opens the built app in a browser.
-                # [] = clean walk; None = skipped (never a verdict).
+                # Host page-health probe: the minimum browser check for
+                # ANY task — requirements-only tasks ship no staged specs,
+                # so without this nothing host-owned ever opens the built
+                # app in a browser. [] = clean walk; None = skipped
+                # (never a verdict).
                 ph_errors: list[str] | None = None
                 if f_err is None and toolchain_cli is not None:
                     ph_errors = _page_health_run(output_dir, smoke_port,
@@ -4402,9 +4232,9 @@ def main() -> int:
                         hs["page_health"] = "clean"
                         log("[plan] page-health clean")
 
-                # 发明拒绝规则保险网(09-30 sheet 95×400 法医):静态
-                # 扫描后端 4xx 文案回查 requirements.yaml 引用,结果
-                # 入 final 链仪表;审计绝不挡 final 链。
+                # 发明拒绝规则保险网:静态扫描后端 4xx 文案回查
+                # requirements.yaml 引用,结果入 final 链仪表;审计绝不挡
+                # final 链。
                 req_text_for_audit = ""
                 for _cand in (dest_req, output_dir / "requirements"):
                     _f = _cand / "requirements.yaml"
@@ -4440,10 +4270,10 @@ def main() -> int:
                     text = f"host spec run all green ({tier2_run[0]} passed)"
                     log("[plan] final pass GREEN (Tier-1 + Tier-2 + "
                         "page-health)")
-                # 自测取证锚点(09-30 github 法医):平台 runner 上 Tier-2
-                # 恒不可用(spec_run=None),模型自测是唯一真浏览器验证——
-                # 从内核 context-logs 的 tools.jsonl 复原每条 spec 的末次
-                # 结果,把"模型自述绿"升级为随 zip 带回的事实记录。
+                # 自测取证锚点:平台 runner 上 Tier-2 恒不可用
+                # (spec_run=None),模型自测是唯一真浏览器验证——从内核
+                # context-logs 的 tools.jsonl 复原每条 spec 的末次结果,
+                # 把"模型自述绿"升级为随 zip 带回的事实记录。
                 try:
                     st = _collect_selftest_evidence(output_dir)
                     if st:
@@ -4474,10 +4304,9 @@ def main() -> int:
                     log(f"[plan] final-verification.json write failed: {exc}")
 
             # Startup rehearsal: run the grading sequence ourselves on the
-            # smoke port as a readiness record. Round 30 finished
-            # generation cleanly, then `npm start` crashed at grading
-            # (Cannot find module './seed') and zero Playwright tests
-            # executed. Read-only: red is logged and shipped as-is — the
+            # smoke port as a readiness record — it catches "generation
+            # finished but the app cannot build/boot" before submission.
+            # Read-only: red is logged and shipped as-is — the
             # batch turns were the model's only chances to fix anything.
             t0 = time.time()
             err = _rehearse_startup(output_dir, smoke_port)
@@ -4496,13 +4325,9 @@ def main() -> int:
                 repair_driver.close()
                 shutil.rmtree(repair_data_dir, ignore_errors=True)
                 shutil.rmtree(repair_config_dir, ignore_errors=True)
-        # A budget-skipped final pass says nothing about node tests — the
-        # platform's own Playwright run is the verdict there, so leave the
-        # nodes unmarked instead of blanket-failing the ones that landed.
-        # C2(09-27 宿主过度定制审计):事件按节点级证据标记,final 不绿
-        # 不再全量连坐。证据序:批内失败记录(负)>
-        # 批 rehearsal 绿(build+boot+探针,正)> final 全绿(兜底正)>
-        # 无证据则不标(平台自有判官)。
+        # 事件按节点级证据标记,final 不绿不连坐。证据序:批内失败记录
+        # (负)> 批 rehearsal 绿(build+boot+探针,正)> final 全绿
+        # (兜底正)> 无证据则不标(平台自有判官)。
         for node in atomic_nodes:
             node_id = str(node.get("id"))
             if node_id in failed:
@@ -4535,11 +4360,9 @@ def main() -> int:
                 )
             except OSError:
                 pass
-        # run11 root cause of the 5 eval timeouts: our own Tier-2 pass left
-        # db.run.json holding archived/pinned state, and the platform's eval
-        # `npm start` reuses that file instead of reseeding. Hand over a
-        # pristine seed start — as the LAST action (anything booting the
-        # server after this would recreate the run file).
+        # Hand over a pristine seed start (the eval `npm start` reuses
+        # db.run.json instead of reseeding) — as the LAST action: anything
+        # booting the server after this would recreate the run file.
         _ensure_eval_telemetry(output_dir)
         _pc = dump_runtime_prompts(output_dir)
         log(f"[prompts] captured {_pc['turns']} turn prompt(s) -> "
