@@ -176,18 +176,24 @@ def set_debug_log_path(path: Path | None) -> None:
             pass
 
 
-def log(msg: str) -> None:
-    """Progress lines go to BOTH stdout and stderr, plus .arc/debug.log.
+# stderr 只收异常/失败行、stdout 只走正常进度(平台把两路流分开存:
+# stderr 面板=纯问题视图,stdout 面板=纯进度流);debug.log 照旧全收。
+# 标记词表按调用点实态收敛,在 log() 内对渲染后的行分类——调用点里的
+# 条件 f-string({'ok' if ok else 'FAILED'})只有运行期才知道落哪路。
+_ERROR_MARKERS = (
+    "[fatal]", "FAILED", "failed", "RED", "error", "Error",
+    "exceeded", "timed out", "Traceback",
+)
 
-    The platform's stdout capture gets truncated on long runs (we lost the
-    [flow] lines of an entire failed run that way); the runner stores agent
-    stderr as a separate field, so mirroring there keeps our diagnostics
-    retrievable. Stderr content does not affect the verdict (exit code and
-    SDK events do). The third copy mirrors agent-arc-based's runtime
-    interaction: the host tails .arc/debug.log for its logs panel — one
-    more raw artifact the agent appends and the host renders. Only lines
-    after runtime init land there (the probe phase predates the contract
-    paths, same as the reference project).
+
+def log(msg: str) -> None:
+    """Progress lines go to stdout (errors to stderr), always plus a copy
+    to .arc/debug.log — see _ERROR_MARKERS for the split rule.
+
+    The platform captures the two streams as separate labeled panels; a
+    long run can truncate stdout, so debug.log is the authoritative full
+    record. Stderr content does not affect the verdict (exit code and
+    SDK events do).
 
     Every line carries a Beijing-time (UTC+8) stamp from clock.py. The
     platform prefixes its own UTC arrival stamp to stream lines — that one
@@ -195,8 +201,10 @@ def log(msg: str) -> None:
     makes each line self-describing for a Beijing reader.
     """
     stamped = f"[{clock.stamp()}] {msg}"
-    print(stamped, flush=True)
-    print(stamped, file=sys.stderr, flush=True)
+    if any(m in msg for m in _ERROR_MARKERS):
+        print(stamped, file=sys.stderr, flush=True)
+    else:
+        print(stamped, flush=True)
     path = _DEBUG_LOG_PATH
     if path is None:
         return
@@ -2956,6 +2964,7 @@ class OctosDriver:
         th.start()
         t0 = time.time()
         deadline = t0 + wall if wall is not None else None
+        checks = 0
         while True:
             # Cap the join by the deadline — a fixed 30s wait sleeps right
             # past a smaller wall and the thread dies before the check.
@@ -2975,7 +2984,13 @@ class OctosDriver:
                 th.join(60)
                 return (False, f"turn cut by host wall clock ({wall}s cap; "
                         f"{int(time.time() - t0)}s elapsed)")
-            log(f"[flow] turn still running ({int(time.time() - t0)}s elapsed)")
+            # 30s 检测一次,日志每 5 次打一条(150s):轮仍保活,面板
+            # 不刷屏。150s 贴在 runner 静默杀手阈值(~7 分钟)安全区内,
+            # 纯打印规则,不影响检测/墙钟切断的功能节奏。
+            checks += 1
+            if checks % 5 == 0:
+                log(f"[flow] turn still running "
+                    f"({int(time.time() - t0)}s elapsed)")
         return box.get("r", (False, "turn thread ended without result"))
 
 
