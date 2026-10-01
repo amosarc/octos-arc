@@ -183,6 +183,10 @@ class DisciplinePinsTest(unittest.TestCase):
         self.assertIn("generate Playwright automation tests", c)
         self.assertIn("fix the app", c)
         self.assertIn("port 3100", c)
+        # 10-01 用户拍板:自测必须真跑——禁 mock(0 分运行实证:curl 绿
+        # ≠ walking flow);完成句空行分块,不与上文粘连。
+        self.assertIn("never mock the app, its API, or the test run", c)
+        self.assertTrue(c.startswith("\n\n"), "完成句须空行分隔")
         # 09-30 真跑三次 premature wrap-up(366s/1006s/1360s 零进展收工)
         # 后的完成定义锚(用户拍板"加"):宣布未来工作≠完成回合。
         self.assertIn("never end mid-investigation", c)

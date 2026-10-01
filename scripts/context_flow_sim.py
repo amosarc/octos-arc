@@ -4,12 +4,12 @@
 落盘(两形式,用户参考件 arc/prompts/*):
 
   00a 系统提示词-gateway 层(main._GATEWAY_PROMPT_OVERRIDE → gateway.md,
-      内核 base 替换:7 工具对齐 + 工具纪律)
+      内核 base 替换:6 工具对齐 + 工具纪律)
   00b 系统行 AGENTS.md(build_system_row_context:Background + children
       map + RULES & ARCHITECTURE + 任务 FIXTURE 段 + RUN SCOPE)
       ——内核装配顺序:gateway base → 日期行 → AGENTS.md → memory(压缩态)
   t01.. 每家族 TURN(BOOTSTRAP 前言[首 turn] + Gherkin Feature + 完成要求
-      一句话 + SEGMENT DIGEST[会话 2+ 首批])
+      一句话)
 
 每个文件附标注为 MOCK 的脚本化回复,构成完整对话轮。
 
@@ -111,9 +111,6 @@ def render_task(task: str, out_root: Path) -> None:
                   body + system_row
                   + _mock("(系统行不产生回复——常驻上下文)。")))
 
-    statuses: dict[str, str] = {
-        str(n.get("id")): "pending" for n in main.flatten_atomic(tree)}
-    done_notes: dict[str, str] = {}
     turn_no = 0
 
     def next_no() -> str:
@@ -136,17 +133,10 @@ def render_task(task: str, out_root: Path) -> None:
         fid = sess["family"]
         for bi, batch in enumerate(sess["batches"], 1):
             ids = [str(n.get("id")) for n in batch]
-            for nid in ids:
-                statuses[nid] = "active"
-            features = main.build_turn_features(
-                tree, batch, family_of, parent_of, statuses=statuses)
+            features = main.build_turn_features(batch, parent_of)
             prompt = features
             if si == 1 and bi == 1:
                 prompt = main.BOOTSTRAP_PREAMBLE + prompt
-            if bi == 1 and si > 1:
-                prompt += main._segment_digest(
-                    done_notes, statuses,
-                    has_seeds=bool((fixture_compiled or {}).get("db")))
             prompt += completion
             no = next_no()
             title = (f"家族会话 {si}({fid})批 {bi}/{len(sess['batches'])}"
@@ -156,11 +146,6 @@ def render_task(task: str, out_root: Path) -> None:
                      f"冷启动自测全绿,节点收尾。")
             files.append((out / f"t{no}-{fid}-b{bi}-turn.md",
                           body + prompt + _mock(reply)))
-            for nid in ids:
-                statuses[nid] = "done"
-            done_notes.update(
-                {nid: "(mock) implemented per Feature; family suite green"
-                 for nid in ids})
 
     for path, text in files:
         Path(path).write_text(text, encoding="utf-8")

@@ -1052,9 +1052,7 @@ def render_extra_rules(manifest: dict, stats: dict | None = None) -> str:
         "delivered workspace carries only the seed db.json, so grading "
         "starts from the pristine seed; within a workspace, "
         "writes persist across server restarts. Your own past turns and "
-        "host state live under the .arc trace area — the runtime REFUSES "
-        "reads of them (bash escape hatch: `# octos:allow-trace-read`). "
-        "What earlier turns did arrives via the host's SEGMENT DIGEST; "
+        "host state live under the .arc trace area; "
         "scratch test scripts belong in /tmp, never inside "
         ".arc/acceptance.")
     text = " ".join(p for p in parts if p)

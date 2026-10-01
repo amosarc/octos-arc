@@ -6,7 +6,8 @@ Gherkin(Feature/Scenario/Given/When/Then)。清洗规则全部机械可审计:
   1. 空白折叠 → 按句切分(句末标点 + 后随大写/引号);
   2. 丢弃 "Seed values: …" 句(种子数据的字面重复);
   3. 剔除占位短语子句:"the requested workflow" 连同其尾随噪声 token
-     (与占位检测器同一形态)——sheet 类模板垃圾的确定性清洗;
+     (与占位检测器同一形态)——sheet 类模板垃圾的确定性清洗;以空格
+     替换保词边界,残渣不与真词黏连;
   4. 清洗后为空的步骤 → 回退原文并标注 # uncleanable(不发明)。
 
 场景名同规则清洗,坍缩到只剩 id 时只留 id。`_steps_templated` 场景只
@@ -34,6 +35,10 @@ _EMPTY_QUOTE_RE = re.compile(r"(\"\"|'')")
 # 引用名:“…”(github)与 "…"(sheet)——反引号是种子值不在此列;
 # 单引号 '…' 有撇号陷阱("the user's own 'X'" 跨词配对)也不取。
 _QUOTED_NAME_RE = re.compile(r"“([^”]+)”|\"([^\"]+)\"")
+# TURN 打标支的占位注记(与 render_scenarios 的注记同哲学;TURN 里
+# 没有 REQ CONTENT 段名,指向上方 Flow contract 注释行)。
+_BOILER_NOTE = ("# WHEN/THEN are platform placeholder boilerplate "
+                "— the flow contract above governs.")
 
 
 def _fold(text: str) -> str:
@@ -41,9 +46,10 @@ def _fold(text: str) -> str:
 
 
 def clean_text(text: str) -> str:
-    """确定性清洗:折叠空白 → 剔占位短语串 → 去空引号对 → 标点坍缩。"""
+    """确定性清洗:折叠空白 → 剔占位短语串(以空格替换保词边界)
+    → 去空引号对 → 标点坍缩。"""
     t = _fold(text)
-    t = _PLACEHOLDER_RE.sub("", t)
+    t = _PLACEHOLDER_RE.sub(" ", t)
     t = _EMPTY_QUOTE_RE.sub("", t)
     t = re.sub(r"\s+", " ", t)
     t = re.sub(r"\s+([,.;!?])", r"\1", t)
@@ -206,6 +212,10 @@ def feature_text(folder: dict, atoms: list[dict]) -> str:
 
     Feature 名 = 文件夹名;描述块 = 文件夹描述首句;Background = 其余句
     (恰为用户样例的结构);原子节点 → Scenario(全步骤 Gherkin)。
+    打标节点(检测器判定 WHEN/THEN 为平台占位样板)改走 GIVEN-only 支:
+    Flow contract 注释 + GIVEN 原文 + 注记行——占位 WHEN/THEN 不承载
+    节点自身操作语义(sheet 审计 24/24,22 个连名称动词都零出现),
+    保留只会注入装错场景的操作指令。
     """
     name = _fold(folder.get("name") or folder.get("id") or "feature")
     desc = clean_text(str(folder.get("description") or ""))
@@ -220,10 +230,20 @@ def feature_text(folder: dict, atoms: list[dict]) -> str:
     for atom in atoms:
         lines.append("")
         lines.append(f"  Scenario: {clean_name(str(atom.get('name') or ''))}")
-        node_lines, _, _ = render_steps(
-            [s for s in (atom.get("scenarios") or [{}])[0].get("steps") or []
-             if isinstance(s, dict)], indent="    ")
-        lines.extend(node_lines)
+        sc0 = (atom.get("scenarios") or [{}])[0]
+        steps = [s for s in (sc0.get("steps") or [])
+                 if isinstance(s, dict)]
+        if atom.get("_scenarios_templated") or sc0.get("_steps_templated"):
+            flow = clean_text(str(atom.get("description") or ""))
+            if flow:
+                lines.append(f"    # Flow contract: {flow}")
+            given_lines, _, _ = render_steps(
+                steps, only_given=True, indent="    ")
+            lines.extend(given_lines)
+            lines.append(f"    {_BOILER_NOTE}")
+        else:
+            node_lines, _, _ = render_steps(steps, indent="    ")
+            lines.extend(node_lines)
     return "\n".join(lines) + "\n"
 
 

@@ -79,8 +79,9 @@ SELFTEST_SUBDIR = "e2e"
 #   ""             → 全量(最终冲分提交务必改回这里!)
 # 本地仿真不受它影响:env OCTOS_ARC_FAMILIES 设置时覆盖此值。
 # COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2,REQ-3"
-COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2"
-# COMPETITION_FAMILY_SCOPE = ""
+# COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2"
+# COMPETITION_FAMILY_SCOPE = "REQ-1"
+COMPETITION_FAMILY_SCOPE = ""
 
 # 思考参数
 # config.json 的 model_thinking/model_reasoning_effort,内核按
@@ -97,7 +98,7 @@ REASONING_EFFORT_REPAIR = "low"
 
 # 内核基础提示词运行时覆盖:$HOME/.octos/prompts/gateway.md 存在即整体
 # 替换内置 gateway_default.txt(零编译)。内置文本面向全量工具集,与 ARC
-# 放行的 7 个工具不符,故 ARC 始终注入下述覆盖文本。
+# 放行的 6 个工具不符,故 ARC 始终注入下述覆盖文本。
 
 # gateway base(pi 风格):一句身份 + 单行祈使 bullet,不解释理由;
 # 行为法则的详细判据在系统行 RULES & ARCHITECTURE,此处不重复。
@@ -110,7 +111,6 @@ You are an expert software engineering agent working in the user's workspace. Ac
 - Batch independent read-only calls (`read_file`, `grep`, `list_dir`) in one response.
 - Prefer dedicated tools over shell; use `bash` only when they cannot do the job.
 - Use `edit_file` for surgical edits; `write_file` only for new files or full rewrites.
-- Emit the `update_plan` checklist once at task start; tick items as you go, never restate it.
 - This session is unattended: state your assumption and continue — do not ask questions.
 - Run builds and tests via `bash` after every change.
 - Never claim or fabricate results you did not run; a failed command is failed.
@@ -126,7 +126,7 @@ You are an expert software engineering agent working in the user's workspace. Ac
 
 
 def install_gateway_prompt_override(log) -> None:
-    """把 7 工具对齐的基础提示词落到内核运行时覆盖位(幂等)。
+    """把 6 工具对齐的基础提示词落到内核运行时覆盖位(幂等)。
 
     内核 load_prompt("gateway") 读 $HOME/.octos/prompts/gateway.md,存在
     即用之,否则回落编译进二进制的 gateway_default.txt。写入失败不致命
@@ -145,7 +145,7 @@ def install_gateway_prompt_override(log) -> None:
             return
         target.write_text(_GATEWAY_PROMPT_OVERRIDE, encoding="utf-8")
         log(f"[prompt] gateway.md base-prompt override installed at {target} "
-            "(7-tool aligned; Subagents/Memory/phantom tools removed)")
+            "(6-tool aligned; Subagents/Memory/phantom tools removed)")
     except OSError as exc:
         log(f"[prompt] gateway.md override not installed ({exc}); "
             "kernel falls back to the compiled base prompt")
@@ -286,39 +286,6 @@ def _prune_acceptance_junk(output_dir: Path, tests_dir: Path | None,
     if removed:
         log(f"[postflight] pruned acceptance junk: {', '.join(removed)}")
     return removed
-
-
-def _segment_digest(node_done_notes: dict[str, str],
-                    plan_statuses: dict[str, str],
-                    has_seeds: bool = True) -> str:
-    """分段后首 turn 注入的"上段做了什么"正版答案(≤2000 字符)。
-
-    hg-github-001:分段后模型翻自己的事件日志/重读已读文件来重建
-    记忆(turn7: 74 工具里 32 个 .arc 考古 + 30 个重读,0 编辑;跨段
-    重复 4 次)。跨会话宿主记忆面只有本摘要,这里把宿主已知的最短
-    事实(节点→完成留言尾)喂进去,配合追踪区关读护栏切断考古路径。
-    """
-    lines = [
-        "",
-        "SEGMENT DIGEST (host record of EARLIER sessions — do NOT "
-        "re-derive context from .arc; this list is authoritative):"]
-    done = [(nid, note) for nid, note in node_done_notes.items()
-            if plan_statuses.get(nid, "done") != "blocked"]
-    for nid, note in reversed(done):  # 最近的在前,超限裁老的
-        entry = f"- {nid}: {' '.join(note.split())[:150] or 'done'}"
-        lines.append(entry)
-    while len("\n".join(lines)) > 1900 and len(lines) > 3:
-        lines.pop()
-    if has_seeds:
-        # 中性句:种子是模型的实现义务,宿主只声明"按 GIVEN 行覆盖"的
-        # 验证基线;仲裁条款(需求原文 wins)只在有种子可仲裁时才有意义。
-        lines.append(
-            "backend/data/db.json must carry the seed implemented from "
-            "the GIVEN lines (plus a data: section if present) — verify it "
-            "covers them before building on it; where a seeded value "
-            "contradicts the requirement text, the requirement wins (correct "
-            "the seed row, keep the collection and row names).")
-    return "\n".join(lines)[:2000]
 
 
 def _extract_agents_section(system_text: str) -> str | None:
@@ -1663,7 +1630,6 @@ def load_requirement_tree(req_dir: Path) -> dict:
         raise ValueError(f"invalid requirements.yaml in {req_dir}")
     _strip_reference_image_marks(data)
     _attach_source_lines(data, raw)
-    _annotate_ancestor_folder_deps(data, ())
     marked = _mark_templated_scenarios(data)
     if marked:
         print(f"[req] {marked} node(s) flagged: scenario steps are "
@@ -1680,8 +1646,9 @@ def load_requirement_tree(req_dir: Path) -> dict:
 # 参考图记号剥离:yaml 的 "Page reference:" 节点(标签+紧随图记号行)
 # 不参与任何模型上下文——自动附图通道已退役,记号留着只会误导模型去
 # 找它看不了的图。按节点整段剥离,连同节点前的空行分隔一并收走,不留
-# 空白残行;reference/ 目录本身保留(平台任务夹具);需要视觉的调用方
-# 走显式媒体通道(params.media)+VISUAL_MODEL 路由。
+# 空白残行;需要视觉的调用方走显式媒体通道(params.media)+VISUAL_MODEL
+# 路由。workspace 侧同口径:_prune_reference_imagery 把源文件与图片
+# 文件一并清出(10-01 拍板:盲 lane 不读参考截图)。
 _IMAGE_MARK_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 # 标签变体白名单:两份真题分别用 "Page/Screenshot reference:",只认其一
 # 会留悬空标签;仅匹配"<名词> reference:"形态,散文句中的 reference: 不受影响。
@@ -1730,6 +1697,36 @@ def _strip_reference_image_marks(node: dict) -> None:
             _strip_reference_image_marks(child)
 
 
+_IMAGE_FILE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}
+
+
+def prune_reference_imagery(req_dir: Path) -> list[str]:
+    """workspace 的 requirements 副本清出参考截图(盲 lane 定则)。
+
+    ① reference/ 下图片文件删除,目录空则连目录收走(非图片文件保留);
+    ② requirements.yaml 原地重写为剥参考图记号后的文本——与 host 渲染
+    同一套正则(_strip_text_marks),模型 read_file 读到的与提示词口径
+    一致,不给悬空指针留诱因(0 分运行实证:图在场诱发模型发明
+    view_image 调用,4 次 fail_fast)。返回清理清单供日志。"""
+    removed: list[str] = []
+    ref = Path(req_dir) / "reference"
+    if ref.is_dir():
+        for p in sorted(ref.rglob("*")):
+            if p.is_file() and p.suffix.lower() in _IMAGE_FILE_EXTS:
+                p.unlink()
+                removed.append(str(p.relative_to(req_dir)))
+        if not any(ref.rglob("*")):
+            ref.rmdir()
+    yaml_path = Path(req_dir) / "requirements.yaml"
+    if yaml_path.is_file():
+        raw = yaml_path.read_text(encoding="utf-8")
+        stripped = _strip_text_marks(raw)
+        if stripped != raw:
+            yaml_path.write_text(stripped, encoding="utf-8")
+            removed.append("requirements.yaml (page-reference marks)")
+    return removed
+
+
 def _attach_source_lines(tree: dict, raw: str) -> None:
     """把每个节点的 yaml 源行号区间挂到节点("_lines")。
 
@@ -1759,25 +1756,6 @@ def _attach_source_lines(tree: dict, raw: str) -> None:
             attach(child, child_end)
 
     attach(tree, total)
-
-
-def _annotate_ancestor_folder_deps(node: dict, inherited: tuple) -> None:
-    """沿 parent 链累积 FOLDER 级 dependencies,标到 ATOMIC 节点。
-
-    消费方=dependency_closure(闭包起点并入,09-30 封堵换 yaml
-    丢失面);与节点自身 dependencies 去重(后者由既有 BFS 距离 1 承载,
-    不双发)。root 的 dependencies 同律向下传播(整树级依赖)。
-    """
-    deps = tuple(str(d) for d in node.get("dependencies") or [])
-    if str(node.get("type") or "").upper() == "ATOMIC":
-        own = set(deps)
-        node["_ancestor_folder_deps"] = [
-            d for d in dict.fromkeys(inherited) if d not in own]
-        return
-    merged = tuple(dict.fromkeys(inherited + deps))
-    for child in node.get("children") or []:
-        if isinstance(child, dict):
-            _annotate_ancestor_folder_deps(child, merged)
 
 
 def flatten_atomic(node: dict, out: list | None = None) -> list[dict]:
@@ -2120,132 +2098,6 @@ def _node_family_index(tree: dict) -> tuple[dict[str, dict], dict[str, str]]:
     return node_by_id, fam_of_node
 
 
-_CLOSURE_MAX_NODES = 24
-_CLOSURE_MAX_CHARS = 6000
-
-
-def _dep_ui_line(node: dict) -> str:
-    """依赖节点 → REUSED UI CONTRACT 行(id (名): 引用名 / …)。
-
-    引用名取自 name+description(gherkin.quoted_names,反引号种子值
-    不在此列);无引用名的依赖(如 FOLDER)只出 id (名) 行。
-    """
-    dep_id = str(node.get("id"))
-    name = " ".join(str(node.get("name") or "").split())
-    line = f"- {dep_id} ({name})"
-    names = gherkin.quoted_names(f"{name} {node.get('description') or ''}")
-    if names:
-        line += ": " + " / ".join(names)
-    return line
-
-
-def dependency_closure(tree: dict,
-                       batch: list[dict]) -> tuple[list[dict], list[dict]]:
-    """本批节点 Depends on 传递闭包(BFS,环安全,批内去重)。
-
-    紧凑依赖块的数据源:返回 (闭包节点 BFS 序, UI 行被失控帽裁掉的
-    深距离节点)——DEPENDENCIES id 行永远完整,帽只裁 REUSED UI 行。
-    距离 1 起点集 = 批节点自身 deps + 祖先 FOLDER deps(永不裁);
-    同族跨批依赖照旧入闭包(大家族拆批后,依赖节点的 id/名/引用名在
-    后来批次无别处在场)。确定性遍历,零 LLM。
-    """
-    node_by_id, _ = _node_family_index(tree)
-    batch_ids = {str(n.get("id")) for n in batch}
-    seen: set[str] = set(batch_ids)
-    first_round: list[dict] = []
-    frontier: list[dict] = []
-
-    def _expand(deps) -> None:
-        for dep in deps:
-            dep_id = str(dep)
-            if dep_id in seen:
-                continue
-            seen.add(dep_id)
-            dep_node = node_by_id.get(dep_id)
-            if dep_node is None:
-                continue
-            frontier.append(dep_node)
-            first_round.append(dep_node)
-
-    for n in batch:
-        _expand(n.get("dependencies") or [])
-        _expand(n.get("_ancestor_folder_deps") or [])
-    by_distance: list[list[dict]] = [first_round] if first_round else []
-    while frontier:
-        next_frontier: list[dict] = []
-        emitted: list[dict] = []
-        for n in frontier:
-            for dep in n.get("dependencies") or []:
-                dep_id = str(dep)
-                if dep_id in seen:
-                    continue
-                seen.add(dep_id)
-                dep_node = node_by_id.get(dep_id)
-                if dep_node is None:
-                    continue
-                next_frontier.append(dep_node)
-                emitted.append(dep_node)
-        if emitted:
-            by_distance.append(emitted)
-        frontier = next_frontier
-    if not by_distance:
-        return [], []
-    all_nodes = [n for round_ in by_distance for n in round_]
-    kept: list[dict] = []
-    dropped: list[dict] = []
-    chars = 0
-    for distance, round_ in enumerate(by_distance, 1):
-        if distance > 1:
-            projected = chars + sum(
-                len(_dep_ui_line(n)) + 1 for n in round_)
-            if (len(kept) + len(round_) > _CLOSURE_MAX_NODES
-                    or projected >= _CLOSURE_MAX_CHARS):
-                dropped.extend(round_)
-                continue
-        kept.extend(round_)
-        chars += sum(len(_dep_ui_line(n)) + 1 for n in round_)
-    return all_nodes, dropped
-
-
-def _dependency_block(dep_nodes: list[dict], dropped: list[dict],
-                      statuses: dict[str, str] | None) -> str:
-    """紧凑依赖块:DEPENDENCIES(状态按 done/pending 分句)+ REUSED UI
-    CONTRACT 行 + 截断标记。依赖节点的场景全文不再进场(09-30 定则:
-    无须把依赖场景描述带过来,可复用面=引用名+种子值)。"""
-    done_ids: list[str] = []
-    pending_ids: list[str] = []
-    for n in dep_nodes:
-        nid = str(n.get("id"))
-        st = (statuses or {}).get(nid, "done")
-        (done_ids if st == "done" else pending_ids).append(nid)
-    lines: list[str] = []
-    if done_ids:
-        lines.append(
-            "DEPENDENCIES: " + " / ".join(done_ids)
-            + " — already implemented, suites green when finished; do NOT "
-            "reimplement them — build on their seed and UI contract.")
-    if pending_ids:
-        lines.append(
-            "DEPENDENCIES: " + " / ".join(pending_ids)
-            + " — not yet implemented (cyclic order or an earlier attempt "
-            "failed): implement the minimum of them this Feature needs, "
-            "straight from the requirement text; do not wait.")
-    dropped_ids = {str(n.get("id")) for n in dropped}
-    ui_lines = [_dep_ui_line(n) for n in dep_nodes
-                if str(n.get("id")) not in dropped_ids]
-    if ui_lines:
-        lines.append("REUSED UI CONTRACT (names only — reuse verbatim, "
-                     "never reinvent):")
-        lines.extend(ui_lines)
-    if dropped:
-        lines.append(
-            f"[dependency context truncated: {len(dropped)} deeper node(s) "
-            f"omitted (cap {_CLOSURE_MAX_NODES} nodes / "
-            f"{_CLOSURE_MAX_CHARS} chars) — read them from "
-            "requirements/requirements.yaml by heading id if needed]")
-    return "\n".join(lines)
-
-
 def _indent_block(text: str, pad: str) -> str:
     """多段描述整体缩进,空行保平(不产生尾随空白)。"""
     return "\n".join(
@@ -2441,40 +2293,38 @@ def group_families(tree: dict, max_batch: int = 6) -> list[list[dict]]:
     return batches
 
 
-def build_turn_features(tree: dict, batch: list[dict],
-                        family_of: dict, parent_of: dict[str, dict],
-                        statuses: dict[str, str] | None = None) -> str:
+# SEED CONTRACT 块旋钮:待确认是否有用。AGENTS.md FIXTURE CONTRACT 与
+# SCENARIOS 的 GIVEN 行已携带同一契约,此块疑似冗余;拍板前不装配,
+# 装配代码原样保留(确认无用连 gherkin.seed_sentences 一并退役)。
+_TURN_SEED_CONTRACT = False
+
+
+def build_turn_features(batch: list[dict],
+                        parent_of: dict[str, dict]) -> str:
     """TURN 正文(唯一出处,批 turn 与 blocked-retry 共用)。
 
-    统一块骨架(09-30 依赖块定则):TASK → DEPENDENCIES → REUSED UI
-    CONTRACT → SCENARIOS(本批 Feature 原文)→ SEED CONTRACT。依赖
-    事实 = ids + 状态 + 引用名 + 种子值;依赖节点的 GIVEN/WHEN/THEN
-    全文不再进场,本批节点自己的 Feature 与 GIVEN 仍逐字(总纲 LAW 4
-    的契约源)。行为法则在系统行 RULES & ARCHITECTURE,此处只装批次
-    执行物。statuses = 节点 id → done/blocked/active(run 循环的
-    plan_statuses),区分已实现与破环未实现的依赖。
+    统一块骨架:TASK → SCENARIOS(本批 Feature 原文)。本批节点自己的
+    Feature 与 GIVEN 仍逐字(总纲 LAW 4 的契约源);行为法则在系统行
+    RULES & ARCHITECTURE,此处只装批次执行物。
     """
     task = ", ".join(
         f"{n.get('id')} ({' '.join(str(n.get('name') or '').split())})"
         for n in batch)
     parts = [f"TASK: implement {task}."]
-    dep_nodes, dep_dropped = dependency_closure(tree, batch)
-    if dep_nodes:
-        parts.append(_dependency_block(dep_nodes, dep_dropped, statuses))
     parts += ["SCENARIOS (verbatim):",
               gherkin.batch_turn_features(batch, parent_of)]
-    seed_sents, seed_dropped = gherkin.seed_sentences(
-        list(batch) + dep_nodes)
-    if seed_sents:
-        block = ("SEED CONTRACT (backend/data/db.json must already "
-                 "contain — seed sentences verbatim from the "
-                 "requirements):")
-        block += "\n" + "\n".join(f"- {s}" for s in seed_sents)
-        if seed_dropped:
-            block += (f"\n[seed contract truncated: {seed_dropped} more "
-                      "sentence(s) omitted — read requirements/"
-                      "requirements.yaml by heading id]")
-        parts.append(block)
+    if _TURN_SEED_CONTRACT:
+        seed_sents, seed_dropped = gherkin.seed_sentences(list(batch))
+        if seed_sents:
+            block = ("SEED CONTRACT (backend/data/db.json must already "
+                     "contain — seed sentences verbatim from the "
+                     "requirements):")
+            block += "\n" + "\n".join(f"- {s}" for s in seed_sents)
+            if seed_dropped:
+                block += (f"\n[seed contract truncated: {seed_dropped} more "
+                          "sentence(s) omitted — read requirements/"
+                          "requirements.yaml by heading id]")
+            parts.append(block)
     return "\n\n".join(x for x in parts if x)
 
 
@@ -2737,7 +2587,7 @@ def build_octos_env(config_dir: Path, *, thinking: str | None = None,
     # 影响)。运维显式 export 优先(setdefault)。
     env.setdefault(
         "OCTOS_TOOL_ALLOWLIST",
-        "bash,read_file,edit_file,write_file,grep,list_dir,update_plan",
+        "bash,read_file,edit_file,write_file,grep,list_dir",
     )
     # 内核 context_log:每轮 LLM 请求的精确 messages 落 .octos/context-logs/
     # llm.jsonl——分层装配的前缀缓存验证基建(逐字节比对系统行/前缀;
@@ -2764,12 +2614,6 @@ def build_octos_env(config_dir: Path, *, thinking: str | None = None,
     # the host's Tier-2 chain owns full-suite verification (escape hatch
     # `# octos:allow-full-suite`).
     env.setdefault("OCTOS_DENY_FULL_SPEC_RUN", "1")
-    # Refuse reads of the host trace/debug subset under .arc (own event
-    # log, node_states, debug/stdout/stderr, host-plan): sessions get
-    # reconstructed from them instead of edited. Sanctioned carriers are
-    # SEGMENT DIGEST / HOST REPORT; .arc/acceptance + .arc/host +
-    # fixture-manifest stay readable; escape hatch `# octos:allow-trace-read`.
-    env.setdefault("OCTOS_DENY_TRACE_READ", "1")
     # Bundle-root EXTRA_RULES.md becomes extra system-prompt rules when a
     # patched core honors OCTOS_ARC_EXTRA_RULES; the official release
     # ignores the variable, so shipping the file is harmless.
@@ -2877,7 +2721,7 @@ class OctosDriver:
         self._session = None
         # planctl 已退役:内核不再有 plan 模式,宿主不发 [arc-plan]
         # envelope——契约/需求地图/进度账本全部印进自含工单正文,会话
-        # 分段后由 _segment_digest + 自含工单续命。
+        # 分段后由自含工单续命。
 
     @property
     def auth_exhausted(self) -> bool:
@@ -3112,12 +2956,14 @@ class OctosDriver:
 # Gherkin Feature(gherkin.py 确定性清洗)+ 完成要求一句话。行为法则在
 # 系统行 RULES & ARCHITECTURE;验收即 Feature;无其它散文。
 GOAL_FIRST_TURN_COMPLETION = (
-    "\nAfter implementing: generate Playwright automation tests for "
+    "\n\nAfter implementing: generate Playwright automation tests for "
     "these scenarios and run them against the RUNNING app (port "
-    "{smoke}); fix the app and re-test until green, then finish the "
-    "turn. End the turn only when this batch's scenarios walk green on "
-    "the running app — never end mid-investigation: a closing message "
-    "that announces future work is an incomplete turn.")
+    "{smoke}) in a real browser — never mock the app, its API, or the "
+    "test run; fix the app and re-test until green, then finish the "
+    "turn.\n\n"
+    "End the turn only when this batch's scenarios walk green on the "
+    "running app — never end mid-investigation: a closing message that "
+    "announces future work is an incomplete turn.")
 
 BOOTSTRAP_PREAMBLE = """\
 BOOTSTRAP (first turn of the run only): (a) implement the seed — \
@@ -3354,7 +3200,7 @@ def main() -> int:
         print(f"[prompts] {summary} -> {target / 'prompts'}")
         return 0
 
-    # 内核基础提示词 7 工具对齐覆盖(在任何 octos 会话启动前落位)。
+    # 内核基础提示词 6 工具对齐覆盖(在任何 octos 会话启动前落位)。
     install_gateway_prompt_override(log)
 
     # Diagnostics (no secrets): which model endpoint did the runner inject?
@@ -3424,6 +3270,14 @@ def main() -> int:
         if dest_req.exists():
             shutil.rmtree(dest_req)
         shutil.copytree(req_src, dest_req)
+
+    # 盲 lane:参考截图不进模型可见面(reference/ 图片+yaml 记号)。
+    # 平台分支 dest_req 即 runner 交给本 workspace 的副本,原地清理;
+    # 本地分支清的是拷贝件,源任务目录不动。
+    removed_images = prune_reference_imagery(dest_req)
+    if removed_images:
+        log(f"[req] pruned reference imagery (blind lane): "
+            f"{len(removed_images)} item(s)")
 
     runtime = AgentRuntime.from_env(project_dir=str(output_dir))
     events = runtime.events
@@ -3774,6 +3628,12 @@ def main() -> int:
         system_row_ctx = build_system_row_context(
             tree, rules_text, fixture_rules,
             scope=family_scope or None)
+        # workspace 根同文落一份:模型 shell 可寻(cat 即得端口/架构答案,
+        # 0 分运行实证:profile 注入版在场但 workspace 无文件,模型 cat
+        # 落空后转向 .octos 考古)。内核引导只读 per-profile data 目录,
+        # 此副本不进系统行,无双注入。
+        (output_dir / "AGENTS.md").write_text(
+            system_row_ctx, encoding="utf-8")
         log(f"[system-row] stable context built: "
             f"{len(system_row_ctx) / 1024:.0f} KB (resident at prefix "
             "position 0 — work orders carry only the delta)")
@@ -3828,7 +3688,7 @@ def main() -> int:
             return repair_driver
 
         # 契约随分层装配走(全局层在系统行,模块层在工单);进度账本是
-        # 宿主本地 dict(供工单进度行/分段摘要/事件标记消费)。
+        # 宿主本地 dict(供工单进度行/事件标记消费)。
         plan_statuses: dict[str, str] = {
             str(n.get("id")): "pending" for n in atomic_nodes}
         # Staged specs of every node whose batch rehearsal-greened so far —
@@ -3855,8 +3715,6 @@ def main() -> int:
             # 用它,而不是误导性的 "final verification did not pass"
             # (skip 的节点从未被验证过)。
             skip_reasons: dict[str, str] = {}
-            node_done_notes: dict[str, str] = {}
-            segment_digest_pending = False
             # 会话策略:family(默认)每家族一会话,依赖全由工单闭包双段
             # 注入承载,组间环容忍拓扑(成环破文档序并告警);scc=互达
             # 成环家族共组;single=全程单会话。OCTOS_ARC_SEGMENT_BATCHES>0
@@ -3895,14 +3753,12 @@ def main() -> int:
                     log(f"[flow] session segmentation: closing session "
                         f"before batch {idx} (every {segment_every})")
                     driver.close()
-                    segment_digest_pending = True
                 elif (idx > 1 and batch_group
                         and batch_group[idx - 1] != batch_group[idx - 2]):
                     log(f"[flow] session boundary: closing session before "
                         f"batch {idx} (dependency group "
                         f"{batch_group[idx - 1] + 1})")
                     driver.close()
-                    segment_digest_pending = True
                 # Finite-budget degrade: trim the batch tail while the
                 # remaining tail cannot fit it (an unlimited budget never
                 # trims). Trimmed nodes take the legacy skip bookkeeping.
@@ -3931,11 +3787,9 @@ def main() -> int:
                     plan_statuses[nid] = "active"
                 # 进度账本行:家族级状态随工单下发(planctl 退役后全局
                 # 进度的唯一载体);范围 run 只列范围内家族。分层装配:
-                # 全局层(地图+契约+播种契约)常驻系统行;工单=模块层
-                # (本家族全子树)+依赖闭包+批节点+进度。
-                node_prompt = build_turn_features(
-                    tree, batch, family_of, parent_of,
-                    statuses=plan_statuses)
+                # 全局层(地图+契约+播种契约)常驻系统行;工单=批节点
+                # TASK+SCENARIOS 本批原文。
+                node_prompt = build_turn_features(batch, parent_of)
                 if idx == 1:
                     # 骨架轮退役:首家族批携带 BOOTSTRAP 前言(种子/共享
                     # API 面/家族 stub 在位)——有模板时首 turn 就是 REQ-1
@@ -3954,14 +3808,6 @@ def main() -> int:
                         batch_specs)
                 node_prompt += GOAL_FIRST_TURN_COMPLETION.format(
                     smoke=smoke_port)
-                if segment_digest_pending:
-                    # 分段后首 turn 的正版记忆——逐节点完成笔记,替代
-                    # 模型翻 .arc 考古。flag 不在此清:该 turn 若死于流
-                    # 错误/墙钟,重试与后续批仍要拿到摘要;本批某个 turn
-                    # 真正成功才在下方清掉。
-                    node_prompt += _segment_digest(
-                        node_done_notes, plan_statuses,
-                        has_seeds=bool(seed_rows_expected))
                 if template_ready:
                     _ensure_dev_server(output_dir, smoke_port,
                                        spec_ports_extra, log)
@@ -3996,10 +3842,6 @@ def main() -> int:
                 main_turn_reason = _turn_end_reason(ok, text)
                 log(f"[flow] batch {focus_id} {'ok' if ok else 'FAILED'} "
                     f"in {time.time()-t0:.0f}s: {text[-300:]!r}")
-                if ok:
-                    # 摘要已随本 turn 进入会话上下文;失败的 turn 不清
-                    # flag,让下一个 prompt 继续携带(见注入点注释)。
-                    segment_digest_pending = False
                 if not ok:
                     # Hard-wall/orphan cuts can leave a batch 90% done on
                     # disk. Gate + rehearse whatever landed instead of
@@ -4074,7 +3916,6 @@ def main() -> int:
                 if ok:
                     for nid in batch_ids:
                         events.mark_implementation_done(nid, text[-500:] or None)
-                        node_done_notes[nid] = (text or "")[-160:]
                 runtime.git.commit(
                     f"{focus_id} (implement): "
                     + "; ".join(str(n.get("name", "")) for n in batch))
@@ -4128,7 +3969,6 @@ def main() -> int:
                                 failed.remove(nid)
                                 events.mark_implementation_done(
                                     nid, "recovered via host rehearsal")
-                                node_done_notes[nid] = "recovered via host rehearsal"
                     if (r_err is None and tests_dir and pre_batch_head
                             and not time_up()
                             and os.environ.get("OCTOS_ARC_HOST_GRADE",

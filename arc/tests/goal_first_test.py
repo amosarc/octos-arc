@@ -138,13 +138,14 @@ class FamilyContextTests(unittest.TestCase):
         self.assertIn("sub-family contract two", ctx)
 
 
-class DependencyBlockTests(unittest.TestCase):
-    """紧凑依赖块(09-30 定则:无须携带依赖场景全文——可复用面=ids+状态
-    +引用名+种子值)。dependency_closure=BFS 数据源,build_turn_features
-    =统一块骨架(TASK/DEPENDENCIES/UI CONTRACT/SCENARIOS/SEED CONTRACT)。
-    本批节点自己的 GIVEN 仍逐字(SeedOwnershipTests)。"""
+class TurnBlockTests(unittest.TestCase):
+    """build_turn_features 统一块骨架:TASK → SCENARIOS(本批 Feature
+    原文)。DEPENDENCIES/REUSED UI CONTRACT 依赖块已整体退役(装配与
+    闭包机器全删);SEED CONTRACT 暂停装配待确认是否有用(代码保留,
+    _TURN_SEED_CONTRACT 旋钮)。本批节点自己的 GIVEN 仍逐字(LAW 4,
+    SeedOwnershipTests)。"""
 
-    def _blob(self, batch_ids, tree=None, statuses=None):
+    def _blob(self, batch_ids, tree=None):
         src_tree = tree or TREE
         batch = [n for n in main.flatten_atomic(src_tree)
                  if str(n["id"]) in batch_ids]
@@ -160,135 +161,22 @@ class DependencyBlockTests(unittest.TestCase):
                     _walk(c, c)
 
         _walk(src_tree, src_tree)
-        return main.build_turn_features(
-            src_tree, batch, main.family_index(src_tree), parent_of,
-            statuses=statuses)
+        return main.build_turn_features(batch, parent_of)
 
-    @staticmethod
-    def _dep_line(blob):
-        return next(l for l in blob.splitlines()
-                    if l.startswith("DEPENDENCIES:"))
-
-    def test_cross_family_dep_compact(self):
+    def test_only_task_and_scenarios_sections(self):
+        # 退役后骨架:TASK → SCENARIOS;依赖/UI/种子三段一律不进场。
         blob = self._blob(["REQ-2-1"])
-        # 依赖以紧凑事实进场:id 行 + UI 行;依赖 Feature 全文不再渲染
-        self.assertIn("DEPENDENCIES: REQ-1 — already implemented", blob)
-        self.assertIn("- REQ-1 (Family One)", blob)
-        self.assertNotIn("Feature: Family One (ID: REQ-1)", blob)
-        self.assertNotIn("NOTE:", blob)
-
-    def test_same_family_cross_batch_dep_included(self):
-        # 批=[REQ-2-2](单节点批):同族依赖 REQ-2-1 不在本批 → 进闭包
-        # (09-29 二轮:大家族拆批后依赖契约无别处在场;github 实测 20 处)。
-        blob = self._blob(["REQ-2-2"])
-        self.assertIn("DEPENDENCIES: REQ-2-1 / REQ-1 — already implemented",
-                      blob)
-
-    def test_same_batch_dep_pruned(self):
-        # 批内依赖由 SCENARIOS 本身携带,DEPENDENCIES 只列批外。
-        blob = self._blob(["REQ-2-1", "REQ-2-2"])
-        dep_line = self._dep_line(blob)
-        self.assertNotIn("REQ-2-1", dep_line)
-        self.assertNotIn("REQ-2-2", dep_line)
-        self.assertIn("REQ-1", dep_line)
-
-    def test_no_deps_omits_dependency_sections(self):
-        # 统一块骨架:无依赖 turn 只是省去 DEPENDENCIES/UI/SEED 三段。
-        blob = self._blob(["REQ-3-1"])
-        self.assertIn("TASK: implement REQ-3-1 (REQ-3-1).", blob)
+        self.assertIn("TASK: implement REQ-2-1", blob)
         self.assertIn("SCENARIOS (verbatim):", blob)
         self.assertNotIn("DEPENDENCIES:", blob)
         self.assertNotIn("REUSED UI CONTRACT", blob)
         self.assertNotIn("SEED CONTRACT", blob)
 
-    def test_unknown_dependency_id_ignored(self):
-        n = node("REQ-3-1", dependencies=["REQ-99"])
-        self.assertEqual(main.dependency_closure(TREE, [n]), ([], []))
-
-    def test_folder_level_dependency_enters_closure(self):
-        # 09-30 封堵:FOLDER 独立声明跨族依赖而无 ATOMIC 重述时,依赖
-        # 仍在场(会话排序图 family_dependency_edges 已含 FOLDER 边)。
-        tree = node("ROOT", "FOLDER", [
-            node("F1", "FOLDER", [
-                node("F1-1", description="base feature"),
-            ]),
-            node("F2", "FOLDER", [
-                node("F2-1", description="second feature",
-                     scenarios=[{"name": "s", "steps": [
-                         {"keyword": "GIVEN", "content": "seeded row"},
-                         {"keyword": "WHEN", "content": "act"},
-                         {"keyword": "THEN", "content": "assert"}]}]),
-            ], dependencies=["F1-1"]),
-        ])
-        main._annotate_ancestor_folder_deps(tree, ())
-        batch = [n for n in main.flatten_atomic(tree) if n["id"] == "F2-1"]
-        dep_nodes, dropped = main.dependency_closure(tree, batch)
-        self.assertIn("F1-1", [str(n.get("id")) for n in dep_nodes])
-        self.assertEqual(dropped, [])
-        # 去重面:ATOMIC 重述同一 FOLDER 依赖时不双发。
-        tree2 = node("ROOT", "FOLDER", [
-            node("F1", "FOLDER", [node("F1-1", description="base")]),
-            node("F2", "FOLDER", [
-                node("F2-1", dependencies=["F1-1"], description="restate"),
-            ], dependencies=["F1-1"]),
-        ])
-        main._annotate_ancestor_folder_deps(tree2, ())
-        batch2 = [n for n in main.flatten_atomic(tree2) if n["id"] == "F2-1"]
-        dep_nodes2, _ = main.dependency_closure(tree2, batch2)
-        self.assertEqual(
-            [str(n.get("id")) for n in dep_nodes2].count("F1-1"), 1)
-
-    def test_dependency_cycle_terminates(self):
-        # 环:A→B→A 不死循环,双向都不重复输出。
-        tree = node("ROOT", "FOLDER", [
-            node("REQ-1", "FOLDER", [
-                node("REQ-1-1", description="a",
-                     dependencies=["REQ-2-1"])]),
-            node("REQ-2", "FOLDER", [
-                node("REQ-2-1", description="b",
-                     dependencies=["REQ-1-1"])]),
-        ])
-        batch = [n for n in main.flatten_atomic(tree)
-                 if n["id"] == "REQ-1-1"]
-        dep_nodes, _ = main.dependency_closure(tree, batch)
-        ids = [str(n.get("id")) for n in dep_nodes]
-        self.assertEqual(ids.count("REQ-2-1"), 1)
-        self.assertNotIn("REQ-1-1", ids)
-
-    def test_closure_truncates_ui_lines_with_marker(self):
-        # 失控帽只裁深距离层的 UI 行;DEPENDENCIES id 行永远完整。
-        chain = []
-        for i in range(30):
-            nid = f"REQ-X-{i:02d}"
-            nxt = f"REQ-X-{i + 1:02d}" if i < 29 else None
-            chain.append(node(nid, description=f"desc {nid}",
-                              dependencies=[nxt] if nxt else None))
-        tree = node("ROOT", "FOLDER", [
-            node("REQ-T", "FOLDER", [
-                node("REQ-T-1", description="t",
-                     dependencies=["REQ-X-00"])]),
-            node("REQ-X", "FOLDER", chain),
-        ])
-        blob = self._blob(["REQ-T-1"], tree=tree)
-        self.assertIn("- REQ-X-00 (REQ-X-00)", blob)   # 直接依赖 UI 行在场
-        self.assertIn("[dependency context truncated", blob)
-        self.assertNotIn("REQ-X-29 (REQ-X-29)", blob)  # 最深的 UI 行被裁
-        self.assertIn("REQ-X-29", self._dep_line(blob))  # id 行仍完整
-
-    def test_status_split_done_vs_pending(self):
-        blob = self._blob(["REQ-2-1"], statuses={"REQ-1": "done"})
-        self.assertIn("DEPENDENCIES: REQ-1 — already implemented", blob)
-        blob = self._blob(["REQ-2-1"], statuses={"REQ-1": "blocked"})
-        self.assertIn(
-            "DEPENDENCIES: REQ-1 — not yet implemented (cyclic order or "
-            "an earlier attempt failed)", blob)
-        self.assertNotIn("already implemented", blob)
-
-    def test_seed_contract_section_order_and_verbatim(self):
+    def test_seeded_given_verbatim_in_scenarios(self):
+        # SEED CONTRACT 暂停后,种子契约唯一载体=SCENARIOS 的 GIVEN 原文。
         tree = node("ROOT", "FOLDER", [
             node("REQ-2", "FOLDER", [
                 node("REQ-2-1", description="d21",
-                     dependencies=["REQ-1-1"],
                      scenarios=[{"name": "s", "steps": [
                          {"keyword": "GIVEN",
                           "content": "The seeded data is account "
@@ -298,106 +186,28 @@ class DependencyBlockTests(unittest.TestCase):
                                      "`feature-search`; pull request "
                                      "`Improve onboarding`; check "
                                      "`test`."}]}])]),
-            node("REQ-1", "FOLDER", [
-                node("REQ-1-1", name="Login", description=(
-                    "Form fields “Username or email” and “Password”."))]),
         ])
         blob = self._blob(["REQ-2-1"], tree=tree)
-        # 段序:TASK → DEPENDENCIES → REUSED UI → SCENARIOS → SEED CONTRACT
-        self.assertLess(blob.index("TASK:"), blob.index("DEPENDENCIES:"))
-        self.assertLess(blob.index("DEPENDENCIES:"),
-                        blob.index("REUSED UI CONTRACT"))
-        self.assertLess(blob.index("REUSED UI CONTRACT"),
-                        blob.index("SCENARIOS (verbatim):"))
-        self.assertLess(blob.index("SCENARIOS (verbatim):"),
-                        blob.index("SEED CONTRACT"))
-        # 种子契约=含 seed 的整句逐字照抄(词汇无关,不按实体枚举)
         self.assertIn(
-            "SEED CONTRACT (backend/data/db.json must already contain — "
-            "seed sentences verbatim from the requirements):\n"
-            "- The seeded data is account `alice-dev`, email `a@x.test`, "
+            "The seeded data is account `alice-dev`, email `a@x.test`, "
             "password `pw`; repository `acme-docs`, branches `main` and "
             "`feature-search`; pull request `Improve onboarding`; check "
             "`test`.", blob)
+        self.assertNotIn("SEED CONTRACT", blob)
 
-    def test_dep_ui_line_excludes_backticks(self):
-        tree = node("ROOT", "FOLDER", [
-            node("REQ-1", "FOLDER", [
-                node("REQ-1-1", name="Login", description=(
-                    "Form fields “Username or email” and “Password”; "
-                    "the seeded account `alice-dev` signs in."))]),
-            node("REQ-2", "FOLDER", [
-                node("REQ-2-1", description="d21",
-                     dependencies=["REQ-1-1"])]),
-        ])
-        blob = self._blob(["REQ-2-1"], tree=tree)
-        # UI 契约行只收引用名(“”/"…"):反引号种子值不进 UI 行;
-        # (含种子值的整句归 SEED CONTRACT 段,是设计内。)
-        ui_line = next(l for l in blob.splitlines()
-                       if l.startswith("- REQ-1-1 (Login):"))
-        self.assertEqual(ui_line,
-                         "- REQ-1-1 (Login): Username or email / Password")
-
-    def test_real_sheet_closure_is_transitive(self):
-        # sheet 真树:REQ-5 家族闭包含 REQ-2/3/4 家族节点(传递)。
+    def test_real_sheet_turn_sections(self):
+        # sheet 真树烟测:装配面只剩 TASK+SCENARIOS。
         req_dir = Path(__file__).resolve().parent.parent / "tasks" / \
             "hackathon--sheet"
         if not (req_dir / "requirements.yaml").is_file():
             self.skipTest("sheet task not present")
         tree = main.load_requirement_tree(req_dir)
-        batch = [n for n in main.flatten_atomic(tree)
-                 if str(n.get("id")).startswith("REQ-5")]
-        dep_nodes, _ = main.dependency_closure(tree, batch)
-        ids = " ".join(str(n.get("id")) for n in dep_nodes)
-        for fam in ("REQ-1", "REQ-2", "REQ-3", "REQ-4"):
-            self.assertIn(f"{fam}-", ids,
-                          f"{fam} family nodes missing from closure")
-
-    def test_real_github_cross_batch_same_family_dep_in_closure(self):
-        # github 真树:batch3(REQ-2-2-*)依赖 batch2 的 REQ-2-1-2(同族
-        # 跨批)——其 id/名/引用名必须进依赖块(旧"同族全剪"缺口)。
-        req_dir = Path(__file__).resolve().parent.parent / "tasks" / \
-            "hackathon--github"
-        if not (req_dir / "requirements.yaml").is_file():
-            self.skipTest("github task not present")
-        tree = main.load_requirement_tree(req_dir)
-        batches = main.group_families(tree)
-        hit = next(b for b in batches
-                   if any(str(n.get("id")) == "REQ-2-2-1" for n in b))
-        dep_nodes, _ = main.dependency_closure(tree, hit)
-        self.assertIn("REQ-2-1-2", [str(n.get("id")) for n in dep_nodes])
-
-    def test_real_github_req6_compact_block(self):
-        # 用户样例场景:REQ-6-1 依赖 6 节点全场景(~10KB)→ 紧凑块。
-        req_dir = Path(__file__).resolve().parent.parent / "tasks" / \
-            "hackathon--github"
-        if not (req_dir / "requirements.yaml").is_file():
-            self.skipTest("github task not present")
-        tree = main.load_requirement_tree(req_dir)
-        blob = self._blob(["REQ-6-1"], tree=tree)
-        # id 行:直接依赖在前,传递尾巴全列(FOLDER 边并入起点)
-        self.assertIn("DEPENDENCIES: REQ-4-3-1 / REQ-1-1-2", blob)
-        for dep_id in ("REQ-3-3", "REQ-4-3", "REQ-4-1", "REQ-1-1-1"):
-            self.assertIn(dep_id, self._dep_line(blob), dep_id)
-        # 引用名行(github 弯引号 → UI 契约)
-        self.assertIn("- REQ-1-1-2 (Sign In with an Existing Account): "
-                      "Username or email / Password / Sign in", blob)
-        self.assertIn("- REQ-4-3-1 (List and Switch Repository Branches): "
-                      "current branch / No matching branch", blob)
-        # 种子契约=依赖+本批的含 seed 整句逐字并集(词汇无关)
-        self.assertIn(
-            "- The seeded data is pull requests `Improve onboarding` and "
-            "`Fix search`, branches `main` and `feature-search`, reviewer "
-            "`bob-reviewer`, check `test`.", blob)
-        self.assertIn(
-            "- The seeded data is repository `acme-docs`, branches `main` "
-            "and `feature-search`, file `README.md`, commit "
-            "`Document search flow`.", blob)
-        # 依赖种子句逐字进场(含逐字凭证);依赖场景流程全文仍不进场
-        self.assertIn("alice.dev@example.test", blob)
-        self.assertNotIn("branch selector", blob)
-        # 本批 GIVEN 仍逐字(LAW 4 契约源)
-        self.assertIn("repository Admin is signed in", blob)
+        batch = main.group_families(tree)[0]
+        blob = self._blob([str(n["id"]) for n in batch], tree=tree)
+        self.assertIn("SCENARIOS (verbatim):", blob)
+        self.assertNotIn("DEPENDENCIES:", blob)
+        self.assertNotIn("REUSED UI CONTRACT", blob)
+        self.assertNotIn("SEED CONTRACT", blob)
 
 
 class MyCheckExampleTests(unittest.TestCase):
@@ -663,6 +473,44 @@ class SystemRowTests(unittest.TestCase):
         self.assertIn("Global rules.", ctx)
         self.assertIn("Build it.", blob)
         self.assertIn("Scenario: N3", blob)
+
+    def test_prune_reference_imagery_blind_lane(self):
+        # 10-01 拍板:盲 lane 不读参考截图——workspace 副本图片删除、
+        # requirements.yaml 记号原地剥成与 host 渲染一致;非图片文件
+        # 保留,剥后 load 幂等。
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            req = Path(td)
+            (req / "requirements.yaml").write_text(
+                "id: ROOT\nname: root\ntype: FOLDER\n"
+                "description: Global rules.\n"
+                "children:\n"
+                "  - id: REQ-1\n"
+                "    name: N1\n"
+                "    type: ATOMIC\n"
+                "    description: |\n"
+                "      Build it.\n"
+                "      Page reference:\n"
+                "      ![image](reference/sort.png)\n",
+                encoding="utf-8")
+            ref = req / "reference"
+            ref.mkdir()
+            (ref / "sort.png").write_bytes(b"\x89PNG")
+            (ref / "notes.txt").write_text("keep me", encoding="utf-8")
+            removed = main.prune_reference_imagery(req)
+            self.assertIn("reference/sort.png", removed)
+            self.assertIn("requirements.yaml (page-reference marks)", removed)
+            self.assertFalse((ref / "sort.png").exists())
+            self.assertTrue((ref / "notes.txt").exists())
+            self.assertTrue(ref.is_dir())  # 非图片文件在,目录不收
+            raw = (req / "requirements.yaml").read_text(encoding="utf-8")
+            self.assertNotIn("Page reference:", raw)
+            self.assertNotIn("](reference/", raw)
+            self.assertIn("Build it.", raw)
+            # 剥后 load 正常且幂等(再次 prune 无事可做)。
+            tree = main.load_requirement_tree(req)
+            self.assertTrue(tree.get("children"))
+            self.assertEqual(main.prune_reference_imagery(req), [])
 
     def test_system_row_is_compact(self):
         ctx = main.build_system_row_context(TREE, self.RULES,
@@ -970,11 +818,12 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertNotIn("schema.json", turn + pre)
 
     def test_gateway_override_excludes_phantom_tools(self):
-        # 09-29 减法重构(最大单项):基础提示词与 7 工具 allowlist 对齐
-        # ——Subagents/Memory 整节与全部幻影工具名出局。
+        # 09-29 减法重构(最大单项):基础提示词与 6 工具 allowlist 对齐
+        # ——Subagents/Memory 整节与全部幻影工具名出局(update_plan
+        # 10-01 退役:弱 lane 把它当伪进度出口,零值)。
         text = main._GATEWAY_PROMPT_OVERRIDE
         for tool in ("read_file", "edit_file", "write_file", "grep",
-                     "list_dir", "update_plan", "bash"):
+                     "list_dir", "bash"):
             self.assertIn(f"`{tool}`", text, f"missing real tool {tool}")
         for phantom in ("spawn", "read_task_output", "check_background_tasks",
                         "save_memory", "recall", "ask_user_question",
@@ -1107,20 +956,6 @@ class GoalFirstRulesTests(unittest.TestCase):
                      "getByRole('option'", "Shift"):
             self.assertIn(keep, text)
 
-    def test_segment_digest_seeds_line_is_gated(self):
-        # 09-28 审计 P3:种子声明行只在宿主真落过种子时附带——空种子
-        # 任务里它是假陈述。
-        notes = {"REQ-1": "did X"}
-        with_seeds = main._segment_digest(
-            notes, {"REQ-1": "done"}, has_seeds=True)
-        without = main._segment_digest(
-            notes, {"REQ-1": "done"}, has_seeds=False)
-        # 09-30 播种退役:种子=模型实现义务,中性验证句,不得再称宿主编译
-        self.assertIn("must carry the seed implemented from", with_seeds)
-        self.assertNotIn("compiled by the host", with_seeds)
-        self.assertNotIn("must carry the seed implemented from", without)
-        self.assertIn("REQ-1", without, "digest body itself stays")
-
     def test_lazy_gate_ignores_requirements_dir(self):
         # 09-28 审计:需求原文是只读真值,模型往 requirements/ 写文件
         # 不得洗白零工作轮;backend/frontend 的真实变化仍计数。
@@ -1189,7 +1024,7 @@ class HostRuntimeRegressionTests(unittest.TestCase):
 
 class WorkOrderSpecTests(unittest.TestCase):
     """build_turn_features:批 turn 与 blocked-retry pass 共用的 TURN 装配
-    (统一块骨架:TASK/DEPENDENCIES/UI CONTRACT/SCENARIOS/SEED CONTRACT)。"""
+    (统一块骨架:TASK → SCENARIOS 本批 Feature 原文)。"""
 
     def _spec(self, batch_ids, tree=None):
         src_tree = tree or TREE
@@ -1207,22 +1042,18 @@ class WorkOrderSpecTests(unittest.TestCase):
                     _walk(c, c)
 
         _walk(src_tree, src_tree)
-        return main.build_turn_features(
-            src_tree, batch, main.family_index(src_tree), parent_of)
+        return main.build_turn_features(batch, parent_of)
 
     def test_sections_in_order(self):
         spec = self._spec(["REQ-2-1"])
-        # 段序:TASK → DEPENDENCIES → REUSED UI → SCENARIOS(本批 Feature)
-        # (SEED 段序由 DependencyBlockTests.test_seed_contract_line 钉);
-        # NOTE/账本废话已删
-        self.assertLess(spec.index("TASK:"), spec.index("DEPENDENCIES:"))
-        self.assertLess(spec.index("DEPENDENCIES:"),
-                        spec.index("REUSED UI CONTRACT"))
-        self.assertLess(spec.index("REUSED UI CONTRACT"),
+        # 段序:TASK → SCENARIOS(本批 Feature);NOTE/账本废话已删
+        self.assertLess(spec.index("TASK:"),
                         spec.index("SCENARIOS (verbatim):"))
         self.assertLess(spec.index("SCENARIOS (verbatim):"),
                         spec.index("Feature:"))
-        self.assertIn("- REQ-1 (Family One)", spec)
+        self.assertNotIn("DEPENDENCIES:", spec)
+        self.assertNotIn("REUSED UI CONTRACT", spec)
+        self.assertNotIn("SEED CONTRACT", spec)
         self.assertNotIn("NOTE:", spec)
         self.assertNotIn("PROGRESS (family ledger", spec)
 
@@ -1406,8 +1237,7 @@ class SeedOwnershipTests(unittest.TestCase):
         )])
         parent_of = self._parent_of(tree)
         batch = main.flatten_atomic(tree)
-        blob = main.build_turn_features(
-            tree, batch, main.family_index(tree), parent_of)
+        blob = main.build_turn_features(batch, parent_of)
         self.assertIn("An organization Owner is signed in", blob)
         self.assertNotIn("seeded by host", blob)
 
@@ -1434,8 +1264,7 @@ class SeedOwnershipTests(unittest.TestCase):
         batches = main.group_families(tree)
         hit = next(b for b in batches
                    if any(str(n.get("id")) == "REQ-2-2-1" for n in b))
-        blob = main.build_turn_features(
-            tree, hit, main.family_index(tree), parent_of)
+        blob = main.build_turn_features(hit, parent_of)
         self.assertIn("Owner is signed in", blob)
         self.assertNotIn("seeded by host", blob)
 

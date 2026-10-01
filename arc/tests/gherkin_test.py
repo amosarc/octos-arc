@@ -58,6 +58,16 @@ class CleaningRuleTests(unittest.TestCase):
                 "REQ-1-1-1 -the requested workflow,the requested workflow"),
             "REQ-1-1-1")
 
+    def test_placeholder_strip_keeps_word_boundaries(self):
+        # 10-01:占位串以空格替换(原为空串),剜掉后不与真词黏连
+        # (真跑实证:"...workbook entry, -8 csv,the requested workflow
+        # with concrete..." 曾渲染成 "...-8 csvconcrete...")。
+        self.assertEqual(
+            gherkin.clean_text(
+                "clicks the workbook entry, -8 csv,the requested "
+                "workflow with concrete values `East`"),
+            "clicks the workbook entry, -8 csv concrete values `East`")
+
 
 class RenderTests(unittest.TestCase):
     def _node(self, steps_templated=False):
@@ -138,6 +148,60 @@ class FeatureAssemblyTests(unittest.TestCase):
         self.assertIn("Scenario: Open a Workbook", feats[0]["text"])
 
 
+class TurnTemplatedBranchTests(unittest.TestCase):
+    """TURN 渲染(feature_text)接占位标记分支(10-01):打标场景渲染
+    Flow contract 注释 + GIVEN 原文 + 注记行,占位 WHEN/THEN 不进场;
+    未打标节点逐字保留全步骤(github 真场景零改动)。"""
+
+    def _folder_and_atoms(self, templated):
+        steps = [
+            {"keyword": "GIVEN", "content": "A seeded workbook `Q3`."},
+            {"keyword": "WHEN", "content":
+                "the requested workflow with concrete values `East`."},
+            {"keyword": "THEN", "content": "The workbook opens."}]
+        atom = {"id": "REQ-1-1-1", "name": "Open a Workbook",
+                "type": "ATOMIC",
+                "description": "Users open the seeded workbook from the "
+                               "home page via its named entry link.",
+                "scenarios": [{"name": "s1", "steps": steps}]}
+        if templated:
+            atom["_scenarios_templated"] = True
+        folder = {"id": "REQ-1-1", "name": "Navigation", "type": "FOLDER",
+                  "description": "Open workbooks from the home page.",
+                  "children": [atom]}
+        return folder, atom
+
+    def _render(self, templated):
+        folder, atom = self._folder_and_atoms(templated)
+        return gherkin.feature_text(folder, [atom])
+
+    def test_templated_renders_flow_contract_and_given_only(self):
+        text = self._render(True)
+        self.assertIn(
+            "# Flow contract: Users open the seeded workbook from the "
+            "home page via its named entry link.", text)
+        self.assertIn("Given A seeded workbook `Q3`.", text)
+        self.assertIn("platform placeholder boilerplate", text)
+        self.assertNotIn("When ", text)
+        self.assertNotIn("Then ", text)
+        self.assertNotIn("the requested workflow", text.lower())
+
+    def test_scenario_level_flag_branches_too(self):
+        # 混合形态节点(github):节点未打标、首场景被场景级补检打标。
+        folder, atom = self._folder_and_atoms(False)
+        atom["scenarios"][0]["_steps_templated"] = True
+        text = gherkin.feature_text(folder, [atom])
+        self.assertIn("# Flow contract:", text)
+        self.assertNotIn("When ", text)
+
+    def test_unflagged_keeps_full_steps(self):
+        text = self._render(False)
+        self.assertIn("When ", text)
+        self.assertIn("Then The workbook opens.", text)
+        self.assertNotIn("# Flow contract", text)
+        self.assertNotIn("placeholder boilerplate", text)
+
+
 class RealTaskSmokeTests(unittest.TestCase):
     def _tree(self, task):
         import main
@@ -164,6 +228,42 @@ class RealTaskSmokeTests(unittest.TestCase):
         text = gherkin.render_scenarios(n, "full")
         self.assertIn("Valid-password-123!", text)
         self.assertIn("Create an account", text)
+
+    def _parent_of(self, tree, node):
+        stack = [tree]
+        while stack:
+            cur = stack.pop()
+            for c in cur.get("children") or []:
+                if not isinstance(c, dict):
+                    continue
+                if c is node:
+                    return cur
+                stack.append(c)
+        raise AssertionError("parent folder not found")
+
+    def test_sheet_turn_path_templated_branch_clean(self):
+        # TURN 真路径(feature_text):sheet 节点级打标 → Flow contract
+        # + GIVEN 原文 + 注记行,占位 WHEN/THEN 与黏连残渣不进场。
+        import main
+        tree = self._tree("hackathon--sheet")
+        n = next(x for x in main.flatten_atomic(tree)
+                 if x.get("id") == "REQ-1-1-1")
+        text = gherkin.feature_text(self._parent_of(tree, n), [n])
+        self.assertIn("# Flow contract:", text)
+        self.assertIn("platform placeholder boilerplate", text)
+        self.assertIn("`Q3 Sales`", text)
+        self.assertNotIn("When ", text)
+        self.assertNotIn("the requested workflow", text.lower())
+        self.assertNotIn("csvconcrete", text.replace(" ", ""))
+
+    def test_github_turn_path_keeps_real_steps(self):
+        import main
+        tree = self._tree("hackathon--github")
+        n = next(x for x in main.flatten_atomic(tree)
+                 if x.get("id") == "REQ-1-1-1")
+        text = gherkin.feature_text(self._parent_of(tree, n), [n])
+        self.assertIn("Create an account", text)
+        self.assertNotIn("placeholder boilerplate", text)
 
 
 class QuotedNamesTests(unittest.TestCase):
@@ -194,9 +294,10 @@ class QuotedNamesTests(unittest.TestCase):
 
 
 class SeedSentencesTests(unittest.TestCase):
-    """依赖块 SEED CONTRACT 的数据源(gherkin.seed_sentences):含 "seed"
+    """SEED CONTRACT 块的数据源(gherkin.seed_sentences):含 "seed"
     的整句逐字提取,词汇无关(逐实体正则不具泛化能力——09-30 用户拍板);
-    "Seed values:" 字面重复句照既有清洗律丢弃。"""
+    "Seed values:" 字面重复句照既有清洗律丢弃。块本身暂停装配待确认
+    是否有用(main._TURN_SEED_CONTRACT),函数与测试保留。"""
 
     def test_seed_declaration_sentence_extracted_verbatim(self):
         n = {"id": "REQ-1", "name": "n", "description": "", "scenarios": [

@@ -335,24 +335,9 @@ pub(super) fn satisfied_completion_content(output_files: &[String], tool_output:
 ///   already 0/5 loops in both arms; block has no effect on Opus
 ///
 /// The block follows hermes-agent's prompt-time-injection pattern (in
-/// `agent/prompt_builder.py`), but applied universally rather than
-/// model-family-gated — the cost is small and the benefit is real.
-const TOOL_USE_DISCIPLINE: &str = "\n\n\
-## Tool use discipline\n\n\
-You have generic file-inspection tools — `read_file`, `list_dir`, \
-`view_image`, `grep`, `glob` — that can answer most questions about \
-the workspace state by reading the files directly. Use them aggressively \
-to investigate what's actually there.\n\n\
-When a tool result does not answer the user's question, do NOT re-call \
-the same tool with the same arguments — the result will be identical. \
-Pick a different tool that can answer the specific question, usually a \
-file-reading tool. If no tool can answer it, respond with text explaining \
-what's missing.";
 
 pub(super) fn compose_system_prompt(agent: &Agent) -> String {
-    // 09-27 planctl 退役:系统行回到稳定快照 + 工具纪律前缀。
     let mut content = agent.system_prompt_snapshot();
-    content.push_str(TOOL_USE_DISCIPLINE);
     content
 }
 

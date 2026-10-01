@@ -53,7 +53,7 @@ sh arc/pack.sh                               # 得到 octos-arc-bundle.zip
 
 `[arc-plan]` envelope 通道整体移除(内核 planctl 模块 -4722 行,宿主
 set_envelope/marker 包装同删):契约、需求地图、进度账本全部印进工单正文,
-工单自包含;跨轮记忆由会话历史 + `_segment_digest` 承接。内核保留 shell
+工单自包含;跨轮记忆由会话历史承接。内核保留 shell
 guard(自测命令放行形状/full-spec-run/trace-deny)、OCTOS_TOOL_ALLOWLIST、
 折叠/迭代治理。`plan_envelope.py` 瘦身为工具箱(契约文案常量 + specmap +
 探针 + stage_specs)。
