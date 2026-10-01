@@ -10,8 +10,7 @@
       ——内核装配顺序:gateway base → 日期行 → AGENTS.md → memory(压缩态)
   t01.. 每家族 TURN(BOOTSTRAP 前言[首 turn] + Gherkin Feature + 完成要求
       一句话 + SEGMENT DIGEST[会话 2+ 首批])
-  n1/n2 nudge、r1/r2 彩排修复、b1 blocked retry、f1 final(变体轮)
-
+  f1 final(变体轮)
 每个文件附标注为 MOCK 的脚本化回复,构成完整对话轮。
 
 用法:python3 scripts/context_flow_sim.py [--out context-sim-out]
@@ -33,7 +32,6 @@ import plan_envelope  # noqa: E402
 from rejection_audit import audit_prompt_block  # noqa: E402
 
 TASKS = ["hackathon--sheet", "hackathon--github"]
-PORT = 3000
 SMOKE = 3100
 TOOLCHAIN_CLI = "/tmp/octos-local-grader/node_modules/@playwright/test/cli.js"
 
@@ -165,60 +163,6 @@ def render_task(task: str, out_root: Path) -> None:
             done_notes.update(
                 {nid: "(mock) implemented per Feature; family suite green"
                  for nid in ids})
-
-    b1 = sessions[0]["batches"][0]
-
-    n1 = (main.NODE_NUDGE_PROMPT
-          + "\n\n" + main.batch_req_block(b1, parent_of))
-    body = _header("n1", "零文件 nudge(懒轮推一把)")
-    files.append((out / "n1-nudge-zero-file.md",
-                  body + n1 + _mock("(mock) 立即写实现文件。")))
-
-    n2 = (main.SELFTEST_NUDGE_PROMPT
-          + "\n\n" + main.batch_req_block(b1, parent_of))
-    body = _header("n2", "零自测 nudge(改了文件但没跑自测)")
-    files.append((out / "n2-nudge-no-selftest.md",
-                  body + n2 + _mock("(mock) 写 spec 并对运行中应用跑绿。")))
-
-    r1 = (main.REHEARSAL_REPAIR_PROMPT.format(
-        error="(mock) backend crashed on boot: Cannot find module "
-              "'./routes/index'",
-        port=PORT, smoke=SMOKE,
-        retry_note=main.REHEARSAL_REPAIR_FIRST_NOTE)
-        + "\n\n" + main.batch_req_block(b1, parent_of))
-    body = _header("r1", "彩排修复轮(首修)")
-    files.append((out / "r1-rehearsal-repair-first.md",
-                  body + r1 + _mock("(mock) 修复 require 路径并自验。")))
-
-    r2 = (main.REHEARSAL_REPAIR_PROMPT.format(
-        error="(mock) backend crashed on boot: Cannot find module "
-              "'./routes/index'",
-        port=PORT, smoke=SMOKE,
-        retry_note=main.REHEARSAL_REPAIR_RETRY_NOTE)
-        + "\n\n" + main.batch_req_block(b1, parent_of))
-    body = _header("r2", "彩排修复轮(换策略 retry)")
-    files.append((out / "r2-rehearsal-repair-retry.md",
-                  body + r2 + _mock("(mock) 换修法重推需求原文再修。")))
-
-    rb = sessions[min(1, len(sessions) - 1)]["batches"][-1]
-    for n in rb:
-        statuses[str(n.get("id"))] = "blocked"
-    r_features = main.build_turn_features(
-        tree, rb, family_of, parent_of, statuses=statuses)
-    b1_prompt = (
-        "BLOCKED RETRY: this family's earlier turn ended, but the app "
-        "keeps failing the host's startup/route rehearsal. Current "
-        "rehearsal error:\n(mock) route probe GET /api/teams -> 500"
-        "\n\nRe-derive this family's implementation from the Feature "
-        "below — the requirement text is the authority (quoted names "
-        "and error strings verbatim). Fix the RUNNING app, then verify "
-        "with your own spec.\n"
-        + r_features + completion)
-    body = _header("b1", "blocked retry(终局前一遍翻案,fresh 会话)")
-    files.append((out / "b1-blocked-retry.md",
-                  body + b1_prompt + _mock("(mock) 修复并自测绿。")))
-    for n in rb:
-        statuses[str(n.get("id"))] = "done"
 
     mock_audit = {"findings": [
         {"kind": "red", "file": "backend/src/routes/mock.js", "line": 42,

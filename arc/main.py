@@ -91,9 +91,8 @@ COMPETITION_FAMILY_SCOPE = ""
 #   REASONING_EFFORT "" | "none" | "low" | "high" | "max"(空=不声明,跟随 THINKING)
 THINKING = "enabled"
 REASONING_EFFORT = "max"
-# 修复类短轮(syntax/rehearsal/spec 回归修复,自含错误摘要)降档:深度思考
-# 对窄修复不成比例地烧输出预算与墙钟。骨架 nudge/NODE_NUDGE 依赖会话连续
-# 性,留在主 driver 工作档。
+# 修复类短轮(syntax/spec 回归修复,自含错误摘要)降档:深度思考
+# 对窄修复不成比例地烧输出预算与墙钟。
 THINKING_REPAIR = "enabled"
 REASONING_EFFORT_REPAIR = "low"
 
@@ -1127,60 +1126,6 @@ def _collect_selftest_evidence(output_dir: Path) -> dict | None:
     return {"runs": len(runs), "last": runs[-1], "specs": per_spec}
 
 
-def _selftest_baseline(output_dir: Path) -> dict[str, int]:
-    """各 context-logs/tools.jsonl 的当前字节偏移(T1 基线)。
-
-    批 turn 开始前取基线,turn 结束后增量扫描——比解析时间戳稳健
-    (格式免约定),新出现的会话文件按偏移 0 全量计入。
-    """
-    marks: dict[str, int] = {}
-    for root in (Path(output_dir) / ".octos" / "context-logs",
-                 Path(output_dir) / "octos" / "dot-octos" / "context-logs"):
-        if not root.is_dir():
-            continue
-        for tools_file in sorted(root.glob("*/tools.jsonl")):
-            try:
-                marks[str(tools_file)] = tools_file.stat().st_size
-            except OSError:
-                pass
-    return marks
-
-
-def _selftest_ran_since(output_dir: Path, marks: dict[str, int]) -> bool:
-    """基线之后是否出现过自测命令运行(T1:零运行=过程纪律缺口)。
-
-    只认"测试运行过没有"这一过程事实,不读结果——红绿与场景预期
-    (含预期拒绝)的裁决归模型自测闭环。
-    """
-    roots = (Path(output_dir) / ".octos" / "context-logs",
-             Path(output_dir) / "octos" / "dot-octos" / "context-logs")
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for tools_file in sorted(root.glob("*/tools.jsonl")):
-            offset = marks.get(str(tools_file), 0)
-            try:
-                if tools_file.stat().st_size <= offset:
-                    continue
-                with tools_file.open("rb") as fh:
-                    fh.seek(offset)
-                    tail = fh.read().decode("utf-8", errors="replace")
-            except OSError:
-                continue
-            for line in tail.splitlines():
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if rec.get("kind") != "tool_call":
-                    continue
-                args = rec.get("args") or {}
-                cmd = str(args.get("cmd") or args.get("command") or "")
-                if _SELFTEST_CMD_RE.search(cmd):
-                    return True
-    return False
-
-
 # ------------------------------------------------- requirement message bridge
 # (2026-09-28 退役:引号消息提取的唯一消费方是 codegen 的确定性消息桥
 # ——CRUD 生成器退役后无消费方,sidecar 与正则一并删除。需求逐字串
@@ -1696,27 +1641,9 @@ def project_files_changed(output_dir: Path, since: float) -> bool:
     return False
 
 
-NODE_NUDGE_PROMPT = (
-    "Your last turn ended without changing any project file. Implement "
-    "the requirement node NOW: write or edit the actual backend and "
-    "frontend files with your file-writing tools. Do not just analyze, "
-    "observe, or announce plans.")
-
-# T1 自测在跑检查的中性 nudge(09-30):只陈述过程事实(改了文件但零
-# 自测运行),不预设任何失败形态;"expected outcome" 措辞天然涵盖预期
-# 拒绝类场景(THEN 断言拒绝行为本身,见核验矩阵)。
-SELFTEST_NUDGE_PROMPT = (
-    "Your last turn changed project files, but no self-test run was "
-    "recorded for it. Write the spec for this batch's nodes from their "
-    "scenarios (GIVEN = arrange, WHEN = act, THEN = assert) and run it "
-    "against the RUNNING app with the SELF-TEST command — a red spec "
-    "means the app does not yet match the scenario's expected outcome; "
-    "fix the app until the spec is green, then finish the turn.")
-
-
 def batch_req_block(batch: list[dict],
                     parent_of: dict[str, dict] | None = None) -> str:
-    """受影响批次的 Gherkin Feature(修复/nudge 轮追加)——契约与错误
+    """受影响批次的 Gherkin Feature(修复轮追加)——契约与错误
     同场,不再让模型凭实现记忆猜。"""
     if parent_of:
         return gherkin.batch_turn_features(batch, parent_of)
@@ -3501,41 +3428,6 @@ def stage_acceptance_runtime(stage_dir: Path, smoke_port: int,
 
 
 
-REHEARSAL_REPAIR_PROMPT = """\
-The app you built just failed its pre-grading startup rehearsal. The \
-benchmark runner executes exactly this sequence, and it failed on our own \
-smoke run:
-
-1. cd frontend && npm install && npm run build   (must exit 0)
-2. cd backend && npm install && npm start        (must bind the port and \
-stay up)
-
-Rehearsal error:
-{error}
-
-Fix the project so this exact sequence works. Typical causes: a require() \
-path that does not match the real file location, a file you referenced but \
-never wrote, a syntax error in a module loaded at startup, or a dependency \
-missing from package.json. After fixing, verify it yourself: run the build \
-in frontend/, then start the backend with PORT={smoke}, confirm it binds, \
-and STOP it afterwards. NEVER bind port {port} yourself — the runner \
-terminates the run if it sees a server there while you are still working. \
-Write the fix now — do not just describe it.\
-{retry_note}"""
-
-# P1-2a(09-30):同一批的修复轮第 2 次仍在红=上一种修法没生效——追加换
-# 策略指令,不再让模型重复同一补丁形状(sheet 法医"重复失败不升级")。
-# 中性措辞:重锚需求原文,不预设任何失败形态。
-REHEARSAL_REPAIR_RETRY_NOTE = (
-    "\n\nNOTE: a previous repair attempt for this SAME failure already "
-    "ran and the error is still here — the fix approach itself is not "
-    "working. Do not repeat the same kind of patch. Re-derive the "
-    "affected chain from the requirement text in THIS BATCH's contract "
-    "below, check what your last edit actually changed on disk, and take "
-    "a different approach.\n")
-
-REHEARSAL_REPAIR_FIRST_NOTE = "\n"
-
 SPEC_REGRESSION_REPAIR_PROMPT = """\
 A full staged regression run just found previously-green tests that are \
 now RED after recent changes (ground truth, Playwright vs the running \
@@ -4249,7 +4141,6 @@ def main() -> int:
                     pre_batch_head = None
                 batch_turn_ok = True
                 main_turn_reason = "not run: auth exhausted"
-                st_baseline = None
                 if driver.auth_exhausted:
                     # Gateway burned its credential budget (tb-trace-001:
                     # 55% of wall clock陪跑 auth failures). Stop paying
@@ -4268,12 +4159,6 @@ def main() -> int:
                             f"({driver.auth_failures})")
                 else:
                     wall = turn_wall(len(batch))
-                    # T1 基线:requirements-only 批 turn 前记 tools.jsonl
-                    # 偏移,turn 后增量判"自测运行过没有"(零运行=过程
-                    # 纪律缺口,见 SELFTEST_NUDGE_PROMPT 注释)。
-                    st_baseline = (_selftest_baseline(output_dir)
-                                   if not (tests_dir and batch_specs)
-                                   else None)
                     ok, text = driver.run(node_prompt, min(node_timeout, wall), wall)
                 batch_turn_ok = ok
                 main_turn_reason = _turn_end_reason(ok, text)
@@ -4302,7 +4187,7 @@ def main() -> int:
                     # going green. Files-changed is the wrong judge; the
                     # specs are the contract (host-computes: we run the
                     # batch's staged specs ourselves, green = done, red =
-                    # genuinely lazy → nudge).
+                    # genuinely lazy → batch failed).
                     if tests_dir and batch_specs:
                         v_run = _run_staged_playwright(
                             output_dir, smoke_port, tests_dir,
@@ -4317,46 +4202,12 @@ def main() -> int:
                         v_run = None
                     if v_run is None:
                         log(f"[gate] {focus_id}: turn ok but no project "
-                            "file changed; nudging to implement")
-                        nudged = False
-                        for ng in range(1, 3):
-                            if time_up():
-                                break
-                            ng_t0 = time.time()
-                            # Nudge/repair turns: 2400s, idle==wall on
-                            # purpose — a smaller idle cap kills a
-                            # still-streaming turn mid-response.
-                            driver.run(
-                                NODE_NUDGE_PROMPT
-                                + batch_req_block(
-                                    batch, parent_of),
-                                2400, 2400)
-                            if project_files_changed(output_dir, ng_t0):
-                                nudged = True
-                                log(f"[gate] {focus_id}: nudge {ng} "
-                                    "produced file changes")
-                                break
-                        if not nudged and not project_files_changed(output_dir, t0):
-                            for nid in batch_ids:
-                                events.mark_implementation_failed(
-                                    nid, "turn made no file changes")
-                                failed.append(nid)
-                            continue
-                if (ok and st_baseline is not None
-                        and project_files_changed(output_dir, t0)
-                        and not _selftest_ran_since(output_dir, st_baseline)):
-                    # T1:文件变了但零自测运行——SPEC DISCIPLINE 的宿主侧
-                    # 过程事实(只看"测试发生过没有",不读结果;忠实度由
-                    # spec 先行+文本锚定承担)。一次中性 nudge,主会话
-                    # (需本轮实现上下文)。
-                    log(f"[gate] {focus_id}: files changed but no "
-                        "self-test run recorded; nudging to test")
-                    if not time_up():
-                        driver.run(
-                            SELFTEST_NUDGE_PROMPT
-                            + batch_req_block(
-                                batch, parent_of),
-                            2400, 2400)
+                            "file changed")
+                        for nid in batch_ids:
+                            events.mark_implementation_failed(
+                                nid, "turn made no file changes")
+                            failed.append(nid)
+                        continue
                 syn = js_syntax_errors(output_dir)
                 if syn:
                     log(f"[gate] {focus_id}: {len(syn)} JS syntax "
@@ -4401,9 +4252,9 @@ def main() -> int:
                     + "; ".join(str(n.get("name", "")) for n in batch))
                 if not time_up():
                     # A-flip: the HOST verifies whatever landed (build +
-                    # boot + route probes + extra ports) — once per batch.
-                    # Red → ≤2 repair turns on the digest; still red → the
-                    # batch stays blocked in the plan.
+                    # boot + route probes + extra ports) — once per batch,
+                    # read-only. Red stays red: the batch goes blocked and
+                    # the final LLM turn is its only repair chance.
                     r_err, r_report = rehearse_node(
                         output_dir, smoke_port, probe_list,
                         spec_ports_extra, fixture_probe_list(),
@@ -4411,31 +4262,6 @@ def main() -> int:
                     log(f"[plan] batch {focus_id} rehearsal "
                         f"{'GREEN' if r_err is None else 'RED'}: "
                         f"{(r_err or 'ok').splitlines()[0][:200]}")
-                    if r_err is not None:
-                        for fix_attempt in (1, 2):
-                            if time_up():
-                                break
-                            r_wall = turn_wall(len(batch))
-                            get_repair_driver().run(
-                                REHEARSAL_REPAIR_PROMPT.format(
-                                    error=r_err[-1200:],
-                                    port=args.web_port, smoke=smoke_port,
-                                    retry_note=(
-                                        REHEARSAL_REPAIR_RETRY_NOTE
-                                        if fix_attempt > 1
-                                        else REHEARSAL_REPAIR_FIRST_NOTE))
-                                + batch_req_block(
-                                    batch, parent_of),
-                                min(node_timeout, r_wall), r_wall)
-                            r_err, r_report = rehearse_node(
-                                output_dir, smoke_port, probe_list,
-                                spec_ports_extra, fixture_probe_list(),
-                                seed_rows=seed_rows_expected)
-                            log(f"[plan] batch {focus_id} repair "
-                                f"{fix_attempt}: "
-                                f"{'GREEN' if r_err is None else 'RED'}")
-                            if r_err is None:
-                                break
                     batch_state = "done" if r_err is None else "blocked"
                     if (r_err is not None and not batch_turn_ok
                             and pre_batch_head):
@@ -4541,96 +4367,6 @@ def main() -> int:
                             elif g_run:
                                 log(f"[plan] regression green: "
                                     f"{g_run[0]}p/{g_run[1]}f")
-
-            # P1-2b(09-30):blocked 批终局前重试 pass——此前 blocked 节点
-            # 只有 final LLM 轮/post-final 探针两条翻案路,从未有专门
-            # 重试(sheet 法医"重复失败不升级"的批级补齐)。一遍为限,
-            # 每批一个 turn(fresh 会话+活排练错误+双段契约闭包),
-            # remaining() 撑不起 final 预留即整段跳过。中性措辞:重锚
-            # 需求原文,不预设失败形态(预期拒绝类场景随 THEN 作断言)。
-            if not driver.auth_exhausted:
-                blocked_batches = [
-                    b for b in node_batches
-                    if any(plan_statuses.get(str(n.get("id"))) == "blocked"
-                           for n in b)]
-                for rb in blocked_batches:
-                    if remaining() <= final_reserve + node_floor * len(rb):
-                        log("[flow] blocked retry skipped: budget tail "
-                            "too thin")
-                        break
-                    r_ids = [str(n.get("id")) for n in rb]
-                    r_focus = r_ids[0]
-                    log(f"[flow] blocked retry pass: {r_focus} "
-                        f"({len(r_ids)} node(s))")
-                    # 活错误:先彩排拿当前红项,修复轮带真实证据。
-                    r_err, _r_report = rehearse_node(
-                        output_dir, smoke_port, probe_list, spec_ports_extra,
-                        fixture_probe_list(), seed_rows=seed_rows_expected)
-                    if r_err is None:
-                        # 探针已绿(如 final 前状态自愈):直接翻案。
-                        for nid in r_ids:
-                            plan_statuses[nid] = "done"
-                            if nid in failed:
-                                failed.remove(nid)
-                                events.mark_implementation_done(
-                                    nid, "recovered before blocked retry")
-                                node_done_notes[nid] = \
-                                    "recovered before blocked retry"
-                        continue
-                    r_features = build_turn_features(
-                        tree, rb, family_of, parent_of,
-                        statuses=plan_statuses)
-                    r_prompt = (
-                        "BLOCKED RETRY: this family's earlier turn "
-                        "ended, but the app keeps failing the host's "
-                        "startup/route rehearsal. Current rehearsal "
-                        "error:\n" + r_err[-1200:] + "\n\nRe-derive this "
-                        "family's implementation from the Feature below "
-                        "— the requirement text is the "
-                        "authority (quoted names and error strings "
-                        "verbatim). Fix the RUNNING app, then verify with "
-                        "your own spec.\n"
-                        + r_features
-                        + (build_spec_run_cmd(
-                            str(toolchain_cli)
-                            if toolchain_cli is not None else None,
-                            sorted({f for nid in r_ids
-                                    for f in (spec_map.get(nid) or [])}))
-                           if tests_dir else
-                           GOAL_FIRST_TURN_COMPLETION.format(
-                               smoke=smoke_port)))
-                    driver.close()  # fresh 会话:不带旧批的失败上下文
-                    r_wall = turn_wall(len(rb))
-                    r_ok, _r_text = driver.run(
-                        r_prompt, min(node_timeout, r_wall), r_wall)
-                    runtime.git.commit(
-                        f"{r_focus} (blocked retry): "
-                        + "; ".join(str(n.get("name", "")) for n in rb))
-                    syn = js_syntax_errors(output_dir)
-                    if syn:
-                        get_repair_driver().run(syntax_repair_prompt(syn),
-                                                2400, 2400)
-                        syn = js_syntax_errors(output_dir)
-                    if not syn:
-                        r_err2, _ = rehearse_node(
-                            output_dir, smoke_port, probe_list,
-                            spec_ports_extra, fixture_probe_list(),
-                            seed_rows=seed_rows_expected)
-                        if r_err2 is None:
-                            for nid in r_ids:
-                                plan_statuses[nid] = "done"
-                                if nid in failed:
-                                    failed.remove(nid)
-                                    events.mark_implementation_done(
-                                        nid, "recovered via blocked retry")
-                                    node_done_notes[nid] = \
-                                        "recovered via blocked retry"
-                            log(f"[plan] blocked retry {r_focus}: GREEN")
-                        else:
-                            log(f"[plan] blocked retry {r_focus}: still "
-                                f"red ({r_err2.splitlines()[0][:120]})")
-                    if time_up():
-                        break
 
             # Final verification pass; octos leaves the port free.
             ok, text = False, "skipped: time budget"
@@ -4919,42 +4655,19 @@ def main() -> int:
                     log(f"[plan] final-verification.json write failed: {exc}")
 
             # Startup rehearsal: run the grading sequence ourselves on the
-            # smoke port and hand any failure back for repair. Round 30
-            # finished generation cleanly, then `npm start` crashed at
-            # grading (Cannot find module './seed') and zero Playwright
-            # tests executed. Not gated on time_up(): the runner's kill
-            # trigger is a live grading port (round 21), not elapsed time
-            # (round 20 generated 44 min and scored), and the rehearsal
-            # only ever touches the smoke port.
-            for rehearsal in range(1, 4):
-                log(f"[rehearsal] startup rehearsal {rehearsal}/3 "
-                    f"(smoke port {smoke_port})")
-                t0 = time.time()
-                err = _rehearse_startup(output_dir, smoke_port)
-                if err is None:
-                    log(f"[rehearsal] app builds and starts cleanly "
-                        f"in {time.time()-t0:.0f}s")
-                    break
+            # smoke port as a readiness record. Round 30 finished
+            # generation cleanly, then `npm start` crashed at grading
+            # (Cannot find module './seed') and zero Playwright tests
+            # executed. Read-only: red is logged and shipped as-is — the
+            # final LLM turn above is the last chance to fix anything.
+            t0 = time.time()
+            err = _rehearse_startup(output_dir, smoke_port)
+            if err is None:
+                log(f"[rehearsal] app builds and starts cleanly "
+                    f"in {time.time()-t0:.0f}s")
+            else:
                 log(f"[rehearsal] FAILED in {time.time()-t0:.0f}s: "
-                    f"{err.splitlines()[0][:200]}")
-                if rehearsal == 3:
-                    log("[rehearsal] giving up; submitting as-is")
-                    break
-                # Post-budget by design (grading readiness beats the clock),
-                # but still wall-capped: worst case 3 × 2400s = 2h of repair
-                # AFTER the budget is gone.
-                ok_r, text_r = driver.run(
-                    REHEARSAL_REPAIR_PROMPT.format(
-                        error=err[-1200:], port=args.web_port,
-                        smoke=smoke_port,
-                        retry_note=(
-                            REHEARSAL_REPAIR_RETRY_NOTE
-                            if rehearsal > 1
-                            else REHEARSAL_REPAIR_FIRST_NOTE)),
-                    2400, 2400,
-                )
-                log(f"[rehearsal] repair turn "
-                    f"{'ok' if ok_r else 'FAILED'}: {text_r[-200:]!r}")
+                    f"{err.splitlines()[0][:200]}; submitting as-is")
             # 交付前清场：宿主托管的 dev server 不得占住冒烟端口。
             _stop_dev_server(smoke_port)
         finally:

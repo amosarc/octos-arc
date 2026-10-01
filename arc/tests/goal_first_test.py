@@ -789,30 +789,6 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertIn("config: e2e/playwright.config.ts", rules)
         self.assertNotIn("SELF-TEST CONTRACT", rules)
 
-    def test_rehearsal_repair_prompt_carries_retry_note_fork(self):
-        # P1-2a:第 2 次修复换策略话术——同错复发时明示"上一种修法没
-        # 生效,换方式重推导",不再重复同一补丁形状(sheet 法医
-        # "重复失败不升级")。
-        fmt = {"error": "E", "port": 1, "smoke": 2}
-        first = main.REHEARSAL_REPAIR_PROMPT.format(
-            retry_note=main.REHEARSAL_REPAIR_FIRST_NOTE, **fmt)
-        retry = main.REHEARSAL_REPAIR_PROMPT.format(
-            retry_note=main.REHEARSAL_REPAIR_RETRY_NOTE, **fmt)
-        self.assertNotIn("SAME failure", first)
-        self.assertIn("SAME failure", retry)
-        self.assertIn("different approach", retry)
-        # 负向场景零专门措辞(09-30 定则:不为负向场景新增机制/措辞)。
-        for text in (first, retry):
-            self.assertNotIn("rejection", text.lower())
-
-    def test_selftest_nudge_is_process_neutral(self):
-        # T1 nudge 只陈述过程事实(改了文件但零自测运行),不预设任何
-        # 失败形态;"expected outcome" 措辞天然涵盖预期拒绝类场景。
-        self.assertIn("no self-test run was recorded",
-                      main.SELFTEST_NUDGE_PROMPT)
-        self.assertIn("expected outcome", main.SELFTEST_NUDGE_PROMPT)
-        self.assertNotIn("rejection", main.SELFTEST_NUDGE_PROMPT.lower())
-
     def test_frontend_rules_pin_accessible_name_uniqueness(self):
         # 09-30 法医:登录页双 "Sign in" → 评测器 strict 定位器歧义即死;
         # 义务钉在 RULES & ARCHITECTURE LAW 7。
@@ -953,46 +929,6 @@ class GoalFirstRulesTests(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as td:
             self.assertIsNone(main._collect_selftest_evidence(Path(td)))
-
-    def test_selftest_presence_gate_reads_only_the_delta(self):
-        # T1:基线偏移之后的增量才计——批 turn 前的自测运行不救批 turn
-        # 后的"零运行";新出现的会话文件按偏移 0 全量计;只认 playwright
-        # 命令形状,构建/探活不算。
-        import json as _json
-        import tempfile
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td) / ".octos" / "context-logs" / "r1"
-            root.mkdir(parents=True)
-            log_file = root / "tools.jsonl"
-
-            def row(cmd):
-                return _json.dumps({"kind": "tool_call", "tool": "bash",
-                                    "args": {"cmd": cmd},
-                                    "output": "ok"})
-
-            log_file.write_text(row("node cli.js test --config "
-                                    "./e2e/playwright.config.ts "
-                                    "old.spec.ts") + "\n",
-                                encoding="utf-8")
-            baseline = main._selftest_baseline(Path(td))
-            # 基线后只有构建 → 未运行
-            with log_file.open("a", encoding="utf-8") as fh:
-                fh.write(row("npm run build --prefix frontend") + "\n")
-            self.assertFalse(main._selftest_ran_since(Path(td), baseline))
-            # 基线后无自测时,新出现的会话文件(偏移 0)里有自测 → 已运行
-            root2 = Path(td) / ".octos" / "context-logs" / "r2"
-            root2.mkdir()
-            (root2 / "tools.jsonl").write_text(
-                row("node cli.js test --config "
-                    "./e2e/playwright.config.ts a.spec.ts") + "\n",
-                encoding="utf-8")
-            self.assertTrue(main._selftest_ran_since(Path(td), baseline))
-            # 基线后出现自测命令 → 已运行(增量识别,历史不误报)
-            with log_file.open("a", encoding="utf-8") as fh:
-                fh.write(row("npx --yes @playwright/test test --config "
-                             "e2e/playwright.config.ts req-2.spec.ts")
-                         + "\n")
-            self.assertTrue(main._selftest_ran_since(Path(td), baseline))
 
     def test_frontend_fingerprint_tracks_sources_only(self):
         # rehearsal 构建缓存判定面:指纹只跟源文件走(node_modules/dist
