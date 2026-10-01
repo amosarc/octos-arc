@@ -74,19 +74,19 @@ class SpecToNodeMapTests(unittest.TestCase):
 
 class RehearsalBootEnvTests(unittest.TestCase):
     def test_sets_port_and_extra_ports(self):
-        env = pe.rehearsal_boot_env({"A": "1"}, 43101, [3301, 3002])
+        env = pe.boot_env({"A": "1"}, 43101, [3301, 3002])
         self.assertEqual(env["PORT"], "43101")
         self.assertEqual(env["ARC_EXTRA_PORTS"], "3301,3002")
         self.assertEqual(env["A"], "1")
 
     def test_no_extra_ports_means_no_key(self):
-        env = pe.rehearsal_boot_env({}, 3000, [])
+        env = pe.boot_env({}, 3000, [])
         self.assertEqual(env, {"PORT": "3000"})
         self.assertNotIn("ARC_EXTRA_PORTS", env)
 
     def test_does_not_mutate_base(self):
         base = {"PORT": "9999"}
-        pe.rehearsal_boot_env(base, 3000, [3301])
+        pe.boot_env(base, 3000, [3301])
         self.assertEqual(base["PORT"], "9999")
 
 
@@ -246,73 +246,3 @@ class HostScaffoldTests(unittest.TestCase):
                 self.assertNotIn("\n\n", content, rel)
 
 
-class ProbeRoutesTests(unittest.TestCase):
-    def test_collects_api_routes_with_method_hints(self):
-        with TemporaryDirectory() as td:
-            tdir = Path(td)
-            (tdir / "REQ-3-api.spec.ts").write_text(
-                "const a = await request.get('http://127.0.0.1:3301/api/health');\n"
-                "const b = await request.post('/api/trains/search', {data: {}});\n"
-                "const c = await request.post('/api/register', {data: {}});\n"
-            )
-            probes = pe.probe_routes(tdir)
-        by = {f"{p['method']} {p['path']}" for p in probes}
-        self.assertIn("GET /api/health", by)
-        self.assertIn("POST /api/trains/search", by)
-        self.assertIn("POST /api/register", by)
-        self.assertEqual(len(probes), 3)
-
-
-
-
-class FixtureProbeTests(unittest.TestCase):
-    def test_declared_logins_first_and_passwordless_skipped(self):
-        # 模型自报账号(seed-accounts.json)优先;无密码条目跳过——
-        # 宿主不再有统一密码兜底(09-28 合成账号退役)。
-        logins = [{"username": "org-owner", "password": "pw"},
-                  {"username": "ghost"},
-                  {"username": "alice-dev", "password": "quoted-pw"}]
-        probes = pe.build_fixture_probes(logins)
-        self.assertEqual([p["user"] for p in probes],
-                         ["org-owner", "alice-dev"])
-        for p in probes:
-            self.assertEqual(json.loads(p["body"])["password"] in
-                             ("pw", "quoted-pw"), True)
-
-    def test_declared_path_overrides_default_login_route(self):
-        # CRUD 生成器退役:登录路由形状归模型,声明条目的 path 字段
-        # 覆盖缺省约定 /api/auth/login。
-        probes = pe.build_fixture_probes([
-            {"username": "u", "password": "p", "path": "/api/login"},
-            {"username": "v", "password": "p"}])
-        self.assertEqual(probes[0]["path"], "/api/login")
-        self.assertEqual(probes[1]["path"], "/api/auth/login")
-
-    def test_declared_entry_supersedes_compiled_duplicate(self):
-        # 09-29 审计:同名去重、声明优先——模型声明了真实路由后,
-        # compiled 缺省条目不得再探测死路径造成永久红。
-        probes = pe.build_fixture_probes([
-            {"username": "alice", "password": "p", "path": "/api/login"},
-            {"username": "alice", "password": "p"},
-            {"username": "bob", "password": "p"}])
-        self.assertEqual([p["user"] for p in probes], ["alice", "bob"])
-        self.assertEqual(probes[0]["path"], "/api/login")
-
-    def test_declared_body_overrides_default_shape(self):
-        # 声明条目可用 body 逐字覆写请求体——宿主对模型自报声明
-        # 不设字段形状假设。
-        probes = pe.build_fixture_probes([
-            {"username": "u", "password": "p",
-             "body": '{"identifier":"u","secret":"p"}'}])
-        self.assertEqual(probes[0]["body"],
-                         '{"identifier":"u","secret":"p"}')
-        # 无 body 声明仍走缺省形状
-        probes = pe.build_fixture_probes([{"username": "v", "password": "p"}])
-        self.assertEqual(json.loads(probes[0]["body"]),
-                         {"username": "v", "password": "p"})
-
-    def test_login_probe_cap(self):
-        logins = [{"username": f"u{i}", "password": "pw"} for i in range(9)]
-        probes = pe.build_fixture_probes(logins)
-        self.assertEqual(len(probes), 8)
-        self.assertEqual(pe.build_fixture_probes([]), [])

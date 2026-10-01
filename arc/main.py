@@ -310,7 +310,7 @@ def dump_runtime_prompts(output_dir: Path) -> dict:
       AGENTS.md         messages[0] 的 "## AGENTS.md" 段(含包裹头);
                         解析不出回退 profile data 目录的原注入文件;
       turn-NNN.md       每回合首次对话的用户消息:iteration==1 的请求行
-                        尾部 user 消息(批 turn/nudge/彩排修复/blocked-
+                        尾部 user 消息(批 turn/nudge/blocked-
                         retry/final 全覆盖),按 (目录 mtime, 行 seq) 全局
                         排序,连续重复(同回合重试)去重。
     跨 run_id 目录合并(家族会话+修复会话);幂等(整体重建);绝不抛。
@@ -530,281 +530,6 @@ def _port_watchdog(web_port: int, output_dir: Path,
         stop.wait(5)
 
 
-_REHEARSAL_FP: dict[str, str] = {}
-
-
-def _frontend_fingerprint(frontend: Path) -> str:
-    """前端源指纹(relpath:mtime_ns,排除 node_modules/dist)。
-
-    rehearsal 的构建缓存判定:指纹与上次成功构建时一致且 dist 在位,
-    说明 dist 对应的就是当前源——重建是纯浪费(每批 ~30-60s × N 批,
-    deadline 模式下直接吃生成窗口)。模型轮中自跑的 build 只会更新鲜,
-    不会造成源-产物错配(指纹只看源)。
-    """
-    sig: list[str] = []
-    for root, dirs, files in os.walk(frontend):
-        dirs[:] = [d for d in dirs if d not in ("node_modules", "dist")]
-        for f in sorted(files):
-            p = Path(root) / f
-            try:
-                sig.append(f"{p.relative_to(frontend)}:"
-                           f"{p.stat().st_mtime_ns}")
-            except OSError:
-                continue
-    return "|".join(sig)
-
-
-def _rehearse_startup(output_dir: Path, smoke_port: int, *,
-                      probes: list | None = None,
-                      extra_ports: list | None = None,
-                      report: dict | None = None,
-                      fixture_probes: list | None = None) -> str | None:
-    """Run the grading sequence ourselves, on the smoke port.
-
-    planctl extension: with a `report` dict the rehearsal becomes a node
-    verification (A-flip) — after the smoke port binds, every probe route
-    is hit (method from the probe list) and every extra port
-    (ARC_EXTRA_PORTS contract) is checked for a listener; facts land in
-    the report for the next envelope's host_signals. Without `report`
-    the behavior is byte-identical to the legacy startup check.
-
-    Returns None when the app builds and comes up, else a short error
-    description suitable for feeding back into a repair turn. Round 30:
-    generation finished cleanly, then `npm start` crashed at grading with
-    `Cannot find module './seed'` — the runner's 120s readiness probe
-    failed and zero Playwright tests executed. This rehearsal catches
-    exactly that class of failure before the runner ever sees it.
-    """
-    frontend = output_dir / "frontend"
-    backend = output_dir / "backend"
-    if not (frontend.is_dir() and backend.is_dir()):
-        return "frontend/ or backend/ missing at workspace root"
-    _stop_dev_server(smoke_port)
-    _reset_runtime_seed(output_dir)
-
-    def run_cmd(cmd: list, cwd: Path, timeout: int) -> tuple:
-        try:
-            r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                               timeout=timeout)
-        except subprocess.TimeoutExpired:
-            return 124, f"timeout after {timeout}s"
-        except OSError as exc:
-            return 127, str(exc)
-        out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
-        return r.returncode, out[-1500:]
-
-    # Frontend build, cached on source fingerprint: unchanged sources +
-    # existing dist skip the rebuild.
-    if (frontend / "package.json").exists():
-        fp = _frontend_fingerprint(frontend)
-        if (_REHEARSAL_FP.get(str(frontend)) == fp
-                and (frontend / "dist" / "index.html").is_file()):
-            log("[rehearsal] frontend source unchanged since last green "
-                "build; skipping rebuild")
-        else:
-            rc, out = run_cmd(["npm", "install", "--no-audit", "--no-fund"],
-                              frontend, 600)
-            if rc != 0 and not (frontend / "node_modules").is_dir():
-                return f"frontend `npm install` failed:\n{out}"
-            rc, out = run_cmd(["npm", "run", "build"], frontend, 600)
-            if rc != 0:
-                return f"frontend `npm run build` failed:\n{out}"
-            _REHEARSAL_FP[str(frontend)] = fp
-
-    if report is not None:
-        report["build_ok"] = True
-
-    # 2. Backend boot on the SMOKE port — never the grading port.
-    if not (backend / "package.json").exists():
-        return "backend/package.json missing"
-    rc, out = run_cmd(["npm", "install", "--no-audit", "--no-fund"],
-                      backend, 600)
-    if rc != 0 and not (backend / "node_modules").is_dir():
-        return f"backend `npm install` failed:\n{out}"
-    _free_web_port(smoke_port)
-    log_file = Path(tempfile.mkstemp(prefix="octos-rehearsal-",
-                                     suffix=".log")[1])
-    # F5: the extra-port check and the boot env must carry the SAME
-    # list — an app that correctly dual-listens via ARC_EXTRA_PORTS used
-    # to fail its own rehearsal.
-    env = plan_envelope.rehearsal_boot_env(os.environ, smoke_port,
-                                           extra_ports or [])
-    try:
-        with open(log_file, "w") as fh:
-            try:
-                proc = subprocess.Popen(
-                    ["npm", "start"], cwd=backend, env=env,
-                    stdout=fh, stderr=subprocess.STDOUT,
-                    start_new_session=True)
-            except OSError as exc:
-                return f"backend `npm start` could not launch: {exc}"
-            try:
-                deadline = time.time() + 45
-                while time.time() < deadline:
-                    if proc.poll() is not None:
-                        out = log_file.read_text(errors="replace")
-                        return (f"backend `npm start` exited early "
-                                f"(rc={proc.returncode}):\n{out[-1500:]}")
-                    try:
-                        with socket.create_connection(
-                                ("127.0.0.1", smoke_port), timeout=2):
-                            log("[rehearsal] backend bound smoke port "
-                                f"{smoke_port}; shutting it down")
-                            if report is None:
-                                return None
-                            report["boot_ok"] = True
-                            route_err = _probe_routes_on(
-                                smoke_port, probes or [], extra_ports or [],
-                                report, fixture_probes=fixture_probes)
-                            return route_err
-                    except OSError:
-                        time.sleep(1)
-                out = log_file.read_text(errors="replace")
-                return (f"backend did not bind port {smoke_port} within "
-                        f"45s:\n{out[-1500:]}")
-            finally:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
-                    pass
-                # npm orphans its node child; kill anything left by port.
-                _free_web_port(smoke_port)
-    finally:
-        try:
-            log_file.unlink()
-        except OSError:
-            pass
-
-
-def _probe_routes_on(smoke_port: int, probes: list, extra_ports: list,
-                     report: dict,
-                     fixture_probes: list | None = None) -> str | None:
-    """Hit every probe route on the live smoke server (stdlib only).
-
-    Records `{method, path, status}` rows in the report. Red only on
-    infrastructure facts (connection failure or 5xx); 4xx is a recorded
-    fact, not a host failure — business assertions belong to Playwright.
-    fixture_probes 例外:它们验证的是宿主自己的种子承诺(声明账号登录
-    可达),语义明确,400/401/404 同样是 RED。种子集合的"行未被删"
-    不走 HTTP(CRUD 生成器退役后端点形状归模型)——文件级完整性检查
-    见 _seed_integrity_errors。
-    Returns an error string for the repair turn, or None when green.
-    """
-    import urllib.request
-    import urllib.error
-    rows = []
-    problems = []
-    for probe in probes[:16]:
-        method = str(probe.get("method", "GET")).upper()
-        path = str(probe.get("path", "/"))
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{smoke_port}{path}",
-            data=(probe.get("body", "{}").encode()
-                  if method in ("POST", "PUT", "PATCH") else None),
-            headers={"Content-Type": "application/json"},
-            method=method,
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                rows.append({"method": method, "path": path,
-                             "status": resp.status})
-        except urllib.error.HTTPError as exc:
-            rows.append({"method": method, "path": path, "status": exc.code})
-            if exc.code >= 500:
-                problems.append(f"{method} {path} -> HTTP {exc.code}")
-        except Exception as exc:  # noqa: BLE001 — connection refused etc.
-            rows.append({"method": method, "path": path, "status": 0})
-            problems.append(f"{method} {path} -> {exc}")
-    for port in extra_ports[:8]:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=2):
-                pass
-        except OSError as exc:
-            problems.append(f"extra port {port} not listening: {exc}")
-    report["routes"] = rows
-
-    # Generic input-validation probes (empty body + one oversized field
-    # per POST route): recorded as FACTS, never RED — validation rules
-    # belong to the requirement text, not the host. 5xx rows land in the
-    # report for the model and operator to read.
-    vprobes = plan_envelope.build_validation_probes(probes)
-    vrows = []
-    for vp in vprobes:
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{smoke_port}{vp['path']}",
-            data=vp["body"].encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                status = resp.status
-        except urllib.error.HTTPError as exc:
-            status = exc.code
-        except Exception:  # noqa: BLE001
-            status = 0
-        label = (f"{vp['path']} " + "{}") if vp["variant"] == "empty" \
-            else f"{vp['path']} +10k"
-        vrows.append({"method": "POST", "path": label, "status": status})
-    report["validation_probes"] = vrows
-
-    # 夹具探针:验证模型自报/宿主逐字种子的账号在实现后的 app 上登录
-    # 可达(0-token 验证,RED 直接进 rehearsal-repair 回路)。语义见
-    # build_fixture_probes;种子行完整性由 _seed_integrity_errors 承接。
-    for fp in (fixture_probes or [])[:8]:
-        method = str(fp.get("method", "GET")).upper()
-        path = str(fp.get("path", "/"))
-        body = None
-        if method in ("POST", "PUT", "PATCH") and fp.get("body"):
-            body = str(fp["body"]).encode()
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{smoke_port}{path}",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method=method,
-        )
-        status = 0
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                status = resp.status
-        except urllib.error.HTTPError as exc:
-            status = exc.code
-        except Exception as exc:  # noqa: BLE001 — connection refused etc.
-            rows.append({"method": method, "path": path, "status": 0})
-            problems.append(f"fixture probe {method} {path} -> {exc}")
-            continue
-        rows.append({"method": method, "path": path, "status": status})
-        kind = str(fp.get("kind") or "")
-        if kind == "login":
-            user = fp.get("user") or "?"
-            if status == 200:
-                pass
-            elif status in (400, 401):
-                problems.append(
-                    f"fixture login rejected for account "
-                    f"{user!r} (HTTP {status} on {path}) — this account is "
-                    "declared in backend/data/seed-accounts.json (or "
-                    "seeded verbatim in backend/data/db.json); the seed "
-                    "row, its password, and your auth route must agree "
-                    "(if your login route is not the default "
-                    "/api/auth/login, put it in the entry's path field). "
-                    "The grader signs in as role accounts like "
-                    "this one — a rejected login here fails whole "
-                    "requirement families")
-            elif status == 404:
-                problems.append(
-                    f"fixture login route {path} missing (HTTP 404) — "
-                    "the account is declared but nothing answers at "
-                    f"{path}; point the entry's path field at your real "
-                    "sign-in route")
-            else:
-                problems.append(f"fixture login {path} -> HTTP {status}")
-
-    if problems:
-        return "; ".join(problems)[:1200]
-    return None
-
-
 def _ensure_dev_server(output_dir: Path, smoke_port: int,
                        extra_ports: list, log) -> bool:
     """回合开始时保证宿主托管服务在线(已在线则复用,不重复拉起)。"""
@@ -820,7 +545,7 @@ def _ensure_dev_server(output_dir: Path, smoke_port: int,
 
 
 def _stop_dev_server(smoke_port: int) -> None:
-    """宿主托管的 dev server 在彩排/Tier-2 前必须让位(它们要自行冷启动)。"""
+    """宿主托管的 dev server 在 Tier-2/page-health 前必须让位(它们要自行冷启动)。"""
     try:
         out = subprocess.run(["lsof", "-ti", f"TCP:{smoke_port}",
                               "-sTCP:LISTEN"], capture_output=True,
@@ -857,7 +582,7 @@ def _boot_dev_server(output_dir: Path, smoke_port: int,
     backend = output_dir / "backend"
     if not (backend / "src" / "index.js").is_file():
         return False
-    env = plan_envelope.rehearsal_boot_env(os.environ, smoke_port,
+    env = plan_envelope.boot_env(os.environ, smoke_port,
                                            extra_ports)
     dev_log_dir = output_dir / "octos" / "logs"
     dev_log_dir.mkdir(parents=True, exist_ok=True)
@@ -959,81 +684,6 @@ def _pw_lg_cli() -> Path | None:
     return None
 
 
-def stage_selftest_dir(output_dir: Path, smoke_port: int,
-                       cli_hint: str | None = None) -> Path:
-    """落盘模型自测所需的最小骨架(非规则、非用例):playwright config +
-    MY-CHECK 示例。该 config 是最顺手的标准跑法(双绿自动停机);
-    Playwright 用法本身不再受限。幂等。"""
-    stage = Path(output_dir) / SELFTEST_SUBDIR
-    stage.mkdir(parents=True, exist_ok=True)
-    cfg = ("import { defineConfig } from '@playwright/test';\n"
-           "export default defineConfig({ testDir: '.',\n"
-           "  fullyParallel: false, workers: 1,\n"
-           "  retries: 0,\n"
-           "  timeout: 10_000, expect: { timeout: 10_000 },\n"
-           f"  use: {{ baseURL: 'http://127.0.0.1:{smoke_port}', "
-           "headless: true, screenshot: 'off', trace: 'off' } });\n")
-    (stage / "playwright.config.ts").write_text(cfg, encoding="utf-8")
-    example = """\
-// MY-CHECK.spec.ts.example — write YOUR OWN spec from the requirement
-// text (the node's scenarios are the oracle), then run it with an
-// explicit file argument:
-//   node <cli> test --config e2e/playwright.config.ts MY-CHECK.spec.ts
-// That form is the convenient standard (re-runnable and green-stop-visible);
-// any other Playwright invocation style is yours to choose as well.
-//
-// LOCATOR RULE — requirement phrasing maps to ROLES, exactly:
-//   "A region named X"      => getByRole('region', { name: X })
-//   "A dialog named X"      => getByRole('dialog', { name: X })
-//   "a combo box labeled X" => getByRole('combobox', { name: X })
-// getByText/getByLabel are NOT role equivalents: a <div aria-label> has
-// no region role, so a getByLabel assertion on it is green while the
-// grader's getByRole('region') times out (an entire family was lost
-// exactly that way). Assert with the ROLE the requirement names.
-//
-// GESTURE RULE — self-test each selection-driven flow with BOTH drag AND
-// click+Shift-click (graders use both; a shift-collapsing handler passed
-// drag-only tests and still lost the whole family), and each dialog flow
-// with mouse AND keyboard (Enter commits, Escape cancels).
-//
-// SOURCE RULE — the spec is derived from the requirement text, never from
-// the implementation: quote dialog names, labels, and error strings
-// verbatim from the scenarios. If the app and the text disagree, the text
-// wins — fix the app, never edit the spec to match what you built.
-import { test, expect } from '@playwright/test';
-
-test('my check - name what this verifies', async ({ page }) => {
-  await page.goto('/');
-  // Example: walk one form chain end to end (use the requirement's OWN
-  // quoted labels and values — these placeholders are shapes, not content).
-  // await page.getByLabel('Name').fill('Demo entry');
-  // await page.getByRole('button', { name: 'Create', exact: true }).click();
-  // await expect(page.getByText('Demo entry')).toBeVisible();
-  //
-  // Example: a "region named" contract asserts with the ROLE:
-  // const editor = page.getByRole('region', { name: 'Editor' });
-  // await expect(editor.getByRole('combobox', { name: 'Rows' })).toBeVisible();
-  //
-  // Example: the second selection gesture (click anchor, Shift-click end)
-  // on whatever multi-select surface the requirement names:
-  // await page.getByRole('option', { name: 'First item', exact: true }).click();
-  // await page.getByRole('option', { name: 'Third item', exact: true })
-  //           .click({ modifiers: ['Shift'] });
-  // await expect(page.getByRole('option', { name: 'Second item', exact: true }))
-  //           .toHaveAttribute('aria-selected', 'true');
-  expect(true).toBe(true);
-});
-"""
-    (stage / "MY-CHECK.spec.ts.example").write_text(example, encoding="utf-8")
-    (stage / ".gitignore").write_text(
-        "test-results/\n.playwright-report/\n", encoding="utf-8")
-    for junk in ("test-results", ".playwright-report"):
-        shutil.rmtree(stage / junk, ignore_errors=True)
-    return stage
-
-
-# 之后的定义)。
-
 # 模型自测取证:从内核 context-logs 的 tools.jsonl 复原每条
 # playwright 运行的通过/失败计数。行形如
 # {"kind":"tool_call","tool":"bash","args":{"cmd":...},"output":...,"ts":...}。
@@ -1041,7 +691,6 @@ _SELFTEST_CMD_RE = re.compile(r"playwright\s+test|playwright\.config\.ts"
                               r"|\.spec\.ts\b")
 _SELFTEST_PASS_RE = re.compile(r"(\d+)\s+passed")
 _SELFTEST_FAIL_RE = re.compile(r"(\d+)\s+failed")
-
 
 def _collect_selftest_evidence(output_dir: Path) -> dict | None:
     """复原模型自测的末次结果(宿主侧事后解析,零模型负担)。
@@ -1223,7 +872,7 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
     # the first-vs-rerun comparison unfair.
     _reset_runtime_seed(output_dir)
     backend = output_dir / "backend"
-    env = plan_envelope.rehearsal_boot_env(os.environ, smoke_port,
+    env = plan_envelope.boot_env(os.environ, smoke_port,
                                            extra_ports or [])
     env["E2E_BASE_URL"] = f"http://127.0.0.1:{smoke_port}"
     proc = None
@@ -1294,56 +943,6 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
                 pass
         shutil.rmtree(grader, ignore_errors=True)
         _free_web_port(smoke_port)
-
-
-def _seed_integrity_errors(output_dir: Path, seed_rows: dict) -> list[str]:
-    """宿主种子的文件级完整性检查(0-token,无 API 形状假设)。
-
-    CRUD 生成器退役后实体探针(GET /api/<name>)失去形状依据——种子
-    "未被删/未改名"的验证改在文件面做:db.json 必须仍含宿主编译的
-    每个集合(行 id 逐一比对,每集合报首个缺失即止)。API 暴露由模型
-    自测与 final 检查承接(09-28 定则:内容面归模型,宿主只验证
-    自己播种的承诺)。
-    """
-    if not seed_rows:
-        return []
-    try:
-        db = json.loads((output_dir / "backend" / "data" / "db.json")
-                        .read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 — 缺档/坏档按全丢处理
-        return ["backend/data/db.json unreadable — host-seeded rows "
-                "must stay in place (collections and rows verbatim)"]
-    colls = db.get("collections") or {}
-    problems: list[str] = []
-    for name, rows in seed_rows.items():
-        have = {r.get("id") for r in (colls.get(name) or [])
-                if isinstance(r, dict)}
-        for r in rows:
-            if r.get("id") not in have:
-                problems.append(
-                    f"seeded collection {name!r} lost row "
-                    f"{r.get('id')!r} — restore host-seeded rows in "
-                    "backend/data/db.json (never delete or rename them)")
-                break
-    return problems
-
-
-def rehearse_node(output_dir: Path, smoke_port: int, probes: list,
-                  extra_ports: list,
-                  fixture_probes: list | None = None,
-                  seed_rows: dict | None = None
-                  ) -> tuple[str | None, dict]:
-    """Node-turn boundary rehearsal (A-flip) → (err, RehearsalReport)."""
-    report = {"build_ok": False, "boot_ok": False, "routes": [], "digest": ""}
-    err = _rehearse_startup(output_dir, smoke_port, probes=probes,
-                            extra_ports=extra_ports, report=report,
-                            fixture_probes=fixture_probes)
-    seed_errs = _seed_integrity_errors(output_dir, seed_rows or {})
-    if seed_errs:
-        err = ((err + "; ") if err else "") + "; ".join(seed_errs)
-        err = err[:1200]
-    report["digest"] = (err or "")[-600:]
-    return err, report
 
 
 _PAGE_HEALTH_SPEC = """\
@@ -1419,7 +1018,7 @@ def _page_health_run(output_dir: Path, smoke_port: int,
             return None
         _stop_dev_server(smoke_port)
         _reset_runtime_seed(output_dir)
-        env = plan_envelope.rehearsal_boot_env(os.environ, smoke_port,
+        env = plan_envelope.boot_env(os.environ, smoke_port,
                                                extra_ports or [])
         backend = output_dir / "backend"
         proc = None
@@ -1487,7 +1086,7 @@ def js_syntax_errors(output_dir: Path) -> list[str]:
     batch parse when available (handles ESM `export` and JSX uniformly —
     node --check's ESM-package detection varies by Node version, and it
     cannot parse JSX at all; a truncated .jsx used to sail through to
-    the next rehearsal's vite build). Best-effort: a missing checker
+    the next vite build). Best-effort: a missing checker
     skips that half rather than the run.
     """
     errors: list[str] = []
@@ -2708,8 +2307,8 @@ class OctosDriver:
         self.max_iterations = max_iterations
         self.events_log = events_log
         # Auth-failure ledger: past the limit, further LLM turns are
-        # skipped and the host rehearsal/verification chain (LLM-free)
-        # takes over. 0 disables the limit.
+        # skipped — the batch goes blocked and the final-verification
+        # chain (LLM-free) records disk state. 0 disables the limit.
         self.auth_failures = 0
         self.auth_fail_limit = int(os.environ.get("OCTOS_AUTH_FAIL_LIMIT", "6") or 0)
         # The frame stream must never break a turn: open("a") does not
@@ -2766,8 +2365,8 @@ class OctosDriver:
         """Run one turn. `timeout` is the idle budget (resets on every
         protocol event); `wall` is a hard wall clock for the whole turn
         INCLUDING retries — on expiry the session is killed and whatever
-        already landed on disk stays (the node loop's rehearsal gates
-        then recover the partial work)."""
+        already landed on disk stays (the batch verdict marks it
+        blocked; the platform's e2e is the final judge)."""
         cancel = threading.Event()
         if self.mode == "chat":
             cap = min(timeout, wall) if wall is not None else timeout
@@ -3399,7 +2998,7 @@ def main() -> int:
         budget = int(os.environ.get("OCTOS_TIME_BUDGET", "0"))
         # Per-turn hard wall, decoupled from the budget: bounds a turn
         # that stays inside its iteration cap but crawls. A wall-cut turn
-        # lands on disk and recovers through the rehearsal loop.
+        # lands on disk and goes blocked (no host recovery gate).
         node_wall = int(os.environ.get("OCTOS_NODE_WALL", "3600"))
         final_reserve = int(os.environ.get(
             "OCTOS_FINAL_RESERVE", str(max(300, budget // 9)) if budget else 0))
@@ -3415,7 +3014,6 @@ def main() -> int:
         # spec→node map for the envelope.
         spec_map: dict = {}
         scaffolded: list[str] = []
-        probe_list: list[dict] = []
         spec_ports_extra: list[int] = []
         # 模板已就位时依赖由宿主预装(模型零安装)。Tier-2 评测链同样宿主
         # 自举，均只做一次、幂等。
@@ -3435,8 +3033,6 @@ def main() -> int:
             stage_acceptance_runtime(stage_dir, smoke_port, toolchain_cli)
             spec_map = plan_envelope.spec_to_node_map(tests_dir, atomic_nodes)
             log(f"[plan] spec→node map: {spec_map}")
-            probe_list = plan_envelope.probe_routes(stage_dir)
-            log(f"[plan] route probes: {len(probe_list)}")
             spec_ports_extra = sorted(
                 {p for p in spec_base_ports(tests_dir)
                  if p not in (args.web_port, smoke_port)})
@@ -3518,21 +3114,18 @@ def main() -> int:
         else:
             log("[fixture] no machine-compilable fixtures; contract rides "
                 "in GIVEN lines (verbatim in prompts)")
-        # 种子完整性基线(文件级检查用):compile_seed 纯函数,与落盘无关。
-        seed_rows_expected: dict = {}
-        if fixture_compiled and fixture_compiled.get("db"):
-            seed_rows_expected = fixture_compiled["db"]
         # ---- 模型自测骨架 staging:测试用例由模型按需求原文自生成,
         # 宿主只落盘内核放行命令形状所需的最小骨架(playwright.config.ts
         # + MY-CHECK 示例);凭据前奏等由模型自行 arrange。 ----
-        stage_selftest_dir(output_dir, smoke_port)
+        scaffold.stage_selftest_dir(output_dir, smoke_port,
+                                    subdir=SELFTEST_SUBDIR)
         # 自测命令/契约已收编进系统行 RULES & ARCHITECTURE(两形式);
         # 此处只落盘 e2e 配置骨架。
         log("[plan] self-test skeleton staged "
             f"({SELFTEST_SUBDIR}/playwright.config.ts + example)")
         # 流级验证定则:比赛全自动无人工环节,流验证由模型自生成自验证
         # (SELF-TEST CONTRACT,spec 先行+逐句锚定需求原文);宿主不做
-        # 内容决策,只做运行时治理(rehearsal 门/端口看门狗)。
+        # 内容决策,只做运行时治理(端口看门狗/批尾回归修复环)。
         # extra_rules 全局契约:确定性渲染(静态 manifest → 每轮字节相同,
         # 缓存律),经稳定 CONTRACT 段常驻;节点 GIVEN 走 FOCUS validation 前缀。
         fixture_stats = {
@@ -3557,34 +3150,6 @@ def main() -> int:
         # GIVEN 恒原文(需求原文是唯一判分依据);宿主种子/指针机制退役后
         # 该集合已无消费方,置空保留参数位。
         fixture_seeded_scenarios = frozenset()
-
-        def fixture_probe_list() -> list[dict]:
-            """夹具探针:模型自报账号(seed-accounts.json)登录可达。
-            角色账号由模型推理决定,宿主只验证其声明——声明了却登不进,
-            RED 进 rehearsal-repair。条目可带 path 指向真实登录路由
-            (缺省 /api/auth/login)。种子集合完整性走 _seed_integrity_errors
-            (文件级,无 API 形状假设),不再发实体探针。"""
-            declared: list[dict] = []
-            accounts_file = (output_dir / "backend" / "data"
-                             / "seed-accounts.json")
-            try:
-                if accounts_file.exists():
-                    raw = json.loads(
-                        accounts_file.read_text(encoding="utf-8"))
-                    declared = [
-                        {"username": str(a.get("username", "")),
-                         "password": str(a.get("password", "")),
-                         **({"path": str(a["path"])} if a.get("path") else {}),
-                         **({"body": str(a["body"])} if a.get("body") else {})}
-                        for a in (raw if isinstance(raw, list) else [])
-                        if isinstance(a, dict) and a.get("username")]
-            except Exception:  # noqa: BLE001 — 声明文件坏格式按未声明处理
-                declared = []
-            compiled_logins = ((fixture_compiled or {}).get("logins") or [])
-            if not declared and not compiled_logins:
-                return []
-            return plan_envelope.build_fixture_probes(
-                declared + compiled_logins)
 
         def remaining() -> float:
             # No budget (0) ⇒ unlimited: the node-skip gate, tail
@@ -3691,7 +3256,7 @@ def main() -> int:
         # 宿主本地 dict(供工单进度行/事件标记消费)。
         plan_statuses: dict[str, str] = {
             str(n.get("id")): "pending" for n in atomic_nodes}
-        # Staged specs of every node whose batch rehearsal-greened so far —
+        # Staged specs of every node whose batch turn completed so far —
         # the post-batch regression's blast radius (NEVER the full suite:
         # unimplemented nodes' specs are legitimately red mid-run).
         completed_specs: list[str] = []
@@ -3823,11 +3388,11 @@ def main() -> int:
                 main_turn_reason = "not run: auth exhausted"
                 if driver.auth_exhausted:
                     # Gateway burned its credential budget: stop paying for
-                    # LLM turns; the rehearsal + final-verification chains
-                    # grade disk state without the LLM.
+                    # LLM turns; the batch goes blocked and the
+                    # final-verification chain grades disk state.
                     log(f"[flow] batch {focus_id} skipped: auth failure "
                         f"limit reached ({driver.auth_failures}); "
-                        "rehearsing disk state instead")
+                        "batch verdict=blocked")
                     ok, text = False, (
                         f"skipped: auth failure limit "
                         f"({driver.auth_failures})")
@@ -3844,10 +3409,10 @@ def main() -> int:
                     f"in {time.time()-t0:.0f}s: {text[-300:]!r}")
                 if not ok:
                     # Hard-wall/orphan cuts can leave a batch 90% done on
-                    # disk. Gate + rehearse whatever landed instead of
-                    # failing fast; repair turns run in a fresh session.
-                    log(f"[flow] batch {focus_id} failed; gating + "
-                        "rehearsing what landed on disk")
+                    # disk. Keep what landed (verdict=blocked; no host
+                    # recovery gate) instead of failing fast.
+                    log(f"[flow] batch {focus_id} failed; keeping what "
+                        "landed on disk (blocked)")
                     for nid in batch_ids:
                         events.mark_implementation_failed(
                             nid, "turn ended failed: " + text[-200:])
@@ -3910,9 +3475,9 @@ def main() -> int:
                         except Exception as exc:
                             log(f"[plan] syntax-gate rollback failed: {exc}")
                     continue
-                # done 标记只属于成功 turn 或 rehearsal 恢复路径(下方)——
-                # 失败 turn 不打"实现完成"。commit 无条件:切断轮已落盘
-                # 文件仍需入库留痕,由 rehearsal 门裁决其成色。
+                # done 标记只属于成功 turn——失败/切断 turn 不打"实现完成"。
+                # commit 无条件:切断轮已落盘文件仍需入库留痕,成色由平台
+                # 评测终裁(宿主不设验证门)。
                 if ok:
                     for nid in batch_ids:
                         events.mark_implementation_done(nid, text[-500:] or None)
@@ -3920,56 +3485,21 @@ def main() -> int:
                     f"{focus_id} (implement): "
                     + "; ".join(str(n.get("name", "")) for n in batch))
                 if not time_up():
-                    # The HOST verifies whatever landed (build + boot +
-                    # route probes + extra ports) — once per batch,
-                    # read-only. Red stays red: the batch goes blocked.
-                    r_err, r_report = rehearse_node(
-                        output_dir, smoke_port, probe_list,
-                        spec_ports_extra, fixture_probe_list(),
-                        seed_rows=seed_rows_expected)
-                    log(f"[plan] batch {focus_id} rehearsal "
-                        f"{'GREEN' if r_err is None else 'RED'}: "
-                        f"{(r_err or 'ok').splitlines()[0][:200]}")
-                    batch_state = "done" if r_err is None else "blocked"
-                    if (r_err is not None and not batch_turn_ok
-                            and pre_batch_head):
-                        # A cut turn whose half-finished state stayed red:
-                        # ship the pre-batch baseline instead of letting
-                        # the next batch build on broken ground. (A green
-                        # rehearsal still recovers the cut batch — wall-cut
-                        # turns are often 90% done on disk.)
-                        try:
-                            runtime.git.run(
-                                ["reset", "--hard", pre_batch_head])
-                            log(f"[plan] batch {focus_id}: cut turn + red "
-                                f"rehearsal; rolled back to "
-                                f"{pre_batch_head[:8]}")
-                        except Exception as exc:
-                            log(f"[plan] batch rollback failed: {exc}")
+                    batch_state = "done" if batch_turn_ok else "blocked"
                     for nid in batch_ids:
                         plan_statuses[nid] = batch_state
                     # 批终局单行汇总(运营判读面):实现完整性=verdict 字段
-                    # (done=彩排基线全绿;blocked=红且未修复;被回滚时显式
-                    # 标注),不必再从 gate/rehearsal/rollback 多行拼推断。
-                    _rolled = (r_err is not None and not batch_turn_ok
-                               and pre_batch_head)
+                    # (done=turn 正常收束;blocked=turn 失败或被切断),
+                    # 不必再从 gate 多行拼推断。平台 e2e 是唯一终裁。
                     log(f"[plan] batch {focus_id} verdict={batch_state} "
-                        f"(turn {main_turn_reason}, "
-                        f"rehearsal {'GREEN' if r_err is None else 'RED'}"
-                        f"{', rolled back to pre-batch baseline' if _rolled else ''})")
+                        f"(turn {main_turn_reason})")
 
-                    if r_err is None:
-                        # Wall-cut turn whose code actually rehearsal-greened.
+                    if batch_turn_ok:
                         completed_specs.extend(
                             f for nid in batch_ids
                             for f in (spec_map.get(nid) or []))
                         completed_specs = sorted(set(completed_specs))
-                        for nid in batch_ids:
-                            if nid in failed:
-                                failed.remove(nid)
-                                events.mark_implementation_done(
-                                    nid, "recovered via host rehearsal")
-                    if (r_err is None and tests_dir and pre_batch_head
+                    if (batch_turn_ok and tests_dir and pre_batch_head
                             and not time_up()
                             and os.environ.get("OCTOS_ARC_HOST_GRADE",
                                                "1") != "0"):
@@ -4026,25 +3556,19 @@ def main() -> int:
                                     f"{g_run[0]}p/{g_run[1]}f")
 
             # Final verification pass (read-only): the host measures
-            # whatever landed — Tier-1 probes, staged specs (Tier-2),
-            # page-health, rejection audit, model selftest evidence — and
-            # records it. No final LLM turn: the batch turns were the
-            # model's only chances to drive the app; this pass never
-            # repairs.
+            # whatever landed — staged specs (Tier-2), page-health,
+            # rejection audit, model selftest evidence — and records it.
+            # No final LLM turn: the batch turns were the model's only
+            # chances to drive the app; this pass never repairs.
             ok, text = False, "skipped: time budget"
             if time_up():
                 log("[flow] time budget exhausted; skipping final verification")
             else:
-                log("[plan] final host verification (Tier-1 probes)")
-                f_err, f_report = rehearse_node(
-                    output_dir, smoke_port, probe_list, spec_ports_extra,
-                    fixture_probe_list(), seed_rows=seed_rows_expected)
-                log(f"[plan] final rehearsal {'GREEN' if f_err is None else 'RED'}")
-                f_report.pop("validation_probes", None)
-                hs = {"rehearsal": f_report}
+                log("[plan] final host verification")
+                hs: dict = {}
                 tier2_run = None
-                if f_err is None and os.environ.get("OCTOS_ARC_HOST_GRADE",
-                                                    "1") != "0":
+                if os.environ.get("OCTOS_ARC_HOST_GRADE",
+                                  "1") != "0":
                     # 防篡改兜底(REQ-1 仿真实测:final 轮模型把自测 spec
                     # 拷进 .arc/acceptance 并删了原始公开 spec)——Tier-2 前
                     # 从 pristine 源重放 staged specs。Tier-2 本就跑
@@ -4077,7 +3601,7 @@ def main() -> int:
                 # app in a browser. [] = clean walk; None = skipped
                 # (never a verdict).
                 ph_errors: list[str] | None = None
-                if f_err is None and toolchain_cli is not None:
+                if toolchain_cli is not None:
                     ph_errors = _page_health_run(output_dir, smoke_port,
                                                  spec_ports_extra)
                     if ph_errors:
@@ -4116,16 +3640,15 @@ def main() -> int:
                         log(f"[plan] rejection audit failed: {exc}")
 
                 _prune_acceptance_junk(output_dir, tests_dir, log)
-                # 宿主终局判定面(全绿=ok):Tier-1 探针绿 + Tier-2 staged
-                # specs(任务自带公开测试)全绿 + page-health 干净。纯测量
-                # 判定,不触发任何修复轮。
-                if (f_err is None and tier2_run is not None
+                # 宿主终局判定面(全绿=ok):Tier-2 staged specs(任务自带
+                # 公开测试)全绿 + page-health 干净。纯测量判定,不触发任何
+                # 修复轮。
+                if (tier2_run is not None
                         and tier2_run[1] == 0 and tier2_run[0] > 0
                         and not ph_errors):
                     ok = True
                     text = f"host spec run all green ({tier2_run[0]} passed)"
-                    log("[plan] final pass GREEN (Tier-1 + Tier-2 + "
-                        "page-health)")
+                    log("[plan] final pass GREEN (Tier-2 + page-health)")
                 # 自测取证锚点:平台 runner 上 Tier-2 恒不可用
                 # (spec_run=None),模型自测是唯一真浏览器验证——从内核
                 # context-logs 的 tools.jsonl 复原每条 spec 的末次结果,
@@ -4146,10 +3669,9 @@ def main() -> int:
                             output_dir, req_text_for_audit)
                     except Exception as exc:  # 审计绝不挡 final 链
                         log(f"[plan] rejection audit record failed: {exc}")
-                # final 验证仪表落盘(自留取证件,随工作区带回):Tier-1
-                # rehearsal 报告/Tier-2 计数/page-health 红项/模型自测
-                # 末次结果/拒绝文案审计——平台不下发失败明细,这里是唯一
-                # 的宿主侧验真记录。
+                # final 验证仪表落盘(自留取证件,随工作区带回):Tier-2
+                # 计数/page-health 红项/模型自测末次结果/拒绝文案审计——
+                # 平台不下发失败明细,这里是唯一的宿主侧验真记录。
                 try:
                     hs_dir = output_dir / "octos"
                     hs_dir.mkdir(parents=True, exist_ok=True)
@@ -4159,19 +3681,6 @@ def main() -> int:
                 except OSError as exc:
                     log(f"[plan] final-verification.json write failed: {exc}")
 
-            # Startup rehearsal: run the grading sequence ourselves on the
-            # smoke port as a readiness record — it catches "generation
-            # finished but the app cannot build/boot" before submission.
-            # Read-only: red is logged and shipped as-is — the
-            # batch turns were the model's only chances to fix anything.
-            t0 = time.time()
-            err = _rehearse_startup(output_dir, smoke_port)
-            if err is None:
-                log(f"[rehearsal] app builds and starts cleanly "
-                    f"in {time.time()-t0:.0f}s")
-            else:
-                log(f"[rehearsal] FAILED in {time.time()-t0:.0f}s: "
-                    f"{err.splitlines()[0][:200]}; submitting as-is")
             # 交付前清场：宿主托管的 dev server 不得占住冒烟端口。
             _stop_dev_server(smoke_port)
         finally:
@@ -4182,8 +3691,8 @@ def main() -> int:
                 shutil.rmtree(repair_data_dir, ignore_errors=True)
                 shutil.rmtree(repair_config_dir, ignore_errors=True)
         # 事件按节点级证据标记,final 不绿不连坐。证据序:批内失败记录
-        # (负)> 批 rehearsal 绿(build+boot+探针,正)> final 全绿
-        # (兜底正)> 无证据则不标(平台自有判官)。
+        # (负)> turn 正常收束(正)> final 全绿(兜底正)> 无证据则不标
+        # (平台自有判官,平台 e2e 是唯一终裁)。
         for node in atomic_nodes:
             node_id = str(node.get("id"))
             if node_id in failed:
@@ -4192,7 +3701,7 @@ def main() -> int:
                     skip_reasons.get(node_id, "final verification did not pass"))
             elif plan_statuses.get(node_id) == "done":
                 events.mark_test_passed(
-                    node_id, "batch rehearsal green (host build+boot+probes)")
+                    node_id, "implementation turn completed")
             elif ok:
                 events.mark_test_passed(
                     node_id, "final host verification all green")

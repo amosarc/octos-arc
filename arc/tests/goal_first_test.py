@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import fixture_manifest  # noqa: E402
 import gherkin  # noqa: E402
 import main  # noqa: E402
+import scaffold  # noqa: E402
 import plan_envelope  # noqa: E402
 from scaffold import manifest as sc  # noqa: E402
 
@@ -214,16 +215,15 @@ class MyCheckExampleTests(unittest.TestCase):
     """MY-CHECK 示例仍随 e2e 骨架落盘,SOURCE RULE 钉住。"""
 
     def test_mycheck_example_carries_source_rule(self):
-        stage = main.stage_selftest_dir(Path(self.id().replace(".", "_")),
-                                        43101)
-        try:
+        # stage_selftest_dir 返回的是 root/e2e 子目录——曾经的
+        # rmtree(stage) 只删子目录,空壳根目录留在 CWD(arc/ 下两例)。
+        # 与其余调用点同风格:TemporaryDirectory 连根回收。
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            stage = scaffold.stage_selftest_dir(Path(td), 43101)
             text = (stage / "MY-CHECK.spec.ts.example").read_text()
             self.assertIn("SOURCE RULE", text)
-            self.assertIn("never edit the spec to match",
-                          text)
-        finally:
-            import shutil
-            shutil.rmtree(stage, ignore_errors=True)
+            self.assertIn("never edit the spec to match", text)
 
 
 class SessionGroupTests(unittest.TestCase):
@@ -419,6 +419,8 @@ class SystemRowTests(unittest.TestCase):
         self.assertIn("Background:", ctx)
         self.assertIn("children map:", ctx)
         self.assertIn("RULES & ARCHITECTURE", ctx)
+        # 需求源文件指针:children map 行号区间 + shell 直取(用户拍板)
+        self.assertIn("requirements/requirements.yaml", ctx)
         # RULES_MUST_NAME 路径拼写不受影响(scaffold_test 钉在常量上)
         self.assertIn("backend/data/db.json", rules)
 
@@ -618,7 +620,7 @@ class GoalFirstRulesTests(unittest.TestCase):
     def test_stage_writes_config_and_example_only(self):
         import tempfile
         with tempfile.TemporaryDirectory() as td:
-            stage = main.stage_selftest_dir(Path(td), 43101)
+            stage = scaffold.stage_selftest_dir(Path(td), 43101)
             names = sorted(p.name for p in stage.iterdir())
             self.assertEqual(
                 names, [".gitignore", "MY-CHECK.spec.ts.example",
@@ -778,36 +780,6 @@ class GoalFirstRulesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             self.assertIsNone(main._collect_selftest_evidence(Path(td)))
 
-    def test_frontend_fingerprint_tracks_sources_only(self):
-        # rehearsal 构建缓存判定面:指纹只跟源文件走(node_modules/dist
-        # 不计),源未变则稳定,touch 源则变化。
-        import os
-        import tempfile
-        import time
-        with tempfile.TemporaryDirectory() as td:
-            fe = Path(td) / "frontend"
-            (fe / "src").mkdir(parents=True)
-            (fe / "src" / "App.jsx").write_text("x", encoding="utf-8")
-            (fe / "node_modules").mkdir()
-            (fe / "node_modules" / "dep.js").write_text("y", encoding="utf-8")
-            (fe / "dist").mkdir()
-            (fe / "dist" / "index.html").write_text("z", encoding="utf-8")
-            fp1 = main._frontend_fingerprint(fe)
-            self.assertEqual(main._frontend_fingerprint(fe), fp1)
-            (fe / "dist" / "index.html").write_text("changed", encoding="utf-8")
-            self.assertEqual(main._frontend_fingerprint(fe), fp1,
-                             "dist 产物不计入指纹")
-            (fe / "node_modules" / "dep.js").write_text("c2", encoding="utf-8")
-            self.assertEqual(main._frontend_fingerprint(fe), fp1,
-                             "node_modules 不计入指纹")
-            src = fe / "src" / "App.jsx"
-            os.utime(src, (time.time() + 10, time.time() + 10))
-            self.assertNotEqual(main._frontend_fingerprint(fe), fp1,
-                                "源变更必须改变指纹")
-            (fe / "src" / "new.css").write_text("body{}", encoding="utf-8")
-            self.assertNotEqual(main._frontend_fingerprint(fe), fp1,
-                                "新增源文件必须改变指纹")
-
     def test_prompt_templates_format_without_keyerror(self):
         # 模板字面量花括号必须保持 {{}} 转义(存量 KeyError 雷)。两形式:
         # TURN = {features}/{smoke} 两个槽;BOOTSTRAP 前言无槽。
@@ -946,14 +918,16 @@ class GoalFirstRulesTests(unittest.TestCase):
         # 09-30 追加:gridcell A1/C5/B3 同属 sheet 味——换 role 中性形。
         import tempfile
         with tempfile.TemporaryDirectory() as td:
-            main.stage_selftest_dir(Path(td), 43101)
+            scaffold.stage_selftest_dir(Path(td), 43101)
             text = (Path(td) / "e2e" / "MY-CHECK.spec.ts.example"
                     ).read_text(encoding="utf-8")
         for word in ("Q3 Sales", "Pivot table", "Workbook name", "pivot",
                      "gridcell", "'A1'", "'C5'", "'B3'"):
             self.assertNotIn(word, text)
         for keep in ("LOCATOR RULE", "GESTURE RULE", "getByRole('region'",
-                     "getByRole('option'", "Shift"):
+                     "getByRole('option'", "Shift",
+                     "PAGE-ERROR RULE", "pageerror", "unhandledrejection",
+                     "expect(pageErrors.concat(rejections)"):
             self.assertIn(keep, text)
 
     def test_lazy_gate_ignores_requirements_dir(self):

@@ -7,10 +7,8 @@
 - HOST_STACK_RULES / HOST_STACK_RULES_GOAL_FIRST  契约文案(工单正文)
 - stage_specs                验收 specs 只读暂存
 - spec_to_node_map           spec→需求节点归属(批过滤/回归范围)
-- probe_routes               staged specs → /api 探测清单
-- build_validation_probes    POST 路由坏载荷探针
-- build_fixture_probes       种子可达性探针(login/entity)
-- rehearsal_boot_env         彩排/Tier-2 boot 环境(PORT+EXTRA)
+- build_validation_probes    POST 路由坏载荷探针(5xx=RED,4xx 记事实)
+- boot_env                   Tier-2/page-health/dev-server boot 环境(PORT+EXTRA)
 """
 
 from __future__ import annotations
@@ -68,6 +66,10 @@ ARCHITECTURE_LINES = [
     "boots it; src/, data/) and frontend/ = the Vite+React client (npm "
     "run build emits dist/; index.html, src/); all paths below are "
     "workspace-relative.",
+    "requirements/requirements.yaml = the requirement source; the "
+    "children map's (lines N-M) ranges address it — retrieve any range "
+    "directly with the shell, e.g. sed -n 'N,Mp' "
+    "requirements/requirements.yaml.",
     "backend/src/app.js + backend/src/index.js bootstrap the app: index "
     "binds PORT + ARC_EXTRA_PORTS, app serves frontend/dist (SPA fallback "
     "to index.html) — keep that contract when you change them.",
@@ -141,8 +143,8 @@ HOST_STACK_RULES_GOAL_FIRST = render_rules()
 
 
 
-def rehearsal_boot_env(base_env: dict, smoke_port: int, extra_ports: list) -> dict:
-    """彩排/Tier-2 boot 环境:PORT + ARC_EXTRA_PORTS 一起设。
+def boot_env(base_env: dict, smoke_port: int, extra_ports: list) -> dict:
+    """Tier-2/page-health/dev-server boot 环境:PORT + ARC_EXTRA_PORTS 一起设。
 
     F5 修复:检查项要求 extra 端口在听,boot 就必须把同一份清单交给应用
     (env 驱动双听),否则「按契约正确实现」的应用也会被判 RED。extra 为空
@@ -177,49 +179,6 @@ def build_validation_probes(routes: list) -> list[dict]:
         if len(probes) >= 8:
             break
     return probes
-
-
-def build_fixture_probes(logins: list[dict]) -> list[dict]:
-    """夹具探针(宿主 0-token 验证,复用 rehearsal-repair 回路)。
-
-    login:POST 到声明路径(条目可带 path,默认 /api/auth/login——纯
-    缺省约定,声明可覆盖;亦可带 body 逐字覆写请求体——模型对自己
-    的声明有完全控制权,宿主不设形状假设)期待 200;400/401 = 声明
-    的账号/密码与实际认证不符,404 = 声明路径无路由。清单优先取模型
-    自报的 backend/data/seed-accounts.json(角色账号由模型推理决定,
-    宿主只验证其声明),逐字转录种子殿后(同名去重,声明条目优先);
-    无密码条目跳过——宿主不再有统一密码兜底(09-28 退役)。
-    种子集合的 API 可达性不再走 HTTP 形状假设(CRUD 生成器退役后
-    端点形状归模型)——由 main.py 的文件级种子完整性检查承接
-    (db.json 种子行 vs 宿主编译清单)。判定语义在 _probe_routes_on 落地。
-    """
-    probes: list[dict] = []
-    seen: set[str] = set()
-    for login in (logins or []):
-        if len(probes) >= 8:
-            break
-        username = str(login.get("username") or "")
-        password = str(login.get("password") or "")
-        if not username or not password:
-            continue
-        # 按用户名去重,首现优先——调用点 declared 在前:模型声明条目
-        # (可带 path/body)压过 compiled 缺省条目,消灭"声明了真实路由、
-        # compiled 副本仍探测缺省路径"的永久红陷阱(09-29 审计)。
-        if username in seen:
-            continue
-        seen.add(username)
-        # 声明条目可用 body 逐字覆写请求体——宿主缺省形状
-        # ({"username","password"} JSON)对自报声明不设假设。
-        body = login.get("body")
-        if not isinstance(body, str) or not body.strip():
-            body = json.dumps({"username": username, "password": password})
-        probes.append({
-            "method": "POST",
-            "path": str(login.get("path") or "/api/auth/login"),
-            "kind": "login",
-            "user": username,
-            "body": body})
-    return probes[:8]
 
 
 # ── spec → 节点映射 ────────────────────────────────────────────────────
@@ -312,35 +271,3 @@ def stage_specs(tests_dir: Path, output_dir: Path) -> Path:
     return stage
 
 
-# ── probe_routes:从 staged specs 提取探测清单(A 翻转)───────────────
-
-_API_RE = re.compile(r"/api/[A-Za-z0-9/_:.\-{}]+")
-_POST_HINT_RE = re.compile(r"register|login|create|add|submit|update|delete|book|order|save|post", re.I)
-
-
-def probe_routes(tests_dir: Path) -> list[dict]:
-    """Harvest `/api/…` literals from the specs → probe list.
-
-    Method defaults to GET; POST when the path or surrounding context
-    hints at a mutating verb. Sorted, deduped.
-    """
-    probes: dict[str, dict] = {}
-    files = sorted(tests_dir.rglob("*.spec.ts")) if tests_dir.is_dir() else []
-    for path in files:
-        try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
-        for line in lines:
-            for m in _API_RE.finditer(line):
-                route = m.group(0).rstrip("/.,;:'\"")
-                # Method hint: the path itself, or the SAME line (a wider
-                # window lets a later `request.post` mislabel `/api/health`).
-                method = (
-                    "POST"
-                    if _POST_HINT_RE.search(route) or _POST_HINT_RE.search(line)
-                    else "GET"
-                )
-                key = f"{method} {route}"
-                probes.setdefault(key, {"method": method, "path": route})
-    return [probes[k] for k in sorted(probes)]

@@ -7,6 +7,7 @@
     template_ready(output_dir)        宿主模板已就位(frontend/ + app.js)
     prewarm_deps(output_dir, log)     宿主代装 backend/frontend 依赖
     task_stubs / scaffold_task_features   需求树→家族 stub 预生成(taskshape)
+    stage_selftest_dir(output_dir, smoke_port)  e2e/ 自测骨架(config+示例)
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from pathlib import Path
 
 from . import backend, frontend, manifest  # noqa: F401  (re-export 便于排查)
 from .taskshape import scaffold_task_features, task_stubs
+from .selftest import stage_selftest_dir  # noqa: F401
 from .manifest import (  # noqa: F401
     INSTALL_REGISTRY,
     MODEL_FILES,
