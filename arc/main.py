@@ -22,7 +22,7 @@ Configuration is via environment variables:
     OCTOS_MODEL     (override model name)
     OCTOS_BIN       (path to the octos binary; default: ./bin/octos then PATH)
     OCTOS_MAX_ITERATIONS (default 500)
-    OCTOS_NODE_TIMEOUT   (idle seconds per requirement node, default 1200)
+    OCTOS_NODE_TIMEOUT   (idle seconds per requirement node, default 600)
     OCTOS_TIME_BUDGET    (wall-clock seconds for the whole flow, default 0
                           = unlimited, except when ARCBENCH_AGENT_TIMEOUT /
                           AGENT_RUN_TIMEOUT_SECONDS is visible in the env —
@@ -421,6 +421,22 @@ def dump_runtime_prompts(output_dir: Path) -> dict:
     except (OSError, ValueError, TypeError):
         pass
     return out
+
+
+def _turn_end_reason(ok: bool, text: str) -> str:
+    """turn 终局原因归一(运营判读面):ok=模型自选结束(EndTurn——
+    premature wrap-up 即此类,完成定义锚的对症面);失败按宿主切断源
+    分类(硬墙钟/空闲超时/内核进程退出/协议错误)。"""
+    if ok:
+        return "model end_turn"
+    t = " ".join(str(text or "").split())
+    if "hard wall clock exceeded" in t:
+        return "host cut: wall clock exceeded"
+    if "idle timeout" in t:
+        return "host cut: idle timeout (no protocol events)"
+    if "process exited" in t:
+        return "kernel process exited"
+    return "error: " + t[:160]
 
 
 def _postflight_structure_check(
@@ -3060,6 +3076,7 @@ class OctosDriver:
             fn = lambda p: self._run_stdio(p, timeout, wall, cancel)
         ok, text = self._run_with_heartbeat(
             lambda: self._run_with_retries(fn, prompt, cancel), wall, cancel)
+        log(f"[flow] turn ended: reason={_turn_end_reason(ok, text)}")
         if not ok and self._orphaned_turn(text):
             # The kernel-side turn may still be live (idle/wall cut) or the
             # process is already dead; either way a follow-up turn/start on
@@ -4231,6 +4248,7 @@ def main() -> int:
                 except Exception:
                     pre_batch_head = None
                 batch_turn_ok = True
+                main_turn_reason = "not run: auth exhausted"
                 st_baseline = None
                 if driver.auth_exhausted:
                     # Gateway burned its credential budget (tb-trace-001:
@@ -4258,6 +4276,7 @@ def main() -> int:
                                    else None)
                     ok, text = driver.run(node_prompt, min(node_timeout, wall), wall)
                 batch_turn_ok = ok
+                main_turn_reason = _turn_end_reason(ok, text)
                 log(f"[flow] batch {focus_id} {'ok' if ok else 'FAILED'} "
                     f"in {time.time()-t0:.0f}s: {text[-300:]!r}")
                 if ok:
@@ -4304,11 +4323,14 @@ def main() -> int:
                             if time_up():
                                 break
                             ng_t0 = time.time()
+                            # Nudge/repair turns: 2400s, idle==wall on
+                            # purpose — a smaller idle cap kills a
+                            # still-streaming turn mid-response.
                             driver.run(
                                 NODE_NUDGE_PROMPT
                                 + batch_req_block(
                                     batch, parent_of),
-                                420, 420)
+                                2400, 2400)
                             if project_files_changed(output_dir, ng_t0):
                                 nudged = True
                                 log(f"[gate] {focus_id}: nudge {ng} "
@@ -4334,7 +4356,7 @@ def main() -> int:
                             SELFTEST_NUDGE_PROMPT
                             + batch_req_block(
                                 batch, parent_of),
-                            420, 420)
+                            2400, 2400)
                 syn = js_syntax_errors(output_dir)
                 if syn:
                     log(f"[gate] {focus_id}: {len(syn)} JS syntax "
@@ -4343,7 +4365,7 @@ def main() -> int:
                         if time_up():
                             break
                         get_repair_driver().run(
-                            syntax_repair_prompt(syn), 420, 420)
+                            syntax_repair_prompt(syn), 2400, 2400)
                         syn = js_syntax_errors(output_dir)
                         if not syn:
                             log(f"[gate] {focus_id} syntax repaired "
@@ -4433,6 +4455,15 @@ def main() -> int:
                             log(f"[plan] batch rollback failed: {exc}")
                     for nid in batch_ids:
                         plan_statuses[nid] = batch_state
+                    # 批终局单行汇总(运营判读面):实现完整性=verdict 字段
+                    # (done=彩排基线全绿;blocked=红且未修复;被回滚时显式
+                    # 标注),不必再从 gate/rehearsal/rollback 多行拼推断。
+                    _rolled = (r_err is not None and not batch_turn_ok
+                               and pre_batch_head)
+                    log(f"[plan] batch {focus_id} verdict={batch_state} "
+                        f"(turn {main_turn_reason}, "
+                        f"rehearsal {'GREEN' if r_err is None else 'RED'}"
+                        f"{', rolled back to pre-batch baseline' if _rolled else ''})")
 
                     if r_err is None:
                         # Wall-cut turn whose code actually rehearsal-greened.
@@ -4578,7 +4609,7 @@ def main() -> int:
                     syn = js_syntax_errors(output_dir)
                     if syn:
                         get_repair_driver().run(syntax_repair_prompt(syn),
-                                                420, 420)
+                                                2400, 2400)
                         syn = js_syntax_errors(output_dir)
                     if not syn:
                         r_err2, _ = rehearse_node(
@@ -4910,8 +4941,8 @@ def main() -> int:
                     log("[rehearsal] giving up; submitting as-is")
                     break
                 # Post-budget by design (grading readiness beats the clock),
-                # but still wall-capped: an uncapped repair here could burn
-                # up to 3 × the 1h hard wall AFTER the budget is gone.
+                # but still wall-capped: worst case 3 × 2400s = 2h of repair
+                # AFTER the budget is gone.
                 ok_r, text_r = driver.run(
                     REHEARSAL_REPAIR_PROMPT.format(
                         error=err[-1200:], port=args.web_port,
@@ -4920,7 +4951,7 @@ def main() -> int:
                             REHEARSAL_REPAIR_RETRY_NOTE
                             if rehearsal > 1
                             else REHEARSAL_REPAIR_FIRST_NOTE)),
-                    420, 420,
+                    2400, 2400,
                 )
                 log(f"[rehearsal] repair turn "
                     f"{'ok' if ok_r else 'FAILED'}: {text_r[-200:]!r}")

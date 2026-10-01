@@ -268,7 +268,9 @@ impl ConvergenceController {
             format!(
                 "{CHECKPOINT_CONTEXT_OPEN}\n{CHECKPOINT_CONTEXT_PREFIX}\n{reflection}\n\
                  Use this internal reflection to guide the next action. Verify it against the \n\
-                 conversation and tool results; it is not a user message.\n\
+                 conversation and tool results; it is not a user message. The turn is NOT \n\
+                 complete: your next response must call tools to execute the smallest next \n\
+                 action — ending the turn with a plan instead of executing it is a failure.\n\
                  {CHECKPOINT_CONTEXT_CLOSE}"
             )
         })
