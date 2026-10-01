@@ -140,10 +140,11 @@ class FamilyContextTests(unittest.TestCase):
 
 
 class TurnBlockTests(unittest.TestCase):
-    """build_turn_features 统一块骨架:TASK → SCENARIOS(本批 Feature
-    原文)。DEPENDENCIES/REUSED UI CONTRACT 依赖块已整体退役(装配与
-    闭包机器全删);SEED CONTRACT 暂停装配待确认是否有用(代码保留,
-    _TURN_SEED_CONTRACT 旋钮)。本批节点自己的 GIVEN 仍逐字(LAW 4,
+    """build_turn_features 统一块骨架:TASK → SEED → SCENARIOS(本批
+    Feature 原文)。DEPENDENCIES/REUSED UI CONTRACT 依赖块已整体退役
+    (装配与闭包机器全删);SEED CONTRACT 暂停装配待确认是否有用(代码
+    保留,_TURN_SEED_CONTRACT 旋钮);SEED 行=种子自愈指令(_TURN_SEED_
+    LINE,SCENARIOS 空时一并省略)。本批节点自己的 GIVEN 仍逐字(LAW 4,
     SeedOwnershipTests)。"""
 
     def _blob(self, batch_ids, tree=None):
@@ -165,9 +166,19 @@ class TurnBlockTests(unittest.TestCase):
         return main.build_turn_features(batch, parent_of)
 
     def test_only_task_and_scenarios_sections(self):
-        # 退役后骨架:TASK → SCENARIOS;依赖/UI/种子三段一律不进场。
+        # 退役后骨架:TASK → SEED → SCENARIOS;依赖/UI/种子引用三段
+        # 一律不进场。TASK 行只列编号不列标题(id↔场景绑定由 `# <id>`
+        # 注释承担);SEED 行=每 turn 种子自愈指令(批间无回种,修补
+        # 必须导向持久面 db.json 而非活本)。
         blob = self._blob(["REQ-2-1"])
-        self.assertIn("TASK: implement REQ-2-1", blob)
+        self.assertIn("TASK: implement the requirements below (REQ-2-1)",
+                      blob)
+        self.assertNotIn("REQ-2-1 (", blob)
+        self.assertIn("SEED: backend/data/db.json", blob)
+        self.assertIn("delete backend/data/db.run.json", blob)
+        self.assertLess(blob.index("TASK:"), blob.index("SEED:"))
+        self.assertLess(blob.index("SEED:"),
+                        blob.index("SCENARIOS (verbatim):"))
         self.assertIn("SCENARIOS (verbatim):", blob)
         self.assertNotIn("DEPENDENCIES:", blob)
         self.assertNotIn("REUSED UI CONTRACT", blob)
@@ -209,6 +220,18 @@ class TurnBlockTests(unittest.TestCase):
         self.assertNotIn("DEPENDENCIES:", blob)
         self.assertNotIn("REUSED UI CONTRACT", blob)
         self.assertNotIn("SEED CONTRACT", blob)
+
+
+    def test_empty_scenarios_omits_field(self):
+        # SCENARIOS 正文为空(批节点在父索引中缺席 → Feature 渲染为空)
+        # → 整块省略(连同 SEED 行,"GIVEN lines below" 不悬空),不留
+        # 悬空字段头;TASK 照常在场。
+        batch = [n for n in main.flatten_atomic(TREE)
+                 if str(n["id"]) in ("REQ-2-1",)]
+        blob = main.build_turn_features(batch, parent_of={})
+        self.assertIn("TASK: implement REQ-2-1", blob)
+        self.assertNotIn("SCENARIOS (verbatim):", blob)
+        self.assertNotIn("SEED:", blob)
 
 
 class MyCheckExampleTests(unittest.TestCase):
@@ -377,16 +400,68 @@ class RunScopeTests(unittest.TestCase):
             spec_map, self.BATCHES, scope, main.family_index(TREE))
         self.assertEqual(files, ["a.spec.ts"])
 
-    def test_system_row_scope_section(self):
+    def test_system_row_map_scoped_to_run_families(self):
+        # 范围 run:AGENTS.md(children map)只描述范围内家族
         with_scope = main.build_system_row_context(
             TREE, "rules", "fx", scope=frozenset({"REQ-1"}))
-        self.assertIn("RUN SCOPE", with_scope)
-        self.assertIn("REQ-1", with_scope)
+        self.assertIn("- REQ-1:", with_scope)
+        self.assertNotIn("- REQ-2:", with_scope)
+        self.assertNotIn("- REQ-3:", with_scope)
+        # 全量 run:地图保持全家族
         without = main.build_system_row_context(TREE, "rules", "fx")
-        self.assertNotIn("RUN SCOPE", without)
-        # scope 段不破坏字节稳定性(同 scope 两次生成相同)
-        self.assertEqual(with_scope, main.build_system_row_context(
-            TREE, "rules", "fx", scope=frozenset({"REQ-1"})))
+        self.assertIn("- REQ-1:", without)
+        self.assertIn("- REQ-2:", without)
+        self.assertIn("- REQ-3:", without)
+
+    def test_map_outline_scope_keeps_family_from_atomic_scope(self):
+        # 范围 id 是原子节点(REQ-1-1-1)⇒ 其顶层家族(REQ-1)整体保留
+        outline = main.render_map_outline(
+            TREE, scope=frozenset({"REQ-1-1-1"}))
+        self.assertIn("- REQ-1:", outline)
+        self.assertNotIn("- REQ-2:", outline)
+        self.assertNotIn("- REQ-3:", outline)
+        # 子家族 id(REQ-2-1)⇒ REQ-2 保留,REQ-1/REQ-3 淘汰
+        outline = main.render_map_outline(
+            TREE, scope=frozenset({"REQ-2-1"}))
+        self.assertNotIn("- REQ-1:", outline)
+        self.assertIn("- REQ-2:", outline)
+        self.assertNotIn("- REQ-3:", outline)
+
+    def test_family_stubs_scope_prunes_generation(self):
+        # taskshape 家族 stub(误删恢复):家族宇宙=范围裁剪树,
+        # REQ-1 范围只生成 req1 家族的 feature/route stub
+        import main
+        family_of = main.family_index(TREE)
+        with tempfile.TemporaryDirectory() as td_s:
+            td = Path(td_s)
+            main.scaffold_family_stubs(td, TREE, frozenset({"REQ-1"}),
+                                       family_of)
+            feats = td / "frontend" / "src" / "features"
+            routes = td / "backend" / "src" / "routes"
+            slugs = {p.stem for p in feats.glob("*.jsx")}
+            self.assertEqual(len(slugs), 1)
+            self.assertTrue(next(iter(slugs)).startswith("req1"))
+            self.assertEqual(
+                {p.stem for p in routes.glob("*.js")
+                 if p.name != "index.js"}, slugs)
+            # 头注释=该家族 REQ 工单清单
+            head = (feats / f"{next(iter(slugs))}.jsx").read_text(
+                encoding="utf-8")
+            self.assertIn("REQ-1-1-1", head)
+            # 幂等:重跑零新增(stub 只在文件不存在时写)
+            main.scaffold_family_stubs(td, TREE, frozenset({"REQ-1"}),
+                                       family_of)
+            self.assertEqual(
+                len(list(feats.glob("*.jsx"))), 1)
+
+    def test_family_stubs_empty_scope_generates_all_families(self):
+        import main
+        with tempfile.TemporaryDirectory() as td_s:
+            td = Path(td_s)
+            main.scaffold_family_stubs(td, TREE)
+            slugs = {p.stem for p in (td / "frontend" / "src"
+                                      / "features").glob("*.jsx")}
+            self.assertEqual(len(slugs), 3)
 
 
 class SystemRowTests(unittest.TestCase):
@@ -1141,6 +1216,61 @@ class DumpRuntimePromptsTests(unittest.TestCase):
                                    "agents_md": False})
         self.assertFalse((Path(td_s) / "octos" / "prompts").exists())
 
+    def test_agents_section_stops_at_kernel_cwd_hint(self):
+        # 内核在系统提示词末尾追加 cwd 提示且其后无 "## " 头:
+        # AGENTS.md 采集件止于提示行;system-prompt.md 仍逐字节含它。
+        import main
+        sys_text = ("gateway base text\n\n## AGENTS.md\n\nROOT CONTRACT\n"
+                    "children map\n\n"
+                    "AppUi session workspace root: /workspace/template\n"
+                    "The server approved this cwd for the current session. "
+                    "Resolve relative shell and file-tool paths against "
+                    "this workspace.")
+        with tempfile.TemporaryDirectory() as td_s:
+            td = Path(td_s)
+            self._write_llm(td, "20261001-130000-1",
+                            [(1, 1, sys_text, "TASK: x")])
+            summary = main.dump_runtime_prompts(td)
+            self.assertTrue(summary["agents_md"])
+            prompts = td / "octos" / "prompts"
+            self.assertEqual(
+                (prompts / "system-prompt.md").read_text(encoding="utf-8"),
+                sys_text)
+            agents = (prompts / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn("ROOT CONTRACT", agents)
+            self.assertNotIn("AppUi session workspace root:", agents)
+            self.assertNotIn("approved this cwd", agents)
+
+    def test_mirror_hidden_logs_copies_arc_and_context_logs(self):
+        # 点前缀目录(.arc/.octos)平台取回会丢:镜像进 octos/logs/ 后齐全
+        import main
+        with tempfile.TemporaryDirectory() as td_s:
+            td = Path(td_s)
+            arc = td / ".arc" / "traceability"
+            arc.mkdir(parents=True)
+            (td / ".arc" / "debug.log").write_text("dbg", encoding="utf-8")
+            (arc / "scenarios.json").write_text("{}", encoding="utf-8")
+            self._write_llm(td, "20261001-130000-1",
+                            [(1, 1, "sys", "user")])
+            counts = main._mirror_hidden_logs(td)
+            self.assertEqual(counts["arc_files"], 2)
+            self.assertEqual(counts["context_log_files"], 1)
+            logs = td / "octos" / "logs"
+            self.assertTrue((logs / "arc" / "debug.log").is_file())
+            self.assertTrue(
+                (logs / "arc" / "traceability" / "scenarios.json").is_file())
+            self.assertTrue((logs / "context-logs" / "20261001-130000-1"
+                             / "llm.jsonl").is_file())
+            # 幂等:重跑计数不变、文件仍在
+            self.assertEqual(main._mirror_hidden_logs(td),
+                             {"arc_files": 2, "context_log_files": 1})
+
+    def test_mirror_hidden_logs_noop_without_hidden_dirs(self):
+        import main
+        with tempfile.TemporaryDirectory() as td_s:
+            counts = main._mirror_hidden_logs(Path(td_s))
+        self.assertEqual(counts, {"arc_files": 0, "context_log_files": 0})
+
     def test_agents_fallback_to_profile_file_when_section_missing(self):
         import main
         with tempfile.TemporaryDirectory() as td_s:
@@ -1225,8 +1355,10 @@ class SeedOwnershipTests(unittest.TestCase):
         self.assertIn("exact emails and passwords", pre)
         self.assertIn("scrypt-hashed via store.hash", pre)
         self.assertIn("role phrases", pre)
-        self.assertIn("backend/data/seed-accounts.json", pre)
-        self.assertIn("login-probe", pre)
+        # seed-accounts.json/login-probe 是 rehearsal 退役后的幽灵机制
+        # (宿主代码零消费方,10-02 拍板),不得回流任何提示词层。
+        self.assertNotIn("seed-accounts", pre)
+        self.assertNotIn("login-probe", pre)
 
     def test_github_given_verbatim_smoke(self):
         req_dir = (Path(__file__).resolve().parent.parent / "tasks"

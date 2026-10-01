@@ -11558,25 +11558,6 @@ pub(crate) fn session_workspace_root_for_state(
     session_workspace_root_for_profile(None, session_id)
 }
 
-/// Append the per-session workspace-root hint to the system prompt.
-///
-/// M11-F: the base prompt comes from the SessionRuntime's agent only
-/// (legacy `state.agent` was deleted), so this helper takes the
-/// resolved `String` rather than an `Agent` reference. The text
-/// appended is identical to the pre-M11-E `session_system_prompt`
-/// wording — the SPA's reducer matches on it heuristically and must
-/// not change.
-fn append_workspace_root_hint(mut prompt: String, workspace_root: Option<&Path>) -> String {
-    if let Some(workspace_root) = workspace_root {
-        prompt.push_str("\n\nAppUi session workspace root: ");
-        prompt.push_str(&workspace_root.to_string_lossy());
-        prompt.push_str(
-            "\nThe server approved this cwd for the current session. Resolve relative shell and file-tool paths against this workspace.",
-        );
-    }
-    prompt
-}
-
 const MAX_PANE_WORKSPACE_ENTRIES: usize = 200;
 const MAX_PANE_ARTIFACT_ITEMS: usize = 80;
 const MAX_PANE_GIT_HISTORY: usize = 12;
@@ -15738,9 +15719,6 @@ async fn run_standalone_turn(
     // used to be concatenated into the first System message below, which
     // invalidated the entire provider KV prefix whenever a peer completed or a
     // monitor fired.
-    let stable_system_prompt =
-        append_workspace_root_hint(system_prompt_base.clone(), workspace_root.as_deref());
-
     let mut tail_context_events = Vec::new();
     // Empty memory is not a context event. In particular, a fresh stdio/solo
     // session must not pay for a synthetic `memory-snapshot` line on every
@@ -15775,7 +15753,7 @@ async fn run_standalone_turn(
             .reconcile_prompt_cache_epoch(
                 &lane_provider,
                 &lane_model,
-                &stable_system_prompt,
+                &system_prompt_base,
                 &ordered_tools,
             )
             .clone();
@@ -15805,7 +15783,7 @@ async fn run_standalone_turn(
         memory_store.clone(),
     )
     .with_config(agent_config.clone())
-    .with_system_prompt(stable_system_prompt)
+    .with_system_prompt(system_prompt_base)
     .with_prompt_cache_epoch_id(prompt_cache_epoch_id) // #1696 soak fix: thread the session key into every ToolContext this
     // turn builds. Without it anything reading
     // `ToolContext::parent_session_key` sees no session on AppUI turns

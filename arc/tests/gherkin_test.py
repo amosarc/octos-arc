@@ -146,12 +146,19 @@ class FeatureAssemblyTests(unittest.TestCase):
         self.assertIn("Background:", feats[0]["text"])
         self.assertIn("After create or rename", feats[0]["text"])
         self.assertIn("Scenario: Open a Workbook", feats[0]["text"])
+        # 节点 id 绑定:每个 Scenario 上方一行 "# <id>" 注释——id↔场景
+        # 块显式对应,场景正文交叉引用("compliant with REQ-1-1-1")可
+        # 一步定位;绑定不得只依赖 TASK 行标题对号(占位场景标题同形)。
+        text = feats[0]["text"]
+        self.assertLess(text.index("\n  # REQ-1-1-1\n"),
+                        text.index("  Scenario: Open a Workbook"))
 
 
 class TurnTemplatedBranchTests(unittest.TestCase):
     """TURN 渲染(feature_text)接占位标记分支(10-01):打标场景渲染
-    Flow contract 注释 + GIVEN 原文 + 注记行,占位 WHEN/THEN 不进场;
-    未打标节点逐字保留全步骤(github 真场景零改动)。"""
+    Flow contract 注释 + GIVEN 原文,占位 WHEN/THEN 不进场(注记行已删
+    ——10-02 拍板,Flow contract 注释即契约锚,注记属冗余散文);未打标
+    节点逐字保留全步骤(github 真场景零改动)。"""
 
     def _folder_and_atoms(self, templated):
         steps = [
@@ -181,7 +188,8 @@ class TurnTemplatedBranchTests(unittest.TestCase):
             "# Flow contract: Users open the seeded workbook from the "
             "home page via its named entry link.", text)
         self.assertIn("Given A seeded workbook `Q3`.", text)
-        self.assertIn("platform placeholder boilerplate", text)
+        # 注记行已随 _BOILER_NOTE 退役:TURN 打标支不留占位散文。
+        self.assertNotIn("platform placeholder boilerplate", text)
         self.assertNotIn("When ", text)
         self.assertNotIn("Then ", text)
         self.assertNotIn("the requested workflow", text.lower())
@@ -243,14 +251,14 @@ class RealTaskSmokeTests(unittest.TestCase):
 
     def test_sheet_turn_path_templated_branch_clean(self):
         # TURN 真路径(feature_text):sheet 节点级打标 → Flow contract
-        # + GIVEN 原文 + 注记行,占位 WHEN/THEN 与黏连残渣不进场。
+        # + GIVEN 原文,占位 WHEN/THEN、注记行与黏连残渣不进场。
         import main
         tree = self._tree("hackathon--sheet")
         n = next(x for x in main.flatten_atomic(tree)
                  if x.get("id") == "REQ-1-1-1")
         text = gherkin.feature_text(self._parent_of(tree, n), [n])
         self.assertIn("# Flow contract:", text)
-        self.assertIn("platform placeholder boilerplate", text)
+        self.assertNotIn("platform placeholder boilerplate", text)
         self.assertIn("`Q3 Sales`", text)
         self.assertNotIn("When ", text)
         self.assertNotIn("the requested workflow", text.lower())

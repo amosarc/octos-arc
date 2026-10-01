@@ -80,8 +80,8 @@ SELFTEST_SUBDIR = "e2e"
 # 本地仿真不受它影响:env OCTOS_ARC_FAMILIES 设置时覆盖此值。
 # COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2,REQ-3"
 # COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2"
-# COMPETITION_FAMILY_SCOPE = "REQ-1"
-COMPETITION_FAMILY_SCOPE = ""
+COMPETITION_FAMILY_SCOPE = "REQ-1"
+# COMPETITION_FAMILY_SCOPE = ""
 
 # 思考参数
 # config.json 的 model_thinking/model_reasoning_effort,内核按
@@ -299,6 +299,43 @@ def _extract_agents_section(system_text: str) -> str | None:
     return section or None
 
 
+def _mirror_hidden_logs(output_dir: Path) -> dict:
+    """工作区隐藏目录的运行痕迹镜像进 octos/logs/(平台取回面)。
+
+    .arc/(平台契约追踪:debug.log/事件流/追溯表)与
+    .octos/context-logs/(内核 llm.jsonl=逐字节模型上下文)是运行期
+    唯一完整记录,但点前缀目录在平台取回里会丢——拷进非隐藏的
+    octos/logs/ 后取回即齐全。幂等(整树重拷);绝不抛。
+    """
+    out = {"arc_files": 0, "context_log_files": 0}
+    try:
+        logs_root = output_dir / "octos" / "logs"
+        logs_root.mkdir(parents=True, exist_ok=True)
+        for src, dst, key in (
+                (output_dir / ".arc", logs_root / "arc", "arc_files"),
+                (output_dir / ".octos" / "context-logs",
+                 logs_root / "context-logs", "context_log_files")):
+            if not src.is_dir():
+                continue
+            for path in src.rglob("*"):
+                if not path.is_file():
+                    continue
+                target = dst / path.relative_to(src)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target)
+                out[key] += 1
+    except OSError:
+        pass
+    return out
+
+
+def _log_mirrored_logs(output_dir: Path) -> None:
+    counts = _mirror_hidden_logs(output_dir)
+    log(f"[postflight] hidden logs mirrored -> octos/logs/: "
+        f"arc ({counts['arc_files']} file(s)), "
+        f"context-logs ({counts['context_log_files']} file(s))")
+
+
 def dump_runtime_prompts(output_dir: Path) -> dict:
     """真实运行时模型上下文采集 → <output_dir>/prompts/(纯内核痕迹,零加工)。
 
@@ -393,11 +430,41 @@ def dump_runtime_prompts(output_dir: Path) -> dict:
     return out
 
 
-def _turn_end_reason(ok: bool, text: str) -> str:
-    """turn 终局原因归一(运营判读面):ok=模型自选结束(EndTurn——
-    premature wrap-up 即此类,完成定义锚的对症面);失败按宿主切断源
-    分类(硬墙钟/空闲超时/内核进程退出/协议错误)。"""
+# 内核治理代收尾识别词表:内核 loop 治理中止(doom 等)以 Ok+合成收尾行
+# 送达,行首标记前缀 → 运营短标签。stdio 通道里该行不在 message/delta 流
+# (text 看不到),由 session/hydrate 取回后在此对表;前缀匹配即可,模型
+# 正文不会以这些标记开头。扩展点:其余内核终局面([LOOP DETECTED]/
+# green stop/预算停)暂不收——语义各有争议,逐项拍板。
+_KERNEL_TERMINAL_MARKERS = (
+    ("[DOOM LOOP DETECTED]", "doom loop"),
+)
+
+
+def kernel_terminal_marker(content: str | None) -> str | None:
+    c = str(content or "").lstrip()
+    for prefix, label in _KERNEL_TERMINAL_MARKERS:
+        if c.startswith(prefix):
+            return label
+    return None
+
+
+def _batch_state(batch_turn_ok: bool, kernel_cut: str | None) -> str:
+    """批终局账面:done 只属于模型自选收束的 turn;内核代收尾(doom 等)
+    与失败 turn 一律 blocked——被杀轮的"完成"是假的(零写入也会被记
+    done 并连坐全节点 PASSED)。"""
+    return "done" if (batch_turn_ok and not kernel_cut) else "blocked"
+
+
+def _turn_end_reason(ok: bool, text: str,
+                     kernel_terminal: str | None = None) -> str:
+    """turn 终局原因归一(运营判读面)。ok 下仍须甄别内核代收尾:
+    doom 硬杀以 Ok+合成收尾行送达而 text=delta 流不含标记,漏判会把被杀
+    批次记成 done。失败按宿主切断源分类(硬墙钟/空闲超时/内核进程退出/
+    协议错误)。"""
     if ok:
+        marker = kernel_terminal_marker(kernel_terminal)
+        if marker:
+            return f"kernel cut: {marker}"
         return "model end_turn"
     t = " ".join(str(text or "").split())
     if "hard wall clock exceeded" in t:
@@ -1553,12 +1620,22 @@ def render_root_contract(tree: dict) -> str:
     return str((tree or {}).get("description") or "").strip() or "(none)"
 
 
-def render_map_outline(tree: dict) -> str:
+def _family_in_scope(fid: str, scope: frozenset[str]) -> bool:
+    """顶层家族是否在运行范围内:家族自身命中,或范围 id 落在家族内部
+    (REQ-1-1-1 ⇒ REQ-1 保留)——与工单过滤同一命中语义(家族一致性)。"""
+    return any(_node_matches_scope(fid, {s}) or s.startswith(fid + "-")
+               for s in scope)
+
+
+def render_map_outline(tree: dict,
+                       scope: frozenset[str] | None = None) -> str:
     """标题树:全部家族/子家族 id+name(无任何描述,~1-2KB)。
 
     系统行常驻层与工单指针共用的"地图骨架"——模型由此知道全局有什么、
     去哪定点读 requirements.yaml;行号区间随标题给出(load 时挂在
-    节点 "_lines"),定点读一步直达无需先 grep 定位。"""
+    节点 "_lines"),定点读一步直达无需先 grep 定位。scope=运行范围时
+    只保留范围内家族:范围外家族不进地图,AGENTS.md 只描述本 run
+    要实现的内容。"""
     def tag(node: dict) -> str:
         span = node.get("_lines")
         return f" (lines {span[0]}-{span[1]})" if span else ""
@@ -1566,6 +1643,9 @@ def render_map_outline(tree: dict) -> str:
     lines = []
     for folder in (tree or {}).get("children") or []:
         if not isinstance(folder, dict):
+            continue
+        if scope and not _family_in_scope(str(folder.get("id") or ""),
+                                          scope):
             continue
         lines.append(f"- {folder.get('id')}: "
                      f"{' '.join(str(folder.get('name') or '').split())}"
@@ -1639,41 +1719,58 @@ def build_system_row_context(tree: dict, rules_text: str,
                              scope: frozenset[str] | None = None) -> str:
     """系统行常驻层(全局层,字节稳定,缓存 0 号位)。
 
-    分层装配的全局层:root 契约 + 标题树 + 契约 + 播种契约。经
-    <data_dir>/AGENTS.md 进入内核系统行(load_bootstrap_files 通道,
-    base+date 之后、memory 之前);每分段重读一次,段内逐字节稳定。
-    挥发物(进度账本/家族细节/批节点)绝不进这里——会破坏前缀缓存。
-    scope=运行范围(OCTOS_ARC_FAMILIES)时追加 RUN SCOPE 段(整 run
-    恒定,仍字节稳定);标题树保持全量——范围是调度决策不是需求裁剪。
-    """
-    """系统行常驻层(全局层,字节稳定,缓存 0 号位)。
-
     两形式之 AGENTS.md(用户参考件 arc/prompts/AGENTS.md):三段——
-    Background(ROOT description 原文=产品范围)+ children map(全树
-    行号地图,out-of-scope 家族的唯一存在感)+ Rules & Architecture
-    (紧凑总纲)。经 <data_dir>/AGENTS.md 进入内核系统行
-    (load_bootstrap_files 通道,base+date 之后、memory 之前);每分段
-    重读一次,段内逐字节稳定。挥发物(进度账本/家族细节/批节点)绝不
-    进这里——会破坏前缀缓存。scope=运行范围(OCTOS_ARC_FAMILIES)时
-    追加 RUN SCOPE 段(整 run 恒定,仍字节稳定)。
+    Background(ROOT description 原文=产品范围)+ children map(行号
+    地图)+ Rules & Architecture(紧凑总纲)。经 <data_dir>/AGENTS.md
+    进入内核系统行(load_bootstrap_files 通道,base+date 之后、memory
+    之前);每分段重读一次,段内逐字节稳定。挥发物(进度账本/家族细节/
+    批节点)绝不进这里——会破坏前缀缓存。scope=运行范围
+    (OCTOS_ARC_FAMILIES)时:children map 只保留范围内家族,裁剪
+    结果随 scope 整 run 恒定。
     """
     parts = [
         "Background:",
         render_root_contract(tree),
         "children map:",
-        render_map_outline(tree),
+        render_map_outline(tree, scope=scope),
         rules_text,
         fixture_rules,
     ]
-    if scope:
-        parts.append(
-            "RUN SCOPE (operator-limited): this run implements ONLY "
-            + ", ".join(sorted(scope))
-            + " — out-of-scope families get no work orders, no "
-            "implementation, and no seed data this run.")
-    # 图片记号防线已上移到 load_requirement_tree 的载入剥离:树在进任何
     # 渲染器之前已无 ![...](...) 记号,此处不再重复防御。
     return "\n\n".join(parts)
+
+
+def scope_pruned_tree(tree: dict, family_scope: frozenset[str],
+                      family_of: dict[str, dict]) -> dict:
+    """范围裁剪树:顶层家族按 batch_in_scope 过滤(与工单/Tier-2 判定面
+    同一命中语义);空范围=全量原树。"""
+    if not family_scope:
+        return tree
+    kept = [c for c in (tree.get("children") or [])
+            if c and batch_in_scope(flatten_atomic(c),
+                                    family_scope, family_of)]
+    return {**tree, "children": kept}
+
+
+def scaffold_family_stubs(output_dir: Path, tree: dict,
+                          family_scope: frozenset[str] = frozenset(),
+                          family_of: dict[str, dict] | None = None,
+                          log=print) -> None:
+    """taskshape 家族 stub 预生成(2525564 曾整层退役,误删恢复)。
+
+    每顶层家族一对 feature/route stub(头注释=该家族 REQ 工单清单),
+    App.jsx/routes/index.js 仅在仍是脚手架原始字节时改写为装配版——
+    BOOTSTRAP/工单承诺的 "stubs pre-created" 由此为真。幂等:stub 只
+    在文件不存在时写,模型已写内容永不覆盖。家族宇宙=scope_pruned_tree
+    (与工单/地图同一裁剪);OCTOS_ARC_FEATURE_STUBS=0 关闭。
+    """
+    if os.environ.get("OCTOS_ARC_FEATURE_STUBS", "1") == "0":
+        return
+    stub_tree = scope_pruned_tree(tree, family_scope, family_of or {})
+    written = scaffold.scaffold_task_features(output_dir, stub_tree, log=log)
+    if not written:
+        log("[scaffold] task shape already present (or tree empty); "
+            "no stubs written")
 
 
 def _node_family_index(tree: dict) -> tuple[dict[str, dict], dict[str, str]]:
@@ -1897,21 +1994,39 @@ def group_families(tree: dict, max_batch: int = 6) -> list[list[dict]]:
 # 装配代码原样保留(确认无用连 gherkin.seed_sentences 一并退役)。
 _TURN_SEED_CONTRACT = False
 
+# 每 turn 种子自愈行:db.json 是评测首 boot 的唯一种子面(交付删活本),
+# 本批 GIVEN 命名项必须已在其中。批间无回种(回种只挂 spec-run/grader
+# boot),后批缺种子最自然的补法是运行期现造——落进活本,spec-run boot
+# 与交付两次删除即蒸发。此行把修补导向持久面:先写 db.json,删活本让
+# 下次 boot 重拷(store 首 boot 拷贝语义模型自实现)。与已退役的 SEED
+# CONTRACT 块不同:不重复引用种子句,只给行动指令。
+_TURN_SEED_LINE = (
+    "SEED: backend/data/db.json is what every grading boot starts from "
+    "— it must already contain every named item in the GIVEN lines "
+    "below. If something is missing, add it to db.json first, then "
+    "delete backend/data/db.run.json so the next boot re-seeds.")
+
 
 def build_turn_features(batch: list[dict],
                         parent_of: dict[str, dict]) -> str:
-    """TURN 正文(唯一出处,批 turn 与 blocked-retry 共用)。
+    """TURN 正文(批 turn 唯一出处;blocked-retry pass 已于 c6fbb30 移除)。
 
-    统一块骨架:TASK → SCENARIOS(本批 Feature 原文)。本批节点自己的
-    Feature 与 GIVEN 仍逐字(总纲 LAW 4 的契约源);行为法则在系统行
-    RULES & ARCHITECTURE,此处只装批次执行物。
+    统一块骨架:TASK → SEED → SCENARIOS(本批 Feature 原文)。本批节点
+    自己的 Feature 与 GIVEN 仍逐字(总纲 LAW 4 的契约源);行为法则在
+    系统行 RULES & ARCHITECTURE,此处只装批次执行物。TASK 行只列编号
+    不列标题——id↔场景绑定由 gherkin `# <id>` 注释承担。SCENARIOS
+    正文为空时(批节点在父索引中缺席,Feature 渲染为空)整块省略(连
+    同 SEED 行——"GIVEN lines below" 不悬空),且 TASK 回退为直接列
+    编号。
     """
-    task = ", ".join(
-        f"{n.get('id')} ({' '.join(str(n.get('name') or '').split())})"
-        for n in batch)
-    parts = [f"TASK: implement {task}."]
-    parts += ["SCENARIOS (verbatim):",
-              gherkin.batch_turn_features(batch, parent_of)]
+    task = ", ".join(str(n.get("id") or "") for n in batch)
+    features = gherkin.batch_turn_features(batch, parent_of)
+    if features.strip():
+        parts = [f"TASK: implement the requirements below ({task}).",
+                 _TURN_SEED_LINE,
+                 "SCENARIOS (verbatim):", features]
+    else:
+        parts = [f"TASK: implement {task}."]
     if _TURN_SEED_CONTRACT:
         seed_sents, seed_dropped = gherkin.seed_sentences(list(batch))
         if seed_sents:
@@ -2318,6 +2433,10 @@ class OctosDriver:
         except OSError:
             pass
         self._session = None
+        # 本 turn 的内核合成收尾行(session/hydrate 取回);None=模型自选
+        # 结束、turn 失败或取回降级。每 turn 由 run() 重置;chat 回退路径
+        # 不取(None=维持现状分类)。
+        self.kernel_terminal: str | None = None
         # planctl 已退役:内核不再有 plan 模式,宿主不发 [arc-plan]
         # envelope——契约/需求地图/进度账本全部印进自含工单正文,会话
         # 分段后由自含工单续命。
@@ -2368,6 +2487,7 @@ class OctosDriver:
         already landed on disk stays (the batch verdict marks it
         blocked; the platform's e2e is the final judge)."""
         cancel = threading.Event()
+        self.kernel_terminal = None
         if self.mode == "chat":
             cap = min(timeout, wall) if wall is not None else timeout
             fn = lambda p: run_octos(self.octos_bin, self.cwd, p, self.env,
@@ -2376,7 +2496,8 @@ class OctosDriver:
             fn = lambda p: self._run_stdio(p, timeout, wall, cancel)
         ok, text = self._run_with_heartbeat(
             lambda: self._run_with_retries(fn, prompt, cancel), wall, cancel)
-        log(f"[flow] turn ended: reason={_turn_end_reason(ok, text)}")
+        log(f"[flow] turn ended: "
+            f"reason={_turn_end_reason(ok, text, self.kernel_terminal)}")
         if not ok and self._orphaned_turn(text):
             # The kernel-side turn may still be live (idle/wall cut) or the
             # process already dead; either way a follow-up turn/start on
@@ -2526,7 +2647,8 @@ class OctosDriver:
     def _run_stdio(self, prompt: str, timeout: int, wall: int | None = None,
                    cancel: threading.Event | None = None) -> tuple[bool, str]:
         try:
-            return self._get_session().run_turn(
+            session = self._get_session()
+            result = session.run_turn(
                 prompt, timeout=float(timeout),
                 wall_timeout=float(wall) if wall is not None else None)
         except Exception as exc:
@@ -2543,6 +2665,10 @@ class OctosDriver:
             if chat_ok:
                 return True, chat_text
             return False, f"stdio driver error: {exc}; chat fallback: {chat_text}"[:1000]
+        # 收尾行只在 stdio 成功路径取:内核治理中止(doom 等)的合成行
+        # 持久化在会话里而不在 delta 流(text),据此识别"内核代收尾"。
+        self.kernel_terminal = session.last_final_assistant
+        return result
 
     def close(self) -> None:
         if self._session is not None:
@@ -2565,24 +2691,17 @@ GOAL_FIRST_TURN_COMPLETION = (
     "announces future work is an incomplete turn.")
 
 BOOTSTRAP_PREAMBLE = """\
-BOOTSTRAP (first turn of the run only): (a) implement the seed — \
-backend/data/db.json from every in-scope GIVEN line (plus a data: \
-section if the requirement has one); every account the text or GIVEN lines name goes \
-in with the exact emails and passwords quoted there (scrypt-hashed via \
-store.hash; your tests sign in with the plaintext passwords the GIVEN \
-lines quote). (b) provision one sign-in-capable account per distinct \
-actor your GIVEN lines and descriptions sign in as — named humans AND \
-role phrases (a repository Admin, the organization Owner) — and wire \
-ownership/membership/grants so each role's stated permissions hold; a \
-GIVEN actor that cannot sign in fails every scenario of that node at \
-arrange. (c) declare every pre-provisioned account in \
-backend/data/seed-accounts.json as \
-[{"username","password","path"?,"body"?,"note"}] — the host \
-login-probe signs in as each entry and expects 200; RED = your \
-declared seed or auth is broken. (d) implement the shared API surface \
-the map's families share (backend/src/routes/). (e) the host template \
-already generates per-family feature/route stubs — confirm they are in \
-place. Then implement the Feature below.
+BOOTSTRAP (first turn of the run only):
+(a) implement the seed: backend/data/db.json from every in-scope GIVEN \
+line (plus a data: section if the requirement has one) — every named \
+entity, every account with the exact emails and passwords quoted there \
+(scrypt-hashed via store.hash; your tests sign in with the plaintext \
+passwords), and the ownership/permission relationships the text states.
+(b) every actor the GIVEN lines or descriptions sign in as — named \
+humans or role phrases — must be able to sign in and hold the \
+permissions the text states.
+(c) implement the shared API surface the map's families share \
+(backend/src/routes/).
 """
 
 VERIFICATION_RULES = (
@@ -2796,6 +2915,7 @@ def main() -> int:
         target = (Path(args.dump_prompts) if args.dump_prompts != "AUTO"
                   else Path(args.output_dir or args.requirement_path))
         summary = dump_runtime_prompts(target)
+        _mirror_hidden_logs(target)
         print(f"[prompts] {summary} -> {target / 'prompts'}")
         return 0
 
@@ -2914,14 +3034,11 @@ def main() -> int:
                     _index_parents(c, c)
 
         _index_parents(tree, tree)
-        scoped_tree = tree
-        if family_scope:
-            kept = [c for c in (tree.get("children") or [])
-                    if c and batch_in_scope(flatten_atomic(c),
-                                            family_scope, family_of)]
-            scoped_tree = {**tree, "children": kept}
+        # 范围裁剪树(与工单/家族 stub 同一裁剪函数):scope 外家族不进
+        # 任何上下文。
+        scoped_tree = scope_pruned_tree(tree, family_scope, family_of)
         # 夹具契约提取(ROOT data: 段 / 场景 GIVEN / "Seed data supplies" 句 /
-        # E2E_* 环境项)——scope 化:种子基线/探针与 RUN SCOPE 同宇宙。
+        # E2E_* 环境项)——scope 化:种子基线/探针与运行范围同宇宙。
         fixture_data = fixture_manifest.extract(scoped_tree)
 
         tests_dir = locate_acceptance_tests(tree, Path(__file__).resolve().parent)
@@ -3046,6 +3163,10 @@ def main() -> int:
             scaffolded = scaffold.scaffold(output_dir)
             log(f"[plan] host scaffold wrote {len(scaffolded)} file(s): "
                 f"{scaffolded}")
+            # taskshape 家族 stub:BOOTSTRAP/工单 "stubs pre-created"
+            # 承诺的兑现面(家族宇宙=范围裁剪树)。
+            scaffold_family_stubs(output_dir, tree, family_scope,
+                                  family_of, log=log)
         else:
             log("[plan] OCTOS_ARC_HOST_SCAFFOLD=0; scaffolding left to the model")
         # 模板已就位时依赖由宿主预装(模型零安装)。
@@ -3396,6 +3517,8 @@ def main() -> int:
                     ok, text = False, (
                         f"skipped: auth failure limit "
                         f"({driver.auth_failures})")
+                    # 不经过 run(),清掉上一批残留的收尾行,防误判 kernel cut。
+                    driver.kernel_terminal = None
                     for nid in batch_ids:
                         skip_reasons[nid] = (
                             f"skipped: auth failure limit "
@@ -3404,20 +3527,28 @@ def main() -> int:
                     wall = turn_wall(len(batch))
                     ok, text = driver.run(node_prompt, min(node_timeout, wall), wall)
                 batch_turn_ok = ok
-                main_turn_reason = _turn_end_reason(ok, text)
+                kernel_cut = kernel_terminal_marker(driver.kernel_terminal)
+                main_turn_reason = _turn_end_reason(ok, text,
+                                                    driver.kernel_terminal)
+                cut_note = (f" (kernel cut: {kernel_cut}; turn failed)"
+                            if kernel_cut else "")
                 log(f"[flow] batch {focus_id} {'ok' if ok else 'FAILED'} "
-                    f"in {time.time()-t0:.0f}s: {text[-300:]!r}")
-                if not ok:
+                    f"in {time.time()-t0:.0f}s{cut_note}: {text[-300:]!r}")
+                if not ok or kernel_cut:
                     # Hard-wall/orphan cuts can leave a batch 90% done on
                     # disk. Keep what landed (verdict=blocked; no host
-                    # recovery gate) instead of failing fast.
+                    # recovery gate) instead of failing fast. Kernel-cut
+                    # turns (doom loop etc.) ride the same path: 协议 ok
+                    # 但收尾不是模型自选。
+                    detail = ("turn ended failed: " + text[-200:] if not kernel_cut
+                              else f"kernel cut ({kernel_cut}): " + text[-200:])
                     log(f"[flow] batch {focus_id} failed; keeping what "
                         "landed on disk (blocked)")
                     for nid in batch_ids:
-                        events.mark_implementation_failed(
-                            nid, "turn ended failed: " + text[-200:])
+                        events.mark_implementation_failed(nid, detail)
                         failed.append(nid)
-                if ok and not project_files_changed(output_dir, t0):
+                if (ok and not kernel_cut
+                        and not project_files_changed(output_dir, t0)):
                     # Lazy turn: protocol ok, zero disk progress. Files-
                     # changed is the wrong judge — a turn whose only tool
                     # was the batch SPEC RUN going green is a legitimate
@@ -3478,14 +3609,14 @@ def main() -> int:
                 # done 标记只属于成功 turn——失败/切断 turn 不打"实现完成"。
                 # commit 无条件:切断轮已落盘文件仍需入库留痕,成色由平台
                 # 评测终裁(宿主不设验证门)。
-                if ok:
+                if ok and not kernel_cut:
                     for nid in batch_ids:
                         events.mark_implementation_done(nid, text[-500:] or None)
                 runtime.git.commit(
                     f"{focus_id} (implement): "
                     + "; ".join(str(n.get("name", "")) for n in batch))
                 if not time_up():
-                    batch_state = "done" if batch_turn_ok else "blocked"
+                    batch_state = _batch_state(batch_turn_ok, kernel_cut)
                     for nid in batch_ids:
                         plan_statuses[nid] = batch_state
                     # 批终局单行汇总(运营判读面):实现完整性=verdict 字段
@@ -3494,12 +3625,13 @@ def main() -> int:
                     log(f"[plan] batch {focus_id} verdict={batch_state} "
                         f"(turn {main_turn_reason})")
 
-                    if batch_turn_ok:
+                    if batch_turn_ok and not kernel_cut:
                         completed_specs.extend(
                             f for nid in batch_ids
                             for f in (spec_map.get(nid) or []))
                         completed_specs = sorted(set(completed_specs))
-                    if (batch_turn_ok and tests_dir and pre_batch_head
+                    if (batch_turn_ok and not kernel_cut and tests_dir
+                            and pre_batch_head
                             and not time_up()
                             and os.environ.get("OCTOS_ARC_HOST_GRADE",
                                                "1") != "0"):
@@ -3732,6 +3864,7 @@ def main() -> int:
         _pc = dump_runtime_prompts(output_dir)
         log(f"[prompts] captured {_pc['turns']} turn prompt(s) -> "
             f"{output_dir / 'octos' / 'prompts'}")
+        _log_mirrored_logs(output_dir)
         _handover_pristine_seed(output_dir)
         return 0
     except Exception as exc:  # platform judges by events, not exit code
@@ -3746,6 +3879,7 @@ def main() -> int:
             dump_runtime_prompts(output_dir)
         except Exception:
             pass
+        _log_mirrored_logs(output_dir)
         _handover_pristine_seed(output_dir)
         events.mark_run_failed(str(exc)[:1000])
         return 0

@@ -35,10 +35,6 @@ _EMPTY_QUOTE_RE = re.compile(r"(\"\"|'')")
 # 引用名:“…”(github)与 "…"(sheet)——反引号是种子值不在此列;
 # 单引号 '…' 有撇号陷阱("the user's own 'X'" 跨词配对)也不取。
 _QUOTED_NAME_RE = re.compile(r"“([^”]+)”|\"([^\"]+)\"")
-# TURN 打标支的占位注记(与 render_scenarios 的注记同哲学;TURN 里
-# 没有 REQ CONTENT 段名,指向上方 Flow contract 注释行)。
-_BOILER_NOTE = ("# WHEN/THEN are platform placeholder boilerplate "
-                "— the flow contract above governs.")
 
 
 def _fold(text: str) -> str:
@@ -212,6 +208,10 @@ def feature_text(folder: dict, atoms: list[dict]) -> str:
 
     Feature 名 = 文件夹名;描述块 = 文件夹描述首句;Background = 其余句
     (恰为用户样例的结构);原子节点 → Scenario(全步骤 Gherkin)。
+    每个 Scenario 上方一行 `# <节点 id>` 注释:场景标题与 TASK 行的
+    id 清单绑定,场景正文里的交叉引用("compliant with REQ-1-1-1")
+    一步可定位——绑定不能只靠 TASK 行标题对号(占位场景标题互相
+    相同,标题对号必失效)。
     打标节点(检测器判定 WHEN/THEN 为平台占位样板)改走 GIVEN-only 支:
     Flow contract 注释 + GIVEN 原文 + 注记行——占位 WHEN/THEN 不承载
     节点自身操作语义(sheet 审计 24/24,22 个连名称动词都零出现),
@@ -229,6 +229,7 @@ def feature_text(folder: dict, atoms: list[dict]) -> str:
         lines += ["", "  Background:", f"    {background}"]
     for atom in atoms:
         lines.append("")
+        lines.append(f"  # {str(atom.get('id') or '')}")
         lines.append(f"  Scenario: {clean_name(str(atom.get('name') or ''))}")
         sc0 = (atom.get("scenarios") or [{}])[0]
         steps = [s for s in (sc0.get("steps") or [])
@@ -240,7 +241,6 @@ def feature_text(folder: dict, atoms: list[dict]) -> str:
             given_lines, _, _ = render_steps(
                 steps, only_given=True, indent="    ")
             lines.extend(given_lines)
-            lines.append(f"    {_BOILER_NOTE}")
         else:
             node_lines, _, _ = render_steps(steps, indent="    ")
             lines.extend(node_lines)

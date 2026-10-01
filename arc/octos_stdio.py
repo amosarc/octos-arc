@@ -26,7 +26,8 @@ class OctosProtocolError(RuntimeError):
 class OctosStdioSession:
     def __init__(self, octos_bin: str, cwd: Path, env: dict, data_dir: Path,
                  on_event: Callable[[str, dict], None] | None = None,
-                 system_context: str | None = None) -> None:
+                 system_context: str | None = None,
+                 hydrate_timeout: float = 30.0) -> None:
         self.cwd = str(cwd)
         self.data_dir = Path(data_dir)
         # 分层装配的全局层(root 契约+标题树+契约):create 后/upsert 前
@@ -46,6 +47,11 @@ class OctosStdioSession:
         self._notifications: queue.Queue = queue.Queue()
         self._stderr_lines: list[str] = []
         self._id_counter = 0
+        # 会话最后一条非空 assistant 行(session/hydrate 取回)。内核治理
+        # 中止(doom 等)以 Ok+合成收尾行送达,该行不在 message/delta 流里
+        # ——turn/completed 后从持久化会话取回,宿主据此识别"内核代收尾"。
+        self.last_final_assistant: str | None = None
+        self.hydrate_timeout = hydrate_timeout
         self._reader = threading.Thread(target=self._read_stdout, daemon=True)
         self._reader.start()
         self._stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
@@ -115,6 +121,29 @@ class OctosStdioSession:
 
     def stderr_tail(self, n: int = 10) -> str:
         return "\n".join(self._stderr_lines[-n:])
+
+    def _last_assistant_content(self) -> str | None:
+        """turn 结束后取回会话最后一条非空 assistant 行(尽力而为)。
+
+        走 session/hydrate(include=["messages"])而非 delta 流:内核
+        治理中止的合成收尾行只持久化、不进 delta。任何失败都降级为
+        None 并把原因留在 stderr——取回失败=宿主按现状分类,绝不抛。
+        """
+        try:
+            res = self._send("session/hydrate", {
+                "session_id": self.session_id,
+                "include": ["messages"],
+            }, want_response=True, timeout=self.hydrate_timeout)
+            for row in reversed((res or {}).get("messages") or []):
+                content = str(row.get("content") or "")
+                if row.get("role") == "assistant" and content.strip():
+                    return content
+        except (OctosProtocolError, AttributeError, KeyError,
+                TypeError, ValueError) as exc:
+            self._stderr_lines.append(
+                f"[stdio] final-assistant hydrate failed ({exc}); "
+                "kernel-terminal detection degraded")
+        return None
 
     # ------------------------------------------------------------ protocol
 
@@ -302,6 +331,7 @@ class OctosStdioSession:
                 except OctosProtocolError:
                     pass
             elif method == "turn/completed" and params.get("turn_id") == turn_id:
+                self.last_final_assistant = self._last_assistant_content()
                 return True, "".join(chunks)
             elif method == "turn/error" and params.get("turn_id") == turn_id:
                 return False, (f"{params.get('code', 'error')}: "

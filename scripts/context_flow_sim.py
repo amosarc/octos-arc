@@ -6,7 +6,7 @@
   00a 系统提示词-gateway 层(main._GATEWAY_PROMPT_OVERRIDE → gateway.md,
       内核 base 替换:6 工具对齐 + 工具纪律)
   00b 系统行 AGENTS.md(build_system_row_context:Background + children
-      map + RULES & ARCHITECTURE + 任务 FIXTURE 段 + RUN SCOPE)
+      map + RULES & ARCHITECTURE + 任务 FIXTURE 段)
       ——内核装配顺序:gateway base → 日期行 → AGENTS.md → memory(压缩态)
   t01.. 每家族 TURN(BOOTSTRAP 前言[首 turn] + Gherkin Feature + 完成要求
       一句话)
@@ -106,7 +106,7 @@ def render_task(task: str, out_root: Path) -> None:
     system_row = main.build_system_row_context(
         tree, rules_text, fixture_rules, scope=family_scope or None)
     body = _header("00b", "系统行 AGENTS.md(总纲:Background + children map "
-                          "+ RULES & ARCHITECTURE + FIXTURE + RUN SCOPE)")
+                          "+ RULES & ARCHITECTURE + FIXTURE)")
     files.append((out / "00b-system-row-AGENTS.md",
                   body + system_row
                   + _mock("(系统行不产生回复——常驻上下文)。")))
