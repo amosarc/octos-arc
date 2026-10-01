@@ -26,107 +26,119 @@ import fixture_manifest
 SPEC_STAGE_SUBDIR = ".arc/acceptance"
 WIPE_GLOBS = ("*.spec.ts", "support")
 
-# 宿主环境事实(grading 形状)——现印进每个工单正文(=0 回退路径用)。
-# 刻意不含任何 UI 行为规则:任务的验收规则来自 requirements.yaml 本身,
-# 宿主不发明规则(09-27 定则)。09-28 CRUD 生成器退役:SCHEMA-DRIVEN
-# BACKEND 段与 engine/auth/validate 通用层整体删除——数据模型/API 形状/
-# 校验语义全归模型(backend/src/routes/),宿主只保留数据面基座
-# (store 双文件存储 + util + 装配)与种子/声明契约。
-HOST_STACK_RULES_GOAL_FIRST = """\
-HOST CONTRACT (goal-first: the requirement text is the authoritative \
-product contract — quoted names are exact accessible names, quoted \
-rules bind verbatim, and the scenarios are the test oracle; staged \
-specs are a regression suite, not authority — where a staged spec \
-disagrees with the requirement text, the text wins and the spec gets \
-fixed. The host documents its data-plane substrate below and authors \
-NO behavioral rules — you derive the behavior and the tests from the \
-requirement text):
-STACK: React(Vite) frontend + Express backend, PREBUILT BY THE HOST — \
-the backend already runs. Host-owned (never rewrite): src/app.js + \
-src/index.js (bootstrap; PORT + ARC_EXTRA_PORTS; serves frontend/dist), \
-src/lib/util.js (responses/cookies/ids), src/lib/session.js (session \
-token/cookie/currentUser mechanics on the store — YOU wire the \
-login/logout/me routes), src/lib/crud.js (OPTIONAL generic REST \
-factory: mount(app, '<collection>', {publicRow, validate, prepare, \
-listQuery}) per collection — hooks carry YOUR validation and exact \
-error strings; custom routes registered before mount take precedence), \
-src/database/store.js (seed/run dual-file JSON store: coll/one/get/all/\
-dup/insert/update/remove/save + query (where/sort/page) + tx (atomic \
-multi-write with rollback) + nextSeq (scoped auto-increment numbers) \
-+ scrypt hash/verify). Dependencies are PREINSTALLED — never run npm \
-install, never add npm packages. ALL API endpoints are YOURS: \
-implement the requirement's data model, auth, and flows in \
-backend/src/routes/ with Express on top of store + these helpers — \
-routes, payload shapes, validation, and error messages follow the \
-requirement text, nothing else.
-FRONTEND (goal-first — the model owns it): frontend/src is yours to \
-shape as the requirements demand: frontend/src/app/App.jsx, the shell, \
-frontend/src/app/styles.css, and frontend/src/features/ — restructure \
-freely (a proven shape: one self-contained file per requirement family \
-under frontend/src/features/<name>.jsx, App.jsx a thin assembly layer). \
-Keep frontend/src/main.jsx, frontend/src/app/store.jsx \
-(useResource('<resource>')) and frontend/src/app/api.js working as the \
-backend client — extend them, never fork shared state into features. \
-ACCESSIBLE-NAME UNIQUENESS: on any single rendered page, no two \
-interactive controls may share the same accessible name, and a page's \
-own primary action (e.g. a form's submit) must not be shadowed by a \
-same-named global control (topbar, menu) — the hidden grader resolves \
-controls with strict canonical locators (getByRole(role, { name })), \
-which DIE on ambiguity and lose the whole scenario. When a page needs a \
-control whose name collides with a global one, hide or rename the \
-global one on that page. \
-TOOLBOX (optional, unwired): frontend/src/app/ui.jsx ships proven \
-shapes — NativeSelect (dropdowns = native <select>, graders use \
-selectOption), AppDialog (native <dialog> modals), AccountTrigger \
-(username its own exact-text node + the requirement's trigger label — \
-the observed full-score shape), SingleError (one visible error \
-element), FieldError + byField (per-field parallel errors from the \
-backend {errors:[{field,msg}]} shape — registration-style forms must \
-show every field's message together), Region (render <Region label="X"> \
-for a requirement phrase "A region named X" — a section, so \
-getByRole('region', {name}) resolves; a div with aria-label has no \
-region role), useContextMenu + Menu (role=menu + menuitem buttons with \
-the requirement's exact labels, Escape/outside-click close — FixedGrid \
-routes its right-click/header-menu callbacks here) and FixedGrid \
-(fixed-size role=grid — MINIMUM EXTENT 40 rows × 20 cols even when the \
-data is smaller: the reference apps show a large empty grid around the \
-data and graders address cells beyond the seeded extent; pass the useGrid \
-kernel as grid={...} and \
-click / Shift-click-extend / drag / aria-selected are handled for \
-you) — use them or roll your own; the requirement text is the only \
-authority. frontend/src/app/grid.js carries the useGrid selection/\
-editing kernel plus rectOf/inRectangle/rangeCoords geometry and \
-compareValues (type-aware ordering: numbers, ISO dates, then text); \
-frontend/src/app/formula.js carries a cell formula engine \
-(displayValue/evalFormula/adjustFormula/shiftRefsOnRowChange/\
-shiftRefsOnColChange — =SUM(A1:A3)*2, =A1 + B1, =-A1, nested calls \
-and the #DIV/0!/#REF!/#NAME?/#ERROR! vocabulary included); \
-frontend/src/app/csv.js carries RFC4180 CSV parse + byte-exact \
-stringify (no BOM, minimal quoting) + TSV clipboard parse + download \
-trigger + readFileText (file-import chain) + copyText (clipboard \
-write with fallback for the "Copy <value>" → "Copied" contracts); \
-frontend/src/app/undo.js carries a snapshot undo/redo stack \
-hook (you supply the getSnapshot closure — one whole-state snapshot \
-covers value, structure, rule and config edits alike); \
-frontend/src/app/router.js carries hash routing (parseRoute + \
-useHashRoute — deep links, refresh and back-forward stay consistent). \
-frontend/src/features/README.md carries the GRID EDITOR KERNEL \
-PATTERN — grid-like families build on ONE shared selection/editing \
-state model instead of re-implementing it per feature.
-FIXTURE CONTRACT (graded, not demo data): the `data:` section + every \
-scenario GIVEN line are the graded seed contract — YOU implement \
-backend/data/db.json from them. Names may carry a unique suffix, but roles, \
-ownership, visibility, relationships match VERBATIM; never drop a GIVEN \
-entity, and expose every requirement-named entity through your API. Scenarios that MODIFY data each need their OWN fresh \
-preconfigured instance (never share one mutable fixture across \
-scenarios). Files/commits are the single source of truth: branches \
-store head references only, NEVER duplicate whole file trees per \
-branch or fork. db.json is the SEED: runtime state goes to db.run.json \
-and every server restart resets to the seed (sh .arc/host/\
-restart-server.sh); db.run.json must NEVER ship. Declare EVERY \
-account your auth provisions in backend/data/seed-accounts.json \
-(see the FIXTURE section of your system prompt for the exact shape \
-the host login-probe verifies)."""
+# 端口契约单一出处:评测口宿主管理(模型绝不 bind/重启),开发口=模型
+# 自验专用;main.py 的 OCTOS_SMOKE_PORT 与 web_port 缺省都从这里取。
+WEB_PORT = 3000
+SMOKE_PORT = 3100
+
+# 全局总纲(两形式之一:AGENTS.md 系统行第三段)。pi buildRules 同构:
+# 规则由多源贡献(全局法则 + 任务层 fixture_manifest.task_rules),集中
+# 经 build_rules 去重装配为单行 bullet——重复贡献自动坍缩,新增来源零
+# 改动装配点。ARCHITECTURE 是事实清单(逐文件一行),不是规则。
+
+CHARTER_RULES = [
+    "The requirement text wins over the app, over your specs, over seeded "
+    "data, and over this file; quoted names are exact accessible names "
+    "and quoted rules bind verbatim.",
+    "The grader walks ONLY the operations the requirement names — never "
+    "make a step mandatory that the text does not describe.",
+    "Reject (a 4xx, a validation error, a disabled submit) only where "
+    "the text states it: use the text's quoted message verbatim when it "
+    "quotes one, a short clear message of your own when it mandates the "
+    "rejection without quoting one; no mandating sentence = the "
+    "operation must SUCCEED with a neutral default.",
+    "Every GIVEN line is a binding pre-state: its actor can sign in, its "
+    "entities exist verbatim, and the seed covers them.",
+    "Write the Playwright spec for a node BEFORE implementing it, watch "
+    "it red, then fix the app until it walks green on the RUNNING app — "
+    "a green API response is not a walking flow.",
+    "Every write survives a refresh; sessions survive a server restart.",
+    "On any page no two controls share an accessible name — the grader's "
+    "getByRole(role, { name }) dies on ambiguity, so ambiguity is an APP "
+    "defect.",
+    "Never regress an already-green family; after editing shared files, "
+    "re-run every green family's spec.",
+]
+
+# 架构事实清单:逐文件一行,路径与角色按脚手架/taskshape 真实运行后的
+# 目录(09-30 用户纠错:旧版写的 src/app.js 等缩写路径从第一天起就是
+# 错的——真实路径是 backend/src/app.js;stub 机制按 taskshape 契约描述)。
+ARCHITECTURE_LINES = [
+    "Layout: two app roots — backend/ = the Express server (npm start "
+    "boots it; src/, data/) and frontend/ = the Vite+React client (npm "
+    "run build emits dist/; index.html, src/); all paths below are "
+    "workspace-relative.",
+    "backend/src/app.js + backend/src/index.js bootstrap the app: index "
+    "binds PORT + ARC_EXTRA_PORTS, app serves frontend/dist (SPA fallback "
+    "to index.html) — keep that contract when you change them.",
+    f"Ports: the host boots and grades the app on port {WEB_PORT} — "
+    f"never bind or restart it; if you start the app yourself to verify, "
+    f"bind port {SMOKE_PORT} only.",
+    "backend/src/lib/util.js = responses/cookies/ids; "
+    "backend/src/lib/eval-telemetry.js = platform traffic/exception "
+    "self-telemetry.",
+    "backend/src/lib/session.js = session mechanics on the store — you "
+    "wire the login/logout/me routes in backend/src/routes/.",
+    "backend/src/lib/crud.js = optional REST factory: mount(app, "
+    "'<collection>', {publicRow, validate, prepare, listQuery}); custom "
+    "routes registered before mount take precedence.",
+    "backend/src/database/store.js = seed/run dual-file store: "
+    "coll/one/get/all/dup/insert/update/remove/save, query/sort/page, "
+    "tx with rollback, nextSeq, scrypt hash/verify.",
+    "ALL API endpoints are YOURS: backend/src/routes/index.js mounts one "
+    "pre-created stub per requirement family (routes/<family>.js — REQ "
+    "ids in the header); fill the stubs in place, add sibling files "
+    "freely — routes, payload shapes, validation, and error messages "
+    "follow the requirement text, nothing else.",
+    "backend/data/db.json ships EMPTY: implement the seed from the "
+    "GIVEN lines (plus a data: section if present) — never drop a GIVEN "
+    "entity; expose every requirement-named entity through your API.",
+    "The substrate boots out of the box; when the requirement demands "
+    "something they do not provide, change them.",
+    "frontend/src/main.jsx = React entry; frontend/src/app/App.jsx = the "
+    "assembly layer mounting one frontend/src/features/<family>.jsx per "
+    "family (stubs pre-created, REQ ids in the headers — fill in place, "
+    "add siblings freely); styles in frontend/src/app/styles.css.",
+    "frontend/src/app/api.js = the backend client; frontend/src/app/"
+    "store.jsx = optional DataProvider helper.",
+    "Kit (optional; each file's header documents itself — read before "
+    "use): frontend/src/app/ui.jsx, frontend/src/app/grid.js, "
+    "frontend/src/app/formula.js, frontend/src/app/csv.js, "
+    "frontend/src/app/undo.js, frontend/src/app/router.js; "
+    "frontend/src/features/README.md = feature notes + grid editor "
+    "kernel pattern.",
+    "Grid pages address cells beyond the data extent (40 rows x 20 cols "
+    "minimum).",
+    "Self-tests live ONLY under e2e/ (config: "
+    "e2e/playwright.config.ts) — never inside .arc/.",
+]
+
+
+def build_rules(*sources: list[str]) -> str:
+    """pi buildRules 同构:多源贡献单行规则,规范化去重,bullet 输出。"""
+    rules: list[str] = []
+    seen: set[str] = set()
+    for source in sources:
+        for rule in source:
+            r = " ".join(str(rule).split()).strip()
+            if not r or r.lower() in seen:
+                continue
+            seen.add(r.lower())
+            rules.append(r)
+    return "\n".join(f"- {r}" for r in rules)
+
+
+def render_rules(task_rules: list[str] | None = None) -> str:
+    """系统行第三段:全局法则 + 任务贡献规则(去重合并)+ 架构清单。"""
+    header = ("RULES & ARCHITECTURE (global laws that bind every turn of "
+              "every family; each derives from the requirement text — the "
+              "host invents none of it).")
+    return (header + "\n" + build_rules(CHARTER_RULES, task_rules or [])
+            + "\nARCHITECTURE:\n" + build_rules(ARCHITECTURE_LINES))
+
+
+HOST_STACK_RULES_GOAL_FIRST = render_rules()
+
 
 
 def rehearsal_boot_env(base_env: dict, smoke_port: int, extra_ports: list) -> dict:

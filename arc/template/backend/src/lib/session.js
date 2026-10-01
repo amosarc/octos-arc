@@ -2,8 +2,8 @@
 // 接线;会话行存 store 的 'sessions' 集合——server 重启保留 db.run.json,
 // 会话随之中存续(graded contract: "sessions survive server restart");
 // 仅冷启动(无 run 文件)才从种子重建=干净会话面(交付前宿主删 run 文件,
-// 评测从种子起)。hash/verify 转出口令哈希(宿主播种账号的 scrypt 已逐位
-// 兼容,直接 verify)。
+// 评测从种子起;种子由模型按需求实现)。hash/verify 转出口令哈希——模型
+// 种子里的口令一律经 store.hash 生成,直接 verify 兼容。
 const store = require('../database/store');
 const U = require('./util');
 const COOKIE = 'arc_session';

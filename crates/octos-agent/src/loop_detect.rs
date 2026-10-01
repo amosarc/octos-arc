@@ -382,14 +382,18 @@ impl LoopDetector {
         // acceptance specs (`.arc/acceptance`) and the UI contract smoke
         // (`.arc/ui-smoke`). The model's own self-test specs are a third
         // carrier: requirements-only tasks stage them at the workspace root
-        // (`./ui-smoke/playwright.config.ts`), and the 09-30 github run
-        // showed every self-test green went unseen by this matcher (the
-        // path carries no `.arc/` prefix and the bash alias carries the
-        // command under `cmd`, not `command`) — so the double-green stop
-        // never armed for the only real browser verification such runs have.
+        // (`./e2e/playwright.config.ts` — renamed from `./ui-smoke/` on
+        // 09-30 so the name stops suggesting shallow smoke checks; the
+        // legacy patterns stay accepted for old workspaces), and the
+        // 09-30 github run showed every self-test green went unseen by
+        // this matcher (the path carries no `.arc/` prefix and the bash
+        // alias carries the command under `cmd`, not `command`) — so the
+        // double-green stop never armed for the only real browser
+        // verification such runs have.
         if !command.contains(".arc/acceptance")
             && !command.contains(".arc/ui-smoke")
             && !command.contains("ui-smoke/playwright.config.ts")
+            && !command.contains("e2e/playwright.config.ts")
         {
             return;
         }
@@ -789,6 +793,21 @@ mod tests {
         let signal = detector
             .take_green_stop_signal()
             .expect("root ui-smoke self-test double green must arm");
+        assert_eq!(signal.passed, 1);
+    }
+
+    #[test]
+    fn root_e2e_selftest_via_bash_alias_arms_green_stop() {
+        // 09-30 rename: the self-test dir is `./e2e/` (the old name suggested
+        // shallow smoke checks); the matcher must arm on the new carrier too.
+        let mut detector = LoopDetector::new(10);
+        let cmd = "node cli.js test --config ./e2e/playwright.config.ts \
+                   req-1-1-1.spec.ts";
+        detector.record_green_stop("bash", &json!({ "cmd": cmd }), GREEN_OUT);
+        detector.record_green_stop("bash", &json!({ "cmd": cmd }), GREEN_OUT);
+        let signal = detector
+            .take_green_stop_signal()
+            .expect("root e2e self-test double green must arm");
         assert_eq!(signal.passed, 1);
     }
 

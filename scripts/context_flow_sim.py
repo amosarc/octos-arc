@@ -1,0 +1,266 @@
+"""上下文流程模拟器:真实需求 yaml × 真实装配代码 × mock LLM。
+
+不发起任何模型请求。把一次完整 run 里模型实际看到的提示词栈逐字节
+落盘(两形式,用户参考件 arc/prompts/*):
+
+  00a 系统提示词-gateway 层(main._GATEWAY_PROMPT_OVERRIDE → gateway.md,
+      内核 base 替换:7 工具对齐 + 工具纪律)
+  00b 系统行 AGENTS.md(build_system_row_context:Background + children
+      map + RULES & ARCHITECTURE + 任务 FIXTURE 段 + RUN SCOPE)
+      ——内核装配顺序:gateway base → 日期行 → AGENTS.md → memory(压缩态)
+  t01.. 每家族 TURN(BOOTSTRAP 前言[首 turn] + Gherkin Feature + 完成要求
+      一句话 + SEGMENT DIGEST[会话 2+ 首批])
+  n1/n2 nudge、r1/r2 彩排修复、b1 blocked retry、f1 final(变体轮)
+
+每个文件附标注为 MOCK 的脚本化回复,构成完整对话轮。
+
+用法:python3 scripts/context_flow_sim.py [--out context-sim-out]
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "arc"))
+
+import fixture_manifest  # noqa: E402
+import gherkin  # noqa: E402
+import main  # noqa: E402
+import plan_envelope  # noqa: E402
+from rejection_audit import audit_prompt_block  # noqa: E402
+
+TASKS = ["hackathon--sheet", "hackathon--github"]
+PORT = 3000
+SMOKE = 3100
+TOOLCHAIN_CLI = "/tmp/octos-local-grader/node_modules/@playwright/test/cli.js"
+
+
+def _mock(tag: str) -> str:
+    return (f"\n\n---\n[MOCK MODEL RESPONSE — 本次模拟未发起任何模型请求,"
+            f"以下为脚本化回复,仅用于展示对话轮完整形态]\n{tag}\n")
+
+
+def _header(no: str, title: str) -> str:
+    return f"# [turn {no}] {title}\n\n"
+
+
+def render_task(task: str, out_root: Path) -> None:
+    task_dir = ROOT / "arc" / "tasks" / task
+    out = out_root / task
+    out.mkdir(parents=True, exist_ok=True)
+    files: list[tuple[Path, str]] = []
+
+    tree = main.load_requirement_tree(task_dir)
+    family_scope = main.parse_family_scope(main.COMPETITION_FAMILY_SCOPE)
+    family_of = main.family_index(tree)
+    node_batches = main.group_families(tree, 6)
+    if family_scope:
+        node_batches = [b for b in node_batches
+                        if main.batch_in_scope(b, family_scope, family_of)]
+
+    # scope 化树(与 main 一致):fixture 段/种子基线只看 scope 内家族
+    scoped_tree = tree
+    if family_scope:
+        kept = [c for c in (tree.get("children") or [])
+                if c and main.batch_in_scope(main.flatten_atomic(c),
+                                             family_scope, family_of)]
+        scoped_tree = {**tree, "children": kept}
+
+    parent_of: dict[str, dict] = {}
+
+    def _index_parents(node: dict, parent: dict) -> None:
+        for c in node.get("children") or []:
+            if not isinstance(c, dict):
+                continue
+            if str(c.get("type", "")).upper() == "ATOMIC":
+                parent_of[str(c.get("id"))] = parent
+            else:
+                _index_parents(c, c)
+
+    _index_parents(tree, tree)
+
+    fixture_data = fixture_manifest.extract(scoped_tree)
+    try:
+        fixture_compiled = fixture_manifest.compile_seed(fixture_data)
+    except Exception:
+        fixture_compiled = None
+    fixture_stats = {
+        "uncovered": len((fixture_compiled or {}).get("uncovered") or ()),
+        "arrange": len((fixture_compiled or {}).get("arrange") or ()),
+        "seeded": len(((fixture_compiled or {}).get("db") or {})
+                      .get("users", [])),
+        "canonical": bool((fixture_compiled or {}).get("canonical")),
+        "kind": (fixture_compiled or {}).get("kind") or "none"}
+    fixture_rules = fixture_manifest.render_extra_rules(
+        fixture_data, fixture_stats)
+    # 任务层贡献规则与全局法则经 build_rules 去重合并(与 main 同构)
+    task_rules = fixture_manifest.task_rules(fixture_data, fixture_stats)
+
+    # ---- 00a gateway 层(内核 base 替换) ----
+    body = _header("00a", "系统提示词-gateway 层(内核 base 替换)")
+    files.append((out / "00a-system-prompt-gateway.md",
+                  body + main._GATEWAY_PROMPT_OVERRIDE
+                  + _mock("(gateway 层不产生回复——常驻上下文)。")))
+
+    # ---- 00b 系统行 AGENTS.md ----
+    rules_text = plan_envelope.render_rules(task_rules)
+    system_row = main.build_system_row_context(
+        tree, rules_text, fixture_rules, scope=family_scope or None)
+    body = _header("00b", "系统行 AGENTS.md(总纲:Background + children map "
+                          "+ RULES & ARCHITECTURE + FIXTURE + RUN SCOPE)")
+    files.append((out / "00b-system-row-AGENTS.md",
+                  body + system_row
+                  + _mock("(系统行不产生回复——常驻上下文)。")))
+
+    statuses: dict[str, str] = {}
+    done_notes: dict[str, str] = {}
+    turn_no = 0
+
+    def next_no() -> str:
+        nonlocal turn_no
+        turn_no += 1
+        return f"{turn_no:02d}"
+
+    # ---- 会话调度(真实 group_families + scope 过滤;family policy) ----
+    sessions: list[dict] = []
+    for batch in node_batches:
+        fid = str(family_of[str(batch[0].get("id"))].get("id"))
+        if sessions and sessions[-1]["family"] == fid:
+            sessions[-1]["batches"].append(batch)
+        else:
+            sessions.append({"family": fid, "batches": [batch]})
+
+    completion = main.GOAL_FIRST_TURN_COMPLETION.format(smoke=SMOKE)
+
+    for si, sess in enumerate(sessions, 1):
+        fid = sess["family"]
+        for bi, batch in enumerate(sess["batches"], 1):
+            ids = [str(n.get("id")) for n in batch]
+            for nid in ids:
+                statuses[nid] = "active"
+            features = main.build_turn_features(
+                tree, batch, family_of, parent_of, statuses=statuses)
+            prompt = features
+            if si == 1 and bi == 1:
+                prompt = main.BOOTSTRAP_PREAMBLE + prompt
+            if bi == 1 and si > 1:
+                prompt += main._segment_digest(
+                    done_notes, statuses,
+                    has_seeds=bool((fixture_compiled or {}).get("db")))
+            prompt += completion
+            no = next_no()
+            title = (f"家族会话 {si}({fid})批 {bi}/{len(sess['batches'])}"
+                     f" TURN — 节点 {', '.join(ids)}")
+            body = _header(no, title)
+            reply = (f"(mock) 已实现 {', '.join(ids)}:spec 先行写绿,"
+                     f"冷启动自测全绿,节点收尾。")
+            files.append((out / f"t{no}-{fid}-b{bi}-turn.md",
+                          body + prompt + _mock(reply)))
+            for nid in ids:
+                statuses[nid] = "done"
+            done_notes.update(
+                {nid: "(mock) implemented per Feature; family suite green"
+                 for nid in ids})
+
+    b1 = sessions[0]["batches"][0]
+
+    n1 = (main.NODE_NUDGE_PROMPT
+          + "\n\n" + main.batch_req_block(b1, parent_of))
+    body = _header("n1", "零文件 nudge(懒轮推一把)")
+    files.append((out / "n1-nudge-zero-file.md",
+                  body + n1 + _mock("(mock) 立即写实现文件。")))
+
+    n2 = (main.SELFTEST_NUDGE_PROMPT
+          + "\n\n" + main.batch_req_block(b1, parent_of))
+    body = _header("n2", "零自测 nudge(改了文件但没跑自测)")
+    files.append((out / "n2-nudge-no-selftest.md",
+                  body + n2 + _mock("(mock) 写 spec 并对运行中应用跑绿。")))
+
+    r1 = (main.REHEARSAL_REPAIR_PROMPT.format(
+        error="(mock) backend crashed on boot: Cannot find module "
+              "'./routes/index'",
+        port=PORT, smoke=SMOKE,
+        retry_note=main.REHEARSAL_REPAIR_FIRST_NOTE)
+        + "\n\n" + main.batch_req_block(b1, parent_of))
+    body = _header("r1", "彩排修复轮(首修)")
+    files.append((out / "r1-rehearsal-repair-first.md",
+                  body + r1 + _mock("(mock) 修复 require 路径并自验。")))
+
+    r2 = (main.REHEARSAL_REPAIR_PROMPT.format(
+        error="(mock) backend crashed on boot: Cannot find module "
+              "'./routes/index'",
+        port=PORT, smoke=SMOKE,
+        retry_note=main.REHEARSAL_REPAIR_RETRY_NOTE)
+        + "\n\n" + main.batch_req_block(b1, parent_of))
+    body = _header("r2", "彩排修复轮(换策略 retry)")
+    files.append((out / "r2-rehearsal-repair-retry.md",
+                  body + r2 + _mock("(mock) 换修法重推需求原文再修。")))
+
+    rb = sessions[min(1, len(sessions) - 1)]["batches"][-1]
+    for n in rb:
+        statuses[str(n.get("id"))] = "blocked"
+    r_features = main.build_turn_features(
+        tree, rb, family_of, parent_of, statuses=statuses)
+    b1_prompt = (
+        "BLOCKED RETRY: this family's earlier turn ended, but the app "
+        "keeps failing the host's startup/route rehearsal. Current "
+        "rehearsal error:\n(mock) route probe GET /api/teams -> 500"
+        "\n\nRe-derive this family's implementation from the Feature "
+        "below — the requirement text is the authority (quoted names "
+        "and error strings verbatim). Fix the RUNNING app, then verify "
+        "with your own spec.\n"
+        + r_features + completion)
+    body = _header("b1", "blocked retry(终局前一遍翻案,fresh 会话)")
+    files.append((out / "b1-blocked-retry.md",
+                  body + b1_prompt + _mock("(mock) 修复并自测绿。")))
+    for n in rb:
+        statuses[str(n.get("id"))] = "done"
+
+    mock_audit = {"findings": [
+        {"kind": "red", "file": "backend/src/routes/mock.js", "line": 42,
+         "literal": "(mock) some invented rejection message",
+         "words": 5}]}
+    f_prompt = main.HOST_FINAL_CHECK_UI_PROMPT
+    f_prompt += (
+        "\nHOST PAGE-HEALTH PROBE (ground truth, headless browser walk "
+        f"over the built app on port {SMOKE}): uncaught page errors — "
+        "['(mock) TypeError: x is not a function @ app.js:12']. Open the "
+        "same pages, find the throwing code path and fix it; every graded "
+        "step behind a crash scores zero.")
+    f_prompt += audit_prompt_block(mock_audit)
+    body = _header("f1", "final 轮(宿主探针之后的模型终验)")
+    files.append((out / "f1-final-check.md",
+                  body + f_prompt + _mock("(mock) 逐链一行证据,全部走通。")))
+
+    for path, text in files:
+        Path(path).write_text(text, encoding="utf-8")
+    print(f"[{task}] {len(files)} file(s) -> {out}"
+          f" | batches={len(node_batches)} sessions={len(sessions)}")
+
+
+def run_sim() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", default=str(ROOT / "context-sim-out"))
+    args = ap.parse_args()
+    out_root = Path(args.out)
+    out_root.mkdir(parents=True, exist_ok=True)
+    (out_root / "README.md").write_text(
+        "# context-sim-out\n\n"
+        "真实需求 yaml × 真实装配代码 × mock LLM 的全轮次提示词落盘。\n"
+        "系统提示词栈(模型真实视野,按装配顺序):00a gateway 层(内核 base "
+        "替换)→ 日期行(内核自加)→ 00b AGENTS.md 总纲 → memory(压缩态)。\n"
+        "每个 t*/n*/r*/b1/f1 文件 = 宿主发给模型的完整用户消息(逐字节出自"
+        "装配函数)+ 标注为 MOCK 的回复。\n"
+        "未覆盖:内核 harness 检查点打回、wall/auth 切断提示、SPEC REGRESSION"
+        "(仅 staged-specs 任务)。\n",
+        encoding="utf-8")
+    for task in TASKS:
+        render_task(task, out_root)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(run_sim())

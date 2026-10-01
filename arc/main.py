@@ -61,15 +61,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from arcbench_agent_runtime import AgentRuntime  # noqa: E402
 import clock  # noqa: E402  (时间戳单一时钟源:北京时间 UTC+8)
 import fixture_manifest  # noqa: E402  (夹具契约提取/宿主种子编译)
+import gherkin  # noqa: E402  (yaml 场景 → Gherkin 渲染,确定性清洗)
 import plan_envelope  # noqa: E402
 import rejection_audit  # noqa: E402  (拒绝文案引用审计:发明 400 保险网)
 import scaffold  # noqa: E402  (宿主脚手架包:模板/清单/schema 编译唯一公开面)
 
 # 只保留:①工具链 CLI 发现(下述 _pw_* 助手);②被内核放行的自测命令
-# 形状所需的 ui-smoke/playwright.config.ts 最小骨架(工作区根,脱离
-# 平台 .arc 命名空间)。
+# 形状所需的 e2e/playwright.config.ts 最小骨架(工作区根,脱离平台 .arc
+# 命名空间;09-30 由 ui-smoke 改名——"smoke"暗示浅检查,而纪律要求的是
+# 全场景走查 E2E;内核绿停 matcher 双载体兼容)。
 PLATFORM_PW_VERSION = "1.57.0"
-SELFTEST_SUBDIR = "./ui-smoke"
+SELFTEST_SUBDIR = "./e2e"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -78,8 +80,8 @@ SELFTEST_SUBDIR = "./ui-smoke"
 #   "REQ-1,REQ-3"  → 任意家族/子家族/原子 id 组合
 #   ""             → 全量(最终冲分提交务必改回这里!)
 # 本地仿真不受它影响:env OCTOS_ARC_FAMILIES 设置时覆盖此值。
-# COMPETITION_FAMILY_SCOPE = "REQ-1"
-COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2,REQ-3"
+# COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2,REQ-3"
+COMPETITION_FAMILY_SCOPE = ""
 
 # 思考参数
 # config.json 的 model_thinking/model_reasoning_effort,内核按
@@ -100,37 +102,30 @@ REASONING_EFFORT_REPAIR = "low"
 # 内置文本向全量工具集描述规则,ARC 的 OCTOS_TOOL_ALLOWLIST 只放行 7 个
 # 工具——Subagents/Memory 两节与 glob/code_structure/diff_edit/apply_patch/
 # view_image/spawn/save_memory/recall/ask_user_question 等点名全是幻影
-# (每请求固定 token 地板 + 选择摩擦 + 调用必败)。此覆盖与 7 工具对齐;
-# 内置文件与其测试不动。
+
+# gateway base(pi 风格):一句身份 + 单行祈使 bullet,不解释理由;
+# 行为法则的详细判据在系统行 RULES & ARCHITECTURE,此处不重复。
 _GATEWAY_PROMPT_OVERRIDE = """\
-You are an expert software engineering agent working directly in the user's workspace. You accomplish tasks by calling tools — reading real code, making real edits, and running real commands — never by guessing or simulating results. Reply directly; never narrate or say "Thinking".
+You are an expert software engineering agent working in the user's workspace. Accomplish tasks by calling tools — read real code, make real edits, run real commands. Never simulate results.
 
 ## Tool Discipline
 
-- READ BEFORE WRITE. Before editing any file, read the relevant region with `read_file` (or locate it with `grep` / `list_dir`). Never edit code you have not seen.
-- Batch independent read-only calls (`read_file`, `grep`, `list_dir`) in a single response — they run in parallel. Do not spread independent lookups across turns.
-- Prefer the dedicated tools over shell: `read_file`, `grep`, `list_dir`. Use `bash` only when a dedicated tool cannot do the job.
-- For edits use the smallest sufficient tool: `edit_file` for surgical changes; `write_file` only for new files or full rewrites.
-- For multi-step work, maintain a plan with `update_plan`: emit the checklist once at task start, tick items as they complete, and do not restate the plan on later turns.
-- This session is unattended — no user will answer questions. When blocked or uncertain, state the assumption you are making and continue; do not stop to ask.
+- Read before write: never edit code you have not seen.
+- Batch independent read-only calls (`read_file`, `grep`, `list_dir`) in one response.
+- Prefer dedicated tools over shell; use `bash` only when they cannot do the job.
+- Use `edit_file` for surgical edits; `write_file` only for new files or full rewrites.
+- Emit the `update_plan` checklist once at task start; tick items as you go, never restate it.
+- This session is unattended: state your assumption and continue — do not ask questions.
+- Run builds and tests via `bash` after every change.
+- Never claim or fabricate results you did not run; a failed command is failed.
+- Start acting immediately; lead closing messages with what was done.
+- Be concise in your replies.
 
 ## Code Output Style
 
 - Code written to files must be pure code: no explanations, no prose blocks, no comments or docstrings, no usage examples or sample data.
 - Keep code compact: no blank lines, no debug logging, no speculative abstractions or scaffolding for imagined future needs.
 - Write the smallest implementation that satisfies the requirement; reuse existing helpers in the project instead of duplicating logic.
-
-## Verification
-
-- After changing code, run the relevant build and tests via `bash` — whatever the project uses.
-- Report honest results: quote real command output or a faithful summary of it. NEVER invent, simulate, or "reconstruct" diffs, test output, or command results. Never claim a build or test passed unless you ran it and saw it pass.
-- If a command fails, say it failed and include the real error. Do not silently substitute an alternative outcome.
-- If something cannot be verified in this environment, say so explicitly.
-
-## Communication
-
-- Plain, factual tone. Lead with what was done, then evidence (tests run, output), then risks or follow-ups. Start tool work immediately; do not restate the task or plan in prose before acting. No preamble or closing pleasantries in final answers.
-- No markdown-heavy chatter in status replies: while work is in progress, at most one short status line per turn.
 """
 
 
@@ -296,7 +291,7 @@ def _segment_digest(node_done_notes: dict[str, str],
 
     hg-github-001:分段后模型翻自己的事件日志/重读已读文件来重建
     记忆(turn7: 74 工具里 32 个 .arc 考古 + 30 个重读,0 编辑;跨段
-    重复 4 次)。HOST REPORT 不承载逐节点结论,这里把宿主已知的最短
+    重复 4 次)。跨会话宿主记忆面只有本摘要,这里把宿主已知的最短
     事实(节点→完成留言尾)喂进去,配合追踪区关读护栏切断考古路径。
     """
     lines = [
@@ -311,17 +306,20 @@ def _segment_digest(node_done_notes: dict[str, str],
     while len("\n".join(lines)) > 1900 and len(lines) > 3:
         lines.pop()
     if has_seeds:
-        # 仅在宿主真落过种子时声明(db 为空的任务这句是假陈述);
-        # 仲裁条款(需求原文 wins)只在有种子可仲裁时才有意义。
+        # 09-30 宿主播种退役后的中性句:种子是模型的实现义务,宿主只
+        # 声明"按 GIVEN 行覆盖"的验证基线;仲裁条款(需求原文 wins)
+        # 只在有种子可仲裁时才有意义。
         lines.append(
-            "backend/data/db.json seeds were compiled by the host from the "
-            "requirement's GIVEN lines — build on them; where a seeded value "
+            "backend/data/db.json must carry the seed implemented from "
+            "the GIVEN lines (plus a data: section if present) — verify it "
+            "covers them before building on it; where a seeded value "
             "contradicts the requirement text, the requirement wins (correct "
             "the seed row, keep the collection and row names).")
     return "\n".join(lines)[:2000]
 
 
-def _postflight_structure_check(output_dir: Path, web_port: int = 3000) -> None:
+def _postflight_structure_check(
+        output_dir: Path, web_port: int = plan_envelope.WEB_PORT) -> None:
     """Diagnose and repair the deliverable layout the runner checks.
 
     The runner requires PROJECT_DIR/frontend and PROJECT_DIR/backend after
@@ -492,6 +490,7 @@ def _rehearse_startup(output_dir: Path, smoke_port: int, *,
     if not (frontend.is_dir() and backend.is_dir()):
         return "frontend/ or backend/ missing at workspace root"
     _stop_dev_server(smoke_port)
+    _reset_runtime_seed(output_dir)
 
     def run_cmd(cmd: list, cwd: Path, timeout: int) -> tuple:
         try:
@@ -750,6 +749,22 @@ def _stop_dev_server(smoke_port: int) -> None:
         pass
 
 
+def _reset_runtime_seed(output_dir: Path) -> None:
+    """回种子起点:删运行态 db.run.json,下次 boot 从 db.json 重新拷贝。
+
+    「回到种子」由宿主在每次验证性 boot 前删运行态文件达成,不是 store
+    的重启行为。探测/评分基线必须从需求的种子契约起步:模型自测留下的
+    运行态(如 REQ-1-1-3 场景按 GIVEN 改掉的种子账号密码)不得让
+    login-probe 把「需求要求的旧行为」(旧密码登录失败)误判成
+    declared seed/auth 损坏而进修复轮(09-30 用户核验)。
+    """
+    run_db = output_dir / "backend" / "data" / "db.run.json"
+    try:
+        run_db.unlink()
+    except OSError:
+        pass
+
+
 def _boot_dev_server(output_dir: Path, smoke_port: int,
                      extra_ports: list, log) -> bool:
     """宿主尽算：宿主把后端以分离会话启动在冒烟端口并等健康检查通过，
@@ -878,7 +893,7 @@ def stage_selftest_dir(output_dir: Path, smoke_port: int,
 // MY-CHECK.spec.ts.example — write YOUR OWN spec from the requirement
 // text (the node's scenarios are the oracle), then run it with an
 // explicit file argument:
-//   node <cli> test --config ui-smoke/playwright.config.ts MY-CHECK.spec.ts
+//   node <cli> test --config e2e/playwright.config.ts MY-CHECK.spec.ts
 // That form is the convenient standard (re-runnable and green-stop-visible);
 // any other Playwright invocation style is yours to choose as well.
 //
@@ -932,8 +947,6 @@ test('my check - name what this verifies', async ({ page }) => {
     return stage
 
 
-# build_selftest_note 已下沉到提示词区(与工单模板同处)——09-29 减法
-# 合并后它是自测装置契约的唯一出处(见 GOAL_FIRST_NODE_PROMPT_TEMPLATE
 # 之后的定义)。
 
 # 模型自测取证(09-30):从内核 context-logs 的 tools.jsonl 复原每条
@@ -1054,7 +1067,7 @@ def _selftest_ran_since(output_dir: Path, marks: dict[str, int]) -> bool:
 
 
 def _ensure_host_toolchain(log) -> Path | None:
-    """宿主尽算原则：自验工具链(Tier-2/ui-smoke/SPEC RUN)三级解析——
+    """宿主尽算原则：自验工具链(Tier-2/e2e/SPEC RUN)三级解析——
 
     ① 镜像全局直用(真实/仿真容器的主路径)：runner 镜像自带全局
        @playwright/test@1.57.0 + chromium-1200,与评测引擎是同一份
@@ -1188,12 +1201,7 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
     # (regression, Tier-2 first pass, rerun-after-fix) start identically,
     # which is also what makes the guardrail's first-vs-rerun comparison
     # fair.
-    run_db = output_dir / "backend" / "data" / "db.run.json"
-    if run_db.exists():
-        try:
-            run_db.unlink()
-        except OSError:
-            pass
+    _reset_runtime_seed(output_dir)
     backend = output_dir / "backend"
     env = plan_envelope.rehearsal_boot_env(os.environ, smoke_port,
                                            extra_ports or [])
@@ -1390,11 +1398,7 @@ def _page_health_run(output_dir: Path, smoke_port: int,
         if not (output_dir / "frontend" / "dist" / "index.html").is_file():
             return None
         _stop_dev_server(smoke_port)
-        run_db = output_dir / "backend" / "data" / "db.run.json"
-        try:
-            run_db.unlink()
-        except OSError:
-            pass
+        _reset_runtime_seed(output_dir)
         env = plan_envelope.rehearsal_boot_env(os.environ, smoke_port,
                                                extra_ports or [])
         backend = output_dir / "backend"
@@ -1590,17 +1594,14 @@ SELFTEST_NUDGE_PROMPT = (
 
 
 def batch_req_block(batch: list[dict],
-                    seeded_scenarios: set[str] | frozenset | None = None
-                    ) -> str:
-    """受影响批次的双段契约原文(修复/nudge 轮追加)。
-
-    修复轮原本只有错误细节——补上"本轮修的东西要满足什么",契约与
-    错误同场,不再让模型凭实现记忆猜。
-    """
-    return ("\n\nTHIS BATCH — REQ CONTENT + VERIFICATION REQUIREMENTS "
-            "(verbatim — satisfy these on the RUNNING app):\n\n"
-            + "\n\n".join(describe_node(n, seeded_scenarios)
-                          for n in batch))
+                    parent_of: dict[str, dict] | None = None) -> str:
+    """受影响批次的 Gherkin Feature(修复/nudge 轮追加)——契约与错误
+    同场,不再让模型凭实现记忆猜。"""
+    if parent_of:
+        return gherkin.batch_turn_features(batch, parent_of)
+    return "\n\n".join(
+        f"Feature: {' '.join(str(n.get('name') or '').split())}\n"
+        + gherkin.render_scenarios(n, "full") for n in batch)
 
 
 # ---------------------------------------------------------------- requirements
@@ -1679,7 +1680,7 @@ def _strip_reference_image_marks(node: dict) -> None:
     """递归剥离节点树中的图片记号(description + 场景 step content)。
 
     在 load_requirement_tree 的 safe_load 之后、源行号附着之前执行;
-    下游 describe_node/render_verbatim_nodes/家族契约/闭包全部继承,
+    下游 Gherkin 渲染/家族契约/闭包全部继承,
     系统行/工单/骨架 blob 自此天然无图。确定性,字节稳定。
     """
     desc = node.get("description")
@@ -1731,7 +1732,7 @@ def _attach_source_lines(tree: dict, raw: str) -> None:
 def _annotate_ancestor_folder_deps(node: dict, inherited: tuple) -> None:
     """沿 parent 链累积 FOLDER 级 dependencies,标到 ATOMIC 节点。
 
-    消费方=collect_dependency_context(闭包起点并入,09-30 封堵换 yaml
+    消费方=dependency_closure(闭包起点并入,09-30 封堵换 yaml
     丢失面);与节点自身 dependencies 去重(后者由既有 BFS 距离 1 承载,
     不双发)。root 的 dependencies 同律向下传播(整树级依赖)。
     """
@@ -1807,18 +1808,6 @@ def group_siblings(tree: dict, max_batch: int) -> list[list[dict]]:
     return batches
 
 
-_VERIFICATION_LABEL = (
-    "VERIFICATION REQUIREMENTS (verbatim — these scenarios are the "
-    "acceptance criteria; a grader walks them end-to-end in a real "
-    "browser; every step must pass):")
-
-_TEMPLATED_NOTE = (
-    "VERIFICATION REQUIREMENTS: this task's scenario steps for this node "
-    "are template placeholders — the REQ CONTENT description above is the "
-    "authoritative flow contract; the grader walks the operations it "
-    "names end-to-end in a real browser. GIVEN lines below carry the "
-    "data contracts.")
-
 # 场景模板填充检测(09-29 sheet 取证:sheet 题 WHEN/THEN 为模板占位串,
 # github 题为真步骤——必须逐节点自适应,不能任务级开关)。判据:场景
 # 文本(场景名+步骤 content)某个 3-gram 出现 ≥5 次、不出现在节点
@@ -1866,7 +1855,7 @@ def _node_scenarios_templated(node: dict) -> bool:
 def _mark_templated_scenarios(tree: dict) -> int:
     """load 期逐 ATOMIC 节点打标(只加 _scenarios_templated,不改 steps
     原文——播种编译/流走查 GIVEN 刮取/闭包等下游消费方继续读原文);
-    渲染层(describe_node)按标记分支。返回命中节点数。"""
+    渲染层(gherkin 清洗)按标记分支。返回命中节点数。"""
     marked = 0
     for folder in (tree or {}).get("children") or []:
         if not isinstance(folder, dict):
@@ -1957,94 +1946,6 @@ def _mark_boilerplate_scenarios(tree: dict) -> int:
                 sc["_steps_templated"] = True
                 marked += 1
     return marked
-
-
-def describe_node(node: dict,
-                  seeded_scenarios: set[str] | frozenset | None = None,
-                  verification: str = "full") -> str:
-    # 双段契约:REQ CONTENT(实现什么)与 VERIFICATION REQUIREMENTS(怎么算
-    # 过)显式分立——不混在描述里,执行者每轮都清楚两件事的原文。
-    # verification="full":双段全量(工单/闭包/骨架地图);="data-only":
-    # 只保留场景名+GIVEN 数据契约,WHEN/THEN 不进(骨架轮判据用不到
-    # THEN 断言,却要为每个节点付全额场景文本并永久驻留历史)。
-    # GIVEN 恒原文(09-30 定则);seeded_scenarios 参数已随"宿主播种→
-    # 指针"机制退役保留占位,不再消费。
-    lines = [f"ID: {node.get('id')}", f"Name: {node.get('name', '')}"]
-    if node.get("description"):
-        lines.append("REQ CONTENT (verbatim):")
-        lines.append(_indent_block(str(node["description"]), "  "))
-    scenarios = node.get("scenarios") or []
-    if scenarios:
-        templated = bool(node.get("_scenarios_templated"))
-        if verification == "full":
-            lines.append(_TEMPLATED_NOTE if templated
-                         else _VERIFICATION_LABEL)
-        else:
-            lines.append(
-                "SCENARIO DATA CONTRACTS (GIVEN arrange material; the "
-                "graded WHEN/THEN steps ride with each node's family "
-                "work order):")
-        for sc in scenarios:
-            lines.append(f"  - {sc.get('name', 'scenario')}")
-            steps_templated = templated or bool(sc.get("_steps_templated"))
-            for step in sc.get("steps") or []:
-                if not isinstance(step, dict):
-                    continue
-                kw = str(step.get("keyword", ""))
-                if verification == "data-only" and kw.upper() != "GIVEN":
-                    continue
-                if steps_templated and verification == "full" \
-                        and kw.upper() != "GIVEN":
-                    # 模板节点/占位场景:GIVEN 是数据契约保留;WHEN/THEN
-                    # 是占位垃圾,由注记统一说明,不逐条渲染。
-                    continue
-                # 09-30 定则:GIVEN 原样进上下文,不许指针化——曾把 seeded
-                # 场景的 GIVEN 换成"已播种进 db.json"一行指针,演员断言
-                # ("An organization Owner is signed in")随之离开模型上下
-                # 文,REQ-2/3 整族死在登录第一步(github 09-30 法医)。种子
-                # 由模型按需求实现后该分支自然消失,此处物理删除防回流。
-                lines.append(f"      {kw} {step.get('content', '')}")
-            if (verification == "full" and steps_templated
-                    and not templated and sc.get("_steps_templated")):
-                # 场景级占位(节点本身不是模板):一句话交代去向,不冒充
-                # 验收判据。
-                lines.append(
-                    "      (WHEN/THEN steps omitted — platform placeholder "
-                    "boilerplate; this scenario re-walks the workflow above "
-                    "signed in. GIVEN lines carry the data contract.)")
-    deps = node.get("dependencies") or []
-    if deps:
-        lines.append(f"Depends on: {', '.join(map(str, deps))}")
-    return "\n".join(lines)
-
-
-def render_verbatim_nodes(tree: dict,
-                          seeded_scenarios: set[str] | frozenset | None = None,
-                          verification: str = "full"
-                          ) -> str:
-    """全量 atomic 节点双段拼接(REQ CONTENT + VERIFICATION REQUIREMENTS)。
-
-    骨架轮全量注入源:auth/数据端点契约决策直接以原文在场,不依赖地图
-    指针自读(09-29 sheet run:骨架轮裸猜 /api/signin 被排练门抓住返修)。
-    verification="data-only"(骨架轮专用):骨架的决策面是 auth/数据端点/
-    外壳结构——THEN 断言对它零贡献,场景 WHEN/THEN 全部不进,只保留
-    GIVEN 数据契约。
-    """
-    return "\n\n".join(
-        describe_node(n, seeded_scenarios, verification)
-        for n in flatten_atomic(tree))
-
-
-# ------------------------------------------------------- goal-first context
-#
-# requirements.yaml 不整份透传(github 3819 行/sheet 3022 行),分层封装——
-#   render_requirements_map: root description 逐字 + 一级标题地图
-#     (每家族 id+name 及其子标题),每工单必带,~2-3KB;
-#   describe_family_context: 本批所属家族的 FOLDER 契约逐字
-#     (家族级+命中子家族级——模块契约此前只进 shared_contract 且被
-#     12KB 截断,github 24.5KB 权限契约被裁半);
-#   group_families: 顶层家族一个工单,超大家族沿子家族边界切。
-# 全部确定性树遍历,零 LLM,字节稳定。
 
 
 def render_root_contract(tree: dict) -> str:
@@ -2145,32 +2046,31 @@ def build_system_row_context(tree: dict, rules_text: str,
     scope=运行范围(OCTOS_ARC_FAMILIES)时追加 RUN SCOPE 段(整 run
     恒定,仍字节稳定);标题树保持全量——范围是调度决策不是需求裁剪。
     """
-    # 去重(09-28 sheet run llm.jsonl 实证 FIXTURE CONTRACT ×2):rules 内嵌
-    # 的通用段与紧随其后的 fixture_rules(任务专属超集,已覆盖 VERBATIM/
-    # never-delete/db.run.json/restart 全部语义)重复——裁通用段留一行指针。
-    # 在装配层裁而非改常量:RULES_MUST_NAME 断言钉在常量上。
-    trimmed_rules = re.sub(
-        r"FIXTURE CONTRACT \(graded[^\n]*(?:\n(?![A-Z]{2,}|$)[^\n]*)*",
-        "FIXTURE CONTRACT: see the task-specific FIXTURE section below — "
-        "seed details bind VERBATIM; runtime db.run.json never ships.\n",
-        rules_text, count=1)
+    """系统行常驻层(全局层,字节稳定,缓存 0 号位)。
+
+    两形式之 AGENTS.md(用户参考件 arc/prompts/AGENTS.md):三段——
+    Background(ROOT description 原文=产品范围)+ children map(全树
+    行号地图,out-of-scope 家族的唯一存在感)+ Rules & Architecture
+    (紧凑总纲)。经 <data_dir>/AGENTS.md 进入内核系统行
+    (load_bootstrap_files 通道,base+date 之后、memory 之前);每分段
+    重读一次,段内逐字节稳定。挥发物(进度账本/家族细节/批节点)绝不
+    进这里——会破坏前缀缓存。scope=运行范围(OCTOS_ARC_FAMILIES)时
+    追加 RUN SCOPE 段(整 run 恒定,仍字节稳定)。
+    """
     parts = [
-        "ROOT CONTRACT (verbatim — global rules that bind every family):",
+        "Background:",
         render_root_contract(tree),
-        "APP OUTLINE (every family/sub-family in document order — "
-        "locate any section here; cross-family detail beyond your work "
-        "order's dependency closure: read THAT section of "
-        "requirements/requirements.yaml by heading id):",
+        "children map:",
         render_map_outline(tree),
-        trimmed_rules,
+        rules_text,
         fixture_rules,
     ]
     if scope:
         parts.append(
             "RUN SCOPE (operator-limited): this run implements ONLY "
             + ", ".join(sorted(scope))
-            + " — work orders for other families are out of scope; do "
-            "not implement them, and expect their surfaces to be absent.")
+            + " — out-of-scope families get no work orders, no "
+            "implementation, and no seed data this run.")
     # 图片记号防线已上移到 load_requirement_tree 的载入剥离(09-29):
     # 树在进任何渲染器之前已无 ![...](...) 记号,此处不再重复防御。
     return "\n\n".join(parts)
@@ -2197,36 +2097,39 @@ def _node_family_index(tree: dict) -> tuple[dict[str, dict], dict[str, str]]:
     return node_by_id, fam_of_node
 
 
-_CLOSURE_MAX_NODES = 12
-_CLOSURE_MAX_CHARS = 30000
+_CLOSURE_MAX_NODES = 24
+_CLOSURE_MAX_CHARS = 6000
 
 
-def collect_dependency_context(tree: dict, batch: list[dict],
-                               family_of: dict[str, dict],
-                               seeded_scenarios: set[str] | frozenset | None
-                               = None) -> str:
-    """本批节点 Depends on 闭包(不在本批的依赖,双段契约逐字)。
+def _dep_ui_line(node: dict) -> str:
+    """依赖节点 → REUSED UI CONTRACT 行(id (名): 引用名 / …)。
 
-    传递闭包按距离分轮展开(直接依赖优先,文档序 tiebreak);输出含跨族
-    与同族跨批(后者在大家族拆批后是唯一的契约在场源;family_of 参数
-    保留为调用方兼容)。BFS 起点并入批节点祖先 FOLDER 的 dependencies
-    (09-30:FOLDER 级依赖边已进会话排序图 family_dependency_edges,闭包
-    注入漏了——若某 yaml 的 FOLDER 独立声明跨族依赖而无 ATOMIC 重述,
-    依赖契约将无处在场;当前两份真题 FOLDER 边全被 ATOMIC 重述,零
-    行为变化,纯健壮性封堵)。失控保护:输出节点
-    >12 或累计 >30K chars 时截断深距离层并留标记——直接依赖(距离 1)
-    永不截。确定性遍历,零 LLM。
+    引用名取自 name+description(gherkin.quoted_names,反引号种子值
+    不在此列);无引用名的依赖(如 FOLDER)只出 id (名) 行。
+    """
+    dep_id = str(node.get("id"))
+    name = " ".join(str(node.get("name") or "").split())
+    line = f"- {dep_id} ({name})"
+    names = gherkin.quoted_names(f"{name} {node.get('description') or ''}")
+    if names:
+        line += ": " + " / ".join(names)
+    return line
+
+
+def dependency_closure(tree: dict,
+                       batch: list[dict]) -> tuple[list[dict], list[dict]]:
+    """本批节点 Depends on 传递闭包(BFS,环安全,批内去重)。
+
+    紧凑依赖块的数据源:返回 (闭包节点 BFS 序, UI 行被失控帽裁掉的
+    深距离节点)——DEPENDENCIES id 行永远完整,帽只裁 REUSED UI 行。
+    距离 1 起点集 = 批节点自身 deps + 祖先 FOLDER deps(永不裁);
+    同族跨批依赖照旧入闭包(大家族拆批后,依赖节点的 id/名/引用名在
+    后来批次无别处在场)。确定性遍历,零 LLM。
     """
     node_by_id, _ = _node_family_index(tree)
     batch_ids = {str(n.get("id")) for n in batch}
-    # BFS 按距离分轮:frontier 全展开,输出留不在本批的依赖——跨族照旧;
-    # 同族但跨批(github 实测 20 处,如 batch3 REQ-2-2-1→batch2 REQ-2-1-2)
-    # 也进闭包:旧"同族全剪"假设家族=单工单,大家族拆批后依赖节点的
-    # 双段原文在后来批次的工单里无处在场(09-29 二轮修复)。
     seen: set[str] = set(batch_ids)
-    # 距离 1 起始集 = 批节点自身 deps + 祖先 FOLDER deps(两源都是
-    # "文本直接声明"的依赖,同享永不截断;标注期已对自身 deps 去重)。
-    first_round: list[str] = []
+    first_round: list[dict] = []
     frontier: list[dict] = []
 
     def _expand(deps) -> None:
@@ -2239,19 +2142,15 @@ def collect_dependency_context(tree: dict, batch: list[dict],
             if dep_node is None:
                 continue
             frontier.append(dep_node)
-            first_round.append(dep_id)
+            first_round.append(dep_node)
 
     for n in batch:
         _expand(n.get("dependencies") or [])
         _expand(n.get("_ancestor_folder_deps") or [])
-    by_distance: list[list[str]] = [first_round] if first_round else []
-    # BFS 按距离分轮:frontier 全展开,输出留不在本批的依赖——跨族照旧;
-    # 同族但跨批(github 实测 20 处,如 batch3 REQ-2-2-1→batch2 REQ-2-1-2)
-    # 也进闭包:旧"同族全剪"假设家族=单工单,大家族拆批后依赖节点的
-    # 双段原文在后来批次的工单里无处在场(09-29 二轮修复)。
+    by_distance: list[list[dict]] = [first_round] if first_round else []
     while frontier:
         next_frontier: list[dict] = []
-        emitted: list[str] = []
+        emitted: list[dict] = []
         for n in frontier:
             for dep in n.get("dependencies") or []:
                 dep_id = str(dep)
@@ -2262,36 +2161,66 @@ def collect_dependency_context(tree: dict, batch: list[dict],
                 if dep_node is None:
                     continue
                 next_frontier.append(dep_node)
-                emitted.append(dep_id)
+                emitted.append(dep_node)
         if emitted:
             by_distance.append(emitted)
         frontier = next_frontier
     if not by_distance:
-        return ""
-    # 距离 1 永不截;深距离层在超限时整层丢弃,留截断标记。
-    keep: list[str] = []
+        return [], []
+    all_nodes = [n for round_ in by_distance for n in round_]
+    kept: list[dict] = []
+    dropped: list[dict] = []
     chars = 0
-    dropped = 0
     for distance, round_ in enumerate(by_distance, 1):
-        take = distance == 1
-        if distance > 1 and (len(keep) + len(round_) <= _CLOSURE_MAX_NODES
-                             and chars < _CLOSURE_MAX_CHARS):
-            take = True
-        if take:
-            for dep_id in round_:
-                block = describe_node(node_by_id[dep_id], seeded_scenarios)
-                keep.append(block)
-                chars += len(block)
-        else:
-            dropped += len(round_)
-    parts = ["\n\n".join(keep)]
+        if distance > 1:
+            projected = chars + sum(
+                len(_dep_ui_line(n)) + 1 for n in round_)
+            if (len(kept) + len(round_) > _CLOSURE_MAX_NODES
+                    or projected >= _CLOSURE_MAX_CHARS):
+                dropped.extend(round_)
+                continue
+        kept.extend(round_)
+        chars += sum(len(_dep_ui_line(n)) + 1 for n in round_)
+    return all_nodes, dropped
+
+
+def _dependency_block(dep_nodes: list[dict], dropped: list[dict],
+                      statuses: dict[str, str] | None) -> str:
+    """紧凑依赖块:DEPENDENCIES(状态按 done/pending 分句)+ REUSED UI
+    CONTRACT 行 + 截断标记。依赖节点的场景全文不再进场(09-30 定则:
+    无须把依赖场景描述带过来,可复用面=引用名+种子值)。"""
+    done_ids: list[str] = []
+    pending_ids: list[str] = []
+    for n in dep_nodes:
+        nid = str(n.get("id"))
+        st = (statuses or {}).get(nid, "done")
+        (done_ids if st == "done" else pending_ids).append(nid)
+    lines: list[str] = []
+    if done_ids:
+        lines.append(
+            "DEPENDENCIES: " + " / ".join(done_ids)
+            + " — already implemented, suites green when finished; do NOT "
+            "reimplement them — build on their seed and UI contract.")
+    if pending_ids:
+        lines.append(
+            "DEPENDENCIES: " + " / ".join(pending_ids)
+            + " — not yet implemented (cyclic order): implement the minimum "
+            "of them this Feature needs, straight from the requirement "
+            "text; do not wait.")
+    dropped_ids = {str(n.get("id")) for n in dropped}
+    ui_lines = [_dep_ui_line(n) for n in dep_nodes
+                if str(n.get("id")) not in dropped_ids]
+    if ui_lines:
+        lines.append("REUSED UI CONTRACT (names only — reuse verbatim, "
+                     "never reinvent):")
+        lines.extend(ui_lines)
     if dropped:
-        parts.append(
-            f"[dependency closure truncated: {dropped} deeper node(s) "
+        lines.append(
+            f"[dependency context truncated: {len(dropped)} deeper node(s) "
             f"omitted (cap {_CLOSURE_MAX_NODES} nodes / "
             f"{_CLOSURE_MAX_CHARS} chars) — read them from "
             "requirements/requirements.yaml by heading id if needed]")
-    return "\n\n".join(p for p in parts if p)
+    return "\n".join(lines)
 
 
 def _indent_block(text: str, pad: str) -> str:
@@ -2486,84 +2415,41 @@ def group_families(tree: dict, max_batch: int = 6) -> list[list[dict]]:
     return batches
 
 
-def _progress_ledger_line(family_of: dict[str, dict],
-                          statuses: dict[str, str],
-                          only: frozenset[str] | None = None) -> str:
-    """家族级进度账本一行(planctl 退役后全局进度的唯一载体)。
+def build_turn_features(tree: dict, batch: list[dict],
+                        family_of: dict, parent_of: dict[str, dict],
+                        statuses: dict[str, str] | None = None) -> str:
+    """TURN 正文(唯一出处,批 turn 与 blocked-retry 共用)。
 
-    家族状态:全部节点 done → done;任一 blocked → blocked;否则任一
-    active → active;其余 pending。非 goal-first(无家族索引)时退化为
-    节点计数摘要。only=运行范围(OCTOS_ARC_FAMILIES)时范围外家族不列。
+    统一块骨架(09-30 依赖块定则):TASK → DEPENDENCIES → REUSED UI
+    CONTRACT → SCENARIOS(本批 Feature 原文)→ SEED CONTRACT。依赖
+    事实 = ids + 状态 + 引用名 + 种子值;依赖节点的 GIVEN/WHEN/THEN
+    全文不再进场,本批节点自己的 Feature 与 GIVEN 仍逐字(总纲 LAW 4
+    的契约源)。行为法则在系统行 RULES & ARCHITECTURE,此处只装批次
+    执行物。statuses = 节点 id → done/blocked/active(run 循环的
+    plan_statuses),区分已实现与破环未实现的依赖。
     """
-    if not family_of:
-        done = sum(1 for s in statuses.values() if s == "done")
-        blocked = sum(1 for s in statuses.values() if s == "blocked")
-        return (f"PROGRESS: {done} node(s) done, {blocked} blocked, "
-                f"{len(statuses) - done - blocked} to go (document order).")
-    fam_nodes: dict[str, list[str]] = {}
-    for nid, fam in family_of.items():
-        fam_nodes.setdefault(str(fam.get("id")), []).append(nid)
-    parts = []
-    for fid, nids in fam_nodes.items():
-        if only is not None and fid not in only:
-            continue
-        sts = [statuses.get(n, "pending") for n in nids]
-        if all(s == "done" for s in sts):
-            st = "done"
-        elif any(s == "blocked" for s in sts):
-            st = "blocked"
-        elif any(s == "active" for s in sts):
-            st = "active"
-        else:
-            st = "pending"
-        parts.append(f"{fid}:{st}")
-    return "PROGRESS (family ledger, document order): " + ", ".join(parts)
-
-
-def build_work_order_spec(tree: dict, batch: list[dict],
-                          family_of: dict[str, dict],
-                          seeded_scenarios: set[str] | frozenset | None,
-                          statuses: dict[str, str],
-                          scope: frozenset[str] | None = None
-                          ) -> tuple[str, str]:
-    """工单正文 + SPEC DISCIPLINE 推导锚点(唯一出处)。
-
-    主循环批 turn 与 blocked-retry pass 共用——此前 retry 侧是手工复制
-    且已漂移(缺系统行 NOTE)。段序:家族契约 → 依赖闭包 → 批节点 →
-    NOTE(系统行常驻层指针)→ 进度账本行。scope=运行范围时账本只列
-    范围内家族。
-    spec_anchor 按本批节点分叉(09-29):sheet 类任务场景步是模板占位,
-    真契约在 REQ CONTENT;github 类是真步骤,锚 VERIFICATION 文本。
-    """
-    fam = family_of.get(str(batch[0].get("id")))
-    parts = [
-        "THIS FAMILY — folder contracts (verbatim):",
-        describe_family_context(fam, batch) if fam is not None else "",
-    ]
-    dep_ctx = collect_dependency_context(tree, batch, family_of,
-                                         seeded_scenarios)
-    if dep_ctx:
-        parts += ["CROSS-FAMILY DEPENDENCIES (Depends on closure, "
-                  "verbatim):", dep_ctx]
-    parts += [
-        "THIS BATCH — requirement nodes (verbatim):",
-        "\n\n".join(describe_node(n, seeded_scenarios) for n in batch),
-        "NOTE: the full requirements map, host contract and fixture "
-        "contract are installed in your system prompt (byte-stable) — "
-        "they bind exactly as if quoted here. Cross-family detail "
-        "beyond the closure above: read THAT section of "
-        "requirements/requirements.yaml by heading id.",
-        _progress_ledger_line(family_of, statuses, only=scope or None),
-    ]
-    node_spec = "\n\n".join(x for x in parts if x)
-    batch_templated = any(n.get("_scenarios_templated") for n in batch)
-    spec_anchor = (
-        "the REQ CONTENT descriptions above — this batch's scenario "
-        "steps are template placeholders; the descriptions are the "
-        "authoritative flow contract"
-        if batch_templated else
-        "the VERIFICATION REQUIREMENTS text above")
-    return node_spec, spec_anchor
+    task = ", ".join(
+        f"{n.get('id')} ({' '.join(str(n.get('name') or '').split())})"
+        for n in batch)
+    parts = [f"TASK: implement {task}."]
+    dep_nodes, dep_dropped = dependency_closure(tree, batch)
+    if dep_nodes:
+        parts.append(_dependency_block(dep_nodes, dep_dropped, statuses))
+    parts += ["SCENARIOS (verbatim):",
+              gherkin.batch_turn_features(batch, parent_of)]
+    seed_sents, seed_dropped = gherkin.seed_sentences(
+        list(batch) + dep_nodes)
+    if seed_sents:
+        block = ("SEED CONTRACT (backend/data/db.json must already "
+                 "contain — seed sentences verbatim from the "
+                 "requirements):")
+        block += "\n" + "\n".join(f"- {s}" for s in seed_sents)
+        if seed_dropped:
+            block += (f"\n[seed contract truncated: {seed_dropped} more "
+                      "sentence(s) omitted — read requirements/"
+                      "requirements.yaml by heading id]")
+        parts.append(block)
+    return "\n\n".join(x for x in parts if x)
 
 
 # ------------------------------------------------------- run scope (灵活范围)
@@ -3246,209 +3132,34 @@ class OctosDriver:
 
 
 # ---------------------------------------------------------------- prompts
-# goal-first 骨架轮:模板已在位可启动,但 App 外壳/路由/家族文件结构由
-# Agent依需求地图自建。db.json 种子保护条款是数据契约。
-GOAL_FIRST_SKELETON_PROMPT = """\
-Lay this application's skeleton — you own frontend/src AND the backend \
-API (backend/src/routes/). The host substrate (src/app.js, src/index.js, \
-src/database/store.js, src/lib/util.js) already boots — never rewrite \
-those files (the host boots the server for you before the \
-implementation turns; if you start it yourself to verify, port \
-{smoke} only). \
-Work from the APP OUTLINE in your system prompt:
-1) The backend API in backend/src/routes/: implement auth ONLY if the \
-requirements name sign-in or named accounts (when the scenarios run \
-unauthenticated, skip auth scaffolding entirely — no login wall in \
-front of graded flows) and the core data endpoints \
-the map's families share, with Express on top of the host substrate \
-(src/lib/session.js = session mechanics, src/lib/crud.js = optional \
-generic REST factory, src/database/store.js = seed/query/tx store — \
-see the HOST CONTRACT) — \
-backend/data/db.json ships EMPTY: the seed database is YOUR \
-implementation from the requirement's data: section and every scenario \
-GIVEN line (verbatim contract — names, roles, ownership, visibility, \
-relationships). Expose every requirement-named entity through your \
-API. Declare every account you provision in \
-backend/data/seed-accounts.json as [{{"username","password","path"?}}].
-2) Implement the seed NOW, in this turn: every entity the \
-requirements' data: section and GIVEN lines name goes into \
-backend/data/db.json — the family turns arrange their specs against \
-it, and a missing entity fails those families at arrange.
-3) The frontend shell: src/app/App.jsx layout/routing as the outline \
-demands, plus one self-contained feature file per requirement family \
-under frontend/src/features/<name>.jsx whose header comment lists that \
-family's REQ ids (empty components are fine — the family work orders \
-fill them).
-The outline is the app map: when a contract spans families, read THAT \
-section of requirements/requirements.yaml by its heading — the seed \
-you write must come from the yaml's data: section and GIVEN lines, \
-never invented. \
-JavaScript/JSX only; dependencies are preinstalled — never run npm \
-install. Do not commit; the harness handles git.
-PORT DISCIPLINE: run any dev/test server ONLY on port {smoke}; NEVER \
-bind port {port} (the grader watches it — binding it kills the whole \
-run). Stop every server you started when done.
-"""
+# 两形式之 TURN(用户参考件 arc/prompts/TURN.md):每轮工单 = 本批家族
+# Gherkin Feature(gherkin.py 确定性清洗)+ 完成要求一句话。行为法则在
+# 系统行 RULES & ARCHITECTURE;验收即 Feature;无其它散文。
+GOAL_FIRST_TURN_COMPLETION = (
+    "\nAfter implementing: generate Playwright automation tests for "
+    "these scenarios and run them against the RUNNING app (port "
+    "{smoke}); fix the app and re-test until green, then finish the "
+    "turn.")
 
-# goal-first 家族工单:深度实现(真实可操作功能,浏览器走场景流才是判
-# 官)+ frontend/src 全域所有权 + 无 40-ops 帽。地图与本家族全文在
-# node_spec 头部注入(见主循环组装处)。
-# 09-29 减法重构:自测契约四处堆叠(模板 VERIFICATION/SPEC DISCIPLINE/
-# NO_STAGED_SPECS_NOTE/selftest_note)合并——模板只留纪律层(SPEC
-# DISCIPLINE + 两句新规),机制层(目录/命令/种子重置/保真规则)唯一
-# 出处=build_selftest_note;TOOLBOX 删除(系统行 HOST CONTRACT 已有)。
-GOAL_FIRST_NODE_PROMPT_TEMPLATE = """\
-Implement requirement family {node_id} DEEP — goal-first: every node in \
-this work order must become a REAL, operable feature. A grader in a \
-real browser walks each scenario end-to-end; strings on the page \
-without a working flow score zero. The pinned HOST CONTRACT applies \
-exactly (its TOOLBOX section catalogs the proven helpers — ui.jsx \
-shapes, grid/formula/csv/undo/router, session/crud); the THIS BATCH \
-section below carries this work order's requirement nodes — their \
-scenarios ARE the acceptance signals. Do not commit.\
-Definition of done: every scenario of every node in this work order \
-walks through on the RUNNING app; every GIVEN fixture is addressable \
-(the account signs in, the object opens, cell/field values match \
-verbatim); red means fix, not report.\
-SCOPE: you own frontend/src as a whole — structure it as the \
-requirements demand (restructure the shell, add files, split or merge \
-features); never regress an already-green family. ALL API endpoints \
-live in backend/src/routes/ (yours to extend freely); never touch the \
-host-owned backend substrate listed in the HOST CONTRACT (src/app.js, \
-src/index.js, src/database/store.js, src/lib/util.js).\
-PORT DISCIPLINE: NEVER bind port {port}. The app is ALREADY RUNNING, \
-host-managed, on port {smoke} — do NOT start your own server. After \
-editing backend/src run `sh .arc/host/restart-server.sh` \
-(host-provided) to pick changes up; after editing frontend run \
-`npm run build --prefix frontend` — the running server serves the \
-fresh dist immediately, no restart needed.\
-SPEC DISCIPLINE: turn each node's scenarios into YOUR OWN Playwright \
-spec and WRITE THE SPEC BEFORE IMPLEMENTING the node — derive it \
-sentence-by-sentence from {spec_anchor} (GIVEN = arrange, WHEN = act, \
-THEN = assert; quoted strings = exact accessible names). Each node's \
-FIRST spec case walks its description literally: arrange exactly what \
-its GIVEN states — sign in as the actor the GIVEN names and realize \
-the seeded data it names — then click what it names, \
-fill ONLY the fields it names (an input the text does not mention \
-stays untouched), assert what it promises — error paths and edge \
-cases come after that case, never instead of it. Watch it red, \
-then implement until it walks green on the RUNNING app — scenario \
-flows actually walking, not string presence, are the verdict. Dialog \
-names, control labels, and quoted error strings must match the \
-requirement text verbatim. When the running app and the requirement \
-text disagree, the TEXT wins: fix the app, never edit the spec to \
-match the implementation. End the turn only when every scenario walks \
-green; if some cannot, list each red chain explicitly in your closing \
-message.\
-FLOW FIDELITY: the grader walks ONLY the operations the requirement \
-text names, in the order it names them — never make a step mandatory \
-that the text does not describe (an extra required field, dialog, or \
-confirmation breaks every scenario at that step).\
-VALIDATION SCOPE — CITE BEFORE YOU REJECT: implement a rejection (a \
-4xx, a validation error, a disabled submit) only where the requirement \
-text states it — find the exact sentence and copy it into a code \
-comment at the check (`// REQ-<id>: "<sentence>"`); if the text \
-mandates the rejection but quotes no exact message, cite the mandating \
-sentence and end the comment with `(message unspecified in text)`. No \
-mandating sentence at all means the operation must SUCCEED, with \
-absent or empty input \
-taking a neutral default (an auto-generated name, a blank field). A \
-described failure UX is not a trigger: never invent a failing input to \
-justify an error path the text promises but never conditions, and \
-never bind one operation's rejection to another operation. List every \
-rejection rule you implemented with its REQ citation in your closing \
-message.\
-REGRESSION SCOPE: re-check only the families you touched this turn.\
-
-{node_spec}"""
-
-def build_selftest_note(cli_path: str | None, smoke: int = 0) -> str:
-    """requirements-only 任务的自测装置契约(机制层唯一出处)。
-
-    09-29 减法合并:原 NO_STAGED_SPECS_NOTE(VERIFICATION 头/自写测试/
-    MY-CHECK/red=fix/禁 raw browser)与本函数(命令形状/种子重置/保真
-    规则)在同一张工单堆叠且互相重复——现只此一块。纪律层(SPEC
-    DISCIPLINE/spec 先行/TEXT wins)在工单模板,不在此重复;curl 只许
-    排查不许作流验证(原两处 curl 授权删除——func 200 ≠ 浏览器流绿)。
-    """
-    if cli_path:
-        cmd = (f"node {cli_path} test --config "
-               f"{SELFTEST_SUBDIR}/playwright.config.ts "
-               "<your-spec>.spec.ts")
-    else:
-        cmd = (f"npx --yes @playwright/test test --config "
-               f"{SELFTEST_SUBDIR}/playwright.config.ts "
-               "<your-spec>.spec.ts")
-    port_note = f" (port {smoke})" if smoke else ""
-    return (
-        "\nSELF-TEST CONTRACT (no staged specs — you author the tests): "
-        "the graded tests are hidden and derived from the requirement "
-        "text — YOUR specs are the only pre-delivery verification, and "
-        "each node's scenarios ARE the test oracle (GIVEN = arrange, "
-        "WHEN = act, THEN = assert; verbatim quoted strings = exact "
-        "accessible names). Write specs ONLY under "
-        f"{SELFTEST_SUBDIR}/ (copy MY-CHECK.spec.ts.example as a "
-        "starting point; never inside .arc/ — host-owned, read-only) "
-        "and run them against the RUNNING app"
-        f"{port_note}. How you invoke Playwright is yours to choose — "
-        "custom configs, batch runs, raw scripts, all fine; the standard "
-        "one-liner below stays the most convenient (explicit file "
-        "argument = fast, re-runnable, and an identical green twice "
-        "auto-stops the turn):\n"
-        f"  {cmd}\n"
-        "curl the API only to inspect responses while debugging — never "
-        "as flow-level verification (a green API response does not mean "
-        "the browser flow walks). Red = the flow fails on the RUNNING "
-        "app — fix the app, then rerun. Debug specs you write while "
-        "chasing a red are scratch: delete them (or rename to "
-        "zz-debug-*) once the node is green, so ui-smoke/ ships only "
-        "meaningful per-node coverage.\n"
-        "SEED RESET (before each self-test round): run "
-        "`rm -f backend/data/db.run.json && sh .arc/host/restart-server.sh` "
-        "from the workspace root — earlier turns and spec runs leave "
-        "runtime data behind, and arrange steps that assume the seeded "
-        "state then fail with false reds on perfectly good code.\n"
-        "SELF-TEST FIDELITY RULES (how the hidden grader differs from a "
-        "hand-walk): 1) LOCATORS ARE ROLES — a requirement phrase "
-        "\"A region named X\" means getByRole('region', { name: X }), "
-        "\"a dialog named X\" means getByRole('dialog', { name: X }); "
-        "getByText/getByLabel on a role-less div is a false green (the "
-        "grader's role locator is what runs). 2) TEST BOTH GESTURES — "
-        "every selection-driven flow needs a drag variant AND a "
-        "click+Shift-click variant (a Shift-collapsing handler passes "
-        "drag-only tests and still loses the family); every dialog flow "
-        "needs the mouse path AND Enter/Escape. 3) ASSERT STATE, NOT "
-        "PRESENCE — verify the observable result (aria-selected states, "
-        "persisted-then-reloaded values, computed results), not that "
-        "controls exist; for any flow with sign-in, reload the page "
-        "mid-flow and assert the signed-in identity survives (session "
-        "restore). 4) THE GRADER LOCATOR IS STRICT AND CANONICAL — if "
-        "your own spec needs exact:/container-scoping or other "
-        "disambiguation to reach a control, that almost always means two "
-        "controls on the page share an accessible name. That is an APP "
-        "defect: rename/hide/scope the control in the app. The grader "
-        "cannot disambiguate; your spec can — so a green spec built on a "
-        "workaround is a false green.\n")
-
-BATCH_DIRECTIVE_NO_SPEC = """\
-
-BATCH MODE: this turn implements the {count} focus nodes IN THE LISTED \
-ORDER, one at a time. There are no staged specs for this task: after \
-each node, walk its scenarios on the RUNNING app (port \
-{smoke}) — a scenario that does not walk through means fix that node \
-before moving on. The turn is complete when every node's scenarios \
-walk through — then write a short per-node summary and finish.\
-"""
-
-BATCH_DIRECTIVE = """\
-BATCH MODE: this turn implements the {count} focus nodes IN THE LISTED \
-ORDER, one at a time. The SPEC RUN command is pre-filtered to this \
-batch's specs — run it verbatim after finishing each node; a red spec \
-means fix that node before moving on. The turn is complete when the \
-SPEC RUN is fully green (all {count} nodes covered) — then write a short \
-per-node summary and finish.\
-Per-node staged specs:
-{specs}
+BOOTSTRAP_PREAMBLE = """\
+BOOTSTRAP (first turn of the run only): (a) implement the seed — \
+backend/data/db.json from every in-scope GIVEN line (plus a data: \
+section if the requirement has one); every account the text or GIVEN lines name goes \
+in with the exact emails and passwords quoted there (scrypt-hashed via \
+store.hash; your tests sign in with the plaintext passwords the GIVEN \
+lines quote). (b) provision one sign-in-capable account per distinct \
+actor your GIVEN lines and descriptions sign in as — named humans AND \
+role phrases (a repository Admin, the organization Owner) — and wire \
+ownership/membership/grants so each role's stated permissions hold; a \
+GIVEN actor that cannot sign in fails every scenario of that node at \
+arrange. (c) declare every pre-provisioned account in \
+backend/data/seed-accounts.json as \
+[{"username","password","path"?,"body"?,"note"}] — the host \
+login-probe signs in as each entry and expects 200; RED = your \
+declared seed or auth is broken. (d) implement the shared API surface \
+the map's families share (backend/src/routes/). (e) the host template \
+already generates per-family feature/route stubs — confirm they are in \
+place. Then implement the Feature below.
 """
 
 VERIFICATION_RULES = (
@@ -3570,15 +3281,6 @@ Fix what is broken; do not rebuild what works. Do not commit.\
 
 
 
-NUDGE_PROMPT = """\
-You ended your last turn before creating any files. Stop analyzing. In \
-your very next actions, CREATE the project files with your file-writing \
-tools: frontend/package.json (with the build script), the frontend page \
-sources, backend/package.json (with the start script), and the backend \
-server including the JSON store seeded with the requirement's fixture \
-contract (data: section + every scenario GIVEN line, verbatim). Do not \
-describe the plan — write the files now.\
-"""
 
 def locate_acceptance_tests(tree: dict, bundle_dir: Path) -> Path | None:
     """Find the public Playwright specs for this task.
@@ -3832,10 +3534,29 @@ def main() -> int:
             _raw_scope = ""
         family_scope = parse_family_scope(_raw_scope)
         family_of = family_index(tree)
+        # 两形式之 AGENTS.md 的 children map 承载全树;模型可见细节与
+        # 种子基线/探针一律 scope 化——scope 外家族不进任何上下文。
+        parent_of: dict[str, dict] = {}
+
+        def _index_parents(node: dict, parent: dict) -> None:
+            for c in node.get("children") or []:
+                if not isinstance(c, dict):
+                    continue
+                if str(c.get("type", "")).upper() == "ATOMIC":
+                    parent_of[str(c.get("id"))] = parent
+                else:
+                    _index_parents(c, c)
+
+        _index_parents(tree, tree)
+        scoped_tree = tree
+        if family_scope:
+            kept = [c for c in (tree.get("children") or [])
+                    if c and batch_in_scope(flatten_atomic(c),
+                                            family_scope, family_of)]
+            scoped_tree = {**tree, "children": kept}
         # 夹具契约提取(ROOT data: 段 / 场景 GIVEN / "Seed data supplies" 句 /
-        # E2E_* 环境项)——宿主尽算:先结构化,再编译种子、注入 envelope、
-        # 生成 0-token 探针。github 2 分根因:这些契约此前全链无人消费。
-        fixture_data = fixture_manifest.extract(tree)
+        # E2E_* 环境项)——scope 化:种子基线/探针与 RUN SCOPE 同宇宙。
+        fixture_data = fixture_manifest.extract(scoped_tree)
 
         tests_dir = locate_acceptance_tests(tree, Path(__file__).resolve().parent)
         if tests_dir:
@@ -3939,7 +3660,8 @@ def main() -> int:
         # minutes after the final-verification turn started a server on
         # port 3000 — the runner appears to treat a live grading port as
         # "agent finished" and kills the process.
-        smoke_port = int(os.environ.get("OCTOS_SMOKE_PORT", "3100"))
+        smoke_port = int(os.environ.get(
+            "OCTOS_SMOKE_PORT", str(plan_envelope.SMOKE_PORT)))
         if smoke_port == args.web_port:
             smoke_port += 1
         # planctl: stage specs read-only + host scaffold (E-flip) + the
@@ -3973,7 +3695,7 @@ def main() -> int:
                  if p not in (args.web_port, smoke_port)})
         # UI 契约冒烟(hackathon--sheet 3 分根因的修复通道):requirements-only
         # 任务的宿主验证原本止步 HTTP 层,而模型被禁止跑浏览器——六类 UI
-        # 契约缺陷全盲。模型自测骨架落盘工作区根 ui-smoke/(09-28 起脱离 .arc),并
+        # 契约缺陷全盲。模型自测骨架落盘工作区根 e2e/(09-28 起脱离 .arc),并
         # 下发与 SPEC RUN 同构的被批准自检命令;批末做静态轻检,final 跑
         # 完整爬虫+修复循环。内核三道 guard 对该命令形状结构性放行
         # (shell.rs ui_smoke_run_command_shape_passes_every_guard)。
@@ -4063,14 +3785,11 @@ def main() -> int:
         # 测试用例由模型根据需求原文自己生成。宿主只落盘内核放行命令
         # 形状所需的最小骨架:playwright.config.ts + MY-CHECK 示例。
         # 凭据前奏等由模型按各自 spec 自行 arrange。
-        selftest_note = ""
         stage_selftest_dir(output_dir, smoke_port)
-        selftest_note = build_selftest_note(
-            str(toolchain_cli) if toolchain_cli is not None else None,
-            smoke=smoke_port)
+        # 自测命令/契约已收编进系统行 RULES & ARCHITECTURE(两形式);
+        # 此处只落盘 e2e 配置骨架。
         log("[plan] self-test skeleton staged "
-            f"({SELFTEST_SUBDIR}/playwright.config.ts + example); "
-            "tests are model-authored from the requirement text")
+            f"({SELFTEST_SUBDIR}/playwright.config.ts + example)")
         # 流级验证定则(09-27 删除宿主自写验收,09-30 强化):比赛全自动
         # 无人工环节,流验证只能由模型自生成自验证(SELF-TEST CONTRACT,
         # spec 先行+逐句锚定需求原文);宿主硬编码走查/探针类别整体不要
@@ -4078,15 +3797,18 @@ def main() -> int:
         # 运行时治理(rehearsal/排练门/端口看门狗),不做内容决策。
         # extra_rules 全局契约:确定性渲染(静态 manifest → 每轮字节相同,
         # 缓存律),经稳定 CONTRACT 段常驻;节点 GIVEN 走 FOCUS validation 前缀。
+        fixture_stats = {
+            "uncovered": len((fixture_compiled or {}).get("uncovered")
+                             or ()),
+            "arrange": len((fixture_compiled or {}).get("arrange") or ()),
+            "seeded": len(((fixture_compiled or {}).get("db") or {})
+                          .get("users", [])),
+            "canonical": bool((fixture_compiled or {}).get("canonical")),
+            "kind": (fixture_compiled or {}).get("kind") or "none"}
         fixture_rules = fixture_manifest.render_extra_rules(
-            fixture_data,
-            {"uncovered": len((fixture_compiled or {}).get("uncovered")
-                              or ()),
-             "arrange": len((fixture_compiled or {}).get("arrange") or ()),
-             "seeded": len(((fixture_compiled or {}).get("db") or {})
-                           .get("users", [])),
-             "canonical": bool((fixture_compiled or {}).get("canonical")),
-             "kind": (fixture_compiled or {}).get("kind") or "none"})
+            fixture_data, fixture_stats)
+        # 任务层贡献规则(pi buildRules 贡献源):与全局法则去重合并
+        task_rules = fixture_manifest.task_rules(fixture_data, fixture_stats)
         fixture_given = {
             nid: info["given"]
             for nid, info in fixture_data["nodes"].items() if info["given"]}
@@ -4095,7 +3817,7 @@ def main() -> int:
         fixture_arranged_nodes = frozenset(
             (fixture_compiled or {}).get("arrange") or ())
         # 09-30 定则:GIVEN 恒原文,指针机制随宿主播种一起退役——集合
-        # 恒空仅为兼容 describe_node 的既有参数位。
+        # 09-30:GIVEN 恒原文后该集合已无消费方,置空保留参数位。
         fixture_seeded_scenarios = frozenset()
 
         def fixture_probe_list() -> list[dict]:
@@ -4164,7 +3886,7 @@ def main() -> int:
         # 在 profile create 后注入;load_bootstrap_files 无 cap)常驻系统行 0 号位——每分段付 1 次,轮轮缓存命中;挥发物
         # (进度/家族细节/批节点)留工单。
         # goal-first 契约:frontend/src 全域归模型/UI kit 降为工具箱。
-        rules_text = plan_envelope.HOST_STACK_RULES_GOAL_FIRST
+        rules_text = plan_envelope.render_rules(task_rules)
         # 全局层内容传给 driver→session,在 profile create 后落盘到
         # per-profile data 目录的 AGENTS.md(内核系统行 bootstrap 读取点)。
         system_row_ctx = build_system_row_context(
@@ -4242,128 +3964,16 @@ def main() -> int:
         batch_specs: list[str] = []
 
         try:
-            # Step 0: skeleton/foundations turn — always runs. The host
-            # template's data plane (backend + deps) is complete, but the
-            # app shell/routes/family files are the model's to build from
-            # the requirements map; the retry machinery below also covers
-            # the no-scaffold path (OCTOS_ARC_HOST_SCAFFOLD=0).
-            log(f"[flow] skeleton/foundations turn starting "
-                f"({len(atomic_nodes)} atomic nodes queued)")
-            skeleton_ok = False
-            skeleton_text = ""
-            # 4-attempt retry machinery (also the no-scaffold path).
-            for sk_attempt in range(1, 5):
-                if time_up():
-                    log("[flow] time budget exhausted before skeleton retry")
-                    break
-                t0 = time.time()
-                # 全局层(地图/契约/播种契约)已常驻系统行;骨架轮决策面
-                # (auth/数据端点契约)以 REQ CONTENT + GIVEN 数据契约在场
-                # —不依赖"按行号自读"指针(09-29 sheet run:骨架轮裸猜
-                # /api/signin,排练门抓住返修 22 调用)。WHEN/THEN 断言对
-                # 骨架决策零贡献却不进(此前全量 blob 占会话 1 成本 ~1/3,
-                # 判分条件随各家族工单到达)。
-                sk_prompt = GOAL_FIRST_SKELETON_PROMPT.format(
-                    port=args.web_port, smoke=smoke_port) \
-                    + "\nSYSTEM ROW: the full requirements map, host " \
-                    "contract and fixture contract are installed in " \
-                    "your system prompt (byte-stable) — work from " \
-                    "them directly." \
-                    + "\n\nALL REQUIREMENTS — REQ CONTENT + scenario " \
-                    "GIVEN data contracts (verbatim from " \
-                    "requirements.yaml; the auth and data contracts you " \
-                    "lay now must satisfy these; graded scenarios and " \
-                    "family work orders arrive per family):\n\n" \
-                    + render_verbatim_nodes(tree,
-                                            fixture_seeded_scenarios,
-                                            verification="data-only")
-                if tests_dir:
-                    # 09-30: ACCEPTANCE_STAGED_NOTE("the spec wins")退役 —
-                    # 系统行权威句已统一为 text wins(staged spec 只是回归
-                    # 套件);spec-wins 教义冲突是 09-30 sheet 95×400 发明
-                    # 规则跨会话固化的放大链,勿回流。
-                    sk_prompt += "\nTEST LAYOUT (host-managed, two " \
-                        "directories, no exceptions): the official " \
-                        "Playwright specs live READ-ONLY at " \
-                        ".arc/acceptance/ — never edit, copy, move, or " \
-                        "delete anything there. YOUR OWN specs live ONLY " \
-                        "under ui-smoke/ (sanctioned config: " \
-                        "ui-smoke/playwright.config.ts)."
-                sk_wall = turn_wall(1)
-                skeleton_ok, skeleton_text = driver.run(
-                    sk_prompt, min(node_timeout, sk_wall), sk_wall)
-                log(f"[flow] skeleton turn attempt {sk_attempt} "
-                    f"{'ok' if skeleton_ok else 'FAILED'} "
-                    f"in {time.time()-t0:.0f}s: {skeleton_text[-300:]!r}")
-                # Round 24: every turn reported "ok" while writing zero
-                # files (the model wandered into OCR attempts). A turn
-                # without frontend/ and backend/ on disk is a failed turn
-                # regardless of what the driver reports.
-                if skeleton_ok and not (
-                        (output_dir / "frontend").is_dir()
-                        and (output_dir / "backend").is_dir()):
-                    skeleton_ok = False
-                    skeleton_text = ("turn ended ok but no frontend/backend "
-                                     "on disk; treating as failed")
-                    log("[flow] skeleton produced no frontend/backend; "
-                        "retrying with emphasis on writing files")
-                    # Round 25/27 pattern: the model ends the turn with a
-                    # text announcement ("then start building") instead of
-                    # tool calls, and full re-prompts get empty replies.
-                    # Nudge the SAME session to execute before burning a
-                    # whole fresh attempt.
-                    for nudge in range(1, 3):
-                        if time_up():
-                            break
-                        log(f"[flow] nudge turn {nudge}/2: push the model "
-                            f"to actually write files")
-                        n_ok, n_text = driver.run(NUDGE_PROMPT, 420, 420)
-                        log(f"[flow] nudge {nudge} "
-                            f"{'ok' if n_ok else 'FAILED'}: "
-                            f"{n_text[-200:]!r}")
-                        if ((output_dir / "frontend").is_dir()
-                                and (output_dir / "backend").is_dir()):
-                            log("[flow] nudge produced frontend/ + backend/")
-                            skeleton_ok = True
-                            break
-                if skeleton_ok:
-                    syn = js_syntax_errors(output_dir)
-                    if syn:
-                        log(f"[gate] {len(syn)} JS syntax error(s) after "
-                            f"skeleton: {syn[:3]}")
-                        for rg_attempt in range(1, 3):
-                            if time_up():
-                                break
-                            get_repair_driver().run(
-                                syntax_repair_prompt(syn), 420, 420)
-                            syn = js_syntax_errors(output_dir)
-                            if not syn:
-                                log(f"[gate] syntax repaired "
-                                    f"(repair turn {rg_attempt})")
-                                break
-                            log(f"[gate] repair turn {rg_attempt}: "
-                                f"{len(syn)} error(s) remain")
-                        if syn:
-                            skeleton_ok = False
-                            skeleton_text = ("skeleton left JS syntax "
-                                             "errors: " + "; ".join(syn[:3]))
-                if skeleton_ok:
-                    break
-                # Round 34: four skeleton attempts + nudges all returned
-                # empty in the SAME session — once the context accumulates
-                # empty assistant turns, the model keeps reasoning-and-
-                # truncating the same way. Reset the session so the next
-                # attempt starts from a clean context.
-                if sk_attempt < 4:
-                    log("[flow] resetting session before next skeleton "
-                        "attempt (empty-context loop)")
-                    driver.close()
-                # 梯度退避(15/30/45):固定 45s 在模型行为型失败(非网关
-                # 型)上是纯等待;梯度保留网关喘息窗口又不拖慢重试。
-                time.sleep(15 * sk_attempt)
-            if not skeleton_ok:
-                raise RuntimeError(f"skeleton scaffolding failed: {skeleton_text}")
-            runtime.git.commit("chore: host template + app skeleton")
+            # 09-30 定则:骨架轮退役(用户裁决:有模板时骨架轮就是
+            # REQ-1 的正式轮)——首家族批 turn 携带 BOOTSTRAP 前言(种子/
+            # 共享 API 面/家族 stub 在位);无脚手架路径(配置关模板)需
+            # 恢复骨架机器,此处显式报错防静默裸跑。
+            if not template_ready:
+                raise RuntimeError(
+                    "OCTOS_ARC_HOST_SCAFFOLD=0 requires the legacy skeleton "
+                    "turn, which was retired on 09-30 — re-enable host "
+                    "scaffolding or restore the skeleton machinery.")
+            runtime.git.commit("chore: host template ready")
 
             failed: list[str] = []
             # skip 节点的真实原因(deadline/budget/auth)——终局 test 事件
@@ -4453,37 +4063,27 @@ def main() -> int:
                 # 内家族(范围外不制造"永远 pending"的噪音)。
                 # 分层装配:全局层(地图+契约+播种契约)常驻系统行;
                 # 工单=模块层(本家族全子树)+依赖闭包+批节点+进度。
-                node_spec, spec_anchor = build_work_order_spec(
-                    tree, batch, family_of, fixture_seeded_scenarios,
-                    plan_statuses, scope=family_scope or None)
-                base_prompt = GOAL_FIRST_NODE_PROMPT_TEMPLATE.format(
-                    node_id=focus_id, node_spec=node_spec,
-                    spec_anchor=spec_anchor,
-                    port=args.web_port, smoke=smoke_port)
+                node_prompt = build_turn_features(
+                    tree, batch, family_of, parent_of,
+                    statuses=plan_statuses)
+                if idx == 1:
+                    # 骨架轮退役:首家族批携带 BOOTSTRAP 前言(种子/共享
+                    # API 面/家族 stub 在位)——有模板时首 turn 就是 REQ-1
+                    # 的正式轮。
+                    node_prompt = BOOTSTRAP_PREAMBLE + node_prompt
                 batch_specs = sorted(
                     {f for nid in batch_ids
                      for f in (spec_map.get(nid) or [])})
                 # 幻影 SPEC RUN 治理:只有本批真有 staged specs 才发
-                # SPEC RUN 装置;requirements-only 任务(两道 hackathon
-                # 题)改发模型自测契约。
+                # SPEC RUN 装置(带官方 spec 路径);requirements-only
+                # 任务(两道 hackathon 题)的完成要求里已含自测义务。
                 if batch_specs:
-                    node_prompt = base_prompt + build_spec_run_cmd(
+                    node_prompt += build_spec_run_cmd(
                         str(toolchain_cli)
                         if toolchain_cli is not None else None,
                         batch_specs)
-                else:
-                    node_prompt = base_prompt + selftest_note
-                if len(batch) > 1:
-                    node_prompt += (
-                        BATCH_DIRECTIVE.format(
-                            count=len(batch),
-                            specs="\n".join(
-                                f"- {nid}: " + (", ".join(spec_map.get(nid) or [])
-                                                or "(no staged spec)")
-                                for nid in batch_ids))
-                        if batch_specs else
-                        BATCH_DIRECTIVE_NO_SPEC.format(
-                            count=len(batch), smoke=smoke_port))
+                node_prompt += GOAL_FIRST_TURN_COMPLETION.format(
+                    smoke=smoke_port)
                 if segment_digest_pending:
                     # P3:分段后首 turn 的正版记忆——逐节点完成笔记,
                     # 替代模型翻 .arc 考古(见注入点注释)。
@@ -4582,7 +4182,7 @@ def main() -> int:
                             driver.run(
                                 NODE_NUDGE_PROMPT
                                 + batch_req_block(
-                                    batch, fixture_seeded_scenarios),
+                                    batch, parent_of),
                                 420, 420)
                             if project_files_changed(output_dir, ng_t0):
                                 nudged = True
@@ -4608,7 +4208,7 @@ def main() -> int:
                         driver.run(
                             SELFTEST_NUDGE_PROMPT
                             + batch_req_block(
-                                batch, fixture_seeded_scenarios),
+                                batch, parent_of),
                             420, 420)
                 syn = js_syntax_errors(output_dir)
                 if syn:
@@ -4678,7 +4278,7 @@ def main() -> int:
                                         if fix_attempt > 1
                                         else REHEARSAL_REPAIR_FIRST_NOTE))
                                 + batch_req_block(
-                                    batch, fixture_seeded_scenarios),
+                                    batch, parent_of),
                                 min(node_timeout, r_wall), r_wall)
                             r_err, r_report = rehearse_node(
                                 output_dir, smoke_port, probe_list,
@@ -4780,7 +4380,7 @@ def main() -> int:
                                             final_spec_files(
                                                 g_run, output_dir)))
                                     + batch_req_block(
-                                        batch, fixture_seeded_scenarios),
+                                        batch, parent_of),
                                     min(node_timeout, r_wall), r_wall)
                             elif g_run:
                                 log(f"[plan] regression green: "
@@ -4821,30 +4421,28 @@ def main() -> int:
                                 node_done_notes[nid] = \
                                     "recovered before blocked retry"
                         continue
-                    r_node_spec, r_anchor = build_work_order_spec(
-                        tree, rb, family_of, fixture_seeded_scenarios,
-                        plan_statuses, scope=family_scope or None)
+                    r_features = build_turn_features(
+                        tree, rb, family_of, parent_of,
+                        statuses=plan_statuses)
                     r_prompt = (
-                        "BLOCKED RETRY: this family's earlier work order "
+                        "BLOCKED RETRY: this family's earlier turn "
                         "ended, but the app keeps failing the host's "
                         "startup/route rehearsal. Current rehearsal "
                         "error:\n" + r_err[-1200:] + "\n\nRe-derive this "
-                        "family's implementation from the THIS BATCH "
-                        "contract below — the requirement text is the "
+                        "family's implementation from the Feature below "
+                        "— the requirement text is the "
                         "authority (quoted names and error strings "
                         "verbatim). Fix the RUNNING app, then verify with "
                         "your own spec.\n"
-                        + GOAL_FIRST_NODE_PROMPT_TEMPLATE.format(
-                            node_id=r_focus,
-                            node_spec=r_node_spec,
-                            spec_anchor=r_anchor,
-                            port=args.web_port, smoke=smoke_port)
+                        + r_features
                         + (build_spec_run_cmd(
                             str(toolchain_cli)
                             if toolchain_cli is not None else None,
                             sorted({f for nid in r_ids
                                     for f in (spec_map.get(nid) or [])}))
-                           if tests_dir else selftest_note))
+                           if tests_dir else
+                           GOAL_FIRST_TURN_COMPLETION.format(
+                               smoke=smoke_port)))
                     driver.close()  # fresh 会话:不带旧批的失败上下文
                     r_wall = turn_wall(len(rb))
                     r_ok, _r_text = driver.run(
@@ -5036,8 +4634,6 @@ def main() -> int:
                             str(toolchain_cli)
                             if toolchain_cli is not None else None,
                             final_spec_files(tier2_run, output_dir))
-                    else:
-                        final_prompt += selftest_note
                     _ensure_dev_server(output_dir, smoke_port,
                                        spec_ports_extra, log)
                     log("[flow] final verification turn starting (slim, "

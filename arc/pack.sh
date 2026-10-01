@@ -88,6 +88,8 @@ EOF
 #  遥测共享,main.py 顶层依赖,漏打即启动崩)
 # (rejection_audit.py:拒绝文案引用审计(发明 400 静态保险网)——main.py
 #  顶层依赖,final 链注入+仪表落盘,漏打即启动崩)
+# (gherkin.py:yaml 场景→Gherkin 渲染(两形式之 TURN 契约)——main.py
+#  顶层依赖,describe/工单/独立产物共用,漏打即启动崩)
 # (visual_ref.py 已退役(2026-09-28):参考图由内核在含图工单的 turn 直接
 #  作为 user 消息媒体附件,宿主预描述通道删除)
 # (flow_suite 二度删除(09-30 终裁):比赛全自动无人工环节,流验证只能
@@ -97,7 +99,7 @@ EOF
 # public-tests 不进包(2026-09-26 正式比赛决策):平台挂载 /workspace/tests
 # 或 ARCBENCH_TESTS_DIR 优先生效;两者皆缺的任务走 no-staged-specs 的
 # 模型自测契约(main.py locate_acceptance_tests 的包内回落分支因此休眠)。
-cp main.py plan_envelope.py fixture_manifest.py octos_stdio.py clock.py rejection_audit.py requirements.txt "$PKG/"
+cp main.py plan_envelope.py fixture_manifest.py octos_stdio.py clock.py rejection_audit.py gherkin.py requirements.txt "$PKG/"
 cp -R arcbench_agent_runtime scaffold bin "$PKG/"
 # 自验工具链零打包(2026-09-27 决策):生产/仿真 runner 镜像自带全局
 # @playwright/test@1.57.0 + chromium-1200,_ensure_host_toolchain /

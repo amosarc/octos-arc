@@ -37,8 +37,8 @@ SESSION_JS = """\
 // 接线;会话行存 store 的 'sessions' 集合——server 重启保留 db.run.json,
 // 会话随之中存续(graded contract: "sessions survive server restart");
 // 仅冷启动(无 run 文件)才从种子重建=干净会话面(交付前宿主删 run 文件,
-// 评测从种子起)。hash/verify 转出口令哈希(宿主播种账号的 scrypt 已逐位
-// 兼容,直接 verify)。
+// 评测从种子起;种子由模型按需求实现)。hash/verify 转出口令哈希——模型
+// 种子里的口令一律经 store.hash 生成,直接 verify 兼容。
 const store = require('../database/store');
 const U = require('./util');
 const COOKIE = 'arc_session';
@@ -108,8 +108,10 @@ exports.mount = (app, name, opts) => {
 
 STORE_JS = """\
 // store.js — 种子/运行时双文件 db:db.json 是模型维护的种子(交付干净、git 跟踪),
-// db.run.json 承载运行时状态;进程首次 load 时从种子初始化,此后读写只走 run 文件
-// ——每次 server 重启(rehearsal/Tier-2/eval)都自动回到种子起点,跨轮测试污染不累积。
+// db.run.json 承载运行时状态:无 run 文件时从种子初始化,有则原样加载——
+// 写入与会话跨 server 重启存活(需求侧持久化事实)。「回到种子起点」
+// 由宿主在彩排/Tier-2/评测每次 boot 前删 run 文件达成,交付前同样删它
+// (zip 只带干净种子);不是本 store 的重启行为。
 // 集合 CRUD、通用查询(query:where/sort/分页)、原子多写事务(tx)、每作用域
 // 自增序号(nextSeq)、唯一索引(小写比较)、scrypt;进程内单例。
 const fs = require('fs'); const path = require('path'); const crypto = require('crypto');

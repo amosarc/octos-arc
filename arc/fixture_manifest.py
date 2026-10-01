@@ -1034,98 +1034,88 @@ def render_extra_rules(manifest: dict, stats: dict | None = None) -> str:
     is_canonical = bool(stats.get("canonical"))
     is_sheetish = stats.get("kind") in ("sheet", "mixed")
     parts = [
-        "FIXTURE CONTRACT (graded, not demo data): the requirement's data: "
-        "section and every scenario GIVEN line are the graded seed "
-        "contract — names, roles, ownership, visibility, and relationships "
-        "must match VERBATIM. backend/data/db.json ships EMPTY: YOU "
-        "implement the seed from the requirement's data: section and "
-        "every GIVEN line; never drop a GIVEN entity, and expose every "
-        "requirement-named entity through your API.",
+        "FIXTURE CONTRACT (graded, not demo data): every scenario GIVEN line "
+        "— plus a data: section when the requirement has one — is the "
+        "graded seed contract: names, roles, ownership, visibility, and "
+        "relationships must match VERBATIM.",
     ]
-    if seeded_n:
-        parts.append(
-            f"{seeded_n} account(s) are named by the requirement text with "
-            "exact emails and passwords — put them in your seed "
-            "(scrypt-hashed via store.hash; auth verifies them from the "
-            "seed); tests sign in with the plaintext passwords quoted in "
-            "the GIVEN lines.")
-    if stats.get("kind") in ("graph", "mixed"):
-        # 角色账号是模型的地盘:宿主只给契约信号,建哪些账号/叫什么/
-        # 什么关系由模型从需求原文推理决定(09-28 定则:宿主写死合成
-        # 账号与平台真值必然错位;09-30 二跑法医:义务在场但模型只播
-        # 3 个自选名——演员断言在 GIVEN 原文里,GIVEN 已恒原文进上下
-        # 文,宿主不再代述任何名单)。
-        parts.append(
-            "ROLE-ACTOR ACCOUNTS (graded, you decide them): every actor "
-            "your scope's GIVEN lines and descriptions sign in as — named "
-            "humans AND role phrases (a repository Admin, the organization "
-            "Owner) — must be able to sign in: provision one "
-            "sign-in-capable account per distinct actor (unique username, "
-            "@example.test email, verified, the standard compliant "
-            "password the sign-in lines quote) and wire "
-            "ownership/membership/grants so each role's stated permissions "
-            "hold; a GIVEN actor that cannot sign in fails every scenario "
-            "of that node at arrange. Declare EVERY pre-provisioned "
-            "account in backend/data/seed-accounts.json "
-            'as [{"username","password","path"?,"body"?,"note"}] — the host '
-            "login-probe POSTs to each entry's path (default "
-            "/api/auth/login; body defaults to username+password JSON and "
-            "an explicit body string overrides it verbatim) and expects "
-            "200; RED = your declared seed or auth is broken.")
-    if stats.get("kind") in ("graph", "mixed"):
-        # 逐字/填充行分口径:解析成功≠语义全对,填充行的合成身份必须
-        # 明示,否则模型把宿主编的约定也当需求原文背。
-        parts.append(
-            "Seed rows named by the requirement are verbatim contract; "
-            "rows it does not name are yours to fill so flows have data "
-            "to render — wherever filler can disagree with the "
-            "requirement text, the requirement text wins.")
-    if is_canonical and is_sheetish:
-        parts.append(
-            "The workbook you seed from the data:/GIVEN contract is "
-            "CANONICAL and FINAL: never rewrite it, "
-            "never create another workbook with the same name, and never "
-            "suffix seeded names (graded lookups match names exactly and "
-            "uniquely). Scenario-specific cell states that conflict with "
-            "the seed are arranged through the UI by the tests themselves — "
-            "do not pre-seed them.")
-    else:
-        parts.append(
-            "Scenarios that MODIFY data each need their OWN fresh "
-            "preconfigured instance (never share one mutable fixture across "
-            "scenarios; the graders restore state between runs).")
-    parts.append(
-        f"E2E_* variables the requirement names: {e2e_str}. The harness "
-        "itself passes only base-URL variables — any other fixture the "
-        "scenarios imply is yours to create and seed.")
     if stats.get("kind") in ("graph", "mixed"):
         parts.append(
             "Files/commits are the single source of truth: branches store "
-            "head references only, NEVER duplicate whole file trees per "
-            "branch or fork.")
-    if arrange_n:
-        parts.append(
-            f"{arrange_n} scenario pre-state(s) conflict with the canonical "
-            "seed and are NOT seeded — the node's GIVEN lists them; the "
-            "grader arranges them through the UI, your code must accept "
-            "them like any other edit.")
-    if uncovered_n:
-        parts.append(
-            f"{uncovered_n} scenario fixture(s) could NOT be auto-compiled — "
-            "they appear per-node under GIVEN; hand-seed those exact "
-            "pre-states before implementing the node.")
+            "head references only.")
     parts.append(
-        "Runtime state (backend/data/db.run.json) never ships; it resets "
-        "to the seed on every server restart.")
+        f"E2E_* variables the requirement names: {e2e_str}. The harness "
+        "itself passes only base-URL variables — any other fixture the "
+        "scenarios imply is yours to create.")
     parts.append(
-        "Your own past turns and host state live under the .arc trace "
-        "area (event logs, node_states, debug logs) — the runtime REFUSES "
+        "Runtime state (backend/data/db.run.json) never ships — the "
+        "delivered workspace carries only the seed db.json, so grading "
+        "starts from the pristine seed; within a workspace, "
+        "writes persist across server restarts. Your own past turns and "
+        "host state live under the .arc trace area — the runtime REFUSES "
         "reads of them (bash escape hatch: `# octos:allow-trace-read`). "
-        "What earlier turns did arrives via the host's SEGMENT DIGEST / "
-        "HOST REPORT; scratch test scripts belong in /tmp, never inside "
+        "What earlier turns did arrives via the host's SEGMENT DIGEST; "
+        "scratch test scripts belong in /tmp, never inside "
         ".arc/acceptance.")
     text = " ".join(p for p in parts if p)
     return text[:_MAX_EXTRA_RULES]
+
+
+def task_rules(manifest: dict, stats: dict | None = None) -> list[str]:
+    """任务层贡献的规则行(pi buildRules 贡献源之一)。
+
+    与 plan_envelope.CHARTER_RULES 汇入同一 build_rules 去重合并——
+    任务规则与全局法则冲突时,谁后到谁坍缩是不对的:这里只放任务特有
+    义务,全局法则由 CHARTER_RULES 承载。
+    """
+    stats = stats or {}
+    e2e = []
+    seeded_n = int(stats.get("seeded", 0))
+    arrange_n = int(stats.get("arrange", 0))
+    uncovered_n = int(stats.get("uncovered", 0))
+    is_canonical = bool(stats.get("canonical"))
+    is_sheetish = stats.get("kind") in ("sheet", "mixed")
+    kind = stats.get("kind")
+    rules: list[str] = []
+    # 09-30 深夜:账号/actor/声明三条义务迁 BOOTSTRAP_PREAMBLE(首 turn
+    # 载体,用户拍板"这些是 turn 应该关注的,不进 AGENTS.md")——系统行
+    # 只留字节稳定的全局法则与架构事实。
+    if kind in ("graph", "mixed") or seeded_n:
+        rules.append(
+            "Seed rows named by the requirement are verbatim contract; "
+            "rows it does not name are yours to fill so flows have data "
+            "to render — wherever filler can disagree with the requirement "
+            "text, the requirement text wins.")
+    if is_canonical and is_sheetish:
+        rules.append(
+            "The workbook you seed from the data:/GIVEN contract is "
+            "CANONICAL and FINAL: implement it carefully in the bootstrap "
+            "turn — correcting your own seed while wiring the API is fine, "
+            "but once family specs depend on it, treat it as frozen: never "
+            "rewrite it, never create another workbook with the same name, "
+            "and never suffix seeded names; scenario-specific cell states "
+            "that conflict with the seed are arranged through the UI by "
+            "the tests — do not pre-seed them.")
+    else:
+        rules.append(
+            "Scenarios that MODIFY data each need their OWN fresh "
+            "preconfigured instance — never share one mutable fixture "
+            "across scenarios; the graders restore state between runs.")
+    if arrange_n:
+        rules.append(
+            f"{arrange_n} scenario pre-state(s) conflict with the seed and "
+            "are NOT seeded — the node's GIVEN lists them; arrange them "
+            "through the UI, your code must accept them like any other "
+            "edit.")
+    if uncovered_n:
+        rules.append(
+            f"{uncovered_n} scenario fixture(s) could NOT be auto-extracted "
+            "— hand-seed those exact pre-states per the node's GIVEN.")
+    if kind in ("graph", "mixed"):
+        rules.append(
+            "Branches store head references only — NEVER duplicate whole "
+            "file trees per branch or fork.")
+    return rules
 
 
 # ------------------------------------------------ 落盘/读取(宿主 IO 面最小)

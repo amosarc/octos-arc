@@ -227,7 +227,7 @@ class ManifestConsistencyTests(unittest.TestCase):
         self.assertIn("useResource", store_jsx)
         rules = pe.HOST_STACK_RULES_GOAL_FIRST
         self.assertIn("frontend/src/features", rules)
-        self.assertIn("GRID EDITOR KERNEL", rules)
+        self.assertIn("grid editor kernel pattern", rules)
 
     def test_store_seed_runtime_split(self):
         # 种子/运行时双文件:db.json 是模型种子,db.run.json 是运行态,

@@ -76,6 +76,8 @@ MODEL_FILES = ("frontend/src/features/*.jsx", "backend/src/routes/*.js")
 
 # HOST_STACK_RULES(plan_envelope 文字契约)必须逐一点名的路径拼写。
 # 拼写按契约原文(backend 相对路径),防漂移测试逐条断言覆盖。
+# 09-30:seed-accounts.json 的义务迁 BOOTSTRAP_PREAMBLE(首 turn 载体),
+# 不再是系统行契约路径。
 RULES_MUST_NAME = (
     "src/app.js",
     "src/index.js",
@@ -85,7 +87,6 @@ RULES_MUST_NAME = (
     "src/database/store.js",
     "src/routes",
     "backend/data/db.json",
-    "backend/data/seed-accounts.json",
     "frontend/dist",
     "frontend/src/main.jsx",
     "frontend/src/app/App.jsx",

@@ -1,35 +1,29 @@
-"""Rejection-literal citation audit — static, task-agnostic backstop.
+"""Rejection-literal membership audit — static, task-agnostic backstop.
 
 09-30 sheet 法医:模型给「创建工作簿」发明了空名 400(需求无此句;该句
 只属于 rename 节点 REQ-1-2-2),评分器逐字执行 description(没有填名
 步骤),POST /api/workbooks {"name":""} → 400 连续 ~95 次杀穿几乎所有
-场景。提示词层已有 CITE-BEFORE-REJECT 纪律(工单模板);本模块是与
-模型行为无关的静态保险网:交付后端里每条拒绝文案,必须能在检查点
-上方紧邻处(8 行内)找到引用注释,且被引句子真实存在于
-requirements.yaml——「字符串在 yaml 某处出现过」不构成豁免(那正是
-跨操作泄漏的形态),「同文件别处有引用」也不豁免别的检查点。
+场景。本模块是与模型行为无关的静态保险网:交付后端里每条拒绝文案,
+归一化后必须逐字出现在 requirements.yaml——查无此文 = 编造嫌疑。
+
+09-30 深夜改版(用户拍板 code style 无注释,注释锚退役):接地判定从
+「检查点 8 行内的引用注释」改为「文案 ⊂ 需求原文」——模型实际写的
+消息本身就是证据,不再需要注释式记账。代价(如实记档):跨操作泄漏
+(文案在 yaml 里但属于别的操作的规则)静态上不可见——它对完全合规
+写引用的旧模型同样不可见;防线=总纲法则("only where the text states
+it, quoted message verbatim")+ final 轮对照原文重查。
 
 v1 范围:backend/src/**/*.js。评分器面对的否决闸门是 API;前端错误
 标签本身不构成流级拒绝(disabled submit 属 FLOW FIDELITY,静态不可
 判定),不进 v1。
 
 红/info 分级(不设任务特设豁免表,词数即分级):
-- red  : ≥4 词的文案无有效引用(完整句级校验规则,如
-         "Workbook name cannot be empty")
-- info : <4 词的无引用文案("Invalid state" / "Not found" 类防御性
-         短语)——只入账,永不触发修复。
-
-引用形态(与工单 CITE-BEFORE-REJECT 条款一致,单行注释):
-  // REQ-1-2-2: "an empty name must be rejected with ..."
-有效引用 = 被引句子(归一化后)存在于 requirements.yaml,且文案
-(归一化后)是该句子的子串。
-
-第二形态(需求要求拒绝但没引号给文案):注释尾标
-  // REQ-3-2-1: "duplicate names display an error and no fork is
-  // created" (message unspecified in text)
-时豁免放宽为「被引句子存在于 requirements.yaml」(文案是模型自选
-的合理消息,不要求是句子子串)。标注句不存在于 yaml 仍红;无标注
-维持强规则——防止借标注形态给"需求根本没要求的拒绝"放行。
+- red  : ≥4 词的文案在需求原文中查无(完整句级校验规则,如
+         "Some invented validation message")
+- info : <4 词的查无文案("Invalid state" / "Not found" 类防御性
+         短语)——只入账,永不触发修复。需求要求拒绝但没给文案时
+         模型自选的短消息可能落 info——final 轮指令让模型对照原文
+         自查,不强制改码。
 
 纯标准库;audit() 绝不抛出以外的副作用,调用方(main.py final 链)
 负责 try/except 兜底。
@@ -44,15 +38,6 @@ MIN_RED_WORDS = 4
 _SCAN_ROOTS = ("backend/src",)
 _SCAN_SUFFIXES = (".js", ".mjs", ".cjs")
 
-# 引用注释: // REQ-1-2-2: "sentence" (可选尾标) (单引号同样收)
-_LINE_COMMENT = re.compile(
-    r"//\s*(REQ-[A-Za-z0-9._\-]+)\s*:\s*([\"'])(.+?)\2")
-# 第二形态尾标:需求要求拒绝但没引号给文案 — 模型自选合理消息
-_UNSPECIFIED_MARKER = "message unspecified"
-# 引用与检查点的绑定窗口:引用必须出现在检查行上方 WINDOW 行内——
-# 文件级生效会让 rename 处的一条引用豁免 create 路由的同文案(正是
-# 要抓的跨操作泄漏)。
-_CITATION_WINDOW = 8
 # JS 字符串字面量('...' / "..." / `...`,容忍转义)
 _STRING_LIT = re.compile(r"([\"'`])((?:\\.|(?!\1).)+?)\1")
 # 拒绝路径锚点:U.err(res, '...') / U.bad(res, [...]) / errors:[{msg:...}]
@@ -67,7 +52,6 @@ _P_IDENT_ARG = re.compile(
 _P_CONST_DEF = re.compile(
     r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
     "([\"'])((?:\\\\.|(?!\\2).)+?)\\2")
-_P_NODE_ID = re.compile(r"\s*- id:\s*(\S+)")
 
 
 def _norm(s: str) -> str:
@@ -78,40 +62,6 @@ def _norm(s: str) -> str:
 
 def _word_count(s: str) -> int:
     return len([w for w in re.split(r"\s+", s.strip()) if w])
-
-
-def _citations(text: str) -> list[tuple[int, str, str, bool]]:
-    """(lineno, REQ-id, sentence, message_unspecified) per citation."""
-    out = []
-    for lineno, line in enumerate(text.splitlines(), 1):
-        m = _LINE_COMMENT.search(line)
-        if m:
-            out.append((lineno, m.group(1), m.group(3),
-                        _UNSPECIFIED_MARKER in line.lower()))
-    return out
-
-
-def _valid_citation(literal: str, lineno: int,
-                    cites: list[tuple[int, str, str, bool]],
-                    req_norm: str) -> bool:
-    """Exempt the check at `lineno` only if a citation sits within
-    _CITATION_WINDOW lines ABOVE it and its quoted sentence exists in
-    requirements.yaml. Strong form: the sentence contains the literal.
-    Message-unspecified form (explicit marker): the requirement
-    mandates the rejection without quoting a message, so the model's
-    own clear message is accepted once the quoted sentence is real."""
-    lit = _norm(literal)
-    if not lit:
-        return True
-    for cit_line, _nid, sent, unspecified in cites:
-        if not (cit_line <= lineno <= cit_line + _CITATION_WINDOW):
-            continue
-        s = _norm(sent)
-        if not s or s not in req_norm:
-            continue
-        if lit in s or unspecified:
-            return True
-    return False
 
 
 def _rejection_literals(text: str, consts: dict[str, str]
@@ -134,50 +84,12 @@ def _rejection_literals(text: str, consts: dict[str, str]
     return out
 
 
-def _yaml_nodes(requirements_text: str, literal: str,
-                limit: int = 4) -> list[str]:
-    """Requirement node ids whose (normalized) text contains the literal.
-
-    归属判定 = 归一化流里「匹配位置之前最近的 - id:」——yaml 的叶子
-    ATOMIC 节点 id 先于其 description/scenarios 出现,最近者即所属。
-    """
-    lit = _norm(literal)
-    if not lit:
-        return []
-    ids: list[tuple[int, str]] = []
-    buf: list[str] = []
-    pos = 0
-    for line in requirements_text.splitlines():
-        m = _P_NODE_ID.match(line)
-        w = _norm(line)
-        if m:
-            ids.append((pos, m.group(1)))
-        buf.append(w)
-        pos += len(w) + 1
-    hay = " ".join(buf)
-    out: list[str] = []
-    i = 0
-    while True:
-        j = hay.find(lit, i)
-        if j < 0:
-            break
-        owner = None
-        for start, nid in ids:
-            if start <= j:
-                owner = nid
-            else:
-                break
-        if owner and owner not in out:
-            out.append(owner)
-        i = j + max(1, len(lit))
-    return out[:limit]
-
-
 def audit(workspace: Path, requirements_text: str) -> dict:
-    """Scan backend rejection literals; every one needs an in-file
-    citation whose sentence exists in requirements.yaml and contains
-    the literal. Returns a json-ready dict; never raises on file-level
-    problems (unreadable files are skipped)."""
+    """Scan backend rejection literals; every one must appear verbatim
+    (normalized) in the requirement text — membership IS the grounding,
+    no citation comments (code style forbids them). Returns a json-ready
+    dict; never raises on file-level problems (unreadable files are
+    skipped)."""
     req_norm = _norm(requirements_text)
     findings: list[dict] = []
     scanned = 0
@@ -194,11 +106,10 @@ def audit(workspace: Path, requirements_text: str) -> dict:
             except (OSError, UnicodeDecodeError):
                 continue
             scanned += 1
-            cites = _citations(text)
             consts = {m[0]: m[2] for m in _P_CONST_DEF.findall(text)}
             rel = path.relative_to(workspace).as_posix()
             for lineno, literal in _rejection_literals(text, consts):
-                if _valid_citation(literal, lineno, cites, req_norm):
+                if _norm(literal) in req_norm:
                     continue
                 words = _word_count(literal)
                 findings.append({
@@ -207,7 +118,6 @@ def audit(workspace: Path, requirements_text: str) -> dict:
                     "literal": literal,
                     "words": words,
                     "kind": "red" if words >= MIN_RED_WORDS else "info",
-                    "yaml_nodes": _yaml_nodes(requirements_text, literal),
                 })
     reds = [f for f in findings if f["kind"] == "red"]
     return {
@@ -221,34 +131,26 @@ def audit(workspace: Path, requirements_text: str) -> dict:
 def audit_prompt_block(result: dict, limit: int = 8) -> str:
     """Render audit findings as a final-turn repair instruction block.
 
-    只在 red_count > 0 时返回非空串;文案在 yaml 里找得到的一并给出
-    归属节点——模型据此判断「补引用」还是「这本是别的操作的规则,
-    改成默认成功」。
+    只在 red_count > 0 时返回非空串。findings=需求原文查无的文案;
+    修复语义是对照原文自查(保留有据的,拆掉无据的),不再有注释
+    载体。
     """
     reds = [f for f in result.get("findings", []) if f["kind"] == "red"]
     if not reds:
         return ""
     lines = [
         "\nREJECTION AUDIT (ground truth, static): these backend "
-        "rejection messages have no requirement citation at their "
-        "check. For each: if the requirement text states THIS "
-        "operation's rejection, copy that exact sentence into a "
-        "`// REQ-<id>: \"<sentence>\"` comment beside the check; if the "
-        "text mandates the rejection but quotes no exact message, cite "
-        "the mandating sentence and end the comment with "
-        "\"(message unspecified in text)\"; if no sentence mandates "
-        "this rejection at all, the operation must SUCCEED with a "
-        "neutral default (an auto-generated name, a blank field) — an "
-        "uncited rejection breaks every scenario "
-        "that walks the flow the text describes."
+        "rejection messages appear nowhere in the requirement text. For "
+        "each: if the text mandates THIS operation's rejection, keep it "
+        "and use the text's quoted message verbatim when it quotes one "
+        "(that finding needs no code change); if the text does not "
+        "mandate it, the operation must SUCCEED with a neutral default "
+        "(an auto-generated name, a blank field) — an invented "
+        "rejection breaks every scenario that walks the flow the text "
+        "describes."
     ]
     for f in reds[:limit]:
-        node_note = ""
-        if f.get("yaml_nodes"):
-            node_note = (f" (text found under: {', '.join(f['yaml_nodes'])}"
-                         " — if that node governs a DIFFERENT operation, "
-                         "this check must not reject)")
-        lines.append(f"  {f['file']}:{f['line']} \"{f['literal']}\"{node_note}")
+        lines.append(f"  {f['file']}:{f['line']} \"{f['literal']}\"")
     if len(reds) > limit:
         lines.append(f"  ... and {len(reds) - limit} more")
     return "\n".join(lines) + "\n"

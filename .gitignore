@@ -84,3 +84,8 @@ tsconfig.tsbuildinfo
 # ready; each rebuild is a new 15MB blob, so commit deliberately).
 /arc/bin/octos
 /octos-arc-linux-x86.zip
+/arc/tasks/hackathon--sheet/template/
+/arc/tasks/hackathon--github/template/
+/context-sim-out/
+
+__pycache__/
