@@ -942,13 +942,19 @@ impl Tool for ShellTool {
                     &result_text,
                 );
 
-                // Truncate if too long (reserve space for exit code suffix).
+                // Truncate if too long.
                 // Artifact-offload first (OCTOS_TOOL_ARTIFACT, default ON):
                 // >8KB outputs land in <workspace>/.octos/artifacts/ and the
                 // history keeps head+tail+pointer — bash output was 83% of
                 // history bytes on the ARC sheet run, the single largest
                 // replay-cost driver.
-                let exit_suffix = format!("\n\nExit code: {exit_code}");
+                // Exit code lives at the HEAD of the result: downstream
+                // model-visible truncation (context_manager tool_output_
+                // policy, cuts from the tail) must never lose it — the
+                // shell-spiral detector classifies success by this marker,
+                // and a tail-placed suffix got stripped by that cut
+                // (2026-10-02 sheet run: healthy requirements dump →
+                // spiral misfire → turn killed at 85s).
                 if artifact_offload_enabled() {
                     if let Some(spill) =
                         artifact_offload(effective_cwd, &result_text)
@@ -959,11 +965,14 @@ impl Tool for ShellTool {
                 const MAX_OUTPUT: usize = 50000;
                 octos_core::truncate_utf8(
                     &mut result_text,
-                    MAX_OUTPUT - exit_suffix.len(),
+                    MAX_OUTPUT,
                     "\n... (output truncated)",
                 );
 
-                result_text.push_str(&exit_suffix);
+                result_text.insert_str(
+                    0,
+                    &format!("Exit code: {exit_code}\n\n"),
+                );
                 if let Some(hint) = denial_hint {
                     result_text.push_str(hint);
                 }

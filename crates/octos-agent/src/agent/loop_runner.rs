@@ -45,6 +45,14 @@ const MAX_TOKENS_EMPTY_RECOVERY_PROMPT: &str = "Your previous response reached t
 /// Terminal message when empty-`MaxTokens` recovery is exhausted. Surfaced
 /// instead of an empty success so the turn never silently dead-ends (#2174).
 const MAX_TOKENS_EMPTY_EXHAUSTED_MESSAGE: &str = "[The model repeatedly reached the output token limit without producing any text or tool call — a degenerate or looping generation. Try a stronger model, reduce the context size, or configure an anti-repetition sampler (a non-zero temperature or a repeat penalty).]";
+/// Nudge for a MaxTokens response WITH content but NO tool call — an
+/// over-long mid-turn monologue (2026-10-02 github run3: 16K tokens of
+/// circular debugging narration ended a productive turn as
+/// output_truncated). Asks for one concrete tool action instead of more
+/// narration. Bounded by MAX_TOKENS_MONOLOGUE_RECOVERY_LIMIT; exhausted,
+/// the turn falls through to the legacy truncated return.
+const MAX_TOKENS_MONOLOGUE_RECOVERY_LIMIT: usize = 2;
+const MAX_TOKENS_MONOLOGUE_RECOVERY_PROMPT: &str = "Your previous response hit the output limit: it was narration without any tool call. Stop analyzing in your head. Call ONE tool now to make concrete progress — read the specific lines you are unsure about, or write/edit the file you were deciding about. Keep any accompanying text under five lines.";
 const SHELL_RETRY_RECOVERY_THRESHOLD: usize = 4;
 
 /// Keep projection provenance beside the immutable output log, not in prompt
@@ -770,6 +778,11 @@ impl Agent {
                 // #2174: bounded recovery for a degenerate empty `MaxTokens`
                 // response (no content, no tool call) in the conversation loop.
                 let mut max_token_empty_recoveries: usize = 0;
+                // 2026-10-02: bounded recovery for a MaxTokens response WITH
+                // content but NO tool call — an over-long mid-turn monologue
+                // (github run3 it138: 16384 tokens of circular debugging
+                // narration ended a productive turn as output_truncated).
+                let mut max_token_monologue_recoveries: usize = 0;
 
                 // UserPromptSubmit lifecycle hook. Fires exactly once here —
                 // when a real user-submitted prompt enters the turn, after the
@@ -2112,6 +2125,36 @@ impl Agent {
                                     max = MAX_TOKENS_CONTINUATION_LIMIT,
                                     "empty MaxTokens response (no content, no tool call); \
                                      nudging and retrying"
+                                );
+                                continue 'agent_loop;
+                            }
+                            // 2026-10-02: a MaxTokens response WITH content but NO
+                            // tool call is an over-long monologue — the model
+                            // narrating in circles instead of acting. Soft-recover
+                            // in-turn: feed the partial back with an act-now nudge
+                            // instead of ending the turn as output_truncated.
+                            // Exhausted → fall through to the legacy truncated
+                            // return (the driver re-enters on that code).
+                            if !content_empty
+                                && response.tool_calls.is_empty()
+                                && max_token_monologue_recoveries
+                                    < MAX_TOKENS_MONOLOGUE_RECOVERY_LIMIT
+                            {
+                                max_token_monologue_recoveries += 1;
+                                let mut assistant = Message::assistant(
+                                    response.content.clone().unwrap_or_default(),
+                                );
+                                assistant.reasoning_content = response.reasoning_content.clone();
+                                messages.push(assistant);
+                                messages.push(Message::user(
+                                    MAX_TOKENS_MONOLOGUE_RECOVERY_PROMPT,
+                                ));
+                                warn!(
+                                    iteration,
+                                    attempt = max_token_monologue_recoveries,
+                                    max = MAX_TOKENS_MONOLOGUE_RECOVERY_LIMIT,
+                                    "MaxTokens response with content but no tool call; \
+                                     nudging and continuing"
                                 );
                                 continue 'agent_loop;
                             }
@@ -3515,11 +3558,22 @@ fn shell_retry_terminal_user_message(content: &str) -> String {
     while let Some(stripped) = tail.strip_prefix(PREFIX) {
         tail = stripped;
     }
+    // Marker line first: this content IS the final assistant reply, so
+    // without a marker it is indistinguishable from a genuine model
+    // end_turn downstream (the ARC host reads the reply text / persisted
+    // final row to attribute turn ends — a bare recovered text made a
+    // governance kill look like "model end_turn", verdict=done).
+    const MARKER: &str = "[SHELL SPIRAL DETECTED] This turn was stopped \
+because repeated shell approaches did not converge.\n\n";
     if tail.trim().is_empty() {
-        "I tried multiple shell approaches but couldn't converge on an answer. Please rephrase or give me a more specific direction.".to_string()
+        format!(
+            "{MARKER}I tried multiple shell approaches but couldn't \
+converge on an answer. Please rephrase or give me a more specific direction."
+        )
     } else {
         format!(
-            "I tried multiple shell approaches but couldn't converge on an answer. Latest output:\n\n{tail}"
+            "{MARKER}I tried multiple shell approaches but couldn't \
+converge on an answer. Latest output:\n\n{tail}"
         )
     }
 }
@@ -3693,7 +3747,15 @@ fn is_useful_shell_output(content: &str) -> bool {
 /// Tier-1 pass for this iteration (spec kv-cache-friendly-compaction): the
 /// turn's first call may rewrite deep history (stale pruning); later
 fn is_successful_shell_output(content: &str) -> bool {
-    content.contains("Exit code: 0")
+    // "Exit code: 0" is the success receipt (head-placed since the
+    // shell.rs 2026-10-02 fix). A "[truncated]" result had its tail cut
+    // by a downstream model-visible cap — a >cap dump is itself evidence
+    // the command ran, and counting it as a failure fed the shell-spiral
+    // detector phantom failures (2026-10-02 sheet run: three truncated
+    // healthy requirements dumps → spiral misfire → turn killed at 85s).
+    // Conservative anti-misfire trade: a truncated genuine failure counts
+    // as success here; the doom detector and upstream budgets still guard.
+    content.contains("Exit code: 0") || content.contains("[truncated]")
 }
 
 fn is_diff_like_shell_output(content: &str) -> bool {

@@ -80,8 +80,8 @@ SELFTEST_SUBDIR = "e2e"
 # 本地仿真不受它影响:env OCTOS_ARC_FAMILIES 设置时覆盖此值。
 # COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2,REQ-3"
 # COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2"
-COMPETITION_FAMILY_SCOPE = "REQ-1"
-# COMPETITION_FAMILY_SCOPE = ""
+# COMPETITION_FAMILY_SCOPE = "REQ-1"
+COMPETITION_FAMILY_SCOPE = ""
 
 # 思考参数
 # config.json 的 model_thinking/model_reasoning_effort,内核按
@@ -94,7 +94,7 @@ REASONING_EFFORT = "max"
 # 修复类短轮(syntax/spec 回归修复,自含错误摘要)降档:深度思考
 # 对窄修复不成比例地烧输出预算与墙钟。
 THINKING_REPAIR = "enabled"
-REASONING_EFFORT_REPAIR = "low"
+REASONING_EFFORT_REPAIR = "high"
 
 # 内核基础提示词运行时覆盖:$HOME/.octos/prompts/gateway.md 存在即整体
 # 替换内置 gateway_default.txt(零编译)。内置文本面向全量工具集,与 ARC
@@ -433,10 +433,10 @@ def dump_runtime_prompts(output_dir: Path) -> dict:
 # 内核治理代收尾识别词表:内核 loop 治理中止(doom 等)以 Ok+合成收尾行
 # 送达,行首标记前缀 → 运营短标签。stdio 通道里该行不在 message/delta 流
 # (text 看不到),由 session/hydrate 取回后在此对表;前缀匹配即可,模型
-# 正文不会以这些标记开头。扩展点:其余内核终局面([LOOP DETECTED]/
-# green stop/预算停)暂不收——语义各有争议,逐项拍板。
+# 正文不会以这些标记开头。
 _KERNEL_TERMINAL_MARKERS = (
     ("[DOOM LOOP DETECTED]", "doom loop"),
+    ("[SHELL SPIRAL DETECTED]", "shell spiral"),
 )
 
 
@@ -453,6 +453,49 @@ def _batch_state(batch_turn_ok: bool, kernel_cut: str | None) -> str:
     与失败 turn 一律 blocked——被杀轮的"完成"是假的(零写入也会被记
     done 并连坐全节点 PASSED)。"""
     return "done" if (batch_turn_ok and not kernel_cut) else "blocked"
+
+
+def reentry_reason(text: str, kernel_terminal: str | None) -> str | None:
+    """批重入触发判定:可续跑的模型侧切断才返回理由串——内核代收尾
+    (doom,经 hydrate 收尾行识别)或 output_truncated(响应撞
+    max_tokens,turn/error 文本按错误码识别)。墙钟/空闲/进程退出等
+    环境或预算性失败返回 None 不续——续跑它们等于旧二轮机会复辟。"""
+    if kernel_terminal_marker(kernel_terminal):
+        return (f"aborted by the kernel "
+                f"{kernel_terminal_marker(kernel_terminal)} guard")
+    if "output_truncated" in str(text or ""):
+        return "cut off by the output length limit mid-response"
+    return None
+
+
+def turn_reentry_prompt(turn_core: str, reason: str) -> str:
+    """重入工单:前缀点破切断原因+磁盘现状续跑纪律(含大文件分块写,
+    防再撞 max_tokens),后接原批工单正文(TASK/SCENARIOS/SPEC RUN+
+    完成锚,锚保持最近位置)。不带 BOOTSTRAP——首 turn 义务已在盘上,
+    重发违"仅首轮"契约。"""
+    prefix = (
+        "CONTINUATION: your previous turn was " + reason + ". "
+        "The task below is NOT complete. Resume from the current state "
+        "on disk: do not re-read files or re-run commands you already "
+        "ran; your next actions must write or edit files and then run "
+        "the checks. When writing large files, write them in several "
+        "smaller edits.\n\n")
+    return prefix + turn_core
+
+
+def zero_output_reentry_prompt(turn_core: str) -> str:
+    """检测B 重入工单:turn 干净返回但零项目文件落盘(全程只读探索/
+    被无标记内核终局收走,如 shell-spiral 盲区)。前缀直书零进展+立即
+    动手纪律,后接原批工单正文(同 turn_reentry_prompt 的契约)。"""
+    prefix = (
+        "CONTINUATION: your previous turn ended without changing any "
+        "project file — it was spent entirely on reading and checking. "
+        "The task below is NOT complete. Start implementing now: your "
+        "next action must create or edit a project file (implementation "
+        "or specs) before you run anything else. Do not re-read files "
+        "you have already read; write from what you already know and "
+        "verify afterwards.\n\n")
+    return prefix + turn_core
 
 
 def _turn_end_reason(ok: bool, text: str,
@@ -1236,9 +1279,15 @@ def project_files_changed(output_dir: Path, since: float) -> bool:
     The skeleton loop already had its own disk check; node turns need the
     same guard (mtime granularity on some filesystems is 1s, hence the
     slack).
+
+    package.json/package-lock.json 不计入:prewarm npm install 会落在
+    批 1 的 1s slack 窗口内改写 lockfile(2026-10-02 02:42 跑实测把
+    零工作轮洗白成"有变化")。命中文件打 stdout——检测B/懒轮门的
+    判据必须可审计。
     """
     # requirements/ 不计入:需求原文是只读真值,模型往里写文件不得
     # 洗白零工作轮。
+    hits = []
     for sub in ("backend", "frontend"):
         root = output_dir / sub
         if not root.is_dir():
@@ -1253,11 +1302,18 @@ def project_files_changed(output_dir: Path, since: float) -> bool:
                 # (store 把种子拷成 db.run.json),不排除会把零工作 turn
                 # 误判为"有文件变化"。
                 continue
+            if path.name in ("package.json", "package-lock.json"):
+                continue
             try:
                 if path.stat().st_mtime >= since - 1:
-                    return True
+                    hits.append(path.relative_to(output_dir))
             except OSError:
                 continue
+    if hits:
+        log("[gate] project files changed since window start: "
+            + ", ".join(map(str, hits[:5]))
+            + (" …" if len(hits) > 5 else ""))
+        return True
     return False
 
 
@@ -3474,13 +3530,9 @@ def main() -> int:
                 # 进度账本行:家族级状态随工单下发(planctl 退役后全局
                 # 进度的唯一载体);范围 run 只列范围内家族。分层装配:
                 # 全局层(地图+契约+播种契约)常驻系统行;工单=批节点
-                # TASK+SCENARIOS 本批原文。
-                node_prompt = build_turn_features(batch, parent_of)
-                if idx == 1:
-                    # 骨架轮退役:首家族批携带 BOOTSTRAP 前言(种子/共享
-                    # API 面/家族 stub 在位)——有模板时首 turn 就是 REQ-1
-                    # 的正式轮。
-                    node_prompt = BOOTSTRAP_PREAMBLE + node_prompt
+                # TASK+SCENARIOS 本批原文。turn_core=无 BOOTSTRAP 的工单
+                # 正文,重入轮复用(重发 BOOTSTRAP 违"仅首轮"契约)。
+                turn_core = build_turn_features(batch, parent_of)
                 batch_specs = sorted(
                     {f for nid in batch_ids
                      for f in (spec_map.get(nid) or [])})
@@ -3488,12 +3540,19 @@ def main() -> int:
                 # SPEC RUN 装置(带官方 spec 路径);requirements-only
                 # 任务(两道 hackathon 题)的完成要求里已含自测义务。
                 if batch_specs:
-                    node_prompt += build_spec_run_cmd(
+                    turn_core += build_spec_run_cmd(
                         str(toolchain_cli)
                         if toolchain_cli is not None else None,
                         batch_specs)
-                node_prompt += GOAL_FIRST_TURN_COMPLETION.format(
+                turn_core += GOAL_FIRST_TURN_COMPLETION.format(
                     smoke=smoke_port)
+                if idx == 1:
+                    # 骨架轮退役:首家族批携带 BOOTSTRAP 前言(种子/共享
+                    # API 面/家族 stub 在位)——有模板时首 turn 就是 REQ-1
+                    # 的正式轮。
+                    node_prompt = BOOTSTRAP_PREAMBLE + turn_core
+                else:
+                    node_prompt = turn_core
                 if template_ready:
                     _ensure_dev_server(output_dir, smoke_port,
                                        spec_ports_extra, log)
@@ -3507,6 +3566,7 @@ def main() -> int:
                     pre_batch_head = None
                 batch_turn_ok = True
                 main_turn_reason = "not run: auth exhausted"
+                reentry_kind = ""
                 if driver.auth_exhausted:
                     # Gateway burned its credential budget: stop paying for
                     # LLM turns; the batch goes blocked and the
@@ -3526,14 +3586,46 @@ def main() -> int:
                 else:
                     wall = turn_wall(len(batch))
                     ok, text = driver.run(node_prompt, min(node_timeout, wall), wall)
+                    # 续跑层,各每批至多一次:
+                    # A=模型侧切断(doom 代收尾/output_truncated)→ 切断理由重入;
+                    # B=零真产出(turn 干净返回但零项目文件落盘——纯探索轮/
+                    # shell-spiral 等无标记内核终局盲区)→ 零进展重入。
+                    # 同会话重入,模型带全上下文;预算门与批尾 trim 环同阈值;
+                    # 重入轮结果即最终结果,仍走下方既有五道门。
+                    reentry_kind = ""
+                    reason = reentry_reason(text, driver.kernel_terminal)
+                    if (reason and not time_up()
+                            and remaining() >= final_reserve + node_floor):
+                        reentry_kind = "cut"
+                        log(f"[flow] {focus_id}: turn cut ({reason}); "
+                            "re-entry turn starting (A, 1 max)")
+                        ok, text = driver.run(
+                            turn_reentry_prompt(turn_core, reason),
+                            min(node_timeout, wall), wall)
+                    if (ok
+                            and not kernel_terminal_marker(
+                                driver.kernel_terminal)
+                            and not project_files_changed(output_dir, t0)
+                            and not time_up()
+                            and remaining() >= final_reserve + node_floor):
+                        reentry_kind = (f"{reentry_kind}+zero-output"
+                                        if reentry_kind else "zero-output")
+                        log(f"[flow] {focus_id}: no project file change; "
+                            "zero-output re-entry starting (B, 1 max)")
+                        ok, text = driver.run(
+                            zero_output_reentry_prompt(turn_core),
+                            min(node_timeout, wall), wall)
                 batch_turn_ok = ok
                 kernel_cut = kernel_terminal_marker(driver.kernel_terminal)
                 main_turn_reason = _turn_end_reason(ok, text,
                                                     driver.kernel_terminal)
                 cut_note = (f" (kernel cut: {kernel_cut}; turn failed)"
                             if kernel_cut else "")
+                reentry_note = (f" (re-entry: {reentry_kind})"
+                                if reentry_kind else "")
                 log(f"[flow] batch {focus_id} {'ok' if ok else 'FAILED'} "
-                    f"in {time.time()-t0:.0f}s{cut_note}: {text[-300:]!r}")
+                    f"in {time.time()-t0:.0f}s{reentry_note}{cut_note}: "
+                    f"{text[-300:]!r}")
                 if not ok or kernel_cut:
                     # Hard-wall/orphan cuts can leave a batch 90% done on
                     # disk. Keep what landed (verdict=blocked; no host

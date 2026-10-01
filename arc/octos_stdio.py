@@ -168,7 +168,7 @@ class OctosStdioSession:
         self.profile_id = res.get("profile_id") if isinstance(res, dict) else None
         if not self.profile_id:
             raise OctosProtocolError(f"profile/local/create gave no profile_id: {res}")
-        self._inject_iteration_cap()
+        self._inject_turn_limits()
         self._inject_system_context()
         api_type = "anthropic" if provider == "anthropic" else "openai"
         route: dict = {"api_type": api_type}
@@ -195,7 +195,7 @@ class OctosStdioSession:
         load_bootstrap_files(commands/mod.rs:149)读该目录下 AGENTS.md
         进系统行(base+date 之后、memory 之前,无 cap)。
 
-        时序同 _inject_iteration_cap:create 之后、llm/upsert 之前——
+        时序同 _inject_turn_limits:create 之后、llm/upsert 之前——
         upsert 触发 ProfileRuntime 重建,重读盘上 bootstrap 文件;每分段
         新会话(new profile id)重新注入,内容字节稳定即跨段缓存前缀一致。
         """
@@ -210,54 +210,74 @@ class OctosStdioSession:
             f"[stdio] system-row context injected: {path} "
             f"({len(self.system_context)} chars)")
 
-    def _inject_iteration_cap(self) -> None:
-        """Bound every turn of this session to OCTOS_TURN_MAX_ITERATIONS.
+    def _inject_turn_limits(self) -> None:
+        """Bound every turn of this session: iteration cap + output cap.
 
         serve 的 OUP 回合按 Interactive 意图归类: profile 没有显式
         gateway.max_iterations 时内核不设回合上限 (自治通道的 50 次兜底
         只覆盖非 OUP lane), 实测单节点 turn 冲到 114-136 次迭代 /
         872K 累计 token (2026-09-21 keep 模拟 run1/run2)。显式 profile
         上限对 Interactive 同样生效 (turn_policy), 所以直接落盘改写
-        注册表 JSON。
+        注册表 JSON。默认 100 = 失控尾部保险丝, 不误伤自然收敛。
 
-        默认 100 的依据: keep 两轮共 20 个 turn 的自然迭代需求分布
-        [1..136], 超过 60 的有 4 个(20%)——60 会截断正常收敛中的回合
-        (run3 实测: 被截节点要靠 repair 轮补救, 反而更贵); 超过 100 的
-        只有 114/136 两个极端失控样本。100 = 失控尾部保险丝, 不误伤
-        自然收敛。
+        单次响应输出上限同通道注入 (gateway.max_output_tokens): serve
+        的 profile 会话默认吃内核内置 16K/响应 (octos-llm context.rs
+        default_max_tokens), 2026-10-02 github 跑实测调试独白单响应
+        16384 tok 撞顶被截 (turn/error output_truncated, 零工具调用)。
+        默认 131072 (deepseek-v4 native completion 384K, catalog 值),
+        env OCTOS_MAX_OUTPUT_TOKENS 覆盖, "0"=留在内核默认。
 
         时序必须在 create 之后、llm/upsert 之前: upsert 是"从磁盘读
         profile → 合并 LLM 选择 → save_with_merge → 代数守护重建运行时"
         (#2164), 编辑搭这班车进入重建后的运行时; upsert 之后再改会被
         已缓存的运行时遮蔽。
         """
-        raw = os.environ.get("OCTOS_TURN_MAX_ITERATIONS", "").strip() or "100"
+        raw_iter = os.environ.get("OCTOS_TURN_MAX_ITERATIONS", "").strip() or "100"
         try:
-            cap = int(raw)
+            iter_cap = int(raw_iter)
         except ValueError:
-            cap = 100
-        if cap <= 0:
-            self._stderr_lines.append(
-                f"[stdio] OCTOS_TURN_MAX_ITERATIONS={raw} <= 0: turns uncapped")
-            return
+            iter_cap = 100
+        raw_out = os.environ.get("OCTOS_MAX_OUTPUT_TOKENS", "").strip() or "131072"
+        try:
+            out_cap = int(raw_out)
+        except ValueError:
+            out_cap = 131072
         registry = self.data_dir / "profiles" / f"{self.profile_id}.json"
+        notes = []
         try:
             profile = json.loads(registry.read_text(encoding="utf-8"))
             gateway = profile.setdefault("config", {}).setdefault("gateway", {})
-            if gateway.get("max_iterations") in (None, cap):
-                gateway["max_iterations"] = cap
+            changed = False
+            if iter_cap > 0:
+                if gateway.get("max_iterations") in (None, iter_cap):
+                    gateway["max_iterations"] = iter_cap
+                    changed = True
+                    notes.append(f"iterations={iter_cap}")
+            else:
+                notes.append(f"iterations uncapped (OCTOS_TURN_MAX_ITERATIONS={raw_iter})")
+            if out_cap > 0:
+                if gateway.get("max_output_tokens") in (None, out_cap):
+                    gateway["max_output_tokens"] = out_cap
+                    changed = True
+                    notes.append(f"max_output_tokens={out_cap}")
+            else:
+                notes.append(
+                    "max_output_tokens left at kernel default "
+                    f"(OCTOS_MAX_OUTPUT_TOKENS={raw_out})")
+            if changed:
                 tmp = registry.with_suffix(".json.tmp")
                 tmp.write_text(json.dumps(profile, ensure_ascii=False, indent=2),
                                encoding="utf-8")
                 os.replace(tmp, registry)
         except (OSError, ValueError) as exc:
-            # 注册表布局漂移或 IO 失败: 不让整个提交挂掉, 退化为无上限
+            # 注册表布局漂移或 IO 失败: 不让整个提交挂掉, 退化为内核默认
             # (与旧行为一致), 但把原因留在 stderr 里。
             self._stderr_lines.append(
-                f"[stdio] iteration-cap injection skipped ({exc}): turns uncapped")
+                f"[stdio] turn-limit injection skipped ({exc})")
             return
         self._stderr_lines.append(
-            f"[stdio] per-turn iteration cap injected: {cap} ({registry.name})")
+            f"[stdio] turn limits injected: {'; '.join(notes)} "
+            f"({registry.name})")
 
     def open(self, timeout: float = 120.0) -> None:
         params = {"session_id": self.session_id, "cwd": self.cwd}

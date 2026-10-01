@@ -344,7 +344,11 @@ impl Default for ToolOutputPolicy {
         Self {
             policy_id: DEFAULT_TOOL_OUTPUT_POLICY_ID.to_owned(),
             inline_raw_threshold_bytes: 16 * 1024,
-            model_visible_max_bytes: 4 * 1024,
+            // 32K (2026-10-02): 4K 截掉了 shell 收据尾注("Exit code: 0"),
+            // shell-spiral 检测器按尾注判成败 → 一次健康的 requirements
+            // dump 触发 spiral 误杀整 turn。32K 与 ARC lane 的 128K 输出
+            // 上限匹配;完整原文仍在 artifact + read_task_output 召回面。
+            model_visible_max_bytes: 32 * 1024,
         }
     }
 }

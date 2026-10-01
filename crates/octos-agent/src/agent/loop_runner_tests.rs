@@ -118,9 +118,19 @@ async fn terminal_integrity_reasoning_only_recovers_to_actual_answer() {
 #[tokio::test]
 async fn terminal_integrity_truncated_answer_is_error_with_usage() {
     let dir = tempfile::tempdir().unwrap();
-    let mut truncated = end_turn("First I need to inspect the image and then I will", 12, 7);
+    // 2026-10-02: a MaxTokens answer WITH content but no tool call now
+    // soft-recovers in-turn (monologue nudge ×
+    // MAX_TOKENS_MONOLOGUE_RECOVERY_LIMIT) before the truncated turn
+    // surfaces as PartialTurnUsage — so the script feeds two nudged
+    // generations and the third (exhausted) one carries the asserted
+    // usage.
+    let mut nudged_1 = end_turn("First I need to inspect the image and then I will", 12, 7);
+    nudged_1.stop_reason = StopReason::MaxTokens;
+    let mut nudged_2 = end_turn("Let me check the image format first", 5, 4);
+    nudged_2.stop_reason = StopReason::MaxTokens;
+    let mut truncated = end_turn("OK, inspecting the image now", 6, 4);
     truncated.stop_reason = StopReason::MaxTokens;
-    let provider = Arc::new(ScriptedProvider::new(vec![truncated]));
+    let provider = Arc::new(ScriptedProvider::new(vec![nudged_1, nudged_2, truncated]));
     let agent = boot_agent(
         "terminal-truncated",
         dir.path(),
@@ -134,9 +144,12 @@ async fn terminal_integrity_truncated_answer_is_error_with_usage() {
         .await
         .expect_err("a truncated response is not a completed answer");
     assert!(error.to_string().contains("max_tokens"), "{error:?}");
+    // PartialTurnUsage is the whole-turn cumulative usage: the terminal
+    // truncated response comes after the two monologue-nudged generations
+    // (12+5+6 in, 7+4+4 out).
     let usage = error.downcast_ref::<crate::PartialTurnUsage>().unwrap();
-    assert_eq!(usage.total.input_tokens, 12);
-    assert_eq!(usage.total.output_tokens, 7);
+    assert_eq!(usage.total.input_tokens, 23);
+    assert_eq!(usage.total.output_tokens, 15);
 }
 
 impl StaticResultTool {
@@ -869,10 +882,14 @@ fn shell_retry_terminal_user_message_strips_system_prefix() {
     assert!(!sanitized.contains("[SHELL RETRY LIMIT]"));
     assert!(!sanitized.contains("Stop retrying shell and summarize"));
     assert!(sanitized.contains("could not find Cargo.toml"));
+    // Marker line first (2026-10-02): the sanitized text IS the final
+    // assistant reply; without a leading marker a governance kill is
+    // indistinguishable downstream from a genuine model end_turn.
     assert!(
-        sanitized.starts_with("I tried multiple shell approaches"),
-        "expected user-facing framing, got: {sanitized}"
+        sanitized.starts_with("[SHELL SPIRAL DETECTED]"),
+        "expected marker line first, got: {sanitized}"
     );
+    assert!(sanitized.contains("I tried multiple shell approaches"));
 }
 
 /// Helper: builds a 4-call shell-streak with all failures, exactly the
