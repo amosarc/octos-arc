@@ -9,6 +9,7 @@ Run: python3 arc/goal_first_test.py
 from __future__ import annotations
 
 import json
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -279,8 +280,8 @@ class DependencyBlockTests(unittest.TestCase):
         self.assertIn("DEPENDENCIES: REQ-1 — already implemented", blob)
         blob = self._blob(["REQ-2-1"], statuses={"REQ-1": "blocked"})
         self.assertIn(
-            "DEPENDENCIES: REQ-1 — not yet implemented (cyclic order)",
-            blob)
+            "DEPENDENCIES: REQ-1 — not yet implemented (cyclic order or "
+            "an earlier attempt failed)", blob)
         self.assertNotIn("already implemented", blob)
 
     def test_seed_contract_section_order_and_verbatim(self):
@@ -1309,6 +1310,131 @@ class RuntimeSeedResetTests(unittest.TestCase):
             main._reset_runtime_seed(out)  # 缺席不抛
             # 种子文件本身不动(它是交付原件)
             self.assertFalse((out / "backend" / "data" / "db.json").exists())
+
+
+class DumpRuntimePromptsTests(unittest.TestCase):
+    """真实运行时上下文采集(main.dump_runtime_prompts):唯一数据源=内核
+    llm.jsonl(OCTOS_CONTEXT_LOG=1 常开,逐字节 messages);产出
+    prompts/{system-prompt,AGENTS,turn-NNN}.md。"""
+
+    REQ_LINE = ('{"kind":"llm_request","seq":%d,"iteration":%d,'
+                '"messages":[{"role":"system","content":%s},'
+                '{"role":"user","content":%s},'
+                '{"role":"assistant","content":"ok"}]}')
+
+    @staticmethod
+    def _sys_text():
+        return ("gateway base text\n\nCurrent date: 2026-09-30\n\n"
+                "## AGENTS.md\n\nROOT CONTRACT (verbatim)\nchildren map\n"
+                "\n## TOOL USE DISCIPLINE\nnever claim results")
+
+    def _write_llm(self, root: Path, run_id: str, rows) -> None:
+        d = root / ".octos" / "context-logs" / run_id
+        d.mkdir(parents=True)
+        body = "\n".join(
+            self.REQ_LINE % (seq, it, json.dumps(sys_text),
+                             json.dumps(user))
+            for seq, it, sys_text, user in rows) + "\n"
+        (d / "llm.jsonl").write_text(body, encoding="utf-8")
+
+    def _fake_workspace(self, td: Path) -> None:
+        sys_text = self._sys_text()
+        # 会话 A:两个回合(iteration 1 各一条;iteration 2 忽略)
+        self._write_llm(td, "20260930-100000-1", [
+            (1, 1, sys_text, "TASK: implement REQ-1 (alpha)."),
+            (2, 2, sys_text, "TASK: implement REQ-1 (alpha)."),
+            (3, 1, sys_text, "TASK: implement REQ-2 (beta)."),
+        ])
+        # 会话 B(修复会话):一个回合;另一 run_id 坏行跳过
+        self._write_llm(td, "20260930-110000-9", [
+            (50, 1, sys_text, "REHEARSAL REPAIR: build failed"),
+        ])
+        bad = td / ".octos" / "context-logs" / "20260930-090000-0"
+        bad.mkdir()
+        (bad / "llm.jsonl").write_text(
+            "{not json}\n{\"kind\":\"llm_response\",\"seq\":9}\n",
+            encoding="utf-8")
+        # 会话 A 先动、会话 B 后动(mtime 序=B 在后)
+        import os as _os
+        import time as _time
+        a = td / ".octos" / "context-logs" / "20260930-100000-1" / "llm.jsonl"
+        b = td / ".octos" / "context-logs" / "20260930-110000-9" / "llm.jsonl"
+        t0 = _time.time() - 60
+        _os.utime(a, (t0, t0))
+
+    def test_full_capture_three_kinds(self):
+        import main
+        with tempfile.TemporaryDirectory() as td_s:
+            td = Path(td_s)
+            self._fake_workspace(td)
+            summary = main.dump_runtime_prompts(td)
+            prompts = td / "prompts"
+            self.assertEqual(summary["turns"], 3)
+            self.assertTrue(summary["system_prompt"])
+            self.assertTrue(summary["agents_md"])
+            sys_out = (prompts / "system-prompt.md").read_text(
+                encoding="utf-8")
+            self.assertEqual(sys_out, self._sys_text())
+            agents = (prompts / "AGENTS.md").read_text(encoding="utf-8")
+            # 段提取含包裹头、止于下一个 "## " 头
+            self.assertTrue(agents.startswith("## AGENTS.md"))
+            self.assertIn("ROOT CONTRACT (verbatim)", agents)
+            self.assertNotIn("TOOL USE DISCIPLINE", agents)
+            # turn 顺序:会话 A 两回合 → 会话 B 一回合;iteration 2 忽略
+            t1 = (prompts / "turn-001.md").read_text(encoding="utf-8")
+            t2 = (prompts / "turn-002.md").read_text(encoding="utf-8")
+            t3 = (prompts / "turn-003.md").read_text(encoding="utf-8")
+            self.assertIn("REQ-1 (alpha)", t1)
+            self.assertIn("REQ-2 (beta)", t2)
+            self.assertIn("REHEARSAL REPAIR", t3)
+            self.assertEqual(
+                sorted(p.name for p in prompts.glob("turn-*.md")),
+                ["turn-001.md", "turn-002.md", "turn-003.md"])
+
+    def test_no_context_logs_is_noop_never_raises(self):
+        import main
+        with tempfile.TemporaryDirectory() as td_s:
+            td = Path(td_s)
+            summary = main.dump_runtime_prompts(td)
+        self.assertEqual(summary, {"turns": 0, "system_prompt": False,
+                                   "agents_md": False})
+        self.assertFalse((Path(td_s) / "prompts").exists())
+
+    def test_agents_fallback_to_profile_file_when_section_missing(self):
+        import main
+        with tempfile.TemporaryDirectory() as td_s:
+            td = Path(td_s)
+            self._write_llm(td, "r1", [
+                (1, 1, "system prompt without any section header",
+                 "TASK: x")])
+            profile = (td / "octos" / "state" / "profiles" / "p1" / "data")
+            profile.mkdir(parents=True)
+            (profile / "AGENTS.md").write_text(
+                "injected system row", encoding="utf-8")
+            summary = main.dump_runtime_prompts(td)
+            self.assertTrue(summary["agents_md"])
+            self.assertEqual(
+                (td / "prompts" / "AGENTS.md").read_text(
+                    encoding="utf-8"),
+                "injected system row")
+
+    def test_idempotent_rebuild_and_consecutive_dedupe(self):
+        import main
+        with tempfile.TemporaryDirectory() as td_s:
+            td = Path(td_s)
+            # 同一回合重试 → 两条相同 iteration-1 行,只计一个 turn
+            self._write_llm(td, "r1", [
+                (1, 1, self._sys_text(), "TASK: retry me"),
+                (2, 1, self._sys_text(), "TASK: retry me"),
+                (3, 1, self._sys_text(), "TASK: next turn")])
+            main.dump_runtime_prompts(td)
+            main.dump_runtime_prompts(td)  # 幂等:整体重建,不翻倍
+            prompts = td / "prompts"
+            self.assertEqual(sorted(p.name for p in prompts.glob("turn-*")),
+                             ["turn-001.md", "turn-002.md"])
+            self.assertIn("TASK: retry me",
+                          (prompts / "turn-001.md").read_text(
+                              encoding="utf-8"))
 
 
 class SeedOwnershipTests(unittest.TestCase):

@@ -318,6 +318,111 @@ def _segment_digest(node_done_notes: dict[str, str],
     return "\n".join(lines)[:2000]
 
 
+def _extract_agents_section(system_text: str) -> str | None:
+    """系统提示词里 "## AGENTS.md" 包裹段原文(load_bootstrap_files 形态,
+    到下一个 "## " 头或文末);解析不出返回 None。"""
+    i = system_text.find("## AGENTS.md")
+    if i < 0:
+        return None
+    j = system_text.find("\n## ", i + len("## AGENTS.md"))
+    section = system_text[i:j if j >= 0 else len(system_text)].strip()
+    return section or None
+
+
+def dump_runtime_prompts(output_dir: Path) -> dict:
+    """真实运行时模型上下文采集 → <output_dir>/prompts/(纯内核痕迹,零加工)。
+
+    唯一数据源=内核 context_log(宿主常开 OCTOS_CONTEXT_LOG=1):
+    .octos/context-logs/<run_id>/llm.jsonl 每次 LLM 请求逐字节落完整
+    messages(system 在 [0],不截断)。产出三件:
+      system-prompt.md  首条 llm_request 的 messages[0]——gateway 覆盖+
+                        日期行+## AGENTS.md 段的真实组装形态;
+      AGENTS.md         messages[0] 的 "## AGENTS.md" 段(含包裹头);
+                        解析不出回退 profile data 目录的原注入文件;
+      turn-NNN.md       每回合首次对话的用户消息:iteration==1 的请求行
+                        尾部 user 消息(批 turn/nudge/彩排修复/blocked-
+                        retry/final 全覆盖),按 (目录 mtime, 行 seq) 全局
+                        排序,连续重复(同回合重试)去重。
+    跨 run_id 目录合并(家族会话+修复会话);幂等(整体重建);绝不抛。
+    """
+    out = {"turns": 0, "system_prompt": False, "agents_md": False}
+    try:
+        logs_root = output_dir / ".octos" / "context-logs"
+        log_files = sorted(
+            logs_root.glob("*/llm.jsonl"),
+            key=lambda p: p.stat().st_mtime) if logs_root.is_dir() else []
+        if not log_files:
+            return out
+        rows: list[tuple[float, int, dict]] = []
+        system_text: str | None = None
+        for lf in log_files:
+            try:
+                mtime = lf.stat().st_mtime
+                with lf.open(encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except ValueError:
+                            continue
+                        if row.get("kind") != "llm_request":
+                            continue
+                        if system_text is None:
+                            msgs = row.get("messages") or []
+                            if msgs and isinstance(
+                                    msgs[0].get("content"), str):
+                                system_text = msgs[0]["content"]
+                        rows.append((mtime, int(row.get("seq") or 0), row))
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+        prompts_dir = output_dir / "prompts"
+        if prompts_dir.exists():
+            shutil.rmtree(prompts_dir, ignore_errors=True)
+        prompts_dir.mkdir(parents=True, exist_ok=True)
+        if system_text:
+            (prompts_dir / "system-prompt.md").write_text(
+                system_text, encoding="utf-8")
+            out["system_prompt"] = True
+            section = _extract_agents_section(system_text)
+            if section is None:
+                profiles = output_dir / "octos" / "state" / "profiles"
+                candidates = sorted(
+                    profiles.glob("*/data/AGENTS.md"),
+                    key=lambda p: p.stat().st_mtime) if profiles.is_dir() \
+                    else []
+                section = (candidates[-1].read_text(encoding="utf-8")
+                           if candidates else None)
+            if section:
+                (prompts_dir / "AGENTS.md").write_text(
+                    section, encoding="utf-8")
+                out["agents_md"] = True
+        turn_no = 0
+        prev_text: str | None = None
+        for _mtime, _seq, row in sorted(
+                rows, key=lambda r: (r[0], r[1])):
+            if row.get("iteration") != 1:
+                continue
+            msgs = row.get("messages") or []
+            users = [m for m in msgs
+                     if isinstance(m, dict) and m.get("role") == "user"
+                     and isinstance(m.get("content"), str)]
+            if not users:
+                continue
+            text = users[-1]["content"]
+            if not text.strip() or text == prev_text:
+                continue
+            prev_text = text
+            turn_no += 1
+            (prompts_dir / f"turn-{turn_no:03d}.md").write_text(
+                text, encoding="utf-8")
+        out["turns"] = turn_no
+    except (OSError, ValueError, TypeError):
+        pass
+    return out
+
+
 def _postflight_structure_check(
         output_dir: Path, web_port: int = plan_envelope.WEB_PORT) -> None:
     """Diagnose and repair the deliverable layout the runner checks.
@@ -2204,9 +2309,9 @@ def _dependency_block(dep_nodes: list[dict], dropped: list[dict],
     if pending_ids:
         lines.append(
             "DEPENDENCIES: " + " / ".join(pending_ids)
-            + " — not yet implemented (cyclic order): implement the minimum "
-            "of them this Feature needs, straight from the requirement "
-            "text; do not wait.")
+            + " — not yet implemented (cyclic order or an earlier attempt "
+            "failed): implement the minimum of them this Feature needs, "
+            "straight from the requirement text; do not wait.")
     dropped_ids = {str(n.get("id")) for n in dropped}
     ui_lines = [_dep_ui_line(n) for n in dep_nodes
                 if str(n.get("id")) not in dropped_ids]
@@ -2304,9 +2409,15 @@ def session_group_batches(tree: dict, batches: list[list[dict]],
             pick = min(pool, key=lambda f: doc_index[f])
             if not ready:
                 unmet = sorted(dep_of[pick] - executed)
+                # 措辞如实的 A 案(09-30 核验):sheet 真题节点级声明无环
+                # (REQ-2-1-1 → REQ-5-3-1 → REQ-5-1-2/2-1 → REQ-2-1-2/1-4
+                # 是单向链),家族投影才成 ⇄ 伪环——日志点名这是家族粒度
+                # 投影,不是需求自相矛盾;机制面照旧(前向依赖=闭包注入
+                # +pending 标注+最小面指令,LAW 8 回归兜底)。
                 log(f"[flow] session policy=family: dependency cycle "
                     f"broken at {pick} (unmet deps {', '.join(unmet)} — "
-                    "carried by closure injection + regression)")
+                    "family-granularity projection, node-level DAG is "
+                    "acyclic; carried by dependency block + regression)")
             order.append(pick)
             executed.add(pick)
             remaining.remove(pick)
@@ -3433,10 +3544,22 @@ def main() -> int:
     # The platform runner passes `--type web|cli|android`; older local flows
     # used `--app-type`. Accept both spellings into the same dest.
     parser.add_argument("--type", "--app-type", dest="app_type", default="web")
+    parser.add_argument(
+        "--dump-prompts", nargs="?", const="AUTO", default=None,
+        help="collect system prompt / AGENTS.md / per-turn first user "
+             "messages from the kernel llm.jsonl into <dir>/prompts "
+             "(dir defaults to --output-dir)")
     parser.add_argument("--web-port", type=int,
                         default=int(os.environ.get("ARCBENCH_WEB_PORT",
                                                    os.environ.get("ARC_WEB_PORT", "3000"))))
     args = parser.parse_args()
+
+    if args.dump_prompts:
+        target = (Path(args.dump_prompts) if args.dump_prompts != "AUTO"
+                  else Path(args.output_dir or args.requirement_path))
+        summary = dump_runtime_prompts(target)
+        print(f"[prompts] {summary} -> {target / 'prompts'}")
+        return 0
 
     # 内核基础提示词 7 工具对齐覆盖(在任何 octos 会话启动前落位)。
     install_gateway_prompt_override(log)
@@ -4852,6 +4975,9 @@ def main() -> int:
         # pristine seed start — as the LAST action (anything booting the
         # server after this would recreate the run file).
         _ensure_eval_telemetry(output_dir)
+        _pc = dump_runtime_prompts(output_dir)
+        log(f"[prompts] captured {_pc['turns']} turn prompt(s) -> "
+            f"{output_dir / 'prompts'}")
         _handover_pristine_seed(output_dir)
         return 0
     except Exception as exc:  # platform judges by events, not exit code
@@ -4862,6 +4988,10 @@ def main() -> int:
         _postflight_structure_check(output_dir, args.web_port)
         _free_web_port(args.web_port)
         _ensure_eval_telemetry(output_dir)
+        try:
+            dump_runtime_prompts(output_dir)
+        except Exception:
+            pass
         _handover_pristine_seed(output_dir)
         events.mark_run_failed(str(exc)[:1000])
         return 0

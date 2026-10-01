@@ -115,7 +115,8 @@ def render_task(task: str, out_root: Path) -> None:
                   body + system_row
                   + _mock("(系统行不产生回复——常驻上下文)。")))
 
-    statuses: dict[str, str] = {}
+    statuses: dict[str, str] = {
+        str(n.get("id")): "pending" for n in main.flatten_atomic(tree)}
     done_notes: dict[str, str] = {}
     turn_no = 0
 
