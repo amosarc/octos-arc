@@ -69,7 +69,7 @@ import scaffold  # noqa: E402  (宿主脚手架包:模板/清单/schema 编译�
 # 模型自测骨架目录名(e2e/):承载 playwright 工具链发现与被内核放行的
 # 自测命令;放工作区根,脱离平台 .arc 命名空间。
 PLATFORM_PW_VERSION = "1.57.0"
-SELFTEST_SUBDIR = "./e2e"
+SELFTEST_SUBDIR = "e2e"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -79,7 +79,8 @@ SELFTEST_SUBDIR = "./e2e"
 #   ""             → 全量(最终冲分提交务必改回这里!)
 # 本地仿真不受它影响:env OCTOS_ARC_FAMILIES 设置时覆盖此值。
 # COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2,REQ-3"
-COMPETITION_FAMILY_SCOPE = ""
+COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2"
+# COMPETITION_FAMILY_SCOPE = ""
 
 # 思考参数
 # config.json 的 model_thinking/model_reasoning_effort,内核按
