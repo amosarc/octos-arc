@@ -1145,7 +1145,7 @@ def _ensure_host_toolchain(log) -> Path | None:
     ③ 裸环境兜底：无清单的 tmpdir 装 @playwright/test@PLATFORM_PW_
        VERSION(钉版本,绝不装 latest——npx latest 的浏览器漂移是
        run4/run5 的旧伤)。
-    失败返回 None(不致命,Tier-2 自会降级为 model final check)。"""
+    失败返回 None(不致命,记入仪表)。"""
     global_cli = _pw_resolve_global_cli()
     if global_cli is not None:
         log(f"[toolchain] using the image-global @playwright/test "
@@ -3302,35 +3302,6 @@ def final_spec_files(tier2_run, output_dir: Path) -> list[str] | None:
             hits.append(name)
     return hits or all_specs
 
-HOST_FINAL_CHECK_PROMPT = """\
-The host already built the app, booted it, and probed the /api/ routes; \
-any host-found failure is listed below. Verify only what the host \
-cannot: assertion semantics (grading behaviors observed in real runs) — \
-strict-mode single matches for echoed values, exactly one visible \
-error element per failure, verbatim option labels, and session \
-persistence across reload. Walk the action chains \
-behind each failing test named below, on the running app, and report \
-one line of evidence per chain; an empty "all good" without evidence \
-is a failed check. Fix what is wrong; do not rebuild what works. Do \
-not commit.\
-"""
-
-HOST_FINAL_CHECK_UI_PROMPT = """\
-The host verified build + boot + ports, plus a crash-free page walk \
-(unless a page-health finding is listed below) — everything else in a \
-real browser is yours to verify with your OWN specs (derive them from \
-the requirement scenarios; the SELF-TEST command runs them against the \
-running app). Walk the action chains behind the requirement scenarios — \
-visible feedback for every named control, exactly one visible error \
-element per failure, strict-mode unique echoes, verbatim labels and \
-seeded values (grading behaviors observed in real runs, not \
-host-invented rules). Report one line of evidence per chain; an empty "all \
-good" without evidence is a failed check. BUDGET: one walk per chain — \
-verify each chain once, fix only what is red, then end the turn; never \
-re-run whole suites and never re-verify chains that already passed. \
-Fix what is broken; do not rebuild what works. Do not commit.\
-"""
-
 # 09-30: ACCEPTANCE_STAGED_NOTE 整块退役——"Implement against the spec
 # files / the spec wins" 与工单 "the TEXT wins" 逐字对立,是发明规则经
 # staged spec 跨会话固化的教义通道(sheet 09-30 95×400 法医)。staged
@@ -4368,16 +4339,16 @@ def main() -> int:
                                 log(f"[plan] regression green: "
                                     f"{g_run[0]}p/{g_run[1]}f")
 
-            # Final verification pass; octos leaves the port free.
+            # Final verification pass (read-only): the host measures
+            # whatever landed — Tier-1 probes, staged specs (Tier-2),
+            # page-health, rejection audit, model selftest evidence — and
+            # records it. No final LLM turn: the batch turns were the
+            # model's only chances to drive the app; this pass never
+            # repairs.
             ok, text = False, "skipped: time budget"
             if time_up():
                 log("[flow] time budget exhausted; skipping final verification")
             else:
-                # B-flip: the host runs the full Tier-1 probe pass itself;
-                # with OCTOS_ARC_HOST_GRADE=1 it also runs the staged
-                # Playwright suite (Tier-2) — all green skips the final LLM
-                # turn entirely, otherwise a slim final checks only what a
-                # host cannot (assertion semantics).
                 log("[plan] final host verification (Tier-1 probes)")
                 f_err, f_report = rehearse_node(
                     output_dir, smoke_port, probe_list, spec_ports_extra,
@@ -4412,7 +4383,7 @@ def main() -> int:
                     log(f"[plan] Tier-2 staged playwright: "
                         f"{tier2_run[0]}p/{tier2_run[1]}f"
                         if tier2_run else "[plan] Tier-2 unavailable; "
-                                         "degrading to model final check")
+                                          "recorded as None")
 
                 # Host page-health probe (09-28 sheet forensics): the
                 # minimum browser check for ANY task — requirements-only
@@ -4432,9 +4403,8 @@ def main() -> int:
                         log("[plan] page-health clean")
 
                 # 发明拒绝规则保险网(09-30 sheet 95×400 法医):静态
-                # 扫描后端 4xx 文案回查 requirements.yaml 引用。turn 前
-                # 一次(红项注入 final 轮),turn 后一次(入 final 链
-                # 仪表);审计绝不挡 final 链。
+                # 扫描后端 4xx 文案回查 requirements.yaml 引用,结果
+                # 入 final 链仪表;审计绝不挡 final 链。
                 req_text_for_audit = ""
                 for _cand in (dest_req, output_dir / "requirements"):
                     _f = _cand / "requirements.yaml"
@@ -4460,167 +4430,16 @@ def main() -> int:
                         log(f"[plan] rejection audit failed: {exc}")
 
                 _prune_acceptance_junk(output_dir, tests_dir, log)
-                # 09-27 定则:宿主不再跑自写浏览器套件——跳过 final LLM 轮
-                # 的门只剩 Tier-1 探针绿 + Tier-2 staged specs(任务自带
-                # 公开测试)全绿;requirements-only 任务的浏览器级验证由
-                # 模型自写 spec 自证(见 SELF-TEST 指引)。
+                # 宿主终局判定面(全绿=ok):Tier-1 探针绿 + Tier-2 staged
+                # specs(任务自带公开测试)全绿 + page-health 干净。纯测量
+                # 判定,不触发任何修复轮。
                 if (f_err is None and tier2_run is not None
                         and tier2_run[1] == 0 and tier2_run[0] > 0
                         and not ph_errors):
-                    ok, text = True, ("host spec run all green "
-                                      f"({tier2_run[0]} passed); final LLM turn skipped")
-                    log("[plan] Tier-2 all green; skipping final LLM turn")
-                else:
-                    # A3: the prompt must state only what the host ACTUALLY
-                    # verified — 0 probes means UI assertions are unchecked
-                    # and the model must walk them itself.
-                    final_prompt = (
-                        HOST_FINAL_CHECK_PROMPT if probe_list
-                        else HOST_FINAL_CHECK_UI_PROMPT)
-                    if f_err is not None:
-                        # 此前 rehearsal 红时 final 轮盲修——错误细节
-                        # (build/boot/探针输出)就在手边,直接给模型。
-                        final_prompt += (
-                            "\nHOST REHEARSAL (build + boot + route probes) "
-                            "FAILED — fix this first:\n"
-                            f"{f_err[-800:]}")
-                    if tier2_run and tier2_run[1] > 0:
-                        # Tier-2 ran and is RED: the failing titles are ground
-                        # truth — hand them to the model instead of letting it
-                        # re-discover failures by hand-walking.
-                        final_prompt += (
-                            f"\nHOST SPEC RUN (ground truth, Playwright vs "
-                            f"this app on port {smoke_port}): "
-                            f"{tier2_run[0]} passed, {tier2_run[1]} FAILED. "
-                            f"Failing tests: {tier2_run[2]}. Reproduce with "
-                            f"the staged specs under .arc/acceptance/, fix "
-                            f"each failure, do not touch passing flows.")
-                    if ph_errors:
-                        final_prompt += (
-                            f"\nHOST PAGE-HEALTH PROBE (ground truth, "
-                            f"headless browser walk over the built app on "
-                            f"port {smoke_port}): uncaught page errors — "
-                            f"{ph_errors}. Open the same pages, find the "
-                            "throwing code path and fix it; every graded "
-                            "step behind a crash scores zero.")
-                    elif tier2_run is not None and not probe_list:
-                        final_prompt += (
-                            f"\nHOST SPEC RUN (ground truth): all "
-                            f"{tier2_run[0]} staged specs PASS on port "
-                            f"{smoke_port}. Do not re-run suites; spot-check "
-                            "one chain if you must, then end the turn.")
-                    if rej_result.get("red_count"):
-                        # 发明拒绝规则 → 评分器流程步死亡的静态实证,直接
-                        # 交给 final 轮修(引用或改默认成功)。
-                        final_prompt += rejection_audit.audit_prompt_block(
-                            rej_result)
-
-                    # Filtered to the red tests' own specs (or all staged
-                    # files as fallback): the final turn never needs the
-                    # unfiltered full-suite form — Tier-2 owns that, and
-                    # the kernel guard refuses it anyway. Requirements-only
-                    # tasks (no staged specs) get the walk-the-app contract
-                    # instead — never a phantom command.
-                    if tests_dir:
-                        final_prompt += build_spec_run_cmd(
-                            str(toolchain_cli)
-                            if toolchain_cli is not None else None,
-                            final_spec_files(tier2_run, output_dir))
-                    _ensure_dev_server(output_dir, smoke_port,
-                                       spec_ports_extra, log)
-                    log("[flow] final verification turn starting (slim, "
-                        f"{len(probe_list)} route probe(s))")
-                    # Guardrail checkpoint: if the fix turn ends up making
-                    # things WORSE (run8: a wall-cut mid-edit main.jsx took
-                    # Tier-2 from 17p to 15p), roll the tree back here and
-                    # ship the pre-fix state instead.
-                    try:
-                        pre_fix_head = runtime.git.run(
-                            ["rev-parse", "HEAD"]).stdout.strip()
-                    except Exception:
-                        pre_fix_head = None
-                    t0 = time.time()
-                    f_wall = turn_wall(1, reserve=0)
-                    ok, text = driver.run(
-                        final_prompt, min(node_timeout, f_wall), f_wall)
-                    log(f"[flow] final check {'ok' if ok else 'FAILED'} "
-                        f"in {time.time()-t0:.0f}s: {text[-300:]!r}")
-                    if f_err is not None:
-                        ok = False
-                        text = f"host final rehearsal red: {f_err[:500]}"
-                    elif tier2_run and tier2_run[1] > 0:
-                        # The turn just fixed Tier-2 red — re-run the specs
-                        # so the repair is verified by ground truth, not by
-                        # the model's self-report.
-                        r_ok, r_fail, r_digest = _run_staged_playwright(
-                            output_dir, smoke_port, tests_dir,
-                            spec_ports_extra,
-                            spec_files=tier2_specs) or (0, 0, "")
-                        log(f"[plan] Tier-2 re-run after fix: "
-                            f"{r_ok}p/{r_fail}f")
-                        hs["spec_run_rerun"] = {"passed": r_ok,
-                                                "failed": r_fail,
-                                                "digest": r_digest}
-                        if (r_ok < tier2_run[0] and pre_fix_head):
-                            # The fix turn left the tree WORSE than before
-                            # (cut mid-edit / regressions). Ship the pre-fix
-                            # state: reset tracked files to the checkpoint;
-                            # untracked strays are harmless (nothing imports
-                            # them once App/entry files are back to the
-                            # pre-fix versions).
-                            try:
-                                runtime.git.run(
-                                    ["reset", "--hard", pre_fix_head])
-                                log(f"[plan] fix turn made it worse "
-                                    f"({r_ok}p < {tier2_run[0]}p); rolled "
-                                    f"back to {pre_fix_head[:8]}")
-                                hs["spec_run_rerun"]["rolled_back_to"] = \
-                                    pre_fix_head[:8]
-                            except Exception as exc:
-                                log(f"[plan] rollback failed: {exc}")
-                            ok = False
-                            text = (f"final fix turn degraded the suite "
-                                    f"({r_ok}p after vs {tier2_run[0]}p "
-                                    f"before); shipped pre-fix state")
-                        elif r_fail > 0:
-                            ok = False
-                            text = (f"Tier-2 still red after fix turn "
-                                    f"({r_fail} failed): {r_digest}")
-                        elif r_ok > 0:
-                            log("[plan] Tier-2 re-run all green; "
-                                "fix verified by ground truth")
-                # O1(09-29 修复):final 修复轮后的重探针。此前 final 轮把
-                # 红项修好后宿主从不复查——批间 rehearsal 红掉的批永远停
-                # 在 blocked、事件面拿不到正向证据、仪表留陈旧红。现在对
-                # 同一 Tier-1 探针面(路由/夹具/种子完整性)重跑一次:
-                # 绿 → blocked 批升级 done + 事件补正,pre-final rehearsal
-                # 红被翻案。只升级 rehearsal-blocked 节点——deadline/budget
-                # skipped 的节点从未实现,绿探针证明不了它们。
-                _blocked_nodes = [nid for nid, st in plan_statuses.items()
-                                  if st == "blocked"]
-                if ((f_err is not None or _blocked_nodes)
-                        and not time_up()):
-                    rf_err, _rf_report = rehearse_node(
-                        output_dir, smoke_port, probe_list, spec_ports_extra,
-                        fixture_probe_list(), seed_rows=seed_rows_expected)
-                    log(f"[plan] post-final rehearsal "
-                        f"{'GREEN' if rf_err is None else 'RED'}")
-                    hs["post_final_rehearsal"] = {
-                        "green": rf_err is None,
-                        "digest": (rf_err or "")[-300:] or None}
-                    if rf_err is None:
-                        for nid in _blocked_nodes:
-                            plan_statuses[nid] = "done"
-                            if nid in failed:
-                                failed.remove(nid)
-                                events.mark_implementation_done(
-                                    nid, "recovered via final repair")
-                                node_done_notes[nid] = \
-                                    "recovered via final repair"
-                        if f_err is not None:
-                            ok = True
-                            text = ("post-final rehearsal green after "
-                                    "repair turn")
+                    ok = True
+                    text = f"host spec run all green ({tier2_run[0]} passed)"
+                    log("[plan] final pass GREEN (Tier-1 + Tier-2 + "
+                        "page-health)")
                 # 自测取证锚点(09-30 github 法医):平台 runner 上 Tier-2
                 # 恒不可用(spec_run=None),模型自测是唯一真浏览器验证——
                 # 从内核 context-logs 的 tools.jsonl 复原每条 spec 的末次
@@ -4642,7 +4461,7 @@ def main() -> int:
                     except Exception as exc:  # 审计绝不挡 final 链
                         log(f"[plan] rejection audit record failed: {exc}")
                 # final 验证仪表落盘(自留取证件,随工作区带回):Tier-1
-                # rehearsal 报告/Tier-2 两轮计数/page-health 红项/模型自测
+                # rehearsal 报告/Tier-2 计数/page-health 红项/模型自测
                 # 末次结果/拒绝文案审计——平台不下发失败明细,这里是唯一
                 # 的宿主侧验真记录。
                 try:
@@ -4659,7 +4478,7 @@ def main() -> int:
             # generation cleanly, then `npm start` crashed at grading
             # (Cannot find module './seed') and zero Playwright tests
             # executed. Read-only: red is logged and shipped as-is — the
-            # final LLM turn above is the last chance to fix anything.
+            # batch turns were the model's only chances to fix anything.
             t0 = time.time()
             err = _rehearse_startup(output_dir, smoke_port)
             if err is None:
@@ -4694,7 +4513,8 @@ def main() -> int:
                 events.mark_test_passed(
                     node_id, "batch rehearsal green (host build+boot+probes)")
             elif ok:
-                events.mark_test_passed(node_id, "verified by octos final check")
+                events.mark_test_passed(
+                    node_id, "final host verification all green")
         runtime.git.commit("chore: final verification pass")
 
         if failed:

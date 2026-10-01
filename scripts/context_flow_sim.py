@@ -10,7 +10,7 @@
       ——内核装配顺序:gateway base → 日期行 → AGENTS.md → memory(压缩态)
   t01.. 每家族 TURN(BOOTSTRAP 前言[首 turn] + Gherkin Feature + 完成要求
       一句话 + SEGMENT DIGEST[会话 2+ 首批])
-  f1 final(变体轮)
+
 每个文件附标注为 MOCK 的脚本化回复,构成完整对话轮。
 
 用法:python3 scripts/context_flow_sim.py [--out context-sim-out]
@@ -26,10 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "arc"))
 
 import fixture_manifest  # noqa: E402
-import gherkin  # noqa: E402
 import main  # noqa: E402
 import plan_envelope  # noqa: E402
-from rejection_audit import audit_prompt_block  # noqa: E402
 
 TASKS = ["hackathon--sheet", "hackathon--github"]
 SMOKE = 3100
@@ -163,22 +161,6 @@ def render_task(task: str, out_root: Path) -> None:
             done_notes.update(
                 {nid: "(mock) implemented per Feature; family suite green"
                  for nid in ids})
-
-    mock_audit = {"findings": [
-        {"kind": "red", "file": "backend/src/routes/mock.js", "line": 42,
-         "literal": "(mock) some invented rejection message",
-         "words": 5}]}
-    f_prompt = main.HOST_FINAL_CHECK_UI_PROMPT
-    f_prompt += (
-        "\nHOST PAGE-HEALTH PROBE (ground truth, headless browser walk "
-        f"over the built app on port {SMOKE}): uncaught page errors — "
-        "['(mock) TypeError: x is not a function @ app.js:12']. Open the "
-        "same pages, find the throwing code path and fix it; every graded "
-        "step behind a crash scores zero.")
-    f_prompt += audit_prompt_block(mock_audit)
-    body = _header("f1", "final 轮(宿主探针之后的模型终验)")
-    files.append((out / "f1-final-check.md",
-                  body + f_prompt + _mock("(mock) 逐链一行证据,全部走通。")))
 
     for path, text in files:
         Path(path).write_text(text, encoding="utf-8")
