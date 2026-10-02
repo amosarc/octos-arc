@@ -13,6 +13,12 @@ Flow contract 注释同场给出该工作流的定义;二者都不是可裁剪�
 09-30~10-01 的占位短语剥离与场景打标检测据此整链退役:渲染层一律
 全场景全步骤(GIVEN/WHEN/THEN),data-only 模式除外。
 
+10-02 同文即残渣(用户拍板):渲染"全"不含克隆——同节点步骤序列
+逐字节相同的模板克隆场景(题目 yaml "- Scenario N" 变体,sheet 100
+场景含 42 克隆/github 13 个)与同场景内逐字节相同的句子只渲染首见;
+判分器读 yaml 全量,渲染层去重不影响判分面。Flow contract 同律:
+每节点恰一行,不逐场景继承。
+
 场景名同规则清洗,坍缩到只剩 id 时只留 id。
 
 纯标准库;同输入 → 逐字节相同(缓存律)。
@@ -124,15 +130,42 @@ def clean_sentences(content: str) -> tuple[list[str], bool]:
     return kept, True
 
 
+def _unique_scenarios(node: dict) -> list[dict]:
+    """同节点内步骤序列逐字节相同的场景只留首见。
+
+    题目 yaml 每节点按 "- Scenario N" 模板造变体,克隆场景步骤与
+    首见场景逐字节相同(sheet 100 场景含 42 克隆/github 13 个,10-02
+    实测)——零新信息,只烧 token;判分器读 yaml 全量,渲染层去重
+    不影响判分面(10-02 拍板:同文即残渣,不继承)。
+    """
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    for sc in node.get("scenarios") or []:
+        if not isinstance(sc, dict):
+            continue
+        sig = tuple(
+            (str(s.get("keyword", "")), str(s.get("content", "")))
+            for s in (sc.get("steps") or []) if isinstance(s, dict))
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(sc)
+    return out
+
+
 def render_steps(steps: list[dict],
                  indent: str = "      ") -> tuple[list[str], int, int]:
     """yaml 步骤 → Gherkin 行。
 
     返回 (lines, n_clean, n_total):n_clean/n_total 供清洗率统计。
     连续同类关键字 → And;清洗后为空的步骤回退原文 + # uncleanable。
+    同场景内逐字节相同的句子只渲染首见(题目模板把标准 GIVEN 串进
+    变体步骤时会一式两份,如 REQ-1-1-2 克隆的 "The visitor starts …"
+    句;10-02 拍板:同文即残渣)。
     """
     lines: list[str] = []
     prev_kw: str | None = None
+    seen: set[str] = set()
     n_clean = 0
     n_total = 0
     for step in steps:
@@ -141,7 +174,12 @@ def render_steps(steps: list[dict],
         sents, ok = clean_sentences(str(step.get("content", "")))
         n_total += 1
         n_clean += 1 if ok else 0
-        for i, s in enumerate(sents):
+        fresh = []
+        for s in sents:
+            if s not in seen:
+                seen.add(s)
+                fresh.append(s)
+        for i, s in enumerate(fresh):
             cur = gkw if i == 0 else "And"
             if cur == prev_kw:
                 cur = "And"
@@ -164,7 +202,7 @@ def render_scenarios(node: dict, verification: str = "full",
             if verification == "full" else "")
     if flow:
         lines.append(f"{indent}# Flow contract: {flow}")
-    for sc in node.get("scenarios") or []:
+    for sc in _unique_scenarios(node):
         name = clean_name(str(sc.get("name") or "scenario"))
         lines.append(f"{indent}Scenario: {name}")
         steps = [s for s in (sc.get("steps") or [])
@@ -202,8 +240,8 @@ def feature_text(folder: dict, atoms: list[dict]) -> str:
     `# Flow contract: <description 清洗文>`(10-02 三次拍板:有就展示、
     无就不展示、不逐场景继承——节点下全部场景共用同一条契约,变体
     场景经 id 锚一步对上;逐场景重复同一大段文本只烧 token 不添信息)
-    ——其下逐字渲染全部 GIVEN/WHEN/THEN(判分器走全部场景,不再
-    sc0-only、不再按占位标记裁剪)。首场景标题沿用节点名(与既有 turn
+    ——其下逐字渲染全部唯一场景的全部 GIVEN/WHEN/THEN(克隆场景只留
+    首见;判分器读 yaml 全量,不再 sc0-only、不再按占位标记裁剪)。首场景标题沿用节点名(与既有 turn
     形态字节兼容),其余场景用场景自身名区分变体。场景正文里的交叉
     引用("compliant with REQ-1-1-1")经 id 注释一步可定位。无
     scenarios 的原子只渲染锚 + 单行 Flow contract。
@@ -224,8 +262,7 @@ def feature_text(folder: dict, atoms: list[dict]) -> str:
     for atom in atoms:
         atom_id = str(atom.get("id") or "").strip()
         flow = clean_text(str(atom.get("description") or ""))
-        scs = [sc for sc in (atom.get("scenarios") or [])
-               if isinstance(sc, dict)]
+        scs = _unique_scenarios(atom)
         if not atom_id and not flow and not scs:
             continue
         lines.append("")
