@@ -234,10 +234,10 @@ class TurnFullRestoreTests(unittest.TestCase):
         self.assertEqual(full_text.count("# REQ-1-1-1"), 1)
         self.assertEqual(full_text.count("# Flow contract:"), 1)
 
-    def test_byte_identical_scenario_clones_collapse(self):
-        # 10-02 拍板"同文即残渣":题目 yaml 的 "- Scenario N" 模板
-        # 克隆(步骤序列逐字节相同)只渲染首见,零新信息不重复进场。
-        # 真实形态=1 真场景 + N 个互为克隆的模板变体。
+    def test_all_scenarios_render_verbatim(self):
+        # 10-02 终版拍板(用户以 yaml 原文对账"三个场景都要原样转到
+        # turn"):场景层零过滤——同文克隆、骨架措辞变体,一律原样
+        # 进场;宿主对 yaml 内容零裁决(83a9799 同律)。
         real = [{"keyword": "GIVEN", "content": "A seeded workbook `Q3`."},
                 {"keyword": "WHEN", "content":
                     "the visitor enters the username and password."},
@@ -256,16 +256,13 @@ class TurnFullRestoreTests(unittest.TestCase):
         folder = {"id": "REQ-1-1", "name": "Access", "type": "FOLDER",
                   "description": "d.", "children": [atom]}
         text = gherkin.feature_text(folder, [atom])
-        self.assertEqual(text.count("  Scenario: "), 2)
-        self.assertNotIn("- Scenario 3", text)
-        self.assertNotIn("- Scenario 4", text)
-        # 变体与真场景步骤不同构时不受去重影响。
-        self.assertIn("- Scenario 2", text)
+        self.assertEqual(text.count("  Scenario: "), 4)
+        for suffix in ("- Scenario 2", "- Scenario 3", "- Scenario 4"):
+            self.assertIn(suffix, text)
 
-    def test_repeated_sentence_within_scenario_renders_once(self):
-        # 题目模板把标准 GIVEN 串进变体步骤时一式两份(REQ-1-1-2 克隆
-        # 实测:"The visitor starts …" 句首尾各一次)——同场景内逐字节
-        # 相同的句子只渲染首见。
+    def test_yaml_own_repeated_sentence_renders_as_is(self):
+        # 句层零删改:yaml 自带的重复句(生成器把标准 GIVEN 串两遍)
+        # 原样渲染——"原样转到 turn" 含 yaml 自己的重复。
         atom = {"id": "REQ-9", "name": "n", "type": "ATOMIC",
                 "description": "",
                 "scenarios": [{"name": "s", "steps": [
@@ -275,43 +272,14 @@ class TurnFullRestoreTests(unittest.TestCase):
                         "The visitor starts at the home page."}]}]}
         text = gherkin.render_scenarios(atom, "full")
         self.assertEqual(
-            text.count("The visitor starts at the home page."), 1)
+            text.count("The visitor starts at the home page."), 2)
         self.assertIn("The seeded data is account `alice-dev`.", text)
 
-    def test_cross_scenario_sentence_repetition_kept(self):
-        # 去重只在同一场景内:不同场景共享前置句是 Gherkin 语义
-        # (每场景自含),步骤序列不同构的场景互不吞并。
-        atom = {"id": "REQ-9", "name": "n", "type": "ATOMIC",
-                "description": "",
-                "scenarios": [
-                    {"name": "s1", "steps": [
-                        {"keyword": "GIVEN",
-                         "content": "A seeded workbook."},
-                        {"keyword": "WHEN",
-                         "content": "the user opens it."}]},
-                    {"name": "s2", "steps": [
-                        {"keyword": "GIVEN",
-                         "content": "A seeded workbook."},
-                        {"keyword": "WHEN",
-                         "content": "the user closes it."}]}]}
-        text = gherkin.render_scenarios(atom, "full")
-        self.assertEqual(text.count("Given A seeded workbook."), 2)
-
-    def test_skeleton_fill_variant_dropped(self):
-        # 骨架填充变体(10-02 同文即残渣②):github 生成器的通用
-        # "走过场"场景——WHEN/THEN 双骨架短语夹真 GIVEN 前置——整体
-        # 剔除;真场景与单短语场景不受影响(双短语门槛防误伤)。
-        real = [{"keyword": "GIVEN", "content":
-                 "The visitor starts at the home page. The seeded data "
-                 "is account `alice-dev`."},
-                {"keyword": "WHEN", "content":
-                 "The visitor enters a compliant username and clicks "
-                 "“Create account”."},
-                {"keyword": "THEN", "content":
-                 "The system displays registration success."}]
+    def test_skeleton_shaped_scenario_renders_too(self):
+        # 骨架措辞变体同样原样进场("follows the visible controls…"
+        # 场景是判分器要走的场景,提示词面必须逐字对齐)。
         skeleton = [{"keyword": "GIVEN", "content":
-                     "The visitor starts at the home page. The seeded "
-                     "data is account `alice-dev`."},
+                     "The visitor starts at the home page."},
                     {"keyword": "WHEN", "content":
                      "The user signs in as `alice-dev` and follows the "
                      "visible controls for the register workflow."},
@@ -319,21 +287,15 @@ class TurnFullRestoreTests(unittest.TestCase):
                      "The page displays the required headings, "
                      "controls, values, and status for the register "
                      "workflow."}]
-        half = [{"keyword": "WHEN", "content":
-                 "the user follows the visible controls for the "
-                 "register workflow."}]
         atom = {"id": "REQ-1-1-1", "name": "Register", "type": "ATOMIC",
                 "description": "Registration flow.",
                 "scenarios": [
-                    {"name": "s - Scenario 1", "steps": real},
-                    {"name": "s - Scenario 2", "steps": skeleton},
-                    {"name": "s - Scenario 3", "steps": half}]}
+                    {"name": "s - Scenario 1", "steps": skeleton}]}
         folder = {"id": "REQ-1-1", "name": "Access", "type": "FOLDER",
                   "description": "d.", "children": [atom]}
         text = gherkin.feature_text(folder, [atom])
-        self.assertEqual(text.count("  Scenario: "), 2)
-        self.assertNotIn("- Scenario 2", text)
-        self.assertIn("- Scenario 3", text)
+        self.assertEqual(text.count("  Scenario: "), 1)
+        self.assertIn("follows the visible controls", text)
 
 
 class RealTaskSmokeTests(unittest.TestCase):
@@ -406,40 +368,38 @@ class RealTaskSmokeTests(unittest.TestCase):
         self.assertIn("Create an account", text)
         self.assertNotIn("placeholder boilerplate", text)
 
-    def test_real_yaml_skeleton_variants_and_clones_dropped(self):
-        # 真题钉子(10-02 同文即残渣):github 生成器骨架变体整体剔除
-        # ——REQ-1-1-1 yaml 3 场景(1 真+2 骨架)/REQ-1-1-2 4 场景
-        # (1 真+3 骨架,同文克隆并入)→ 各渲染 1,注册节点的 "signs
-        # in" 变体不再误导。
+    def test_real_yaml_all_scenarios_verbatim(self):
+        # 真题对账钉(10-02 终版拍板"三个场景都要原样转到 turn"):
+        # 渲染场景数 == yaml 场景数(两题恰各 100=判分面对齐),骨架
+        # 变体与同文克隆一律原样在场;yaml 自带重复句零删改。
         import main
         tree = self._tree("hackathon--github")
         n = next(x for x in main.flatten_atomic(tree)
                  if x.get("id") == "REQ-1-1-1")
         text = gherkin.feature_text(self._parent_of(tree, n), [n])
         self.assertEqual(len(n.get("scenarios") or []), 3)
-        self.assertEqual(text.count("  Scenario: "), 1)
-        self.assertNotIn("- Scenario 2", text)
+        self.assertEqual(text.count("  Scenario: "), 3)
+        self.assertIn("- Scenario 2", text)
+        self.assertIn("- Scenario 3", text)
+        # yaml 自带的双写句原样:REQ-1-1-1 场景 1 真 GIVEN 含一次、
+        # 场景 2/3 的 GIVEN 各含两遍 → 单节点渲染恰 5 次(句层零删改)。
+        single = gherkin.render_scenarios(n, "full")
+        self.assertEqual(
+            single.count("The visitor starts at the application home "
+                         "page in a fresh unauthenticated browser "
+                         "session."), 5)
         n2 = next(x for x in main.flatten_atomic(tree)
                   if x.get("id") == "REQ-1-1-2")
         self.assertEqual(len(n2.get("scenarios") or []), 4)
         self.assertEqual(gherkin.feature_text(
-            self._parent_of(tree, n2), [n2]).count("  Scenario: "), 1)
-        # 零误伤:REQ-2-2-2 的 "- Scenario 2" 是真变体(循环团队拒绝)
-        # → 2 场景全渲染。
-        n3 = next(x for x in main.flatten_atomic(tree)
-                  if x.get("id") == "REQ-2-2-2")
-        self.assertEqual(gherkin.feature_text(
-            self._parent_of(tree, n3), [n3]).count("  Scenario: "), 2)
-        # sheet 的 "the requested workflow" 场景不含骨架短语,全量恢复
-        # 拍板原样有效;其同文克隆仍由克隆律收敛(REQ-1-3-1 4→3)。
+            self._parent_of(tree, n2), [n2]).count("  Scenario: "), 4)
+        # sheet 同律:克隆场景原样(REQ-1-3-1 4→4)。
         stree = self._tree("hackathon--sheet")
-        sn = next(x for x in main.flatten_atomic(stree)
-                  if x.get("id") == "REQ-1-1-1")
-        self.assertEqual(len(gherkin._unique_scenarios(sn)), 2)
         sn2 = next(x for x in main.flatten_atomic(stree)
                    if x.get("id") == "REQ-1-3-1")
         self.assertEqual(len(sn2.get("scenarios") or []), 4)
-        self.assertEqual(len(gherkin._unique_scenarios(sn2)), 3)
+        self.assertEqual(gherkin.feature_text(
+            self._parent_of(stree, sn2), [sn2]).count("  Scenario: "), 4)
 
 
 class QuotedNamesTests(unittest.TestCase):
