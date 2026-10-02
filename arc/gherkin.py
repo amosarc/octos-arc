@@ -5,14 +5,15 @@ Gherkin(Feature/Scenario/Given/When/Then)。清洗规则全部机械可审计:
 
   1. 空白折叠 → 按句切分(句末标点 + 后随大写/引号);
   2. 丢弃 "Seed values: …" 句(种子数据的字面重复);
-  3. 剔除占位短语子句:"the requested workflow" 连同其尾随噪声 token
-     (与占位检测器同一形态)——sheet 类模板垃圾的确定性清洗;以空格
-     替换保词边界,残渣不与真词黏连;
-  4. 清洗后为空的步骤 → 回退原文并标注 # uncleanable(不发明)。
+  3. 清洗后为空的步骤 → 回退原文并标注 # uncleanable(不发明)。
 
-场景名同规则清洗,坍缩到只剩 id 时只留 id。`_steps_templated` 场景只
-渲染清洗后 GIVEN + 注释行(WHEN/THEN 是平台占位样板,REQ CONTENT 是
-流程契约——与 data-only 注记同 philosophy)。
+10-02 全量恢复(用户澄清):步骤里的 "the requested workflow" 是
+"所请求的工作流"——LLM 须按顺序走完的测试本体,节点 description 以
+Flow contract 注释同场给出该工作流的定义;二者都不是可裁剪对象。
+09-30~10-01 的占位短语剥离与场景打标检测据此整链退役:渲染层一律
+全场景全步骤(GIVEN/WHEN/THEN),data-only 模式除外。
+
+场景名同规则清洗,坍缩到只剩 id 时只留 id。
 
 纯标准库;同输入 → 逐字节相同(缓存律)。
 """
@@ -23,12 +24,8 @@ import re
 
 _KEYWORDS = {"GIVEN": "Given", "WHEN": "When", "THEN": "Then"}
 
-# 占位短语(含尾随噪声 token,如 "the requested workflow sheet1")及其
-# 前导连接词——循环匹配以吞掉连续串。
-_PLACEHOLDER_RE = re.compile(
-    r"(?:,\s*|\b(?:and|with)\s+)?(?:the\s+requested\s+workflow"
-    r"(?:\s+[a-z0-9]+)?\s*)+",
-    re.IGNORECASE)
+# 占位短语剥离已退役(10-02):"the requested workflow" 是步骤的语义
+# 成分,不是模板垃圾——见模块 docstring。
 _SEED_VALUES_RE = re.compile(r"^seed values\s*:", re.IGNORECASE)
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z“\"‘`])")
 _EMPTY_QUOTE_RE = re.compile(r"(\"\"|'')")
@@ -42,10 +39,8 @@ def _fold(text: str) -> str:
 
 
 def clean_text(text: str) -> str:
-    """确定性清洗:折叠空白 → 剔占位短语串(以空格替换保词边界)
-    → 去空引号对 → 标点坍缩。"""
+    """确定性清洗:折叠空白 → 去空引号对 → 标点坍缩。"""
     t = _fold(text)
-    t = _PLACEHOLDER_RE.sub(" ", t)
     t = _EMPTY_QUOTE_RE.sub("", t)
     t = re.sub(r"\s+", " ", t)
     t = re.sub(r"\s+([,.;!?])", r"\1", t)
@@ -129,7 +124,7 @@ def clean_sentences(content: str) -> tuple[list[str], bool]:
     return kept, True
 
 
-def render_steps(steps: list[dict], only_given: bool = False,
+def render_steps(steps: list[dict],
                  indent: str = "      ") -> tuple[list[str], int, int]:
     """yaml 步骤 → Gherkin 行。
 
@@ -143,8 +138,6 @@ def render_steps(steps: list[dict], only_given: bool = False,
     for step in steps:
         kw = str(step.get("keyword", "")).upper()
         gkw = _KEYWORDS.get(kw, kw.capitalize() or "And")
-        if only_given and kw != "GIVEN":
-            continue
         sents, ok = clean_sentences(str(step.get("content", "")))
         n_total += 1
         n_clean += 1 if ok else 0
@@ -161,27 +154,25 @@ def render_scenarios(node: dict, verification: str = "full",
                      indent: str = "  ") -> str:
     """一个原子节点的全部场景 → Gherkin 块。
 
-    full:非模板场景渲染全部步骤;模板场景只渲染 GIVEN + 注记行。
-    data-only:只渲染 GIVEN(骨架数据契约)。
+    full:每场景块上方一行 Flow contract(description 与步骤同场,与
+    feature_text 同口径)+ 全部步骤逐字(10-02 全量恢复:GIVEN/WHEN/
+    THEN 都是判分器要走的测试)。
+    data-only:只渲染 GIVEN(骨架数据契约),不带 description。
     """
     lines: list[str] = []
-    node_templated = bool(node.get("_scenarios_templated"))
+    flow = (clean_text(str(node.get("description") or ""))
+            if verification == "full" else "")
     for sc in node.get("scenarios") or []:
+        if flow:
+            lines.append(f"{indent}# Flow contract: {flow}")
         name = clean_name(str(sc.get("name") or "scenario"))
         lines.append(f"{indent}Scenario: {name}")
-        steps_templated = node_templated or bool(sc.get("_steps_templated"))
         steps = [s for s in (sc.get("steps") or [])
                  if isinstance(s, dict)
-                 and str(s.get("keyword", "")).upper() == "GIVEN"]
-        if verification == "full" and not steps_templated:
-            steps = [s for s in (sc.get("steps") or []) if isinstance(s, dict)]
+                 and (verification == "full"
+                      or str(s.get("keyword", "")).upper() == "GIVEN")]
         glines, _, _ = render_steps(steps)
         lines.extend(glines)
-        if (verification == "full" and steps_templated
-                and not any(l.strip().startswith(("When", "Then")) for l in glines)):
-            lines.append(
-                f"{indent}  # WHEN/THEN are platform placeholder boilerplate "
-                "— the REQ CONTENT description above is the flow contract.")
     return "\n".join(lines)
 
 
@@ -206,16 +197,19 @@ def _direct_atomic_groups(tree: dict) -> list[dict]:
 def feature_text(folder: dict, atoms: list[dict]) -> str:
     """家族文件夹 → .feature 文本。
 
-    Feature 名 = 文件夹名;描述块 = 文件夹描述首句;Background = 其余句
-    (恰为用户样例的结构);原子节点 → Scenario(全步骤 Gherkin)。
-    每个 Scenario 上方一行 `# <节点 id>` 注释:场景标题与 TASK 行的
-    id 清单绑定,场景正文里的交叉引用("compliant with REQ-1-1-1")
-    一步可定位——绑定不能只靠 TASK 行标题对号(占位场景标题互相
-    相同,标题对号必失效)。
-    打标节点(检测器判定 WHEN/THEN 为平台占位样板)改走 GIVEN-only 支:
-    Flow contract 注释 + GIVEN 原文 + 注记行——占位 WHEN/THEN 不承载
-    节点自身操作语义(sheet 审计 24/24,22 个连名称动词都零出现),
-    保留只会注入装错场景的操作指令。
+    Feature 名 = 文件夹名;描述块 = 文件夹描述首句;Background = 其余句。
+    每个原子节点:`# <节点 id>` 锚 + **每个场景块上方一行**
+    `# Flow contract: <description 清洗文>`(10-02 二次拍板:description
+    不丢=每个场景块自包含——步骤里的 "the requested workflow" 指代本
+    描述定义的工作流,变体场景不借助上下文也能对上契约)——其下逐字
+    渲染全部 GIVEN/WHEN/THEN(判分器走全部场景,不再 sc0-only、不再按
+    占位标记裁剪)。首场景标题沿用节点名(与既有 turn 形态字节兼容),
+    其余场景用场景自身名区分变体。场景正文里的交叉引用("compliant
+    with REQ-1-1-1")经 id 注释一步可定位。无 scenarios 的原子只渲染
+    锚 + 单行 Flow contract。
+    有则渲染、无则不渲染(10-02 拍板"有就展示无就不展示"):无 id 不发
+    悬空 "# " 锚,无 description 不发 Flow contract 行,三者皆无的原子
+    整体省略——与 SCENARIOS 空省略同律,不留任何空标签。
     """
     name = _fold(folder.get("name") or folder.get("id") or "feature")
     desc = clean_text(str(folder.get("description") or ""))
@@ -228,22 +222,33 @@ def feature_text(folder: dict, atoms: list[dict]) -> str:
     if background:
         lines += ["", "  Background:", f"    {background}"]
     for atom in atoms:
+        atom_id = str(atom.get("id") or "").strip()
+        flow = clean_text(str(atom.get("description") or ""))
+        scs = [sc for sc in (atom.get("scenarios") or [])
+               if isinstance(sc, dict)]
+        if not atom_id and not flow and not scs:
+            continue
         lines.append("")
-        lines.append(f"  # {str(atom.get('id') or '')}")
-        lines.append(f"  Scenario: {clean_name(str(atom.get('name') or ''))}")
-        sc0 = (atom.get("scenarios") or [{}])[0]
-        steps = [s for s in (sc0.get("steps") or [])
-                 if isinstance(s, dict)]
-        if atom.get("_scenarios_templated") or sc0.get("_steps_templated"):
-            flow = clean_text(str(atom.get("description") or ""))
+        if atom_id:
+            lines.append(f"  # {atom_id}")
+        if not scs:
             if flow:
-                lines.append(f"    # Flow contract: {flow}")
-            given_lines, _, _ = render_steps(
-                steps, only_given=True, indent="    ")
-            lines.extend(given_lines)
-        else:
-            node_lines, _, _ = render_steps(steps, indent="    ")
-            lines.extend(node_lines)
+                lines.append(f"  # Flow contract: {flow}")
+            continue
+        node_title = (clean_name(str(atom.get("name") or ""))
+                      or atom_id or "scenario")
+        for si, sc in enumerate(scs):
+            if flow:
+                lines.append(f"  # Flow contract: {flow}")
+            if si == 0:
+                lines.append(f"  Scenario: {node_title}")
+            else:
+                lines.append(f"  Scenario: "
+                             f"{clean_name(str(sc.get('name') or '')) or 'scenario'}")
+            steps = [s for s in (sc.get("steps") or [])
+                     if isinstance(s, dict)]
+            glines, _, _ = render_steps(steps, indent="    ")
+            lines.extend(glines)
     return "\n".join(lines) + "\n"
 
 

@@ -549,7 +549,10 @@ class SystemRowTests(unittest.TestCase):
         self.assertNotIn("Screenshot reference:", blob)
         self.assertIn("Global rules.", ctx)
         self.assertIn("Build it.", blob)
-        self.assertIn("Scenario: N3", blob)
+        # 原子节点锚与 Flow contract(description 剥图后)在场;N3 无
+        # scenarios,不渲染空 Scenario 行(10-02 全量恢复后的形态)。
+        self.assertIn("# REQ-1-3", blob)
+        self.assertIn("# Flow contract: Shot body.", blob)
 
     def test_prune_reference_imagery_blind_lane(self):
         # 10-01 拍板:盲 lane 不读参考截图——workspace 副本图片删除、
@@ -729,69 +732,15 @@ class GoalFirstRulesTests(unittest.TestCase):
             env = main.build_octos_env(Path(tmp))
         self.assertNotIn("OCTOS_DENY_BROWSER_SCRIPTS", env)
 
-    def test_scenario_level_boilerplate_detection(self):
-        # 09-30 github 法医:47 节点里 23 个混合形态——场景 1 真步骤、
-        # 场景 2+ 是跨节点占位骨架,节点级检测器按设计放行(标题回声),
-        # 36/100 占位场景曾以 "VERIFICATION REQUIREMENTS (verbatim)" 名义
-        # 进工单。场景级判据(通用零词表):非 GIVEN 步骤剥种子尾/引号值/
-        # 标题短语后跨 ≥4 节点逐字相同 = 占位;场景全部步骤皆占位才打标。
-        def make_node(nid, name, tab):
-            boiler_when = (f"The user signs in as `alice-dev` with "
-                           f"`Valid-password-123!` and follows the visible "
-                           f"controls for the {name.lower()} workflow. "
-                           f"Seed values: account `alice-dev`.")
-            boiler_then = ("The page displays the required headings, "
-                           "controls, values, and status for the "
-                           f"{name.lower()} workflow.")
-            return main_node(nid, name, scenarios=[
-                {"name": f"{nid} real", "steps": [
-                    {"keyword": "GIVEN", "content": "A seeded org exists."},
-                    {"keyword": "WHEN", "content":
-                        f"The user clicks the {tab} tab, enters the name "
-                        "in the filter box, and clicks the result."},
-                    {"keyword": "THEN", "content":
-                        f"The list shows only matching {tab} entries with "
-                        "their visibility and update time."}]},
-                {"name": f"{nid} filler", "steps": [
-                    {"keyword": "GIVEN", "content": "A seeded org exists."},
-                    {"keyword": "WHEN", "content": boiler_when},
-                    {"keyword": "THEN", "content": boiler_then}]}])
-
-        def main_node(nid, name, scenarios=None):
-            return {"id": nid, "name": name, "type": "ATOMIC",
-                    "dependencies": [], "children": [],
-                    **({"scenarios": scenarios} if scenarios else {})}
-
-        root = {"id": "ROOT", "name": "Root", "type": "FOLDER",
-                "children": [
-                    {"id": "F1", "name": "Family One", "type": "FOLDER",
-                     "children": [
-                         make_node("A-1", "Alpha Workflow", "Ledgers"),
-                         make_node("A-2", "Beta Workflow", "Troves"),
-                         make_node("A-3", "Gamma Workflow", "Archives"),
-                         make_node("A-4", "Delta Workflow", "Cellars"),
-                     ]}]}
-        flagged = main._mark_boilerplate_scenarios(root)
-        self.assertEqual(flagged, 4, "each node's filler scenario flags")
-        node = root["children"][0]["children"][0]
-        scens = node["scenarios"]
-        self.assertFalse(scens[0].get("_steps_templated"),
-                         "real scenario must stay unflagged")
-        self.assertTrue(scens[1].get("_steps_templated"))
-        # Gherkin 渲染:真场景全步骤逐字;模板场景只渲染 GIVEN + 注记,
-        # 占位样板不得作为验收信号出现。
-        text = gherkin.render_scenarios(node, "full")
-        self.assertIn("The user clicks the Ledgers tab", text,
-                      "real WHEN/THEN must render verbatim")
-        self.assertIn("platform placeholder boilerplate", text)
-        self.assertNotIn("follows the visible controls", text,
-                         "boilerplate must not render as acceptance criteria")
-        # 单节点无跨节点重复 → 零误标
-        single = {"id": "ROOT", "name": "Root", "type": "FOLDER",
-                  "children": [{"id": "F1", "name": "F", "type": "FOLDER",
-                                "children": [make_node("B-1", "Solo Job",
-                                                       "Ledgers")]}]}
-        self.assertEqual(main._mark_boilerplate_scenarios(single), 0)
+    def test_scenario_level_boilerplate_detection_retired(self):
+        # 10-02 全量恢复拍板:"the requested workflow" 是"所请求的工作流"
+        # (LLM 须按顺序走完的测试本体),占位判定是误读——节点级/场景级
+        # 检测器整链退役,须保持删除状态(防回退);渲染恒全场景全步骤。
+        self.assertFalse(hasattr(main, "_mark_boilerplate_scenarios"))
+        self.assertFalse(hasattr(main, "_mark_templated_scenarios"))
+        self.assertFalse(hasattr(main, "_node_scenarios_templated"))
+        self.assertFalse(hasattr(main, "_norm_step_skeleton"))
+        self.assertFalse(hasattr(main, "_iter_atomic_nodes"))
 
     def test_requirement_message_bridge_is_retired(self):
         # 09-28 CRUD 生成器退役:引号消息 sidecar 桥(_collect_requirement_
@@ -937,7 +886,9 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertNotIn("Then Y shows", data_only)
         self.assertIn("Given a seeded workbook", data_only)
 
-    def test_describe_node_templated_placeholder(self):
+    def test_workflow_reference_steps_render_verbatim(self):
+        # 10-02 全量恢复:步骤里的 "the requested workflow" 是"所请求的
+        # 工作流"——LLM 须按顺序走完的测试本体,逐字进场,不再判占位。
         nd = node(
             "REQ-7-7-7", "n",
             "Users create a blank workbook from the home page.",
@@ -960,15 +911,14 @@ class GoalFirstRulesTests(unittest.TestCase):
                                         "the requested workflow remains "
                                         "persisted the requested "
                                         "workflow"}]}])
-        self.assertTrue(main._node_scenarios_templated(nd),
-                        "真垃圾样本必须命中模板检测")
-        nd["_scenarios_templated"] = True  # load 期 _mark_templated_scenarios 打标
         rendered = gherkin.render_scenarios(nd, "full")
-        self.assertNotIn("When the requested workflow", rendered)
-        self.assertIn("platform placeholder boilerplate", rendered)
-        self.assertIn("flow contract", rendered)
-        # GIVEN 数据契约保留(清洗后)
+        self.assertIn("When the requested workflow", rendered)
+        self.assertIn("the requested workflow remains persisted",
+                      rendered)
+        self.assertNotIn("platform placeholder boilerplate", rendered)
+        # GIVEN 数据契约照常在场。
         self.assertIn("seed contains workbook `Q3`", rendered)
+        # 干净真步骤照常逐字(真步骤的合法重复不受任何检测牵连)。
         clean = node("REQ-6-6-6", "m", "plain",
                            scenarios=[{"name": "s", "steps": [
                                {"keyword": "WHEN",
@@ -981,8 +931,6 @@ class GoalFirstRulesTests(unittest.TestCase):
                                 "content": "state remains"},
                                {"keyword": "THEN",
                                 "content": "nothing else changes"}]}])
-        self.assertFalse(main._node_scenarios_templated(clean),
-                         "干净场景文本不得误伤")
         self.assertIn("When user clicks the save button",
                       gherkin.render_scenarios(clean, "full"))
 

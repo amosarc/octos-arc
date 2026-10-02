@@ -35,42 +35,35 @@ class CleaningRuleTests(unittest.TestCase):
         self.assertEqual([s for s in sents if "alice" in s.lower()], [])
         self.assertNotIn("Seed values", " ".join(sents))
 
-    def test_placeholder_phrase_stripped(self):
+    def test_placeholder_phrase_kept_verbatim(self):
+        # 10-02 拍板:"the requested workflow" 是"所请求的工作流"——
+        # LLM 须按顺序走完的测试本体,语义成分,逐字保留不剥。
         sents, ok = gherkin.clean_sentences(
             "The user opens the home page, and the requested workflow,"
             "the requested workflow page entry the requested workflow "
             "with concrete values `East`, `1200`.")
         self.assertTrue(ok)
         joined = " ".join(sents)
-        self.assertNotIn("the requested workflow", joined.lower())
+        self.assertIn("the requested workflow", joined.lower())
         self.assertIn("concrete values", joined)
 
-    def test_uncleanable_falls_back_to_original(self):
-        # 纯占位短语、无句界、无实义内容 → 清洗后为空 → 回退原文
+    def test_pure_phrase_step_round_trips(self):
+        # 纯占位短语、无句界 → 折叠后原样保留(不再判"不可清洗")。
         sents, ok = gherkin.clean_sentences(
             "the requested workflow,the requested workflow")
-        self.assertFalse(ok)
-        self.assertIn("the requested workflow", sents[0])
+        self.assertTrue(ok)
+        self.assertEqual(sents, [
+            "the requested workflow,the requested workflow"])
 
-    def test_placeholder_name_collapses_to_id(self):
+    def test_name_kept_verbatim_folded(self):
         self.assertEqual(
             gherkin.clean_name(
                 "REQ-1-1-1 -the requested workflow,the requested workflow"),
-            "REQ-1-1-1")
-
-    def test_placeholder_strip_keeps_word_boundaries(self):
-        # 10-01:占位串以空格替换(原为空串),剜掉后不与真词黏连
-        # (真跑实证:"...workbook entry, -8 csv,the requested workflow
-        # with concrete..." 曾渲染成 "...-8 csvconcrete...")。
-        self.assertEqual(
-            gherkin.clean_text(
-                "clicks the workbook entry, -8 csv,the requested "
-                "workflow with concrete values `East`"),
-            "clicks the workbook entry, -8 csv concrete values `East`")
+            "REQ-1-1-1 -the requested workflow,the requested workflow")
 
 
 class RenderTests(unittest.TestCase):
-    def _node(self, steps_templated=False):
+    def _node(self):
         steps = [
             {"keyword": "GIVEN", "content":
                 "A fresh unauthenticated browser session. "
@@ -84,12 +77,9 @@ class RenderTests(unittest.TestCase):
                 "The list shows only matching entries."}]
         sc = [{"name": "REQ-1-1-1 -the requested workflow",
                "steps": steps}]
-        n = _node(sc, description="d")
-        if steps_templated:
-            n["_scenarios_templated"] = True
-        return n
+        return _node(sc, description="d")
 
-    def test_full_mode_renders_all_steps_cleaned(self):
+    def test_full_mode_renders_all_steps_verbatim(self):
         text = gherkin.render_scenarios(self._node(), "full")
         self.assertIn("Scenario: REQ-1-1-1", text)
         self.assertIn("Given A fresh unauthenticated browser session.",
@@ -97,16 +87,17 @@ class RenderTests(unittest.TestCase):
         self.assertIn("And The evaluation seed contains", text)
         self.assertIn("When The user opens the home page", text)
         self.assertIn("Then The list shows only matching entries.", text)
-        self.assertNotIn("the requested workflow", text.lower())
+        # 10-02:工作流指代短语是语义成分,逐字进场。
+        self.assertIn("the requested workflow", text.lower())
         self.assertNotIn("Seed values:", text)
 
-    def test_templated_scenario_renders_given_only_with_note(self):
-        text = gherkin.render_scenarios(self._node(steps_templated=True),
-                                        "full")
-        self.assertIn("Given A fresh unauthenticated browser session.",
-                      text)
-        self.assertNotIn("When The user opens", text)
-        self.assertIn("platform placeholder boilerplate", text)
+    def test_templated_flags_no_longer_withhold_steps(self):
+        # 10-02 全量恢复:占位检测退役,遗留标记不得再改变渲染。
+        n = self._node()
+        n["_scenarios_templated"] = True
+        n["scenarios"][0]["_steps_templated"] = True
+        self.assertEqual(gherkin.render_scenarios(n, "full"),
+                         gherkin.render_scenarios(self._node(), "full"))
 
     def test_data_only_mode_renders_given_only(self):
         text = gherkin.render_scenarios(self._node(), "data-only")
@@ -154,60 +145,94 @@ class FeatureAssemblyTests(unittest.TestCase):
                         text.index("  Scenario: Open a Workbook"))
 
 
-class TurnTemplatedBranchTests(unittest.TestCase):
-    """TURN 渲染(feature_text)接占位标记分支(10-01):打标场景渲染
-    Flow contract 注释 + GIVEN 原文,占位 WHEN/THEN 不进场(注记行已删
-    ——10-02 拍板,Flow contract 注释即契约锚,注记属冗余散文);未打标
-    节点逐字保留全步骤(github 真场景零改动)。"""
+class TurnFullRestoreTests(unittest.TestCase):
+    """TURN 渲染(feature_text)10-02 全量恢复:每原子节点 = id 锚 +
+    Flow contract(description,定义步骤里 "the requested workflow" 所指
+    的工作流)+ 全部场景全部 GIVEN/WHEN/THEN 逐字;占位检测/短语剥离/
+    sc0-only 全部退役。"""
 
-    def _folder_and_atoms(self, templated):
-        steps = [
+    def _folder_and_atom(self):
+        steps_a = [
             {"keyword": "GIVEN", "content": "A seeded workbook `Q3`."},
             {"keyword": "WHEN", "content":
                 "the requested workflow with concrete values `East`."},
             {"keyword": "THEN", "content": "The workbook opens."}]
+        steps_b = [
+            {"keyword": "GIVEN", "content": "A seeded workbook `Q3`."},
+            {"keyword": "WHEN", "content":
+                "the requested workflow SheetN the requested workflow."},
+            {"keyword": "THEN", "content": "The first unused tab appears."}]
         atom = {"id": "REQ-1-1-1", "name": "Open a Workbook",
                 "type": "ATOMIC",
                 "description": "Users open the seeded workbook from the "
                                "home page via its named entry link.",
-                "scenarios": [{"name": "s1", "steps": steps}]}
-        if templated:
-            atom["_scenarios_templated"] = True
+                "scenarios": [
+                    {"name": "s1 -the requested workflow",
+                     "steps": steps_a},
+                    {"name": "s2 -the requested workflow SheetN",
+                     "steps": steps_b}]}
         folder = {"id": "REQ-1-1", "name": "Navigation", "type": "FOLDER",
                   "description": "Open workbooks from the home page.",
                   "children": [atom]}
         return folder, atom
 
-    def _render(self, templated):
-        folder, atom = self._folder_and_atoms(templated)
-        return gherkin.feature_text(folder, [atom])
-
-    def test_templated_renders_flow_contract_and_given_only(self):
-        text = self._render(True)
+    def test_flow_contract_and_all_steps_of_all_scenarios(self):
+        folder, atom = self._folder_and_atom()
+        text = gherkin.feature_text(folder, [atom])
         self.assertIn(
             "# Flow contract: Users open the seeded workbook from the "
             "home page via its named entry link.", text)
-        self.assertIn("Given A seeded workbook `Q3`.", text)
-        # 注记行已随 _BOILER_NOTE 退役:TURN 打标支不留占位散文。
-        self.assertNotIn("platform placeholder boilerplate", text)
-        self.assertNotIn("When ", text)
-        self.assertNotIn("Then ", text)
-        self.assertNotIn("the requested workflow", text.lower())
-
-    def test_scenario_level_flag_branches_too(self):
-        # 混合形态节点(github):节点未打标、首场景被场景级补检打标。
-        folder, atom = self._folder_and_atoms(False)
-        atom["scenarios"][0]["_steps_templated"] = True
-        text = gherkin.feature_text(folder, [atom])
-        self.assertIn("# Flow contract:", text)
-        self.assertNotIn("When ", text)
-
-    def test_unflagged_keeps_full_steps(self):
-        text = self._render(False)
-        self.assertIn("When ", text)
+        # description 不丢=每个场景块上方都带 Flow contract(自包含)。
+        self.assertEqual(text.count("# Flow contract:"), 2)
+        # 首场景标题沿用节点名(与既有 turn 形态字节兼容)。
+        self.assertIn("Scenario: Open a Workbook", text)
+        # 场景 2..N 逐字进场(不再 sc0-only),标题用场景自身名。
+        self.assertIn("Scenario: s2 -the requested workflow SheetN", text)
+        # WHEN/THEN 逐字,工作流指代短语原样保留。
+        self.assertIn("When the requested workflow with concrete "
+                      "values `East`.", text)
         self.assertIn("Then The workbook opens.", text)
-        self.assertNotIn("# Flow contract", text)
-        self.assertNotIn("placeholder boilerplate", text)
+        self.assertIn("Then The first unused tab appears.", text)
+        # id 锚每节点恰一行。
+        self.assertEqual(text.count("# REQ-1-1-1"), 1)
+
+    def test_legacy_flags_inert(self):
+        # 退役标记不得改变任何渲染字节。
+        folder, atom = self._folder_and_atom()
+        atom["_scenarios_templated"] = True
+        atom["scenarios"][0]["_steps_templated"] = True
+        plain_folder, plain_atom = self._folder_and_atom()
+        self.assertEqual(gherkin.feature_text(folder, [atom]),
+                         gherkin.feature_text(plain_folder, [plain_atom]))
+
+    def test_absent_fields_render_no_dangling_labels(self):
+        # 10-02 拍板"有就展示无就不展示":无 id 不发悬空 "# " 锚,
+        # 无 description 不发 Flow contract 行,三者皆无的原子整体省略
+        # ——与 SCENARIOS 空省略同律,不留任何空标签。
+        folder = {"id": "REQ-1", "name": "F", "type": "FOLDER",
+                  "description": "", "children": []}
+        no_id_no_desc = {"id": "", "name": "No Id", "type": "ATOMIC",
+                         "description": "", "scenarios": [
+                             {"name": "s1", "steps": [
+                                 {"keyword": "GIVEN",
+                                  "content": "seeded."}]}]}
+        text = gherkin.feature_text(folder, [no_id_no_desc])
+        self.assertNotIn("#", text)
+        self.assertIn("Scenario: No Id", text)
+        empty = {"id": "", "name": "", "type": "ATOMIC",
+                 "description": "", "scenarios": []}
+        self.assertEqual(gherkin.feature_text(folder, [empty]),
+                         "Feature: F\n")
+        # 仅 id 的原子只渲染锚一行(有就展示)。
+        id_only = {"id": "REQ-9", "name": "", "type": "ATOMIC",
+                   "description": "", "scenarios": []}
+        self.assertEqual(gherkin.feature_text(folder, [id_only]),
+                         "Feature: F\n\n  # REQ-9\n")
+        # 真数据(id/description 恒在场)渲染字节不受影响。
+        full_folder, full_atom = self._folder_and_atom()
+        full_text = gherkin.feature_text(full_folder, [full_atom])
+        self.assertEqual(full_text.count("# REQ-1-1-1"), 1)
+        self.assertEqual(full_text.count("# Flow contract:"), 2)
 
 
 class RealTaskSmokeTests(unittest.TestCase):
@@ -218,14 +243,17 @@ class RealTaskSmokeTests(unittest.TestCase):
             self.skipTest(f"{task} not present")
         return main.load_requirement_tree(req_dir)
 
-    def test_sheet_req_1_1_1_renders_clean_gherkin(self):
+    def test_sheet_req_1_1_1_renders_full_steps(self):
         tree = self._tree("hackathon--sheet")
         n = next(x for x in
                  (gherkin.__dict__ and __import__("main").flatten_atomic(tree))
                  if x.get("id") == "REQ-1-1-1")
         text = gherkin.render_scenarios(n, "full")
         self.assertIn("Given", text)
-        self.assertNotIn("the requested workflow", text.lower())
+        self.assertIn("When ", text)
+        self.assertIn("Then ", text)
+        # 工作流指代短语逐字保留(10-02 拍板)。
+        self.assertIn("the requested workflow", text.lower())
         self.assertIn("`Q3 Sales`", text)
 
     def test_github_real_steps_kept_verbatim(self):
@@ -249,20 +277,23 @@ class RealTaskSmokeTests(unittest.TestCase):
                 stack.append(c)
         raise AssertionError("parent folder not found")
 
-    def test_sheet_turn_path_templated_branch_clean(self):
-        # TURN 真路径(feature_text):sheet 节点级打标 → Flow contract
-        # + GIVEN 原文,占位 WHEN/THEN、注记行与黏连残渣不进场。
+    def test_sheet_turn_path_full_restore(self):
+        # TURN 真路径(feature_text):Flow contract + 全场景全步骤逐字
+        # (10-02 全量恢复),工作流指代短语原样在场。
         import main
         tree = self._tree("hackathon--sheet")
         n = next(x for x in main.flatten_atomic(tree)
                  if x.get("id") == "REQ-1-1-1")
         text = gherkin.feature_text(self._parent_of(tree, n), [n])
         self.assertIn("# Flow contract:", text)
-        self.assertNotIn("platform placeholder boilerplate", text)
+        # REQ-1-1-1 两个变体场景各带一行 description(自包含契约块)。
+        self.assertEqual(text.count("# Flow contract:"), 2)
         self.assertIn("`Q3 Sales`", text)
-        self.assertNotIn("When ", text)
-        self.assertNotIn("the requested workflow", text.lower())
-        self.assertNotIn("csvconcrete", text.replace(" ", ""))
+        self.assertIn("When ", text)
+        self.assertIn("Then ", text)
+        self.assertIn("the requested workflow", text.lower())
+        # 全场景:REQ-1-1-1 两个变体都在场。
+        self.assertEqual(text.count("  Scenario: "), 2)
 
     def test_github_turn_path_keeps_real_steps(self):
         import main
