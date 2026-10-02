@@ -182,8 +182,8 @@ class TurnFullRestoreTests(unittest.TestCase):
         self.assertIn(
             "# Flow contract: Users open the seeded workbook from the "
             "home page via its named entry link.", text)
-        # description 不丢=每个场景块上方都带 Flow contract(自包含)。
-        self.assertEqual(text.count("# Flow contract:"), 2)
+        # 每节点恰一行 Flow contract(10-02 三次拍板:场景间不继承重复)。
+        self.assertEqual(text.count("# Flow contract:"), 1)
         # 首场景标题沿用节点名(与既有 turn 形态字节兼容)。
         self.assertIn("Scenario: Open a Workbook", text)
         # 场景 2..N 逐字进场(不再 sc0-only),标题用场景自身名。
@@ -232,7 +232,7 @@ class TurnFullRestoreTests(unittest.TestCase):
         full_folder, full_atom = self._folder_and_atom()
         full_text = gherkin.feature_text(full_folder, [full_atom])
         self.assertEqual(full_text.count("# REQ-1-1-1"), 1)
-        self.assertEqual(full_text.count("# Flow contract:"), 2)
+        self.assertEqual(full_text.count("# Flow contract:"), 1)
 
 
 class RealTaskSmokeTests(unittest.TestCase):
@@ -286,8 +286,9 @@ class RealTaskSmokeTests(unittest.TestCase):
                  if x.get("id") == "REQ-1-1-1")
         text = gherkin.feature_text(self._parent_of(tree, n), [n])
         self.assertIn("# Flow contract:", text)
-        # REQ-1-1-1 两个变体场景各带一行 description(自包含契约块)。
-        self.assertEqual(text.count("# Flow contract:"), 2)
+        # 每节点恰一行:REQ-1-1-1 两个变体场景共用同一条契约
+        # (不逐场景继承重复)。
+        self.assertEqual(text.count("# Flow contract:"), 1)
         self.assertIn("`Q3 Sales`", text)
         self.assertIn("When ", text)
         self.assertIn("Then ", text)

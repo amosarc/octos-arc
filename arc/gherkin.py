@@ -154,17 +154,17 @@ def render_scenarios(node: dict, verification: str = "full",
                      indent: str = "  ") -> str:
     """一个原子节点的全部场景 → Gherkin 块。
 
-    full:每场景块上方一行 Flow contract(description 与步骤同场,与
-    feature_text 同口径)+ 全部步骤逐字(10-02 全量恢复:GIVEN/WHEN/
+    full:节点级一行 Flow contract(与 feature_text 同口径:每节点恰
+    一行,不逐场景重复)+ 全部步骤逐字(10-02 全量恢复:GIVEN/WHEN/
     THEN 都是判分器要走的测试)。
     data-only:只渲染 GIVEN(骨架数据契约),不带 description。
     """
     lines: list[str] = []
     flow = (clean_text(str(node.get("description") or ""))
             if verification == "full" else "")
+    if flow:
+        lines.append(f"{indent}# Flow contract: {flow}")
     for sc in node.get("scenarios") or []:
-        if flow:
-            lines.append(f"{indent}# Flow contract: {flow}")
         name = clean_name(str(sc.get("name") or "scenario"))
         lines.append(f"{indent}Scenario: {name}")
         steps = [s for s in (sc.get("steps") or [])
@@ -198,15 +198,15 @@ def feature_text(folder: dict, atoms: list[dict]) -> str:
     """家族文件夹 → .feature 文本。
 
     Feature 名 = 文件夹名;描述块 = 文件夹描述首句;Background = 其余句。
-    每个原子节点:`# <节点 id>` 锚 + **每个场景块上方一行**
-    `# Flow contract: <description 清洗文>`(10-02 二次拍板:description
-    不丢=每个场景块自包含——步骤里的 "the requested workflow" 指代本
-    描述定义的工作流,变体场景不借助上下文也能对上契约)——其下逐字
-    渲染全部 GIVEN/WHEN/THEN(判分器走全部场景,不再 sc0-only、不再按
-    占位标记裁剪)。首场景标题沿用节点名(与既有 turn 形态字节兼容),
-    其余场景用场景自身名区分变体。场景正文里的交叉引用("compliant
-    with REQ-1-1-1")经 id 注释一步可定位。无 scenarios 的原子只渲染
-    锚 + 单行 Flow contract。
+    每个原子节点:`# <节点 id>` 锚 + **节点级一行**
+    `# Flow contract: <description 清洗文>`(10-02 三次拍板:有就展示、
+    无就不展示、不逐场景继承——节点下全部场景共用同一条契约,变体
+    场景经 id 锚一步对上;逐场景重复同一大段文本只烧 token 不添信息)
+    ——其下逐字渲染全部 GIVEN/WHEN/THEN(判分器走全部场景,不再
+    sc0-only、不再按占位标记裁剪)。首场景标题沿用节点名(与既有 turn
+    形态字节兼容),其余场景用场景自身名区分变体。场景正文里的交叉
+    引用("compliant with REQ-1-1-1")经 id 注释一步可定位。无
+    scenarios 的原子只渲染锚 + 单行 Flow contract。
     有则渲染、无则不渲染(10-02 拍板"有就展示无就不展示"):无 id 不发
     悬空 "# " 锚,无 description 不发 Flow contract 行,三者皆无的原子
     整体省略——与 SCENARIOS 空省略同律,不留任何空标签。
@@ -231,15 +231,13 @@ def feature_text(folder: dict, atoms: list[dict]) -> str:
         lines.append("")
         if atom_id:
             lines.append(f"  # {atom_id}")
+        if flow:
+            lines.append(f"  # Flow contract: {flow}")
         if not scs:
-            if flow:
-                lines.append(f"  # Flow contract: {flow}")
             continue
         node_title = (clean_name(str(atom.get("name") or ""))
                       or atom_id or "scenario")
         for si, sc in enumerate(scs):
-            if flow:
-                lines.append(f"  # Flow contract: {flow}")
             if si == 0:
                 lines.append(f"  Scenario: {node_title}")
             else:
