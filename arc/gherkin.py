@@ -13,13 +13,13 @@ Flow contract 注释同场给出该工作流的定义;二者都不是可裁剪�
 09-30~10-01 的占位短语剥离与场景打标检测据此整链退役:渲染层一律
 全场景全步骤(GIVEN/WHEN/THEN),data-only 模式除外。
 
-10-02 终版拍板(用户以 yaml 原文对账:"三个场景都要原样转到
-turn"):场景层零过滤、句层零删改——同文克隆、骨架措辞变体、yaml
-自带的重复句,一律原样进场;宿主对 yaml 内容零裁决(83a9799 同律),
-判分面=提示词面逐字对齐(两题恰各 100 场景)。宿主自产的标签才受
-"有就展示无就不展示"律:Flow contract 每节点恰一行,不逐场景继承。
-("同文即残渣"三件过滤——克隆塌缩/骨架剔除/同文句删改——据此
-整体退役,存在即回归。)
+10-02 终版拍板(两步定案):先"三个场景都要原样转到 turn"(用户以
+yaml 原文对账,撤销骨架措辞剔除与同文句删改——句层零删改、骨架
+变体原样进场);再补场景去重律:同节点内 GIVEN+WHEN+THEN 内容
+逐字节完全一致的 scenario 自动合并只留首见(用户拍板)。跨节点
+步骤同文但 Flow contract 各异,信息不同,不合并。宿主对 yaml 场景
+/句子内容零裁决(83a9799 同律);宿主自产标签受"有就展示无就不
+展示"律:Flow contract 每节点恰一行,不逐场景继承。
 
 场景名同规则清洗,坍缩到只剩 id 时只留 id。
 
@@ -132,6 +132,29 @@ def clean_sentences(content: str) -> tuple[list[str], bool]:
     return kept, True
 
 
+def _unique_scenarios(node: dict) -> list[dict]:
+    """同节点内 GIVEN+WHEN+THEN 逐字节相同的场景自动合并,只留首见
+    (10-02 拍板:GIVEN+WHEN+THEN 内容完全一致的 scenario 去重)。
+
+    判据=(keyword, content) 步骤序列逐字节相等;以节点为界——跨节点
+    步骤同文但 Flow contract 各异,信息不同,不合并。判分器走 yaml
+    全量,渲染层合并不影响判分面(同文场景测的是同一条工作流)。
+    """
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    for sc in node.get("scenarios") or []:
+        if not isinstance(sc, dict):
+            continue
+        sig = tuple(
+            (str(s.get("keyword", "")), str(s.get("content", "")))
+            for s in (sc.get("steps") or []) if isinstance(s, dict))
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(sc)
+    return out
+
+
 def render_steps(steps: list[dict],
                  indent: str = "      ") -> tuple[list[str], int, int]:
     """yaml 步骤 → Gherkin 行。
@@ -166,8 +189,9 @@ def render_scenarios(node: dict, verification: str = "full",
     """一个原子节点的全部场景 → Gherkin 块。
 
     full:节点级一行 Flow contract(与 feature_text 同口径:每节点恰
-    一行,不逐场景重复)+ 全部步骤逐字(10-02 全量恢复:GIVEN/WHEN/
-    THEN 都是判分器要走的测试)。
+    一行,不逐场景重复)+ 全部唯一场景全部步骤逐字(同节点内
+    GIVEN+WHEN+THEN 逐字节相同的场景合并;GIVEN/WHEN/THEN 都是判分器
+    要走的测试)。
     data-only:只渲染 GIVEN(骨架数据契约),不带 description。
     """
     lines: list[str] = []
@@ -175,7 +199,7 @@ def render_scenarios(node: dict, verification: str = "full",
             if verification == "full" else "")
     if flow:
         lines.append(f"{indent}# Flow contract: {flow}")
-    for sc in node.get("scenarios") or []:
+    for sc in _unique_scenarios(node):
         name = clean_name(str(sc.get("name") or "scenario"))
         lines.append(f"{indent}Scenario: {name}")
         steps = [s for s in (sc.get("steps") or [])
@@ -212,12 +236,12 @@ def feature_text(folder: dict, atoms: list[dict]) -> str:
     每个原子节点:`# <节点 id>` 锚 + **节点级一行**
     `# Flow contract: <description 清洗文>`(10-02 拍板:有就展示、
     无就不展示、不逐场景继承——节点下全部场景共用同一条契约,变体
-    场景经 id 锚一步对上)——其下逐字渲染**全部场景**的全部
-    GIVEN/WHEN/THEN(10-02 终版拍板:三个场景都要原样转到 turn,场景
-    层零过滤、句层零删改;首场景标题沿用节点名与既有 turn 形态字节
-    兼容,其余场景用场景自身名区分变体)。场景正文里的交叉引用
-    ("compliant with REQ-1-1-1")经 id 注释一步可定位。无 scenarios 的
-    原子只渲染锚 + 单行 Flow contract。
+    场景经 id 锚一步对上)——其下逐字渲染**全部唯一场景**的全部
+    GIVEN/WHEN/THEN(同节点内 GIVEN+WHEN+THEN 逐字节相同的自动合并,
+    骨架措辞变体与 yaml 自带重复句原样;首场景标题沿用节点名与既有
+    turn 形态字节兼容,其余场景用场景自身名区分变体)。场景正文里的
+    交叉引用("compliant with REQ-1-1-1")经 id 注释一步可定位。无
+    scenarios 的原子只渲染锚 + 单行 Flow contract。
     有则渲染、无则不渲染(10-02 拍板"有就展示无就不展示"):无 id 不发
     悬空 "# " 锚,无 description 不发 Flow contract 行,三者皆无的原子
     整体省略——与 SCENARIOS 空省略同律,不留任何空标签。
@@ -235,8 +259,7 @@ def feature_text(folder: dict, atoms: list[dict]) -> str:
     for atom in atoms:
         atom_id = str(atom.get("id") or "").strip()
         flow = clean_text(str(atom.get("description") or ""))
-        scs = [sc for sc in (atom.get("scenarios") or [])
-               if isinstance(sc, dict)]
+        scs = _unique_scenarios(atom)
         if not atom_id and not flow and not scs:
             continue
         lines.append("")
