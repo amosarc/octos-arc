@@ -145,6 +145,34 @@ class OctosStdioSession:
                 "kernel-terminal detection degraded")
         return None
 
+    def recent_tool_calls(self, limit: int = 24) -> list[dict]:
+        """取回会话尾部的 tool 调用签名(name + arguments,尽力而为)。
+
+        doom/spiral 杀轮取证用:内核终局只给通用文案,重复的命令原文要
+        从消息流里提——hydrate 响应本就带全量行,这里向尾部多扫一遍。
+        任何失败降级为空列表并把原因留在 stderr,绝不在取证路径上抛。
+        """
+        try:
+            res = self._send("session/hydrate", {
+                "session_id": self.session_id,
+                "include": ["messages"],
+            }, want_response=True, timeout=self.hydrate_timeout)
+            out: list[dict] = []
+            for row in (res or {}).get("messages") or []:
+                for call in (row.get("tool_calls") or []) or []:
+                    if isinstance(call, dict):
+                        out.append({
+                            "name": str(call.get("name") or ""),
+                            "arguments": call.get("arguments"),
+                        })
+            return out[-limit:]
+        except (OctosProtocolError, AttributeError, KeyError,
+                TypeError, ValueError) as exc:
+            self._stderr_lines.append(
+                f"[stdio] tool-call hydrate failed ({exc}); "
+                "doom signature degraded")
+            return []
+
     # ------------------------------------------------------------ protocol
 
     def bootstrap_profile(self, provider: str, model: str, base_url: str | None,

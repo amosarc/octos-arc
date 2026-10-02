@@ -143,6 +143,93 @@ class ReentryReasonTests(unittest.TestCase):
                          DOOM_REASON)
 
 
+def _bash_call(n: int) -> dict:
+    return {"name": "bash", "arguments": {"command": f"cmd-{n}"}}
+
+
+class DoomCallSignatureTests(unittest.TestCase):
+    """doom 杀轮取证:会话尾部 tool 调用 → 重复签名(工具+命令原文)。"""
+
+    def test_tail_streak_extracts_command_and_count(self):
+        calls = [_bash_call(1), {"name": "read", "arguments": {"p": "x"}}]
+        calls += [_bash_call(2) for _ in range(7)]
+        sig = main.doom_call_signature(calls)
+        self.assertEqual(sig, {"tool": "bash", "count": 7,
+                               "command": "cmd-2"})
+
+    def test_string_arguments_supported(self):
+        calls = [{"name": "bash",
+                  "arguments": json.dumps({"command": "npm test"})}
+                 for _ in range(3)]
+        self.assertEqual(main.doom_call_signature(calls)["command"],
+                         "npm test")
+
+    def test_no_streak_returns_none(self):
+        self.assertIsNone(main.doom_call_signature([]))
+        self.assertIsNone(main.doom_call_signature(
+            [_bash_call(1), _bash_call(2)]))
+
+    def test_command_truncated_to_400(self):
+        calls = [{"name": "bash", "arguments": {"command": "x" * 500}}
+                 for _ in range(2)]
+        self.assertEqual(len(main.doom_call_signature(calls)["command"]),
+                         400)
+
+    def test_non_shell_arguments_rendered_empty(self):
+        calls = [{"name": "read", "arguments": {"path": "a.md"}}
+                 for _ in range(5)]
+        sig = main.doom_call_signature(calls)
+        self.assertEqual(sig["tool"], "read")
+        self.assertEqual(sig["count"], 5)
+        self.assertEqual(sig["command"], "")
+
+
+class DoomEvidenceCaptureTests(unittest.TestCase):
+    """_capture_doom_evidence:取证落 octos/doom-events.jsonl + stderr
+    面板一行;绝不在取证路径上抛,无 recent_tool_calls 的驱动降级。"""
+
+    def _run(self, tmp, tool_calls, kernel_terminal=DOOM_ROW,
+             with_tool_method=True):
+        logs = []
+        driver = type("D", (), {"kernel_terminal": kernel_terminal})()
+        if with_tool_method:
+            driver.recent_tool_calls = lambda: tool_calls
+        main._capture_doom_evidence(Path(tmp), "REQ-6-2-1", driver,
+                                    logs.append)
+        events = Path(tmp) / "octos" / "doom-events.jsonl"
+        lines = (events.read_text().splitlines()
+                 if events.exists() else [])
+        return logs, [json.loads(x) for x in lines]
+
+    def test_capture_writes_event_and_logs_summary(self):
+        calls = [_bash_call(1)] + [_bash_call(2) for _ in range(7)]
+        with tempfile.TemporaryDirectory() as tmp:
+            logs, records = self._run(tmp, calls)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["node"], "REQ-6-2-1")
+        self.assertEqual(records[0]["tool"], "bash")
+        self.assertEqual(records[0]["count"], 7)
+        self.assertEqual(records[0]["command"], "cmd-2")
+        self.assertEqual(records[0]["reason"], DOOM_ROW)
+        self.assertTrue(any("[doom] REQ-6-2-1: bash x7" in x
+                            for x in logs), logs)
+
+    def test_no_terminal_no_capture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logs, records = self._run(tmp, [_bash_call(1)],
+                                      kernel_terminal=None)
+        self.assertEqual(records, [])
+        self.assertEqual(logs, [])
+
+    def test_degrades_without_recent_tool_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logs, records = self._run(tmp, [], with_tool_method=False)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].get("tool"), None)
+        self.assertTrue(any("no repeated-call signature" in x
+                            for x in logs), logs)
+
+
 class TurnReentryPromptTests(unittest.TestCase):
     def test_prompt_embeds_reason_and_keeps_core_verbatim(self):
         core = ("TASK: implement the requirements below (REQ-1-1-1).\n\n"

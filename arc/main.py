@@ -483,6 +483,72 @@ def turn_reentry_prompt(turn_core: str, reason: str) -> str:
     return prefix + turn_core
 
 
+def doom_call_signature(tool_calls: list[dict]) -> dict | None:
+    """doom/spiral 杀轮取证:从会话尾部 tool 调用里提"重复的是什么"。
+
+    自尾部找极大同签名 (name, arguments) 连续段;bash/shell 类取
+    command 原文截断。段长 <2 或入参为空返回 None(没有"重复"可言)。
+    arguments 兼容 dict 与 JSON 字符串两种形态。
+    """
+
+    def _sig(call: dict) -> tuple[str, str]:
+        args = call.get("arguments")
+        raw = (args if isinstance(args, str)
+               else json.dumps(args, sort_keys=True, ensure_ascii=False))
+        return (str(call.get("name") or ""), raw or "")
+
+    if not tool_calls:
+        return None
+    last = _sig(tool_calls[-1])
+    count = 0
+    for call in reversed(tool_calls):
+        if _sig(call) != last:
+            break
+        count += 1
+    if count < 2:
+        return None
+    name, args_raw = last
+    command = ""
+    try:
+        args = (json.loads(args_raw)
+                if args_raw and isinstance(args_raw, str) else args_raw)
+        if isinstance(args, dict):
+            command = str(args.get("command") or "")
+    except ValueError:
+        command = ""
+    return {"tool": name, "count": count, "command": command[:400]}
+
+
+def _capture_doom_evidence(output_dir, focus_id: str, driver,
+                           log) -> None:
+    """内核杀轮取证落盘(尽力而为,绝不抛):重复的命令原文追加到
+    octos/doom-events.jsonl(工作区直接可见,随 zip 带回),并在 stderr
+    面板打一行即时可见的摘要。首次切断与重入后再切各采一次。"""
+    if not driver.kernel_terminal:
+        return
+    try:
+        fetch = getattr(driver, "recent_tool_calls", None)
+        sig = (doom_call_signature(fetch()) if callable(fetch) else None)
+        record = {"ts": clock.iso(), "node": focus_id,
+                  "reason": str(driver.kernel_terminal), **(sig or {})}
+        octos_dir = output_dir / "octos"
+        octos_dir.mkdir(parents=True, exist_ok=True)
+        with open(octos_dir / "doom-events.jsonl", "a",
+                  encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if sig:
+            log(f"[doom] {focus_id}: {sig['tool'] or '?'} "
+                f"x{sig['count']} identical: {sig['command'][:240]}")
+        else:
+            log(f"[doom] {focus_id}: kernel cut, no repeated-call "
+               f"signature found in session tail")
+    except Exception as exc:  # 取证绝不挡批循环
+        try:
+            log(f"[doom] evidence capture failed: {exc}")
+        except Exception:
+            pass
+
+
 def zero_output_reentry_prompt(turn_core: str) -> str:
     """检测B 重入工单:turn 干净返回但零项目文件落盘(全程只读探索/
     被无标记内核终局收走,如 shell-spiral 盲区)。前缀直书零进展+立即
@@ -3533,6 +3599,11 @@ def main() -> int:
                     # 重入轮结果即最终结果,仍走下方既有五道门。
                     reentry_kind = ""
                     reason = reentry_reason(text, driver.kernel_terminal)
+                    if driver.kernel_terminal:
+                        # 内核杀轮取证先行(重入可能救活,但首切的
+                        # 重复命令原文仍要留档)。
+                        _capture_doom_evidence(output_dir, focus_id,
+                                               driver, log)
                     if (reason and not time_up()
                             and remaining() >= final_reserve + node_floor):
                         reentry_kind = "cut"
@@ -3556,6 +3627,9 @@ def main() -> int:
                             min(node_timeout, wall), wall)
                 batch_turn_ok = ok
                 kernel_cut = kernel_terminal_marker(driver.kernel_terminal)
+                if kernel_cut:
+                    # 重入后再切(双 doom)的第二笔取证。
+                    _capture_doom_evidence(output_dir, focus_id, driver, log)
                 main_turn_reason = _turn_end_reason(ok, text,
                                                     driver.kernel_terminal)
                 cut_note = (f" (kernel cut: {kernel_cut}; turn failed)"
