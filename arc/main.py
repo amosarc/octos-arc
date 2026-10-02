@@ -80,8 +80,8 @@ SELFTEST_SUBDIR = "e2e"
 # 本地仿真不受它影响:env OCTOS_ARC_FAMILIES 设置时覆盖此值。
 # COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2,REQ-3"
 # COMPETITION_FAMILY_SCOPE = "REQ-1,REQ-2"
-# COMPETITION_FAMILY_SCOPE = "REQ-1"
-COMPETITION_FAMILY_SCOPE = ""
+COMPETITION_FAMILY_SCOPE = "REQ-1"
+# COMPETITION_FAMILY_SCOPE = ""
 
 # 思考参数
 # config.json 的 model_thinking/model_reasoning_effort,内核按
@@ -667,6 +667,58 @@ def _stop_dev_server(smoke_port: int) -> None:
                 pass
     except (OSError, subprocess.SubprocessError):
         pass
+
+
+def _dev_server_watchdog(output_dir: Path, smoke_port: int, extra_ports: list,
+                         stop: "threading.Event", log) -> None:
+    """宿主托管 dev server 的看门狗:回合内死亡即复活。
+
+    _ensure_dev_server 只在每批开始调用;模型在回合内把 3100 杀掉(重启
+    惯用语里的 pkill、误杀)后,直到下批之前无人拉起,模型在当回合内
+    永远拿不到验证通道(10-02 sheet 跑:零输出循环→doom guard→双 turn
+    全灭)。端口被任何人占用(含模型自管的服务器)即视为在线,不干预。
+
+    连续两拍(≈10s)死亡才复活:给 scripts/restart-server.sh 的
+    kill→start 窗口让路,不在模型自行重启的中途抢跑。复活连续 3 次失败
+    后退避 60s——防止模型起了无 /api/health 的自管服务器时陷入
+    「复活→EADDRINUSE→再复活」的崩循环刷日志。交付清场
+    (_stop_dev_server)前必须先 set stop,否则清场会被这里拉回来。
+    """
+    import urllib.request
+    backend = output_dir / "backend"
+    dead_ticks = 0
+    boot_failures = 0
+    while not stop.is_set():
+        stop.wait(60 if boot_failures >= 3 else 5)
+        if stop.is_set():
+            break
+        if not (backend / "src" / "index.js").is_file():
+            continue
+        alive = False
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{smoke_port}/api/health",
+                    timeout=2) as resp:
+                alive = resp.status == 200
+        except OSError:
+            alive = False
+        if alive:
+            dead_ticks = 0
+            boot_failures = 0
+            continue
+        dead_ticks += 1
+        if dead_ticks < 2:
+            continue
+        dead_ticks = 0
+        if boot_failures == 3:
+            log(f"[dev-server] watchdog: 3 consecutive resurrect failures "
+                f"on {smoke_port}; retrying every 60s")
+        log(f"[dev-server] watchdog: health check dead on {smoke_port}; "
+            f"resurrecting (host-managed)")
+        if _boot_dev_server(output_dir, smoke_port, extra_ports, log):
+            boot_failures = 0
+        else:
+            boot_failures += 1
 
 
 def _reset_runtime_seed(output_dir: Path) -> None:
@@ -2792,7 +2844,7 @@ def build_spec_run_cmd(cli_path: str | None,
     # rm 永不失败;build 失败整链停止(先见构建错误);restart 失败容忍。
     cold_start = ("rm -f backend/data/db.run.json && "
                   "npm run build --prefix frontend && "
-                  "sh .arc/host/restart-server.sh >/dev/null 2>&1; ")
+                  "sh scripts/restart-server.sh >/dev/null 2>&1; ")
     if cli_path:
         return (
             f"{VERIFICATION_RULES}"
@@ -3229,16 +3281,29 @@ def main() -> int:
         template_ready = scaffold.template_ready(output_dir)
         if template_ready:
             # 宿主托管的 dev server 一键重启脚本：模型改了 backend/src 后
-            # 只跑它，进程管理零参与。
-            host_dir = output_dir / ".arc" / "host"
-            host_dir.mkdir(parents=True, exist_ok=True)
-            (host_dir / "restart-server.sh").write_text(
+            # 只跑它，进程管理零参与。宿主辅助脚本统一住工作区根 scripts/
+            # (AGENTS.md ARCHITECTURE 点名),不放交付代码区也不藏 .arc。
+            # 目录内自忽略 .gitignore(内容 `*`)——git status/脏收据看不
+            # 见,但文件对模型照常可读写。
+            scripts_dir = output_dir / "scripts"
+            scripts_dir.mkdir(parents=True, exist_ok=True)
+            scripts_gitignore = scripts_dir / ".gitignore"
+            if not scripts_gitignore.exists():
+                scripts_gitignore.write_text("*\n", encoding="utf-8")
+            (scripts_dir / "restart-server.sh").write_text(
                 "#!/bin/sh\n"
                 "# Host-provided: restart the dev server after backend/src "
                 "changes.\n"
                 'PORT="${1:-' + str(smoke_port) + '}"\n'
-                'cd "$(dirname "$0")/../../backend" || exit 1\n'
-                'lsof -ti TCP:"$PORT" -sTCP:LISTEN | xargs -r kill 2>/dev/null\n'
+                'cd "$(dirname "$0")/../backend" || exit 1\n'
+                "# lsof 缺席的平台容器 fallback 到按名 kill:本脚本是文件,\n"
+                "# 模式串不进任何 argv,pkill -f 自匹配在这条路径上不可达。\n"
+                'if command -v lsof >/dev/null 2>&1; then\n'
+                '  lsof -ti TCP:"$PORT" -sTCP:LISTEN | xargs -r kill '
+                "2>/dev/null\n"
+                "else\n"
+                '  pkill -f "node src/index.js" 2>/dev/null\n'
+                "fi\n"
                 "sleep 1\n"
                 'mkdir -p ../octos/logs\n'
                 'PORT="$PORT" nohup node src/index.js '
@@ -3398,6 +3463,19 @@ def main() -> int:
             daemon=True,
         )
         watchdog.start()
+        # 宿主托管 dev server 的看门狗:模型在回合内杀死 3100(重启惯用语
+        # 里的 pkill/误杀)后,回合内无人拉起——10-02 sheet 跑里模型从此
+        # 拿不到任何验证通道,(no output) 零信息循环喂给内核 doom guard,
+        # 双 turn 全灭。复活逻辑只在 template 就绪的任务上开。
+        dev_watchdog_stop = threading.Event()
+        if template_ready:
+            dev_watchdog = threading.Thread(
+                target=_dev_server_watchdog,
+                args=(output_dir, smoke_port, spec_ports_extra,
+                      dev_watchdog_stop, log),
+                daemon=True,
+            )
+            dev_watchdog.start()
         driver = OctosDriver(
             octos_bin, output_dir, env, data_dir, max_iter,
             events_log=events_log_path,
@@ -3789,6 +3867,10 @@ def main() -> int:
                 log("[flow] time budget exhausted; skipping final verification")
             else:
                 log("[plan] final host verification")
+                # final 链(Tier-2/page-health)要在冒烟端口自起应用实例:
+                # 先停看门狗,否则两拍死亡判会把宿主 dev server 复活进去
+                # 抢端口。停止后不复活,交给各链自己的 boot。
+                dev_watchdog_stop.set()
                 hs: dict = {}
                 tier2_run = None
                 if os.environ.get("OCTOS_ARC_HOST_GRADE",
@@ -3906,8 +3988,11 @@ def main() -> int:
                     log(f"[plan] final-verification.json write failed: {exc}")
 
             # 交付前清场：宿主托管的 dev server 不得占住冒烟端口。
+            # 先停看门狗再清场——顺序反了清场会被看门狗拉回来。
+            dev_watchdog_stop.set()
             _stop_dev_server(smoke_port)
         finally:
+            dev_watchdog_stop.set()
             watchdog_stop.set()
             driver.close()
             if repair_driver is not None:

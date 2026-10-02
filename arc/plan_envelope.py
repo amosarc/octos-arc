@@ -75,7 +75,12 @@ ARCHITECTURE_LINES = [
     "to index.html) — keep that contract when you change them.",
     f"Ports: the host boots and grades the app on port {WEB_PORT} — "
     f"never bind or restart it; if you start the app yourself to verify, "
-    f"bind port {SMOKE_PORT} only.",
+    f"bind port {SMOKE_PORT} only. Restart the dev server after backend "
+    f"changes with `sh scripts/restart-server.sh` from the workspace root "
+    f"— never kill server processes by pattern.",
+    "scripts/ = host-provided helper scripts (e.g. restart-server.sh); "
+    "run them from the workspace root, do not put your own files there "
+    "(scratch belongs in /tmp).",
     "backend/src/lib/util.js = responses/cookies/ids; "
     "backend/src/lib/eval-telemetry.js = platform traffic/exception "
     "self-telemetry.",

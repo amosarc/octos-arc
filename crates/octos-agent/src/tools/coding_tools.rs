@@ -550,7 +550,12 @@ impl ExecCommandTool {
         }
 
         let dirty_before = super::shell::snapshot_dirty_paths(&snapshot_root);
-        let mut cmd = self.sandbox.wrap_command(&command, &cwd);
+        // Script-file exec (see shell::script_exec_command): the raw command
+        // text must never enter the executing shell's argv, or a `pkill -f`
+        // pattern inside the command can match (and SIGTERM) that very
+        // shell — the 2026-10-02 sheet doom loop.
+        let exec_command = super::shell::script_exec_command(&command, &cwd);
+        let mut cmd = self.sandbox.wrap_command(&exec_command, &cwd);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         // Put the child in its own process group so the timeout path can
         // signal the WHOLE tree (wrapper shell + grandchildren) with a
@@ -595,7 +600,7 @@ impl ExecCommandTool {
                 }
                 text.push_str(&format!(
                     "\n\nExit code: {}",
-                    output.status.code().unwrap_or(-1)
+                    super::shell::exit_code_token(&output.status)
                 ));
                 // #28c — file-change receipt on the coding-session exec
                 // path too (same shared 28a module; same five acceptance
@@ -685,7 +690,12 @@ impl ExecCommandTool {
             });
         }
 
-        let mut cmd = self.sandbox.wrap_command(&command, &cwd);
+        // Script-file exec (see shell::script_exec_command): the raw command
+        // text must never enter the executing shell's argv, or a `pkill -f`
+        // pattern inside the command can match (and SIGTERM) that very
+        // shell — the 2026-10-02 sheet doom loop.
+        let exec_command = super::shell::script_exec_command(&command, &cwd);
+        let mut cmd = self.sandbox.wrap_command(&exec_command, &cwd);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -2135,7 +2145,12 @@ impl Tool for BashTool {
         }
 
         let dirty_before = super::shell::snapshot_dirty_paths(&snapshot_root);
-        let mut cmd = self.sandbox.wrap_command(&command, &cwd);
+        // Script-file exec (see shell::script_exec_command): the raw command
+        // text must never enter the executing shell's argv, or a `pkill -f`
+        // pattern inside the command can match (and SIGTERM) that very
+        // shell — the 2026-10-02 sheet doom loop.
+        let exec_command = super::shell::script_exec_command(&command, &cwd);
+        let mut cmd = self.sandbox.wrap_command(&exec_command, &cwd);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         // codex review (#1172) P2 (follow-up): put the child in its own
         // process group BEFORE spawn so the negative-PID kill below
@@ -2185,7 +2200,7 @@ impl Tool for BashTool {
                 if text.is_empty() {
                     text.push_str("(no output)");
                 }
-                let exit_code = output.status.code().unwrap_or(-1);
+                let exit_code = super::shell::exit_code_token(&output.status);
                 text.push_str(&format!("\n\nExit code: {exit_code}"));
                 // #28c — file-change receipt appended ONCE to THIS result's
                 // tail (28a semantics: prompt-cache stable, never a system

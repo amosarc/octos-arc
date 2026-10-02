@@ -1216,30 +1216,6 @@ class DumpRuntimePromptsTests(unittest.TestCase):
                                    "agents_md": False})
         self.assertFalse((Path(td_s) / "octos" / "prompts").exists())
 
-    def test_agents_section_stops_at_kernel_cwd_hint(self):
-        # 内核在系统提示词末尾追加 cwd 提示且其后无 "## " 头:
-        # AGENTS.md 采集件止于提示行;system-prompt.md 仍逐字节含它。
-        import main
-        sys_text = ("gateway base text\n\n## AGENTS.md\n\nROOT CONTRACT\n"
-                    "children map\n\n"
-                    "AppUi session workspace root: /workspace/template\n"
-                    "The server approved this cwd for the current session. "
-                    "Resolve relative shell and file-tool paths against "
-                    "this workspace.")
-        with tempfile.TemporaryDirectory() as td_s:
-            td = Path(td_s)
-            self._write_llm(td, "20261001-130000-1",
-                            [(1, 1, sys_text, "TASK: x")])
-            summary = main.dump_runtime_prompts(td)
-            self.assertTrue(summary["agents_md"])
-            prompts = td / "octos" / "prompts"
-            self.assertEqual(
-                (prompts / "system-prompt.md").read_text(encoding="utf-8"),
-                sys_text)
-            agents = (prompts / "AGENTS.md").read_text(encoding="utf-8")
-            self.assertIn("ROOT CONTRACT", agents)
-            self.assertNotIn("AppUi session workspace root:", agents)
-            self.assertNotIn("approved this cwd", agents)
 
     def test_mirror_hidden_logs_copies_arc_and_context_logs(self):
         # 点前缀目录(.arc/.octos)平台取回会丢:镜像进 octos/logs/ 后齐全

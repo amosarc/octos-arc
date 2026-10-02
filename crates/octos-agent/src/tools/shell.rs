@@ -234,7 +234,8 @@ impl ShellTool {
         // `strip_trailing_ampersand`).
         let command = strip_trailing_ampersand(raw_command);
 
-        let mut cmd = self.sandbox.wrap_command(&command, effective_cwd);
+        let exec_command = script_exec_command(&command, effective_cwd);
+        let mut cmd = self.sandbox.wrap_command(&exec_command, effective_cwd);
         // We return immediately and never read the pipes, so piping stdout/
         // stderr risks a full-buffer deadlock in a chatty child. Discard the
         // std streams (in-command redirects like `> log 2>&1` still win).
@@ -882,7 +883,8 @@ impl Tool for ShellTool {
         // Spawn the child, grab its PID, then timeout on wait_with_output().
         // If timeout fires, kill by PID to prevent orphaned processes.
         // (wait_with_output() takes ownership of child, so we save the PID first.)
-        let mut cmd = self.sandbox.wrap_command(&input.command, effective_cwd);
+        let exec_command = script_exec_command(&input.command, effective_cwd);
+        let mut cmd = self.sandbox.wrap_command(&exec_command, effective_cwd);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         apply_frontend_tool_env(&mut cmd, effective_cwd);
         apply_quarto_tool_env(&mut cmd, &input.command, effective_cwd);
@@ -914,7 +916,7 @@ impl Tool for ShellTool {
             Ok(Ok(output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                let exit_code = output.status.code().unwrap_or(-1);
+                let exit_code = exit_code_token(&output.status);
 
                 let mut result_text = String::new();
 
@@ -1074,6 +1076,55 @@ impl Tool for ShellTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn script_exec_command_writes_script_and_hides_command_text() {
+        let cwd = std::env::temp_dir().join(format!("octos-scriptexec-{}", std::process::id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let command =
+            "pkill -f \"node src/index.js\"; sleep 1; nohup node src/index.js & curl localhost";
+        let wrapped = script_exec_command(command, &cwd);
+        assert!(wrapped.starts_with("sh "), "wrapped = {wrapped}");
+        // The pattern text must NOT appear in the wrapped argv string — that
+        // is the entire point (2026-10-02 sheet pkill self-match doom).
+        assert!(!wrapped.contains("pkill"), "wrapped = {wrapped}");
+        let script_path = wrapped.strip_prefix("sh ").unwrap();
+        let written = std::fs::read_to_string(script_path).unwrap();
+        assert_eq!(written, command);
+        // Self-ignoring gitignore keeps the dir out of git-status receipts.
+        let gitignore = std::fs::read_to_string(cwd.join(".octos/cmd/.gitignore")).unwrap();
+        assert_eq!(gitignore, "*\n");
+        std::fs::remove_dir_all(&cwd).ok();
+    }
+
+    #[test]
+    fn script_exec_command_fails_open_to_raw_command() {
+        // cwd is a FILE — `<cwd>/.octos/cmd` cannot be created; the raw
+        // command must come back unchanged (exec never fails for infra).
+        let cwd = std::env::temp_dir().join(format!("octos-scriptexec-f-{}", std::process::id()));
+        std::fs::write(&cwd, "not a dir").unwrap();
+        let wrapped = script_exec_command("echo hi", &cwd);
+        assert_eq!(wrapped, "echo hi");
+        std::fs::remove_file(&cwd).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_code_token_names_signal_deaths() {
+        use std::os::unix::process::ExitStatusExt;
+        // wait-status encoding: low byte = terminating signal.
+        let sigterm = std::process::ExitStatus::from_raw(15);
+        let token = exit_code_token(&sigterm);
+        assert!(token.contains("signal 15"), "token = {token}");
+        assert!(token.contains("SIGTERM"), "token = {token}");
+        assert!(token.contains("pkill"), "token = {token}");
+        // Normal exits stay bare numbers — `Exit code: 0` parsing depends on it.
+        assert_eq!(exit_code_token(&std::process::ExitStatus::from_raw(0)), "0");
+        assert_eq!(
+            exit_code_token(&std::process::ExitStatus::from_raw(256)),
+            "1"
+        );
+    }
 
     #[test]
     fn trace_subset_path_matching_is_precise() {
@@ -1864,6 +1915,56 @@ impl ChangeReceipt {
     }
 }
 
+/// Exit-code fragment for shell/exec/bash tool results. Normal exits render
+/// as the bare number (`"0"`, `"1"`, …). Signal deaths — `code() == None` —
+/// previously collapsed into `Exit code: -1`, indistinguishable from a
+/// normal `-1` exit and carrying zero diagnostic value (2026-10-02 sheet
+/// run: a `pkill -f` restart one-liner SIGTERMed its own shell via argv
+/// self-match; sixteen consecutive `(no output) / Exit code: -1` results
+/// fed a terminal doom loop in both turns). Name the signal and state the
+/// one fact that breaks the loop: the shell itself died mid-command, so
+/// everything after the kill point never ran. The `Exit code: ` prefix at
+/// the call sites is load-bearing (`loop_runner` success classification
+/// keys on `Exit code: 0`) — only the fragment changed.
+pub(crate) fn exit_code_token(status: &std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return code.to_string();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            let name = signal_name(sig);
+            return format!(
+                "signal {sig} ({name}) — the shell executing this command was \
+                 killed by {name} before it finished; everything after the kill \
+                 point never ran. If the command kills processes by pattern \
+                 (pkill/killall), the pattern very likely matched this very \
+                 shell, whose argv carries the full command text. Narrow the \
+                 pattern or put the kill in a script file, then continue."
+            );
+        }
+    }
+    "-1".to_string()
+}
+
+/// Human-readable name for the common termination signals.
+#[cfg(unix)]
+fn signal_name(sig: i32) -> &'static str {
+    match sig {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        6 => "SIGABRT",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => "unknown signal",
+    }
+}
+
 /// #28a — snapshot the repo-relative dirty paths (modified + untracked,
 /// i.e. `git status --porcelain` lines) at `git status` cost (ms-scale, no
 /// index refresh beyond what status itself does; no new dependencies).
@@ -1897,6 +1998,118 @@ pub(crate) fn snapshot_dirty_paths(cwd: &Path) -> Option<Vec<String>> {
 }
 
 pub(crate) const CHANGE_RECEIPT_MAX_LISTED: usize = 20;
+
+/// Script-file exec — the process-pattern self-match defense.
+///
+/// An exec-shaped tool hands the raw command text to `Sandbox::wrap_command`,
+/// which runs `sh -c <command>`: the ENTIRE command text sits in the
+/// executing shell's argv, so any `pkill -f` / `pgrep -f` / `killall`
+/// pattern inside the command can match the very shell about to run it.
+/// 2026-10-02 sheet run: the model's restart one-liner
+/// `pkill -f "node src/index.js"; … nohup node src/index.js …; curl …`
+/// matched its own `sh -c` argv and SIGTERMed the shell before any later
+/// statement ran (the target server died too); every retry — all beginning
+/// with the same pkill — died identically, sixteen consecutive
+/// `(no output) / Exit code: -1` results carried zero diagnostic value,
+/// and the terminal doom loop fired in BOTH turns (the re-entry turn
+/// re-derived the same idiom).
+///
+/// `script_exec_command` writes the command to a per-call script file and
+/// returns `sh <path>`: wrapped as `sh -c "sh <path>"`, the child's argv
+/// carries only the script path, which no meaningful process pattern
+/// matches — kill-then-restart one-liners simply work. The sandbox layer is
+/// untouched; whichever backend resolves receives an ordinary command
+/// string.
+///
+/// The script lives under `<cwd>/.octos/cmd/` (the workspace-root `.octos/`
+/// is the kernel's established infra dir, gitignored in octos workspaces).
+/// An inner self-ignoring `.gitignore` (`*`) keeps the dir invisible to
+/// git-status dirty receipts even for non-octos or nested cwds. Files are
+/// 0600 and swept after one hour. On any IO failure the command is returned
+/// unchanged (the historical behavior — exec never fails for infra
+/// reasons). Non-unix returns the command unchanged (no `pkill -f` class
+/// there).
+pub(crate) fn script_exec_command(command: &str, cwd: &Path) -> String {
+    #[cfg(unix)]
+    {
+        if command.is_empty() {
+            return command.to_string();
+        }
+        let dir = cwd.join(".octos").join("cmd");
+        match write_exec_script(&dir, command) {
+            Some(path) => {
+                // The script path itself must not break the wrap_command
+                // shell quoting: octos paths are workspace-local and
+                // validated upstream, but stay defensive — refuse to wrap
+                // on any quote or metacharacter surprise and run the raw
+                // command instead.
+                if !path_as_arg_is_safe(&path) {
+                    return command.to_string();
+                }
+                format!("sh {}", path.display())
+            }
+            None => command.to_string(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (command, cwd);
+        command.to_string()
+    }
+}
+
+#[cfg(unix)]
+fn path_as_arg_is_safe(path: &Path) -> bool {
+    path.to_string_lossy().bytes().all(|b| {
+        b >= 0x20 && b != b'\'' && b != b'"' && b != b'\\' && b != b'$' && b != b'`'
+    })
+}
+
+/// Write the per-call script plus its self-ignoring `.gitignore`, sweep
+/// scripts older than one hour. `None` on any IO failure.
+#[cfg(unix)]
+fn write_exec_script(dir: &Path, command: &str) -> Option<std::path::PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    std::fs::create_dir_all(dir).ok()?;
+    sweep_old_scripts(dir);
+    let name = format!(
+        "cmd-{}-{}-{}.sh",
+        std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed),
+    );
+    let path = dir.join(&name);
+    std::fs::write(&path, command).ok()?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    let gitignore = dir.join(".gitignore");
+    if !gitignore.exists() {
+        let _ = std::fs::write(&gitignore, "*\n");
+    }
+    Some(path)
+}
+
+/// Best-effort removal of script files older than one hour from `dir`.
+#[cfg(unix)]
+fn sweep_old_scripts(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(3600))
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.modified().map(|m| m < cutoff).unwrap_or(false) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
 
 pub(crate) fn diff_to_receipt(
     before: Option<Vec<String>>,

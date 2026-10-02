@@ -129,7 +129,11 @@ class HostStackRulesTests(unittest.TestCase):
                        "tx with rollback", "nextSeq",
                        # 09-30 端口契约在 ARCHITECTURE(评测口宿主管理/
                        # 开发口自验专用),main.py 缺省从常量取
-                       "never bind or restart it", "bind port 3100 only"]:
+                       "never bind or restart it", "bind port 3100 only",
+                       # 10-02:重启唯一通道=scripts/restart-server.sh
+                       # (pkill 自匹配 doom 两 turn 全灭后的三重修复之一)
+                       "sh scripts/restart-server.sh",
+                       "scripts/ = host-provided helper scripts"]:
             self.assertIn(needle, r)
         # Hygiene 一刀切禁令整体退役(用户拍板;grading-port/db.run/
         # .arc 三条由 ARCHITECTURE Ports 行与任务 FIXTURE 段承载)
