@@ -191,6 +191,12 @@ class DisciplinePinsTest(unittest.TestCase):
         # 后的完成定义锚(用户拍板"加"):宣布未来工作≠完成回合。
         self.assertIn("never end mid-investigation", c)
         self.assertIn("announces future work is an incomplete turn", c)
+        # 10-02 sheet 真跑 56/100 法医(用户拍板"加"):自测 26/26 绿全打
+        # seed 簿,评分器打新建簿 → 删表 500 穿透;pivots 字段盲区跨
+        # 三跑复现,绿必须含一条"测试自建实体"流。
+        self.assertIn("at least one scenario on an entity your "
+                      "tests create through the UI", c)
+        self.assertIn("not only the seeded ones", c)
 
     def test_system_row_demotes_staged_specs(self):
         import plan_envelope

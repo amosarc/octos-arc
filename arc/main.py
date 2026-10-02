@@ -2654,8 +2654,10 @@ GOAL_FIRST_TURN_COMPLETION = (
     "test run; fix the app and re-test until green, then finish the "
     "turn.\n\n"
     "End the turn only when this batch's scenarios walk green on the "
-    "running app — never end mid-investigation: a closing message that "
-    "announces future work is an incomplete turn.")
+    "running app — including at least one scenario on an entity your "
+    "tests create through the UI, not only the seeded ones — never end "
+    "mid-investigation: a closing message that announces future work is "
+    "an incomplete turn.")
 
 BOOTSTRAP_PREAMBLE = """\
 BOOTSTRAP (first turn of the run only):

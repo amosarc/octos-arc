@@ -44,7 +44,12 @@ def stage_selftest_dir(output_dir: Path, smoke_port: int,
 // GESTURE RULE — self-test each selection-driven flow with BOTH drag AND
 // click+Shift-click (graders use both; a shift-collapsing handler passed
 // drag-only tests and still lost the whole family), and each dialog flow
-// with mouse AND keyboard (Enter commits, Escape cancels).
+// with mouse AND keyboard (Enter commits, Escape cancels). Drive every
+// combo box BOTH ways as well: selectOption() AND click-open + click on a
+// role=option — the kit's NativeSelect supports both; whichever gesture a
+// dialog never exercises is the one the grader may use, and a pure
+// native-select popup fails the click way (an eval family was lost on
+// exactly that gap).
 //
 // SOURCE RULE — the spec is derived from the requirement text, never from
 // the implementation: quote dialog names, labels, and error strings
@@ -86,6 +91,13 @@ test('my check - name what this verifies', async ({ page }) => {
   //           .click({ modifiers: ['Shift'] });
   // await expect(page.getByRole('option', { name: 'Second item', exact: true }))
   //           .toHaveAttribute('aria-selected', 'true');
+  //
+  // Example: one combo box, BOTH gestures (neutral names here — use the
+  // requirement's own labels in your real spec):
+  // const box = page.getByRole('combobox', { name: 'Field' });
+  // await box.selectOption('Alpha');
+  // await box.click();
+  // await page.getByRole('option', { name: 'Alpha', exact: true }).click();
   const rejections: string[] =
     await page.evaluate(() => (window as any).__rejections || []);
   expect(pageErrors.concat(rejections),

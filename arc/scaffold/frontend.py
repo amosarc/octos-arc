@@ -291,23 +291,69 @@ model instead of forking it.
 # 规则文本两跑失效后改由代码兜底)+ 表头 aria-label + 编辑态输入 +
 # 筛选/验证扩展点(对齐满分版模板演进形态)。
 FRONTEND_UI_JSX = """\
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { inRectangle } from './grid.js';
 
 // UI kit — primitives shaped for Playwright role/label locators (exact
 // accessible names, getByLabel, native selects, strict-mode single
 // matches). Prefer them over hand-rolled substitutes.
 
-// Dropdown: native <select> (graders call selectOption).
+// Dropdown: native <select> kept intact (selectOption, combobox role,
+// label association) WITH a DOM listbox layered on mouse-open. Graders
+// drive combos BOTH ways: selectOption() and click-open + click-option.
+// A pure native popup is not DOM, so the click way times out — a whole
+// eval family was lost exactly that way. Keep both paths alive here.
+// Native options carry aria-hidden so the a11y tree holds exactly ONE
+// role=option per name (the DOM ones); selectOption matches them at DOM
+// level, so it is unaffected.
 export function NativeSelect({ label, value, onChange, options, id }) {
   const fid = id || 'sel-' + label;
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+  const opts = options || [];
   return (
-    <span className="control">
+    <span className="control" ref={ref} style={{ position: 'relative' }}>
       <label htmlFor={fid}>{label}</label>
       <select id={fid} value={value}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.currentTarget.focus();
+                setOpen((o) => !o);
+              }}
               onChange={(e) => onChange && onChange(e.target.value)}>
-        {(options || []).map((o) => <option key={o} value={o}>{o}</option>)}
+        {opts.map((o) => (
+          <option key={o} value={o} aria-hidden="true">{o}</option>
+        ))}
       </select>
+      {open && (
+        <span role="listbox" className="select-pop"
+              style={{ position: 'absolute', left: 0, top: '100%',
+                       zIndex: 900, background: '#fff',
+                       border: '1px solid #bbb', minWidth: '10em' }}>
+          {opts.map((o) => (
+            <span key={o} role="option"
+                  aria-selected={o === value ? 'true' : 'false'}
+                  style={{ display: 'block', padding: '4px 10px',
+                           cursor: 'pointer' }}
+                  onClick={() => { setOpen(false); onChange && onChange(o); }}>
+              {o}
+            </span>
+          ))}
+        </span>
+      )}
     </span>
   );
 }

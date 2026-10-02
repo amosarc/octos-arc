@@ -241,6 +241,31 @@ class ManifestConsistencyTests(unittest.TestCase):
                       inspect.getsource(GitClient.ensure_arc_gitignore))
 
 
+class KitNativeSelectDualDriveTests(unittest.TestCase):
+    """10-02 sheet 真跑 56/100 法医:纯原生 <select> 的弹层非 DOM,评分器
+    点击式组合框交互(select.click + role=option click)整族超时、
+    /sort 与 /rules 评测期零调用(~17-22 分)。NativeSelect 必须同时
+    保住两条驱动路径:selectOption(真 <select> 在场)+ 点击式
+    (DOM listbox/option 在场,原生弹层被 mousedown preventDefault 压制)。"""
+
+    def test_native_select_supports_both_drive_styles(self):
+        jsx = sc.SCAFFOLD_FILES["frontend/src/app/ui.jsx"][0]
+        # selectOption 路径:受控真 <select> + onChange 直连
+        self.assertIn("<select id={fid} value={value}", jsx)
+        self.assertIn(
+            "onChange={(e) => onChange && onChange(e.target.value)}", jsx)
+        # 点击式路径:压制原生弹层 + DOM listbox/option 可点
+        self.assertIn("e.preventDefault()", jsx)
+        self.assertIn('role="listbox"', jsx)
+        self.assertIn('role="option"', jsx)
+        # 原生 option 出 a11y 树:role=option 每名恰一(重放实证 strict
+        # mode 双命中——原生 option 在树里时点击式查询 2 元素直接炸)
+        self.assertIn('<option key={o} value={o} aria-hidden="true">', jsx)
+        # 回退警示:两条路都要活的注释契约
+        self.assertIn("BOTH ways", jsx)
+        self.assertIn("useState", jsx)
+
+
 class TelemetryTests(unittest.TestCase):
     """评测期遥测(2026-09-27):平台 func/e2e 失败明细不下发,应用自身把
     评测流量与前端异常落 octos/logs/eval-traffic.jsonl 随 zip 带回

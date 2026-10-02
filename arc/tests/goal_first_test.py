@@ -247,6 +247,10 @@ class MyCheckExampleTests(unittest.TestCase):
             text = (stage / "MY-CHECK.spec.ts.example").read_text()
             self.assertIn("SOURCE RULE", text)
             self.assertIn("never edit the spec to match", text)
+            # 10-02 sheet 56/100 法医:组合框双驱动示例(点击式整族
+            # 超时的教训进 GESTURE RULE;示例用中性词汇,禁任务味)。
+            self.assertIn("combo box BOTH ways", text)
+            self.assertIn("getByRole('combobox', { name: 'Field' }", text)
 
 
 class SessionGroupTests(unittest.TestCase):
