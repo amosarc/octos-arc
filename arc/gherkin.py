@@ -13,11 +13,14 @@ Flow contract 注释同场给出该工作流的定义;二者都不是可裁剪�
 09-30~10-01 的占位短语剥离与场景打标检测据此整链退役:渲染层一律
 全场景全步骤(GIVEN/WHEN/THEN),data-only 模式除外。
 
-10-02 同文即残渣(用户拍板):渲染"全"不含克隆——同节点步骤序列
-逐字节相同的模板克隆场景(题目 yaml "- Scenario N" 变体,sheet 100
-场景含 42 克隆/github 13 个)与同场景内逐字节相同的句子只渲染首见;
-判分器读 yaml 全量,渲染层去重不影响判分面。Flow contract 同律:
-每节点恰一行,不逐场景继承。
+10-02 同文即残渣(用户拍板):渲染"全"不含生成器残渣——①同节点
+步骤序列逐字节相同的模板克隆场景(题目 yaml "- Scenario N" 变体,
+sheet 100 场景含 42 克隆/github 13 个)与同场景内逐字节相同的句子
+只渲染首见;②骨架填充变体(github 生成器的通用"走过场"场景,
+_TEMPLATE_SKELETON_MARKS 双短语字节判据,36 个)整体剔除。判分器读
+yaml 全量,渲染层过滤不影响判分面;sheet 的 "the requested
+workflow" 场景不含骨架短语,全量恢复拍板对其原样有效。Flow
+contract 同律:每节点恰一行,不逐场景继承。
 
 场景名同规则清洗,坍缩到只剩 id 时只留 id。
 
@@ -130,18 +133,38 @@ def clean_sentences(content: str) -> tuple[list[str], bool]:
     return kept, True
 
 
-def _unique_scenarios(node: dict) -> list[dict]:
-    """同节点内步骤序列逐字节相同的场景只留首见。
+# 骨架填充变体的字节判据(10-02 拍板"同文即残渣"的推广):github 题
+# 生成器给每节点配的通用"走过场"场景——WHEN="…follows the visible
+# controls for the <节点名> workflow"、THEN="…the required headings,
+# controls, values, and status for the <节点名> workflow"——除节点名槽
+# 位外跨节点逐字节同文,信息量被节点真场景+Flow contract 完全覆盖,
+# 且语义常与节点冲突(注册节点的变体说 "signs in")。双短语在两题
+# 200 场景零误伤(github 36 命中全为变体;47 真首场景+17 真变体+
+# sheet 100 场景全零命中);sheet 的 "the requested workflow" 场景不含
+# 此短语,仍按全量恢复拍板逐字进场。字节判据非语义:新题目措辞若
+# 变,过滤自动失效不误伤。
+_TEMPLATE_SKELETON_MARKS = (
+    "follows the visible controls",
+    "required headings, controls",
+)
 
-    题目 yaml 每节点按 "- Scenario N" 模板造变体,克隆场景步骤与
-    首见场景逐字节相同(sheet 100 场景含 42 克隆/github 13 个,10-02
-    实测)——零新信息,只烧 token;判分器读 yaml 全量,渲染层去重
-    不影响判分面(10-02 拍板:同文即残渣,不继承)。
+
+def _scenario_is_skeleton_fill(sc: dict) -> bool:
+    steps = [s for s in (sc.get("steps") or []) if isinstance(s, dict)]
+    body = " ".join(str(s.get("content", "")) for s in steps)
+    return all(mark in body for mark in _TEMPLATE_SKELETON_MARKS)
+
+
+def _unique_scenarios(node: dict) -> list[dict]:
+    """节点场景渲染序:骨架填充变体剔除 → 同文克隆只留首见。
+
+    判分器读 yaml 全量,渲染层过滤不影响判分面(10-02 拍板:同文即
+    残渣,不继承)。
     """
     out: list[dict] = []
     seen: set[tuple] = set()
     for sc in node.get("scenarios") or []:
-        if not isinstance(sc, dict):
+        if not isinstance(sc, dict) or _scenario_is_skeleton_fill(sc):
             continue
         sig = tuple(
             (str(s.get("keyword", "")), str(s.get("content", "")))
