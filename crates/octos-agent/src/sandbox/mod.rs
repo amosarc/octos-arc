@@ -493,6 +493,41 @@ pub trait Sandbox: Send + Sync {
     }
 }
 
+/// Check whether `path` names an executable file (unix permission bits).
+#[cfg(not(windows))]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// Resolve the interpreter for unix command wrapping, once per process:
+/// prefer `bash` — models write bash-isms (`[[ ]]`, arrays, `pipefail`) that
+/// POSIX `sh` rejects with syntax errors, and on Debian-based runner images
+/// /bin/sh is dash — falling back to `sh` when no bash is findable. The
+/// result is the bare program name, so std's own PATH lookup does the exec.
+#[cfg(not(windows))]
+fn script_shell() -> &'static str {
+    static BASH_FOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *BASH_FOUND.get_or_init(|| {
+        let mut found = false;
+        if let Some(path_var) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&path_var) {
+                if is_executable_file(&dir.join("bash")) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        found || is_executable_file(std::path::Path::new("/bin/bash"))
+    }) {
+        "bash"
+    } else {
+        "sh"
+    }
+}
+
 /// No-op sandbox: executes commands directly.
 pub struct NoSandbox;
 
@@ -510,7 +545,7 @@ impl Sandbox for NoSandbox {
         }
         #[cfg(not(windows))]
         {
-            let mut cmd = Command::new("sh");
+            let mut cmd = Command::new(script_shell());
             cmd.arg("-c").arg(shell_command).current_dir(cwd);
             cmd
         }
@@ -1232,7 +1267,7 @@ mod tests {
         #[cfg(windows)]
         assert_eq!(prog, "cmd");
         #[cfg(not(windows))]
-        assert_eq!(prog, "sh");
+        assert_eq!(prog, script_shell());
     }
 
     #[test]
@@ -1333,7 +1368,7 @@ mod tests {
         #[cfg(windows)]
         assert_eq!(prog, "cmd");
         #[cfg(not(windows))]
-        assert_eq!(prog, "sh");
+        assert_eq!(prog, script_shell());
     }
 
     // --- #1976: per-path write fence (write_allow_globs) ---

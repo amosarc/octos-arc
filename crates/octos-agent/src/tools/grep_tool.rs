@@ -66,6 +66,10 @@ struct GrepInput {
     /// Case insensitive search.
     #[serde(default)]
     ignore_case: bool,
+    /// Treat the pattern as a literal string instead of a regex, so
+    /// metacharacters (`a.b`, `(x)`, `C++`) match themselves verbatim.
+    #[serde(default)]
+    literal: bool,
 }
 
 fn default_limit() -> usize {
@@ -112,7 +116,8 @@ impl Tool for GrepTool {
         static DESCRIPTION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
                 "Regex content search, .gitignore-aware. `file_pattern` filters files \
-                 (e.g. '*.rs'), `path` scopes the directory. Output truncates beyond {} \
+                 (e.g. '*.rs'), `path` scopes the directory, `literal` treats the \
+                 pattern as a plain string. Output truncates beyond {} \
                  bytes (middle elided) and per line at {GREP_MAX_LINE_LENGTH} chars — \
                  prefer narrow patterns over broad sweeps.",
                 octos_core::tool_output_limit("grep")
@@ -152,6 +157,10 @@ impl Tool for GrepTool {
                 "ignore_case": {
                     "type": "boolean",
                     "description": "Case-insensitive search (default false)"
+                },
+                "literal": {
+                    "type": "boolean",
+                    "description": "Treat the pattern as a literal string, not a regex (default false)"
                 }
             },
             "required": ["pattern"]
@@ -273,9 +282,13 @@ impl Tool for GrepTool {
         let scope = ctx.session_scope.clone();
         let pattern_str = input.pattern.clone();
         let file_pattern = input.file_pattern.clone();
-        let limit = input.limit;
+        // A zero limit would break the walker loop on its first iteration and
+        // report "No matches" for a file full of hits — indistinguishable
+        // from a genuine empty result. Clamp to 1 (pi does `Math.max(1, ...)`).
+        let limit = input.limit.max(1);
         let context = input.context;
         let ignore_case = input.ignore_case;
+        let literal = input.literal;
 
         // Run search in blocking task.
         let result = tokio::task::spawn_blocking(move || {
@@ -287,6 +300,7 @@ impl Tool for GrepTool {
                 limit,
                 context,
                 ignore_case,
+                literal,
             )
         })
         .await??;
@@ -300,16 +314,24 @@ impl Tool for GrepTool {
                 ..Default::default()
             })
         } else {
-            let truncated = if count >= limit {
-                format!(" (limited to {limit})")
+            // run_grep over-fetches one match so "exactly limit" is
+            // distinguishable from "truncated at limit" — the old
+            // `count >= limit` test mislabeled a full result set.
+            let truncated = count > limit;
+            let shown = matches.len().min(limit);
+            let truncation_note = if truncated {
+                format!(
+                    " (showing first {limit} of more — raise limit to {} or narrow the pattern)",
+                    limit * 2
+                )
             } else {
                 String::new()
             };
             let output = format!(
                 "Found {} match(es){}:\n\n{}",
-                count,
-                truncated,
-                matches.join("\n")
+                shown,
+                truncation_note,
+                matches[..shown].join("\n")
             );
             Ok(ToolResult {
                 output,
@@ -328,16 +350,24 @@ fn run_grep(
     limit: usize,
     context: usize,
     ignore_case: bool,
+    literal: bool,
 ) -> Result<(Vec<String>, usize)> {
     // Canonical form of the resolved search root. Used by the per-entry scope
     // guard to exempt the legitimately-rooted upload file (see below).
     let canonical_search_root = octos_core::canonicalize_lossy(&search_root);
 
-    // Compile regex.
-    let regex_pattern = if ignore_case {
-        format!("(?i){pattern_str}")
+    // Compile regex. `literal` escapes the pattern so metacharacters match
+    // themselves; escape happens BEFORE the case-insensitive prefix so the
+    // flag itself is never escaped.
+    let escaped = if literal {
+        regex::escape(&pattern_str)
     } else {
         pattern_str.clone()
+    };
+    let regex_pattern = if ignore_case {
+        format!("(?i){escaped}")
+    } else {
+        escaped
     };
     let regex = RegexBuilder::new(&regex_pattern)
         .size_limit(1 << 20) // 1 MB compiled regex limit (prevents ReDoS)
@@ -364,7 +394,9 @@ fn run_grep(
         .build();
 
     for entry in walker {
-        if match_count >= limit {
+        // Over-fetch: stop at limit+1 so the caller can distinguish "exactly
+        // limit matches" from "truncated at limit".
+        if match_count > limit {
             break;
         }
 
@@ -435,7 +467,7 @@ fn run_grep(
 
         // Search lines.
         for (line_num, line) in lines.iter().enumerate() {
-            if match_count >= limit {
+            if match_count > limit {
                 break;
             }
 
@@ -510,6 +542,112 @@ mod tests {
         assert!(result.success);
         assert!(result.output.contains("hello"));
         assert!(result.output.contains("match"));
+    }
+
+    #[tokio::test]
+    async fn grep_limit_zero_behaves_as_one() {
+        // limit=0 must not break the walker loop on its first iteration and
+        // report "No matches" for a file full of hits — that answer is
+        // indistinguishable from a genuine empty result.
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+
+        let tool = GrepTool::new(dir.path());
+        let result = tool
+            .execute(&serde_json::json!({"pattern": "hello", "limit": 0}))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(
+            result.output.contains("Found 1 match"),
+            "limit=0 must clamp to 1 match, got: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_exact_limit_not_marked_truncated() {
+        // Exactly `limit` hits is a complete result set — the old
+        // `count >= limit` test mislabeled it "(limited to N)".
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "hit\nhit\nhit\n").unwrap();
+
+        let tool = GrepTool::new(dir.path());
+        let result = tool
+            .execute(&serde_json::json!({"pattern": "hit", "limit": 3}))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(
+            result.output.contains("Found 3 match(es):\n"),
+            "expected the untruncated header, got: {}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("showing first"),
+            "exactly-limit results must not be marked truncated, got: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_over_limit_reports_truncation_with_escape() {
+        // More hits than `limit` must be flagged AND carry a next step.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "hit\nhit\nhit\nhit\n").unwrap();
+
+        let tool = GrepTool::new(dir.path());
+        let result = tool
+            .execute(&serde_json::json!({"pattern": "hit", "limit": 3}))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(
+            result.output.contains("showing first 3 of more"),
+            "expected the truncation note, got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("raise limit to 6"),
+            "expected the raise-limit advice, got: {}",
+            result.output
+        );
+        // Only `limit` matches are displayed even though limit+1 were scanned.
+        assert!(
+            result.output.matches("hit").count() >= 3,
+            "expected the first 3 displayed matches, got: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_literal_matches_metacharacters_verbatim() {
+        // With literal=true, regex metacharacters match themselves: "a.b"
+        // must hit the literal "a.b" line and NOT "axb".
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("code.txt"), "a.b\naxb\n").unwrap();
+
+        let tool = GrepTool::new(dir.path());
+        let result = tool
+            .execute(&serde_json::json!({"pattern": "a.b", "literal": true}))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(
+            result.output.contains("Found 1 match"),
+            "literal 'a.b' must match exactly one line, got: {}",
+            result.output
+        );
+        assert!(result.output.contains("a.b"));
+        assert!(
+            !result.output.contains("axb"),
+            "literal mode must not let '.' match 'x', got: {}",
+            result.output
+        );
     }
 
     #[tokio::test]

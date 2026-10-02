@@ -102,6 +102,79 @@ fn ceil_char_boundary(s: &str, i: usize) -> usize {
     i
 }
 
+/// In-memory cap for one output stream captured by the reader tasks. Above
+/// this, the head is dropped and counted (normal-path artifact files then
+/// hold the last `cap` bytes with an elision marker instead of the full
+/// stream — bounded memory wins over unbounded spill for the rare >cap
+/// command).
+const SHELL_CAPTURE_CAP_BYTES: usize = 8 * 1024 * 1024;
+
+/// Bounded tail capture of one output stream. Keeps the LAST bytes so a
+/// timed-out command still returns whatever it managed to print, and a
+/// completed command behaves byte-identically to the old wait_with_output()
+/// path whenever the stream fit under the cap. The eviction seam skips
+/// forward to a UTF-8 char boundary so the lossy conversion has no torn
+/// character in the middle.
+#[derive(Default)]
+struct BoundedTail {
+    buf: Vec<u8>,
+    dropped: u64,
+    total: u64,
+}
+
+impl BoundedTail {
+    fn push(&mut self, chunk: &[u8]) {
+        self.total += chunk.len() as u64;
+        self.buf.extend_from_slice(chunk);
+        if self.buf.len() > SHELL_CAPTURE_CAP_BYTES {
+            let cut = self.buf.len() - SHELL_CAPTURE_CAP_BYTES;
+            let mut start = cut;
+            while start < self.buf.len()
+                && (self.buf[start] & 0b1100_0000) == 0b1000_0000
+            {
+                start += 1;
+            }
+            self.dropped += start as u64;
+            self.buf.drain(..start);
+        }
+    }
+
+    fn text(&self) -> String {
+        let mut s = String::from_utf8_lossy(&self.buf).into_owned();
+        if self.dropped > 0 {
+            s.insert_str(
+                0,
+                &format!(
+                    "[shell output: kept last {} of {} bytes — earlier head dropped]\n",
+                    self.buf.len(),
+                    self.total
+                ),
+            );
+        }
+        s
+    }
+}
+
+/// Drain one pipe into the shared bounded tail. Runs as a detached task per
+/// stream; terminates at EOF or on a read error.
+async fn read_stream<R>(mut pipe: R, tail: Arc<std::sync::Mutex<BoundedTail>>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        match pipe.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                tail.lock()
+                    .expect("shell capture")
+                    .push(&chunk[..n]);
+            }
+        }
+    }
+}
+
 /// Tool for executing shell commands.
 pub struct ShellTool {
     /// Timeout for command execution.
@@ -241,6 +314,11 @@ impl ShellTool {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // Own process group, mirroring the foreground path: a tracked task
+        // that is ever force-killed must take its whole tree down, not just
+        // the leader.
+        #[cfg(unix)]
+        cmd.process_group(0);
         apply_frontend_tool_env(&mut cmd, effective_cwd);
         apply_quarto_tool_env(&mut cmd, &command, effective_cwd);
         apply_git_tool_env(&mut cmd, &command);
@@ -703,6 +781,22 @@ impl Tool for ShellTool {
         })
     }
 
+    fn truncation_recovery(
+        &self,
+        args: &serde_json::Value,
+        omitted_bytes: usize,
+    ) -> Option<String> {
+        // The execution loop's 70/30 blind cut fires only when artifact
+        // offload is disabled (the spill keeps results under the loop cap);
+        // give the model a way out instead of a dead `[N bytes omitted]`.
+        let _ = args;
+        Some(format!(
+            "[{omitted_bytes} bytes omitted] Output exceeded the tool-result cap. \
+             Re-run with the output redirected to a file (`... > out.log 2>&1`) \
+             and read the file in slices, or pipe through `tail -c 20000`."
+        ))
+    }
+
     async fn execute(&self, args: &serde_json::Value) -> Result<ToolResult> {
         // Legacy entry point: route through the typed path with a zero-value
         // context so out-of-band callers (tests, `ToolRegistry::execute`)
@@ -879,18 +973,25 @@ impl Tool for ShellTool {
         }
 
         // Execute command (through sandbox).
-        // Spawn the child, grab its PID, then timeout on wait_with_output().
-        // If timeout fires, kill by PID to prevent orphaned processes.
-        // (wait_with_output() takes ownership of child, so we save the PID first.)
+        // Spawn the child, grab its PID, then timeout on child.wait().
+        // If timeout fires, kill by process group to prevent orphaned
+        // processes.
         let mut cmd = self.sandbox.wrap_command(&input.command, effective_cwd);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        // Own process group: the timeout kill path below signals `-pid` to
+        // take down the whole tree; without setpgid the child shares the
+        // harness's group and those group signals hit nothing while
+        // grandchildren survive holding the pipes (coding_tools.rs wraps
+        // its children the same way).
+        #[cfg(unix)]
+        cmd.process_group(0);
         apply_frontend_tool_env(&mut cmd, effective_cwd);
         apply_quarto_tool_env(&mut cmd, &input.command, effective_cwd);
         apply_git_tool_env(&mut cmd, &input.command);
         sanitize_command_env(&mut cmd, &EnvAllowlist::empty());
         apply_harness_event_sink_env(&mut cmd, ctx);
 
-        let child = match cmd.spawn() {
+        let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
                 return Ok(ToolResult {
@@ -902,19 +1003,37 @@ impl Tool for ShellTool {
         };
         let child_pid = child.id();
 
-        // Dropping the caller's future detaches this waiter, so the child is
-        // still reaped to completion.
-        let waiter = tokio::spawn(async move { child.wait_with_output().await });
-        let result = timeout(timeout_duration, async {
-            waiter.await.map_err(std::io::Error::other)?
-        })
-        .await;
+        // Take the pipes and let two reader tasks keep a bounded tail of
+        // each stream while `child.wait()` runs under the timeout. The old
+        // wait_with_output() handed both streams to a detached waiter, so a
+        // timeout fired with every byte already read discarded — the model
+        // got one bare sentence and had to re-run a long command blind
+        // (pi keeps partial output on timeout; parity here). The tail is
+        // capped: outputs beyond SHELL_CAPTURE_CAP_BYTES keep their last
+        // bytes and an elision marker, which also bounds reader memory.
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+        let stdout_tail = Arc::new(std::sync::Mutex::new(BoundedTail::default()));
+        let stderr_tail = Arc::new(std::sync::Mutex::new(BoundedTail::default()));
+        let out_reader =
+            stdout_pipe.map(|pipe| tokio::spawn(read_stream(pipe, Arc::clone(&stdout_tail))));
+        let err_reader =
+            stderr_pipe.map(|pipe| tokio::spawn(read_stream(pipe, Arc::clone(&stderr_tail))));
+
+        let result = timeout(timeout_duration, child.wait()).await;
 
         match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let exit_code = output.status.code().unwrap_or(-1);
+            Ok(Ok(status)) => {
+                // The child exited; the readers finish at pipe EOF.
+                if let Some(handle) = out_reader {
+                    let _ = handle.await;
+                }
+                if let Some(handle) = err_reader {
+                    let _ = handle.await;
+                }
+                let stdout = stdout_tail.lock().expect("shell capture").text();
+                let stderr = stderr_tail.lock().expect("shell capture").text();
+                let exit_code = status.code().unwrap_or(-1);
 
                 let mut result_text = String::new();
 
@@ -938,7 +1057,7 @@ impl Tool for ShellTool {
                 // after truncation so it survives the cut.
                 let denial_hint = crate::sandbox::sandbox_denial_hint(
                     !self.sandbox.is_noop(),
-                    output.status.success(),
+                    status.success(),
                     &result_text,
                 );
 
@@ -998,7 +1117,7 @@ impl Tool for ShellTool {
 
                 Ok(ToolResult {
                     output: result_text,
-                    success: output.status.success(),
+                    success: status.success(),
                     ..Default::default()
                 })
             }
@@ -1009,11 +1128,21 @@ impl Tool for ShellTool {
             }),
             Err(_) => {
                 // Graceful shutdown: SIGTERM first, then SIGKILL after grace period.
-                // wait_with_output() consumed the Child, so we kill via PID.
-                // Use negative PID to target the entire process group.
+                // The child sits in its own process group (process_group(0) at
+                // spawn), so the negative-PID signal targets the whole tree.
                 #[cfg(unix)]
                 if let Some(pid) = child_pid {
                     use std::process::Command as StdCommand;
+
+                    // The external `kill` runs with muted stdio: a raced
+                    // probe/escalation on an already-dead group prints
+                    // "Operation not permitted" to inherited stderr, which
+                    // reads like a failure in the host's stderr panel.
+                    let muted = |program: &str| {
+                        let mut c = StdCommand::new(program);
+                        c.stdout(Stdio::null()).stderr(Stdio::null());
+                        c
+                    };
 
                     // 1. Send SIGTERM to process group for graceful shutdown.
                     // `--` is required before the negative PID: GNU/procps
@@ -1021,8 +1150,8 @@ impl Tool for ShellTool {
                     // group signal is silently never delivered (macOS
                     // accepted the bare form, Linux did not).
                     let group = format!("-{pid}");
-                    let _ = StdCommand::new("kill").args(["-15", "--", &group]).status();
-                    let _ = StdCommand::new("kill")
+                    let _ = muted("kill").args(["-15", "--", &group]).status();
+                    let _ = muted("kill")
                         .args(["-15", &pid.to_string()])
                         .status();
 
@@ -1034,19 +1163,19 @@ impl Tool for ShellTool {
                     // recycled group while a member remains.
                     tokio::time::sleep(Duration::from_millis(500)).await;
 
-                    let group_alive = StdCommand::new("kill")
+                    let group_alive = muted("kill")
                         .args(["-0", "--", &group])
                         .status()
                         .is_ok_and(|s| s.success());
                     if group_alive {
-                        let _ = StdCommand::new("kill").args(["-9", "--", &group]).status();
+                        let _ = muted("kill").args(["-9", "--", &group]).status();
                     }
-                    let leader_alive = StdCommand::new("kill")
+                    let leader_alive = muted("kill")
                         .args(["-0", &pid.to_string()])
                         .status()
                         .is_ok_and(|s| s.success());
                     if leader_alive {
-                        let _ = StdCommand::new("kill")
+                        let _ = muted("kill")
                             .args(["-9", &pid.to_string()])
                             .status();
                     }
@@ -1055,14 +1184,62 @@ impl Tool for ShellTool {
                 if let Some(pid) = child_pid {
                     use std::process::Command as StdCommand;
                     let _ = StdCommand::new("taskkill")
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
                         .args(["/F", "/T", "/PID", &pid.to_string()])
                         .status();
                 }
+
+                // Reap the readers: after the group SIGKILL the pipes close
+                // and the tasks finish at EOF; a straggler grandchild holding
+                // a pipe cannot stall the result past this grace window.
+                if let Some(handle) = out_reader {
+                    let _ = timeout(Duration::from_secs(2), handle).await;
+                }
+                if let Some(handle) = err_reader {
+                    let _ = timeout(Duration::from_secs(2), handle).await;
+                }
+
+                // Whatever the command managed to print rides along with the
+                // timeout notice — the model sees how far it got instead of
+                // re-running a long command blind.
+                let stdout = stdout_tail.lock().expect("shell capture").text();
+                let stderr = stderr_tail.lock().expect("shell capture").text();
+                let mut result_text = String::new();
+                if !stdout.is_empty() {
+                    result_text.push_str(&stdout);
+                }
+                if !stderr.is_empty() {
+                    if !result_text.is_empty() {
+                        result_text.push_str("\n--- stderr ---\n");
+                    }
+                    result_text.push_str(&stderr);
+                }
+
+                // Same offload/truncation discipline as the normal path, but
+                // the timeout notice is appended AFTER the cuts so it always
+                // survives inline (mirrors the Exit-code-at-head rule).
+                if artifact_offload_enabled() {
+                    if let Some(spill) = artifact_offload(effective_cwd, &result_text) {
+                        result_text = spill;
+                    }
+                }
+                const MAX_OUTPUT: usize = 50000;
+                octos_core::truncate_utf8(
+                    &mut result_text,
+                    MAX_OUTPUT,
+                    "\n... (output truncated)",
+                );
+                if !result_text.is_empty() {
+                    result_text.push_str("\n\n");
+                }
+                result_text.push_str(&format!(
+                    "Command timed out after {} seconds",
+                    timeout_duration.as_secs()
+                ));
+
                 Ok(ToolResult {
-                    output: format!(
-                        "Command timed out after {} seconds",
-                        timeout_duration.as_secs()
-                    ),
+                    output: result_text,
                     success: false,
                     ..Default::default()
                 })
@@ -1510,6 +1687,38 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "the 1s cap must bound the wait well under the requested 30s",
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_keeps_partial_output() {
+        // A timed-out command must not lose the bytes it printed before the
+        // kill: `printf` emits instantly, `sleep 30` hangs until the 1s cap.
+        // The result carries the partial output plus the timeout notice so
+        // the model sees how far the command got instead of re-running blind.
+        let tool = ShellTool::new(std::env::temp_dir()).with_max_timeout_secs(1);
+        let result = tool
+            .execute(&serde_json::json!({
+                "command": "printf PARTIAL_MARK_stdout; printf PARTIAL_MARK_stderr >&2; sleep 30",
+                "timeout_secs": 30
+            }))
+            .await
+            .unwrap();
+        assert!(!result.success, "a timed-out command must fail");
+        assert!(
+            result.output.contains("PARTIAL_MARK_stdout"),
+            "partial stdout must survive the timeout, got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("PARTIAL_MARK_stderr"),
+            "partial stderr must survive the timeout, got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("timed out after 1 seconds"),
+            "the timeout notice must be present, got: {}",
+            result.output
         );
     }
 
