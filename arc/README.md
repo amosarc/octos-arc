@@ -125,8 +125,14 @@ shell 安装/构建类调用应显著下降。
 ### Linux x86_64 发布(内核改动后必做)
 
 ```sh
-# glibc 兼容容器内构建(默认 features = api+ast,不可 --no-default-features)
+# $SRC = 仓库根,可直接挂载(PSSD 卷现已支持 docker 挂载,无需 rsync 中转;
+# 旧法曾因挂载限制把源码 rsync 到 ~/octos-build 再构建,已废弃——rsync 退役,
+# 但 ~/octos-build/target 仍留作持久 linux 构建缓存,冷编一次后次次增量)。
+# glibc 兼容容器内构建(默认 features = api+ast,不可 --no-default-features)。
+SRC="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+mkdir -p "$HOME/octos-build/target"
 docker run --rm --platform linux/amd64 -v "$SRC":/src -w /src \
+  -v "$HOME/octos-build/target":/tmp/target \
   -e CARGO_TARGET_DIR=/tmp/target rust:1-slim-bookworm \
   sh -c "cargo build --release -p octos-cli && strip /tmp/target/release/octos \
          && cp /tmp/target/release/octos /src/arc/bin/octos"

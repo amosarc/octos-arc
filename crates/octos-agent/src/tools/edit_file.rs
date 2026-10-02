@@ -158,7 +158,7 @@ impl Tool for EditFileTool {
         };
 
         // Read current content (O_NOFOLLOW atomically rejects symlinks)
-        let content = match super::read_no_follow(&path).await {
+        let raw_content = match super::read_no_follow(&path).await {
             Ok(c) => c,
             Err(e) => return Ok(super::file_io_error(e, &input.path)),
         };
@@ -170,6 +170,18 @@ impl Tool for EditFileTool {
                 ..Default::default()
             });
         }
+
+        // BOM/CRLF normalization (pi edit.ts parity): the model never emits
+        // a U+FEFF or a `\r` in old_string — read_file's display layer strips
+        // both (`str::lines` swallows the carriage return; the line-number
+        // gutter shows clean lines) — so matching raw bytes fails
+        // mysteriously on the first line of a BOM file and on every
+        // multi-line match in a CRLF file, pushing the model onto the
+        // aggressive fuzzy replacers instead. Strip the BOM (remember it),
+        // run the whole chain in LF space, then restore both on write.
+        let (had_bom, without_bom) = split_bom(&raw_content);
+        let crlf = detect_crlf(without_bom);
+        let content = normalize_to_lf(without_bom);
 
         // #1771: cascading replacer chain — exact match first, then
         // increasingly whitespace/indentation/escape-tolerant fallbacks.
@@ -247,6 +259,14 @@ impl Tool for EditFileTool {
         new_content.push_str(&content[..range.start]);
         new_content.push_str(&splice_new);
         new_content.push_str(&content[range.end..]);
+
+        // Restore the file's original framing before hitting disk: CRLF
+        // endings (the model's inserted \n lines get the file's dominant
+        // ending, same as pi) and the byte-order mark.
+        let mut new_content = restore_line_endings(new_content, crlf);
+        if had_bom {
+            new_content.insert_str(0, "\u{FEFF}");
+        }
 
         if let Err(e) = super::write_no_follow(&path, new_content.as_bytes()).await {
             return Ok(super::file_io_error(e, &input.path));
@@ -421,6 +441,42 @@ fn edited_hunk_preview(
     edited_hunk_preview_lines(new_content, region_start_line, region_end_line)
 }
 
+/// Split a leading U+FEFF byte-order mark off `s`; the flag records whether
+/// one was present so the write path can restore it.
+fn split_bom(s: &str) -> (bool, &str) {
+    match s.strip_prefix('\u{FEFF}') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    }
+}
+
+/// Whether the file's dominant line ending is CRLF: the first `\r\n` must
+/// precede the first bare `\n` (pi `detectLineEnding`). Files without any
+/// line ending classify as LF.
+fn detect_crlf(s: &str) -> bool {
+    match (s.find("\r\n"), s.find('\n')) {
+        (_, None) => false,
+        (None, _) => false,
+        (Some(crlf), Some(lf)) => crlf < lf,
+    }
+}
+
+/// Normalize `\r\n` (and lone `\r`, old-Mac) line endings to `\n` so the
+/// replacer chain and old_string match on what the model actually saw.
+fn normalize_to_lf(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Restore a single line ending across the whole content — the model's
+/// inserted lines included (pi `restoreLineEndings`).
+fn restore_line_endings(s: String, crlf: bool) -> String {
+    if crlf {
+        s.replace('\n', "\r\n")
+    } else {
+        s
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,6 +524,70 @@ mod tests {
         let content = std::fs::read_to_string(dir.path().join("code.rs")).unwrap();
         assert!(content.contains("println!(\"world\")"));
         assert!(!content.contains("println!(\"hello\")"));
+    }
+
+    #[tokio::test]
+    async fn edit_crlf_file_with_lf_old_string_round_trips() {
+        // read_file's display layer swallows `\r`, so the model can never
+        // reproduce CRLF endings in old_string — the edit path must
+        // normalize to LF before matching and restore CRLF on write
+        // (including on the model's inserted lines).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crlf.txt");
+        std::fs::write(&path, "alpha one\r\nalpha two\r\nbeta three\r\n").unwrap();
+
+        let tool = EditFileTool::new(dir.path());
+        let result = tool
+            .execute(&serde_json::json!({
+                "path": "crlf.txt",
+                "old_string": "alpha two\nbeta three",
+                "new_string": "alpha TWO\nbeta THREE"
+            }))
+            .await
+            .unwrap();
+
+        assert!(
+            result.success,
+            "CRLF file must be editable with \\n-only old_string, got: {}",
+            result.output
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after, "alpha one\r\nalpha TWO\r\nbeta THREE\r\n",
+            "edited lines must adopt the file's CRLF framing"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_bom_file_first_line_round_trips() {
+        // The model never emits the invisible U+FEFF, so the first line of
+        // a BOM file used to be unreachable — "String not found" with no
+        // hint. The BOM must be stripped for matching and restored on write.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bom.json");
+        std::fs::write(&path, "\u{FEFF}{\n  \"a\": 1\n}\n").unwrap();
+
+        let tool = EditFileTool::new(dir.path());
+        let result = tool
+            .execute(&serde_json::json!({
+                "path": "bom.json",
+                "old_string": "{\n  \"a\": 1\n}",
+                "new_string": "{\n  \"a\": 2\n}"
+            }))
+            .await
+            .unwrap();
+
+        assert!(
+            result.success,
+            "first line of a BOM file must be editable, got: {}",
+            result.output
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.starts_with('\u{FEFF}'),
+            "BOM must survive the edit, got: {after:?}"
+        );
+        assert!(after.contains("\"a\": 2"));
     }
 
     #[tokio::test]

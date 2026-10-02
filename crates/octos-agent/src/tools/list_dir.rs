@@ -37,7 +37,15 @@ impl ListDirTool {
 #[serde(deny_unknown_fields)]
 struct Input {
     path: String,
+    /// Maximum entries to return (default 500).
+    #[serde(default)]
+    limit: Option<usize>,
 }
+
+/// Default cap on returned entries. Without it a huge directory rode into
+/// the loop-layer 50K blind cut with no recovery advice (pi caps at 500 and
+/// says so in the result).
+const DEFAULT_ENTRY_LIMIT: usize = 500;
 
 #[async_trait]
 impl Tool for ListDirTool {
@@ -46,7 +54,7 @@ impl Tool for ListDirTool {
     }
 
     fn description(&self) -> &str {
-        "List the contents of a directory."
+        "List the contents of a directory. Returns at most `limit` entries (default 500)."
     }
 
     fn tags(&self) -> &[&str] {
@@ -60,10 +68,27 @@ impl Tool for ListDirTool {
                 "path": {
                     "type": "string",
                     "description": "The directory path to list (relative to working directory)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max entries to return (default 500)"
                 }
             },
             "required": ["path"]
         })
+    }
+
+    fn truncation_recovery(
+        &self,
+        args: &serde_json::Value,
+        omitted_bytes: usize,
+    ) -> Option<String> {
+        let _ = args;
+        Some(format!(
+            "[{omitted_bytes} bytes omitted] Directory listing exceeded the tool-result cap. \
+             Narrow the path to a subdirectory, or page through with shell \
+             `ls <dir> | sed -n 'N,Mp'`."
+        ))
     }
 
     async fn execute(&self, args: &serde_json::Value) -> Result<ToolResult> {
@@ -186,8 +211,14 @@ impl Tool for ListDirTool {
 
         let mut dirs = Vec::new();
         let mut files = Vec::new();
+        let entry_limit = input.limit.unwrap_or(DEFAULT_ENTRY_LIMIT).max(1);
+        let mut entry_limit_reached = false;
 
         while let Ok(Some(entry)) = entries.next_entry().await {
+            if dirs.len() + files.len() >= entry_limit {
+                entry_limit_reached = true;
+                break;
+            }
             let entry_path = entry.path();
             if let Some(scope) = scope_filter {
                 if matches!(
@@ -224,12 +255,22 @@ impl Tool for ListDirTool {
             out.push_str(&format!("[file] {f}\n"));
         }
 
+        let note = if entry_limit_reached {
+            format!(
+                "\n\n[{entry_limit} entries limit reached — raise limit to {} or narrow the path]",
+                entry_limit * 2
+            )
+        } else {
+            String::new()
+        };
+
         Ok(ToolResult {
             output: format!(
-                "{} entries in {}:\n{}",
+                "{} entries in {}:\n{}{}",
                 dirs.len() + files.len(),
                 input.path,
-                out.trim_end()
+                out.trim_end(),
+                note
             ),
             success: true,
             ..Default::default()
@@ -259,6 +300,40 @@ mod tests {
         assert!(result.success);
         assert!(result.output.contains("[dir]  subdir"));
         assert!(result.output.contains("[file] file.txt"));
+    }
+
+    #[tokio::test]
+    async fn list_dir_entry_limit_truncates_with_advice() {
+        // An entry-capped listing must say so and offer the next step —
+        // otherwise the model cannot tell a capped listing from a complete
+        // one.
+        let dir = TempDir::new().unwrap();
+        for i in 0..10 {
+            std::fs::write(dir.path().join(format!("f{i:02}.txt")), "x").unwrap();
+        }
+
+        let tool = ListDirTool::new(dir.path());
+        let result = tool
+            .execute(&serde_json::json!({"path": ".", "limit": 5}))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(
+            result.output.contains("5 entries in"),
+            "expected the capped header, got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("entries limit reached"),
+            "expected the limit note, got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("raise limit to 10"),
+            "expected the raise-limit advice, got: {}",
+            result.output
+        );
     }
 
     // ------------------------------------------------------------------

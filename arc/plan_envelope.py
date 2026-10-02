@@ -67,9 +67,11 @@ ARCHITECTURE_LINES = [
     "run build emits dist/; index.html, src/); all paths below are "
     "workspace-relative.",
     "requirements/requirements.yaml = the requirement source; the "
-    "children map's (lines N-M) ranges address it — retrieve any range "
-    "directly with the shell, e.g. sed -n 'N,Mp' "
-    "requirements/requirements.yaml.",
+    "children map's (lines N-M) ranges address it — read ONLY those "
+    "mapped ranges, via read_file start_line/end_line (shell sed -n "
+    "'N,Mp' acceptable for narrow ranges). NEVER read the whole file: "
+    "no full-file reads, no paging from line 1, no wholesale cat of "
+    "the source.",
     "backend/src/app.js + backend/src/index.js bootstrap the app: index "
     "binds PORT + ARC_EXTRA_PORTS, app serves frontend/dist (SPA fallback "
     "to index.html) — keep that contract when you change them.",
