@@ -951,6 +951,90 @@ def _pw_browsers_dir() -> Path | None:
     return None
 
 
+def _chromium_rev_of_global_pw(cli: Path) -> str | None:
+    """全局 @playwright/test 期望的 chromium rev(browsers.json 权威)。
+
+    评测器用全局包跑测试,它找哪一版浏览器由这个文件决定——宿主自愈
+    必须与它对齐,自装新版 PW 的浏览器对评测器不可见(10-03 arc-006:
+    模型自装 1.63 用 rev1243 全绿,评测器 1.57 找 rev1200 秒死)。"""
+    candidates = [
+        cli.parent / "node_modules" / "playwright-core" / "browsers.json",
+        cli.parent.parent.parent / "playwright-core" / "browsers.json",
+    ]
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            for browser in data.get("browsers") or []:
+                if browser.get("name") == "chromium":
+                    return str(browser.get("revision") or "")
+        except (OSError, ValueError, AttributeError):
+            continue
+    return None
+
+
+def _chromium_binary_ok(browsers_dir: Path, rev: str) -> bool:
+    """rev 对应的 chrome 二进制真实在场(目录壳/INSTALLATION_COMPLETE
+    marker 不算数——arc-006 平台镜像即此形态)。"""
+    for layout in ("chrome-linux64", "chrome-linux"):
+        if (browsers_dir / f"chromium-{rev}" / layout / "chrome").is_file():
+            return True
+    return False
+
+
+def _repair_global_chromium(log, cli: Path | None = None,
+                            browsers_dir: Path | None = None) -> None:
+    """评测环境 chromium 自愈(agent 开头一次,10-03 arc-006 法医落地)。
+
+    平台镜像 /ms-playwright/chromium-1200 缺 chrome 二进制 → 评测器
+    100×Executable-doesn't-exist 每个 4ms 秒死 = 0 分;模型自测用自装
+    新版 PW + 自下载浏览器不踩此雷,所以"自测 ok 评测 0 分"。宿主是
+    评测前唯一能修这份浏览器的角色(marker 陷阱:install 对
+    INSTALLATION_COMPLETE 幂等秒退,必须删 rev 目录强制重装;非 root
+    对 /ms-playwright 可写已实证)。失败只大声记日志,绝不挡 agent——
+    修复失败意味着本跑平台评测必 0 分,运营需要第一时间知道。"""
+    cli = cli or _pw_resolve_global_cli()
+    if cli is None:
+        return
+    browsers_dir = browsers_dir or _pw_browsers_dir()
+    if browsers_dir is None:
+        return
+    try:
+        rev = _chromium_rev_of_global_pw(cli)
+        if not rev:
+            log("[toolchain] chromium self-check skipped: cannot read the "
+                "global package's browsers.json")
+            return
+        if _chromium_binary_ok(browsers_dir, rev):
+            log(f"[toolchain] chromium-{rev} binary verified present "
+                f"(evaluator will be able to launch)")
+            return
+        log(f"[toolchain] chromium-{rev} binary MISSING from "
+            f"{browsers_dir} — the evaluator would die on every scenario; "
+            "force-reinstalling (marker makes plain install a no-op)")
+        rev_dir = browsers_dir / f"chromium-{rev}"
+        shutil.rmtree(rev_dir, ignore_errors=True)
+        env = dict(os.environ,
+                   PLAYWRIGHT_BROWSERS_PATH=str(browsers_dir),
+                   npm_config_cache=os.environ.get("npm_config_cache")
+                   or "/tmp/arcbench-npm-cache")
+        env.setdefault("HOME", "/tmp/arcbench-home")
+        completed = subprocess.run(
+            ["node", str(cli), "install", "chromium"],
+            cwd=browsers_dir, env=env, timeout=900, check=False,
+            capture_output=True, text=True, errors="replace")
+        if _chromium_binary_ok(browsers_dir, rev):
+            log(f"[toolchain] chromium-{rev} repaired for the evaluator "
+                f"(install exit={completed.returncode})")
+        else:
+            tail = (completed.stderr or completed.stdout or "")[-300:]
+            log(f"[toolchain] chromium repair FAILED (exit="
+                f"{completed.returncode}): {tail} — platform eval WILL "
+                f"score 0 (browserType.launch: Executable doesn't exist); "
+                f"report to the platform, do not re-run")
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"[toolchain] chromium self-check failed (non-fatal): {exc}")
+
+
 def _pw_resolve_global_cli() -> Path | None:
     """镜像全局 @playwright/test 的 cli.js——与评测引擎同一份二进制。
 
@@ -1063,6 +1147,7 @@ def _ensure_host_toolchain(log) -> Path | None:
     失败返回 None(不致命,记入仪表)。"""
     global_cli = _pw_resolve_global_cli()
     if global_cli is not None:
+        _repair_global_chromium(log, cli=global_cli)
         log(f"[toolchain] using the image-global @playwright/test "
             f"(the evaluator's own engine, zero install): {global_cli}")
         return global_cli
