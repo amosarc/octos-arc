@@ -50,10 +50,20 @@ CHARTER_RULES = [
     "Write the Playwright spec for a node BEFORE implementing it, watch "
     "it red, then fix the app until it walks green on the RUNNING app — "
     "a green API response is not a walking flow.",
+    "Your spec's clicks replay each scenario's WHEN steps in order, "
+    "exactly as written — never insert a step the scenario does not "
+    "name, never skip or reorder one; a literal step the app cannot "
+    "perform is an APP bug — fix the app, never detour the walk.",
+    "Every alternative a THEN or the description lists (refresh, "
+    "browser back navigation, direct reopen of a recorded protected "
+    "page) gets its own walk in the spec.",
     "Every write survives a refresh; sessions survive a server restart.",
     "On any page no two controls share an accessible name — the grader's "
     "getByRole(role, { name }) dies on ambiguity, so ambiguity is an APP "
     "defect.",
+    "Navigation chrome — tab bars, named links, menus — renders "
+    "synchronously, never gated behind a data fetch; only the data area "
+    "may wait.",
     "Never regress an already-green family; after editing shared files, "
     "re-run every green family's spec.",
 ]

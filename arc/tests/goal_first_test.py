@@ -752,6 +752,20 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertIn("no two controls share an accessible name", rules)
         self.assertIn("ambiguity is an APP defect", rules)
 
+    def test_rules_pin_walk_fidelity_and_instant_nav(self):
+        # 10-03 评测法医:自测 spec 插步(改密后私加 Sign out 三步)遮蔽
+        # 应用缺口(会话不销毁)+漏走 back-nav 腿 → 4 挂;helper 在
+        # Loading 态找 tab → 2 挂。三律+完成锚从句钉死。
+        rules = plan_envelope.HOST_STACK_RULES_GOAL_FIRST
+        self.assertIn("replay each scenario's WHEN steps in order", rules)
+        self.assertIn("never detour the walk", rules)
+        self.assertIn("gets its own walk in the spec", rules)
+        self.assertIn("Navigation chrome", rules)
+        self.assertIn("never gated behind a data fetch", rules)
+        turn = main.GOAL_FIRST_TURN_COMPLETION.format(smoke=3100)
+        self.assertIn("each walk replaying its scenario's steps exactly "
+                      "as written", turn)
+
     def test_browser_script_guard_is_not_armed_by_default(self):
         # 09-30 拍板:Playwright 用法全面放开——env 不再默认武装内核
         # guard(代码保留,运维可显式 re-enable)。
