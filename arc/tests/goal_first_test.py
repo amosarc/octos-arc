@@ -779,6 +779,17 @@ class GoalFirstRulesTests(unittest.TestCase):
         # ARCHITECTURE 实体页行:or 硬化为排他
         self.assertIn("header breadcrumb or page title — never both", rules)
 
+    def test_rules_pin_home_reachability(self):
+        # 10-03 github-stage-03 0/41 法医:评分器行走=点可见导航目标,
+        # search-only 首页零可点入口 → 40/41 全灭(评测窗零 search/零
+        # 仓库 fetch);种子数据写进去就是为了被使用,入口必须可见可达。
+        rules = plan_envelope.HOST_STACK_RULES_GOAL_FIRST
+        self.assertIn("reachable from the application home page by "
+                      "clicking visible links or tabs", rules)
+        self.assertIn("a search box or a typed URL is not an entry point",
+                      rules)
+        self.assertIn("seeded data exists to be used", rules)
+
     def test_browser_script_guard_is_not_armed_by_default(self):
         # 09-30 拍板:Playwright 用法全面放开——env 不再默认武装内核
         # guard(代码保留,运维可显式 re-enable)。

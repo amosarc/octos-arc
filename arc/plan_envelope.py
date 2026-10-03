@@ -67,6 +67,10 @@ CHARTER_RULES = [
     "Navigation chrome — tab bars, named links, menus — renders "
     "synchronously, never gated behind a data fetch; only the data area "
     "may wait.",
+    "Every entity the seed pre-provisions and every feature page that "
+    "serves it is reachable from the application home page by clicking "
+    "visible links or tabs — a search box or a typed URL is not an "
+    "entry point; seeded data exists to be used.",
     "An entity's name renders at most once per page as visible text — "
     "breadcrumb crumb or page heading, never both; the grader's "
     "getByText(name, { exact: true }) dies on the second match, so "
