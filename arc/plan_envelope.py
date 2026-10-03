@@ -57,6 +57,9 @@ CHARTER_RULES = [
     "Every alternative a THEN or the description lists (refresh, "
     "browser back navigation, direct reopen of a recorded protected "
     "page) gets its own walk in the spec.",
+    "Every behavioral rule a description states gets its own assertion "
+    "in your spec — a quoted rule the spec never exercises is a rule "
+    "never verified.",
     "Every write survives a refresh; sessions survive a server restart.",
     "On any page no two controls share an accessible name — the grader's "
     "getByRole(role, { name }) dies on ambiguity, so ambiguity is an APP "
@@ -64,6 +67,10 @@ CHARTER_RULES = [
     "Navigation chrome — tab bars, named links, menus — renders "
     "synchronously, never gated behind a data fetch; only the data area "
     "may wait.",
+    "An entity's name renders at most once per page as visible text — "
+    "breadcrumb crumb or page heading, never both; the grader's "
+    "getByText(name, { exact: true }) dies on the second match, so "
+    "duplication is an APP defect.",
     "Never regress an already-green family; after editing shared files, "
     "re-run every green family's spec.",
 ]
@@ -127,8 +134,9 @@ ARCHITECTURE_LINES = [
     "reachable from it as a clickable row or link whose exact accessible "
     "name is the entity's name.",
     "Entity pages keep the frame, show the entity's name in the header "
-    "breadcrumb or page title, and expose sub-views as named navigation "
-    "(TabNav tabs or labeled links using the requirement's own words).",
+    "breadcrumb or page title — never both — and expose sub-views as "
+    "named navigation (TabNav tabs or labeled links using the "
+    "requirement's own words).",
     "Sign-in is a centered card with labeled Username and Password "
     "inputs and a Sign in submit; deep links must render their page "
     "directly (the router falls back to the URL pathname when the hash "

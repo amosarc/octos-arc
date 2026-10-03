@@ -147,8 +147,9 @@ class HostStackRulesTests(unittest.TestCase):
         self.assertEqual((pe.WEB_PORT, pe.SMOKE_PORT), (3000, 3100))
         # 预算帽(防契约无限膨胀):386ed58 加 ACCESSIBLE-NAME UNIQUENESS
         # 段后常量 6033,6000 旧帽是提交时漏改的既有失败——帽随内容走,
-        # 不裁法医根因修复文本。
-        self.assertLessEqual(len(r), 6500)
+        # 不裁法医根因修复文本;2c8f1b4 步进保真三律+10-03 sheet 文本
+        # 身义/描述句断言两律后 6676,帽再次随内容走。
+        self.assertLessEqual(len(r), 7000)
         # 09-28 CRUD 生成器退役:声明协议/生成层词汇不得回流
         self.assertNotIn("SCHEMA-DRIVEN", r)
         self.assertNotIn("schema.json", r)

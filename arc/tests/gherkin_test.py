@@ -393,37 +393,36 @@ class RealTaskSmokeTests(unittest.TestCase):
         self.assertNotIn("placeholder boilerplate", text)
 
     def test_real_yaml_scenario_merge_pins(self):
-        # 真题对账钉(10-02 拍板:GIVEN+WHEN+THEN 完全一致的场景合并):
-        # github REQ-1-1-1 3→2(骨架 2/3 同文)、REQ-1-1-2 4→2;
-        # sheet REQ-1-3-1 4→3;合并只认逐字节,骨架措辞变体若不同文
-        # 则原样在场(REQ-1-1-1 场景 1 真 GIVEN 与骨架变体不同文)。
+        # 真题对账钉(10-02 拍板:GIVEN+WHEN+THEN 完全一致的场景合并)。
+        # 10-03 yaml 换代重锚:github REQ-1-1-1/REQ-1-1-2 场景改写后
+        # 全部逐字节不同文,合并律正确地不触发(3/4 原样在场);
+        # sheet REQ-1-3-1 仍 4 场景 3 种字节形态 → 4→3 合并照常开火。
         import main
         tree = self._tree("hackathon--github")
         n = next(x for x in main.flatten_atomic(tree)
                  if x.get("id") == "REQ-1-1-1")
         text = gherkin.feature_text(self._parent_of(tree, n), [n])
         self.assertEqual(len(n.get("scenarios") or []), 3)
-        self.assertEqual(text.count("  Scenario: "), 2)
+        self.assertEqual(text.count("  Scenario: "), 3)
         self.assertIn("- Scenario 2", text)
-        self.assertNotIn("- Scenario 3", text)
+        self.assertIn("- Scenario 3", text)
         n2 = next(x for x in main.flatten_atomic(tree)
                   if x.get("id") == "REQ-1-1-2")
         self.assertEqual(gherkin.feature_text(
-            self._parent_of(tree, n2), [n2]).count("  Scenario: "), 2)
-        # 句层零删改不变:场景 1 真 GIVEN 含该句一次、保留的场景 2
-        # GIVEN 含两遍 → 单节点渲染恰 3 次。
-        single = gherkin.render_scenarios(n, "full")
-        self.assertEqual(
-            single.count("The visitor starts at the application home "
-                         "page in a fresh unauthenticated browser "
-                         "session."), 3)
-        # sheet 同律(REQ-1-3-1 4→3)。
+            self._parent_of(tree, n2), [n2]).count("  Scenario: "), 4)
+        # sheet 同律(REQ-1-3-1 4→3);句层零删改钉迁此处:github
+        # yaml 换代后该 GIVEN 句不复存在,sheet 单节点渲染恰 3 次。
         stree = self._tree("hackathon--sheet")
         sn2 = next(x for x in main.flatten_atomic(stree)
                    if x.get("id") == "REQ-1-3-1")
         self.assertEqual(len(sn2.get("scenarios") or []), 4)
         self.assertEqual(gherkin.feature_text(
             self._parent_of(stree, sn2), [sn2]).count("  Scenario: "), 3)
+        single = gherkin.render_scenarios(sn2, "full")
+        self.assertEqual(
+            single.count("The visitor starts at the application home "
+                         "page in a fresh unauthenticated browser "
+                         "session."), 3)
 
 
 class QuotedNamesTests(unittest.TestCase):

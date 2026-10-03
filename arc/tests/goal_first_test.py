@@ -766,6 +766,19 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertIn("each walk replaying its scenario's steps exactly "
                       "as written", turn)
 
+    def test_rules_pin_text_identity_and_description_coverage(self):
+        # 10-03 sheet 法医:工作簿名面包屑+页头双渲染 → grader
+        # getByText strict×2 炸(5 挂);导出公式求值空上下文=描述规范句
+        # 未被自测覆盖(1 挂)。文本身义一律+描述句断言义务钉死。
+        rules = plan_envelope.HOST_STACK_RULES_GOAL_FIRST
+        self.assertIn("at most once per page as visible text", rules)
+        self.assertIn("breadcrumb crumb or page heading, never both", rules)
+        self.assertIn("dies on the second match", rules)
+        self.assertIn("gets its own assertion in your spec", rules)
+        self.assertIn("a rule never verified", rules)
+        # ARCHITECTURE 实体页行:or 硬化为排他
+        self.assertIn("header breadcrumb or page title — never both", rules)
+
     def test_browser_script_guard_is_not_armed_by_default(self):
         # 09-30 拍板:Playwright 用法全面放开——env 不再默认武装内核
         # guard(代码保留,运维可显式 re-enable)。
@@ -910,9 +923,10 @@ class GoalFirstRulesTests(unittest.TestCase):
             self.assertEqual(conf2["model_thinking"], main.THINKING_REPAIR)
             self.assertEqual(conf2["model_reasoning_effort"],
                              main.REASONING_EFFORT_REPAIR)
-        self.assertNotEqual(main.REASONING_EFFORT,
-                            main.REASONING_EFFORT_REPAIR,
-                            "修复档必须与工作档不同,否则分档是摆设")
+        # 10-03 拍板:工作/修复两档同 max(工作轮推理强度优先),分档
+        # 管道仍由上面两条 config 断言钉死;两档必须不同的人工律退役。
+        self.assertEqual(main.REASONING_EFFORT, "max")
+        self.assertEqual(main.REASONING_EFFORT_REPAIR, "max")
 
     def test_describe_node_data_only_mode_drops_then(self):
         nd = node(
@@ -1393,7 +1407,10 @@ class SeedOwnershipTests(unittest.TestCase):
         hit = next(b for b in batches
                    if any(str(n.get("id")) == "REQ-2-2-1" for n in b))
         blob = main.build_turn_features(hit, parent_of)
-        self.assertIn("Owner is signed in", blob)
+        # 10-03 yaml 换代重锚:GIVEN 从 "Owner is signed in" 句式改写为
+        # pre-provisions 句式;种子实质(账号+邮箱+密码+归属)逐字在场。
+        self.assertIn("pre-provisions the verified account `org-owner`", blob)
+        self.assertIn("org-owner@example.test", blob)
         self.assertNotIn("seeded by host", blob)
 
 
