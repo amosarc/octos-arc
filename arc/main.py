@@ -1422,10 +1422,13 @@ test('grader walk - no page errors, seed entities reachable', async ({ page }) =
 """
 
 
-def _seed_entity_names(collections: dict, cap: int = 6) -> list[str]:
-    """种子顶层实体名机械提取(零任务语义):取含 name/title 字段的行数
-    最多的两个集合,各取前 3 个值,去重封顶 cap。集合字典形态兼容
-    {collections: {...}} 与平铺 dict-of-lists;非 dict 行忽略。"""
+def _seed_entity_names(collections: dict, cap: int = 10) -> list[str]:
+    """种子顶层实体名机械提取(零任务语义):凡含 name/title 值的集合
+    全取,各前 3 个值,去重封顶 cap;size-desc 稳定排序保证确定性。
+    集合字典形态兼容 {collections: {...}} 与平铺 dict-of-lists;非 dict
+    行忽略(username 等非 name/title 字段行自然跳过)。编译种子行的
+    name 就是 yaml 逐字引号名(fixture_manifest 转录),小集合(如单组织)
+    不得因行数排序被挤出——判分器恰恰按这些名字点导航。"""
     if not isinstance(collections, dict):
         return []
     sized: list[tuple[int, list[str]]] = []
@@ -1443,7 +1446,7 @@ def _seed_entity_names(collections: dict, cap: int = 6) -> list[str]:
             sized.append((len(vals), vals))
     sized.sort(key=lambda t: -t[0])
     out: list[str] = []
-    for _, vals in sized[:2]:
+    for _, vals in sized:
         for v in vals[:3]:
             if v not in out:
                 out.append(v)
@@ -3064,8 +3067,7 @@ VERIFICATION_RULES = (
     "the SPEC RUN command is the primary way; for anything else write "
     "your OWN Playwright spec from the requirement text (copy "
     f"{SELFTEST_SUBDIR}/MY-CHECK.spec.ts.example, edit it) and run it "
-    "with `sh scripts/run-e2e.sh <spec files>` against the running app "
-    "(cold-start included; it pins the @playwright/test module path). "
+    "with `sh scripts/run-e2e.sh <spec files>` against the running app. "
     "NEVER revert project "
     "files with git checkout/reset/restore — the repo is host-managed "
     "for traceability; when a check fails, fix forward with edits.\n")
@@ -3236,8 +3238,8 @@ app on port {smoke}):
 {failed}
 
 Fix ONLY what these failures cover. Do NOT rewrite working features, do \
-NOT regress other families' already-green flows, and do \
-NOT revert project files with git — fix forward with surgical edits. \
+NOT regress other families' already-green flows — fix forward with \
+surgical edits. \
 Reproduce with the SPEC RUN command below (pre-filtered to the failing \
 specs), then finish the turn.\
 {spec_cmd}"""

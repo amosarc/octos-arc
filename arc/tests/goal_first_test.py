@@ -684,8 +684,8 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertNotIn("npm install", rules)
         self.assertNotIn("never commit", rules)
         # 架构说明零禁令:需求要求基座没提供的能力时就该改
-        self.assertIn("when the requirement demands something they do "
-                      "not provide, change them", rules)
+        self.assertIn("when the requirement needs more than it provides, "
+                      "change it", rules)
         self.assertNotIn("never rewrite", rules)
         self.assertNotIn("never touch", rules)
         # 死目录不复流:TOOLBOX 逐助手目录/宿主代述播种
@@ -789,6 +789,42 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertIn("a search box or a typed URL is not an entry point",
                       rules)
         self.assertIn("seeded data exists to be used", rules)
+
+    def test_rules_pin_grader_walk_mechanics(self):
+        # 10-03 template-3 法医:首页 slug≠yaml 引号名"Acme Demo"→
+        # REQ-2-1-1 全灭;下拉菜单打开后异步 fetch 重插菜单项→点击落空,
+        # REQ-2-1-2/REQ-2-2 十一连超时;裸 <select> 判分器点不动→
+        # REQ-2-3 卡死;Sign in 登录后仍显示→会话态不可读。四律+架构
+        # home 行硬化钉死。
+        rules = plan_envelope.HOST_STACK_RULES_GOAL_FIRST
+        self.assertIn("never gated behind a data fetch or rebuilt on "
+                      "open", rules)
+        self.assertIn("a rebuilt item is a detached miss", rules)
+        self.assertIn("scaffold's NativeSelect", rules)
+        self.assertIn("never a bare <select>", rules)
+        self.assertIn("the name the requirement quotes for it", rules)
+        self.assertIn("the display name when one exists, never a slug or "
+                      "id", rules)
+        self.assertIn("signed in shows the account menu and no Sign in",
+                      rules)
+        self.assertIn("signed out shows Sign in and no account menu", rules)
+        # 架构 home 行已回缩为结构事实(义务由引号名律承载)
+        self.assertIn("renders on it as a clickable row or link", rules)
+
+    def test_seed_entity_names_cover_small_collections(self):
+        # 10-03 template-3 法医:旧行"行数最多两集合×各前3"把
+        # organizations(1 行)挤掉,walk 只查 repo/team 名——判分器点
+        # "Acme Demo" 全灭而宿主行走全绿。改全集合覆盖(仍零语义:只读
+        # name/title,username 行自然跳过)。
+        cols = {"organizations": [{"name": "Acme Demo"}],
+                "repositories": [{"name": "acme-docs"},
+                                 {"name": "secret-research"}],
+                "teams": [{"name": "a"}, {"name": "b"}, {"name": "c"}],
+                "members": [{"username": "bob"}]}
+        names = main._seed_entity_names(cols)
+        self.assertIn("Acme Demo", names)
+        self.assertEqual(len(names), 6)
+        self.assertNotIn("bob", names)
 
     def test_browser_script_guard_is_not_armed_by_default(self):
         # 09-30 拍板:Playwright 用法全面放开——env 不再默认武装内核

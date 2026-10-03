@@ -64,9 +64,19 @@ CHARTER_RULES = [
     "On any page no two controls share an accessible name — the grader's "
     "getByRole(role, { name }) dies on ambiguity, so ambiguity is an APP "
     "defect.",
-    "Navigation chrome — tab bars, named links, menus — renders "
-    "synchronously, never gated behind a data fetch; only the data area "
-    "may wait.",
+    "Navigation chrome — tab bars, named links, menus, and every item "
+    "inside a menu — renders synchronously, never gated behind a data "
+    "fetch or rebuilt on open; only the data area may wait — the grader "
+    "clicks what it saw, and a rebuilt item is a detached miss.",
+    "Every combobox is the scaffold's NativeSelect (frontend/src/app/"
+    "ui.jsx), never a bare <select> — the grader picks an option by "
+    "clicking, and a bare select deadlocks the pick.",
+    "An entity link's accessible name is the name the requirement "
+    "quotes for it — the display name when one exists, never a slug or "
+    "id; the grader clicks the quoted name.",
+    "The header states the session truth: signed in shows the account "
+    "menu and no Sign in; signed out shows Sign in and no account "
+    "menu — the grader verifies session state by reading the header.",
     "Every entity the seed pre-provisions and every feature page that "
     "serves it is reachable from the application home page by clicking "
     "visible links or tabs — a search box or a typed URL is not an "
@@ -123,8 +133,8 @@ ARCHITECTURE_LINES = [
     "backend/data/db.json ships EMPTY: implement the seed from the "
     "GIVEN lines (plus a data: section if present) — never drop a GIVEN "
     "entity; expose every requirement-named entity through your API.",
-    "The substrate boots out of the box; when the requirement demands "
-    "something they do not provide, change them.",
+    "The substrate boots out of the box — when the requirement needs "
+    "more than it provides, change it.",
     "frontend/src/main.jsx = React entry; frontend/src/app/App.jsx = the "
     "assembly layer mounting one frontend/src/features/<family>.jsx per "
     "family (stubs pre-created, REQ ids in the headers — fill in place, "
@@ -134,9 +144,8 @@ ARCHITECTURE_LINES = [
     "(frontend/src/app/frame.jsx — one persistent top header with brand, "
     "breadcrumb, and an actions slot); the page that owns the current "
     "view declares its header context with useFrame({ crumbs, actions }).",
-    "Home page = the entity list: every seeded top-level entity is "
-    "reachable from it as a clickable row or link whose exact accessible "
-    "name is the entity's name.",
+    "Home page = the entity list: every seeded top-level entity "
+    "renders on it as a clickable row or link.",
     "Entity pages keep the frame, show the entity's name in the header "
     "breadcrumb or page title — never both — and expose sub-views as "
     "named navigation (TabNav tabs or labeled links using the "
@@ -180,9 +189,8 @@ def build_rules(*sources: list[str]) -> str:
 
 def render_rules(task_rules: list[str] | None = None) -> str:
     """系统行第三段:全局法则 + 任务贡献规则(去重合并)+ 架构清单。"""
-    header = ("RULES & ARCHITECTURE (global laws that bind every turn of "
-              "every family; each derives from the requirement text — the "
-              "host invents none of it).")
+    header = ("RULES & ARCHITECTURE (these bind every turn of every "
+              "family):")
     return (header + "\n" + build_rules(CHARTER_RULES, task_rules or [])
             + "\nARCHITECTURE:\n" + build_rules(ARCHITECTURE_LINES))
 

@@ -21,7 +21,7 @@ _HOST_WALK_SPEC = """\
 // your own specs live beside it). It loads the app, walks the home page
 // plus every internal hash link, and asserts: zero uncaught page errors
 // AND every seeded top-level entity name from _host-walk.json visible in
-// some visited page's text — the same way the eval grader looks for them.
+// some visited page's text — the names the eval grader looks for.
 // Run it with:  sh scripts/run-e2e.sh _host-walk.spec.ts
 import { writeFileSync } from 'fs';
 import { test, expect } from '@playwright/test';
@@ -102,15 +102,12 @@ def stage_selftest_dir(output_dir: Path, smoke_port: int,
 // grader's getByRole('region') times out (an entire family was lost
 // exactly that way). Assert with the ROLE the requirement names.
 //
-// GESTURE RULE — self-test each selection-driven flow with BOTH drag AND
-// click+Shift-click (graders use both; a shift-collapsing handler passed
-// drag-only tests and still lost the whole family), and each dialog flow
-// with mouse AND keyboard (Enter commits, Escape cancels). Drive every
-// combo box BOTH ways as well: selectOption() AND click-open + click on a
-// role=option — the kit's NativeSelect supports both; whichever gesture a
-// dialog never exercises is the one the grader may use, and a pure
-// native-select popup fails the click way (an eval family was lost on
-// exactly that gap).
+// GESTURE RULE — drive every selection-driven flow with BOTH drag AND
+// click+Shift-click, every dialog flow with mouse AND keyboard (Enter
+// commits, Escape cancels), and every combo box BOTH ways: selectOption()
+// AND click-open + click on a role=option (the kit's NativeSelect
+// supports both) — whichever gesture a flow never exercises is the one
+// the grader may use.
 //
 // SOURCE RULE — the spec is derived from the requirement text, never from
 // the implementation: quote dialog names, labels, and error strings
