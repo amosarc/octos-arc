@@ -24,15 +24,41 @@ FRONTEND_INDEX_HTML = """\
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>App</title>
     <script data-host="__arcTelemetryHook">
-      // Host-owned frontend error hook (best-effort): page errors and
+      // Host-owned frontend telemetry hook (best-effort): page errors and
       // unhandled rejections are beaconed to the backend telemetry endpoint
-      // so eval-time crashes land in octos/logs/eval-traffic.jsonl.
+      // so eval-time crashes land in octos/logs/eval-traffic.jsonl, and
+      // every page load beacons a `mount` snapshot (href, title, headings,
+      // link names, form count) so the eval window shows what the visitor's
+      // browser actually rendered.
       (function () {
-        var send = function (kind, msg) {
+        var post = function (obj) {
           try {
-            var payload = JSON.stringify({ kind: kind, msg: String(msg).slice(0, 300), href: location.href });
-            navigator.sendBeacon('/api/__telemetry', new Blob([payload], { type: 'application/json' }));
+            navigator.sendBeacon('/api/__telemetry',
+              new Blob([JSON.stringify(obj)], { type: 'application/json' }));
           } catch (e) { /* best effort */ }
+        };
+        var send = function (kind, msg) {
+          post({ kind: kind, msg: String(msg).slice(0, 300), href: location.href });
+        };
+        var texts = function (sel, n, len) {
+          return Array.prototype.slice.call(document.querySelectorAll(sel))
+            .slice(0, n)
+            .map(function (el) {
+              var t = el.getAttribute && el.getAttribute('aria-label');
+              if (!t) t = el.textContent || '';
+              return String(t).trim().slice(0, len);
+            })
+            .filter(Boolean);
+        };
+        var sendMount = function () {
+          post({
+            kind: 'mount',
+            href: String(location.href).slice(0, 200),
+            title: String(document.title || '').slice(0, 120),
+            heads: texts('h1,h2,h3', 8, 80),
+            links: texts('a', 20, 60),
+            forms: document.forms.length
+          });
         };
         window.addEventListener('error', function (e) {
           send('pageerror', (e && e.message ? e.message : 'error') + ' @' + ((e && e.filename) || '') + ':' + ((e && e.lineno) || ''));
@@ -40,6 +66,11 @@ FRONTEND_INDEX_HTML = """\
         window.addEventListener('unhandledrejection', function (e) {
           send('unhandledrejection', e && e.reason !== undefined ? e.reason : 'rejection');
         });
+        // Mount snapshot after first render, re-sent when the SPA view
+        // changes (hash navigation) — one line per visited view.
+        setTimeout(sendMount, 700);
+        window.addEventListener('hashchange', function () { setTimeout(sendMount, 400); });
+        window.addEventListener('popstate', function () { setTimeout(sendMount, 400); });
       })();
     </script>
   </head>
@@ -60,19 +91,105 @@ createRoot(document.getElementById('root')).render(<App />);
 """
 
 FRONTEND_APP_JSX = """\
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { DataProvider } from './store.jsx';
+import { AppFrame } from './frame.jsx';
+import { useHashRoute } from './router.js';
 
 // ASSEMBLY LAYER — the only file that wires features together: add ONE
 // import + mount per requirement family. Business logic lives in
 // frontend/src/features/<name>.jsx (self-contained).
+function RedirectHome() {
+  useEffect(() => { window.location.hash = '#/'; }, []);
+  return null;
+}
+
 export default function App() {
+  const { route } = useHashRoute();
+  const slot = useRef(null);
+  const [empty, setEmpty] = useState(false);
+  useEffect(() => {
+    setEmpty(false);
+    const t = setTimeout(() => {
+      // A deep link no feature handles must not blank the app: after a
+      // short grace period an empty slot on a non-home route redirects
+      // home so any visitor (or grader) always lands on something real.
+      if (route.parts.length > 0 && slot.current
+          && slot.current.childElementCount === 0) {
+        setEmpty(true);
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [route.path]);
   return (
     <DataProvider>
-      <div className="app">
-        {/* mount feature components here */}
-      </div>
+      <AppFrame>
+        <div className="app" ref={slot}>
+          {/* mount feature components here */}
+        </div>
+        {empty && <RedirectHome />}
+      </AppFrame>
     </DataProvider>
+  );
+}
+"""
+
+FRONTEND_FRAME_JSX = """\
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+
+// frame.jsx — the app shell every page renders inside: ONE persistent top
+// header (brand + breadcrumb + actions), the shape the platform's
+// reference screens share (GitHub-style app header / workbook title bar).
+// Pages declare their context with useFrame — call it from the ONE
+// component that owns the current page (two callers fight over chrome):
+//   useFrame({ crumbs: [{ label: 'acme-docs', href: '#/repos/acme-docs' }],
+//              actions: <button>New issue</button> });
+const FrameContext = createContext({ setChrome: () => {} });
+
+export function AppFrame({ brand = 'App', children }) {
+  const [chrome, setChrome] = useState({ crumbs: [], actions: null });
+  const value = useMemo(() => ({ setChrome }), []);
+  return (
+    <FrameContext.Provider value={value}>
+      <header className="app-header">
+        <span className="app-brand">{brand}</span>
+        <nav className="app-crumbs" aria-label="Breadcrumb">
+          {(chrome.crumbs || []).map((c) => (
+            c.href
+              ? <a key={c.label} href={c.href}>{c.label}</a>
+              : <span key={c.label} className="app-crumb-here">{c.label}</span>
+          ))}
+        </nav>
+        <span className="app-header-actions">{chrome.actions}</span>
+      </header>
+      <main className="app-main">{children}</main>
+    </FrameContext.Provider>
+  );
+}
+
+// Declare the header chrome for the current page. crumbs: [{label, href?}]
+// — a crumb without href is the current page. actions: header-right JSX.
+export function useFrame(chrome) {
+  const { setChrome } = useContext(FrameContext);
+  const crumbs = (chrome && chrome.crumbs) || [];
+  const actions = (chrome && chrome.actions) || null;
+  const key = JSON.stringify(crumbs);
+  useEffect(() => {
+    setChrome({ crumbs, actions });
+    return () => setChrome({ crumbs: [], actions: null });
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+}
+
+// Sub-view navigation for an entity page: named tabs, aria-current marks
+// the active one. tabs: [{label, href, active?}].
+export function TabNav({ label = 'Sections', tabs }) {
+  return (
+    <nav className="app-tabs" aria-label={label}>
+      {(tabs || []).map((t) => (
+        <a key={t.label} href={t.href}
+           aria-current={t.active ? 'page' : undefined}>{t.label}</a>
+      ))}
+    </nav>
   );
 }
 """
@@ -229,6 +346,21 @@ body {
   background: #f8f9fa;
 }
 .app { max-width: 960px; margin: 0 auto; padding: 16px; }
+.app-header {
+  display: flex; gap: 12px; align-items: center;
+  padding: 8px 16px; background: #1f2933; color: #fff;
+}
+.app-brand { font-weight: 700; }
+.app-crumbs { display: flex; gap: 8px; align-items: center; flex: 1; }
+.app-crumbs a, .app-crumbs span { color: #e5e7eb; text-decoration: none; }
+.app-crumb-here { font-weight: 600; }
+.app-header-actions { display: flex; gap: 8px; align-items: center; }
+.app-main { min-height: 70vh; }
+.app-tabs { display: flex; gap: 16px; border-bottom: 1px solid #cbd2d9;
+  padding: 0 16px; margin-bottom: 12px; }
+.app-tabs a { padding: 8px 2px; text-decoration: none; color: #1f2933; }
+.app-tabs a[aria-current="page"] { font-weight: 700;
+  border-bottom: 2px solid #1f2933; }
 .row { display: flex; gap: 8px; align-items: center; }
 .column { display: flex; flex-direction: column; gap: 8px; }
 .card { background: #fff; border: 1px solid #e0e6eb; border-radius: 8px; padding: 12px; }

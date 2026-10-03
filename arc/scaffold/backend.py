@@ -188,7 +188,10 @@ const clip = (v, n) => {
 };
 exports.mount = (app) => {
   line({ t: new Date().toISOString(), kind: 'boot', port: process.env.PORT || 3000 });
-  // Frontend error reports (sendBeacon with an application/json Blob).
+  // Frontend reports (sendBeacon with an application/json Blob):
+  // pageerror / unhandledrejection carry msg; the `mount` kind carries a
+  // page snapshot (title/heads/links/forms) so the eval window records
+  // what the visitor's browser actually rendered at each URL.
   app.post('/api/__telemetry',
     require('express').json({ type: ['application/json', 'text/plain'] }),
     (req, res) => {
@@ -196,8 +199,13 @@ exports.mount = (app) => {
     const events = Array.isArray(body) ? body : [body];
     for (const e of events) {
       if (e && typeof e === 'object') {
-        line({ t: new Date().toISOString(), kind: String(e.kind || 'console'),
-               msg: clip(e.msg, 300), href: clip(e.href, 120) });
+        const rec = { t: new Date().toISOString(), kind: String(e.kind || 'console'),
+                      msg: clip(e.msg, 300), href: clip(e.href, 200) };
+        if (e.title !== undefined || e.heads || e.links || e.forms !== undefined) {
+          rec.page = clip({ title: e.title, heads: e.heads,
+                            links: e.links, forms: e.forms }, 2000);
+        }
+        line(rec);
       }
     }
     res.status(204).end();

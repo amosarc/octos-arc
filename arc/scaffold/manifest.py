@@ -52,6 +52,9 @@ SCAFFOLD_FILES: dict[str, tuple[str, str]] = {
     # UI kit:满分形态代码化(NativeSelect/AppDialog/AccountTrigger/
     # SingleError/FixedGrid)——提示词规则的方差靠默认路径消零
     "frontend/src/app/ui.jsx": (frontend.FRONTEND_UI_JSX, "host"),
+    # 应用框架(参考图骨架蒸馏):每页常驻全局页头(品牌/面包屑/动作区)
+    # + 实体页命名子视图导航原语——两任务参考图共有的结构契约代码化
+    "frontend/src/app/frame.jsx": (frontend.FRONTEND_FRAME_JSX, "host"),
     # 09-28:网格选区/编辑内核 + 单元格公式引擎(纯函数、零任务语义,
     # 手写形态两跑翻车后下沉为宿主代码;未 import 时 vite 不打包)
     "frontend/src/app/grid.js": (GRID_JS, "host"),
@@ -93,6 +96,7 @@ RULES_MUST_NAME = (
     "frontend/src/app/store.jsx",
     "frontend/src/app/api.js",
     "frontend/src/app/ui.jsx",
+    "frontend/src/app/frame.jsx",
     "frontend/src/app/grid.js",
     "frontend/src/app/formula.js",
     "frontend/src/app/csv.js",

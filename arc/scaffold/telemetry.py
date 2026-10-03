@@ -19,18 +19,33 @@ from pathlib import Path
 from clock import iso as now_iso
 
 # index.html 回补钩子的锚点标记(scaffold 常量的内联脚本也含此 data 属性,
-# 存在即免注)。字符串形态与 scaffold/frontend.py 保持一致。
+# 存在即免注)。字符串形态与 scaffold/frontend.py 保持一致:pageerror/
+# unhandledrejection 上报 + mount 快照(href/title/标题/链接名/表单数)。
 _HOOK_MARKER = "__arcTelemetryHook"
 _HOOK_HTML = (
-    '<script data-host="__arcTelemetryHook">(function(){var s=function(k,m)'
-    "{try{navigator.sendBeacon('/api/__telemetry',new Blob([JSON.stringify("
-    "{kind:k,msg:String(m).slice(0,300),href:location.href})],"
-    "{type:'application/json'}))}catch(e){}};"
+    '<script data-host="__arcTelemetryHook">(function(){'
+    "var post=function(o){try{navigator.sendBeacon('/api/__telemetry',"
+    "new Blob([JSON.stringify(o)],{type:'application/json'}))}catch(e){}};"
+    "var s=function(k,m){post({kind:k,msg:String(m).slice(0,300),"
+    "href:String(location.href).slice(0,200)})};"
+    "var t=function(sel,n,len){return Array.prototype.slice.call("
+    "document.querySelectorAll(sel)).slice(0,n).map(function(el){"
+    "var v=el.getAttribute&&el.getAttribute('aria-label');"
+    "if(!v)v=el.textContent||'';return String(v).trim().slice(0,len)}"
+    ").filter(Boolean)};"
+    "var m=function(){post({kind:'mount',href:String(location.href)"
+    ".slice(0,200),title:String(document.title||'').slice(0,120),"
+    "heads:t('h1,h2,h3',8,80),links:t('a',20,60),"
+    "forms:document.forms.length})};"
     "window.addEventListener('error',function(e){s('pageerror',"
     "(e&&e.message?e.message:'error')+' @'+((e&&e.filename)||'')+':'"
     "+((e&&e.lineno)||''))});window.addEventListener("
     "'unhandledrejection',function(e){s('unhandledrejection',e&&e.reason"
-    "!==undefined?e.reason:'rejection')});})();</script>")
+    "!==undefined?e.reason:'rejection')});"
+    "setTimeout(m,700);"
+    "window.addEventListener('hashchange',function(){setTimeout(m,400)});"
+    "window.addEventListener('popstate',function(){setTimeout(m,400)});"
+    "})();</script>")
 _REQUIRE_LINE = (
     "try { require('./lib/eval-telemetry').mount(app); } "
     "catch { /* telemetry best-effort */ }")

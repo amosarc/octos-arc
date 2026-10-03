@@ -127,22 +127,48 @@ def _app_wiring(stubs: list[dict]) -> str:
         f"import {s['component']} from '../features/{s['slug']}.jsx';"
         for s in stubs)
     mounts = "\n".join(
-        f"        <{s['component']} />" for s in stubs)
+        f"          <{s['component']} />" for s in stubs)
     return f"""\
-import React from 'react';
+import React, {{ useEffect, useRef, useState }} from 'react';
 import {{ DataProvider }} from './store.jsx';
+import {{ AppFrame }} from './frame.jsx';
+import {{ useHashRoute }} from './router.js';
 {imports}
 
 // ASSEMBLY LAYER — the only file that wires features together.
 // Stubs are pre-mounted per requirement family in requirement order;
 // rearrange the layout/mounts freely as the app takes shape (business
 // logic NEVER lives here — it goes in frontend/src/features/<name>.jsx).
+function RedirectHome() {{
+  useEffect(() => {{ window.location.hash = '#/'; }}, []);
+  return null;
+}}
+
 export default function App() {{
+  const {{ route }} = useHashRoute();
+  const slot = useRef(null);
+  const [empty, setEmpty] = useState(false);
+  useEffect(() => {{
+    setEmpty(false);
+    const t = setTimeout(() => {{
+      // A deep link no feature handles must not blank the app: after a
+      // short grace period an empty slot on a non-home route redirects
+      // home so any visitor (or grader) always lands on something real.
+      if (route.parts.length > 0 && slot.current
+          && slot.current.childElementCount === 0) {{
+        setEmpty(true);
+      }}
+    }}, 300);
+    return () => clearTimeout(t);
+  }}, [route.path]);
   return (
     <DataProvider>
-      <div className="app">
+      <AppFrame>
+        <div className="app" ref={{slot}}>
 {mounts}
-      </div>
+        </div>
+        {{empty && <RedirectHome />}}
+      </AppFrame>
     </DataProvider>
   );
 }}

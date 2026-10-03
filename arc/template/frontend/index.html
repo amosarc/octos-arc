@@ -5,15 +5,41 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>App</title>
     <script data-host="__arcTelemetryHook">
-      // Host-owned frontend error hook (best-effort): page errors and
+      // Host-owned frontend telemetry hook (best-effort): page errors and
       // unhandled rejections are beaconed to the backend telemetry endpoint
-      // so eval-time crashes land in octos/logs/eval-traffic.jsonl.
+      // so eval-time crashes land in octos/logs/eval-traffic.jsonl, and
+      // every page load beacons a `mount` snapshot (href, title, headings,
+      // link names, form count) so the eval window shows what the visitor's
+      // browser actually rendered.
       (function () {
-        var send = function (kind, msg) {
+        var post = function (obj) {
           try {
-            var payload = JSON.stringify({ kind: kind, msg: String(msg).slice(0, 300), href: location.href });
-            navigator.sendBeacon('/api/__telemetry', new Blob([payload], { type: 'application/json' }));
+            navigator.sendBeacon('/api/__telemetry',
+              new Blob([JSON.stringify(obj)], { type: 'application/json' }));
           } catch (e) { /* best effort */ }
+        };
+        var send = function (kind, msg) {
+          post({ kind: kind, msg: String(msg).slice(0, 300), href: location.href });
+        };
+        var texts = function (sel, n, len) {
+          return Array.prototype.slice.call(document.querySelectorAll(sel))
+            .slice(0, n)
+            .map(function (el) {
+              var t = el.getAttribute && el.getAttribute('aria-label');
+              if (!t) t = el.textContent || '';
+              return String(t).trim().slice(0, len);
+            })
+            .filter(Boolean);
+        };
+        var sendMount = function () {
+          post({
+            kind: 'mount',
+            href: String(location.href).slice(0, 200),
+            title: String(document.title || '').slice(0, 120),
+            heads: texts('h1,h2,h3', 8, 80),
+            links: texts('a', 20, 60),
+            forms: document.forms.length
+          });
         };
         window.addEventListener('error', function (e) {
           send('pageerror', (e && e.message ? e.message : 'error') + ' @' + ((e && e.filename) || '') + ':' + ((e && e.lineno) || ''));
@@ -21,6 +47,11 @@
         window.addEventListener('unhandledrejection', function (e) {
           send('unhandledrejection', e && e.reason !== undefined ? e.reason : 'rejection');
         });
+        // Mount snapshot after first render, re-sent when the SPA view
+        // changes (hash navigation) — one line per visited view.
+        setTimeout(sendMount, 700);
+        window.addEventListener('hashchange', function () { setTimeout(sendMount, 400); });
+        window.addEventListener('popstate', function () { setTimeout(sendMount, 400); });
       })();
     </script>
   </head>

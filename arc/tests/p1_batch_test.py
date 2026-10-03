@@ -143,9 +143,10 @@ check("spec cmd: green-stop marker (.arc/acceptance) present",
 check("spec cmd: git rollback banned",
       "git checkout/reset/restore" in cmd)
 # 09-27 目标优先定则:测试用例由模型根据需求自生成——旧"禁止自写
-# Playwright"政策翻转,新政策=自写 spec 走被批准命令形状。
+# Playwright"政策翻转,新政策=自写 spec 走被批准命令形状;2026-10 起
+# 唯一入口钉死为 scripts/run-e2e.sh(REQ-6 模块解析 doom 根修)。
 check("spec cmd: model-authored specs sanctioned",
-      "your OWN Playwright spec" in cmd and "explicit file argument" in cmd,
+      "your OWN Playwright spec" in cmd and "run-e2e.sh" in cmd,
       cmd[-120:])
 
 cmd_full = main.build_spec_run_cmd("/path/to/cli.js")

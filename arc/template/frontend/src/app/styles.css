@@ -8,6 +8,21 @@ body {
   background: #f8f9fa;
 }
 .app { max-width: 960px; margin: 0 auto; padding: 16px; }
+.app-header {
+  display: flex; gap: 12px; align-items: center;
+  padding: 8px 16px; background: #1f2933; color: #fff;
+}
+.app-brand { font-weight: 700; }
+.app-crumbs { display: flex; gap: 8px; align-items: center; flex: 1; }
+.app-crumbs a, .app-crumbs span { color: #e5e7eb; text-decoration: none; }
+.app-crumb-here { font-weight: 600; }
+.app-header-actions { display: flex; gap: 8px; align-items: center; }
+.app-main { min-height: 70vh; }
+.app-tabs { display: flex; gap: 16px; border-bottom: 1px solid #cbd2d9;
+  padding: 0 16px; margin-bottom: 12px; }
+.app-tabs a { padding: 8px 2px; text-decoration: none; color: #1f2933; }
+.app-tabs a[aria-current="page"] { font-weight: 700;
+  border-bottom: 2px solid #1f2933; }
 .row { display: flex; gap: 8px; align-items: center; }
 .column { display: flex; flex-direction: column; gap: 8px; }
 .card { background: #fff; border: 1px solid #e0e6eb; border-radius: 8px; padding: 12px; }

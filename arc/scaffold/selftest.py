@@ -1,16 +1,77 @@
-"""模型自测骨架:e2e/ 的 playwright config + MY-CHECK 示例落盘。
+"""模型自测骨架:e2e/ 的 playwright config + MY-CHECK 示例 + 宿主
+可达性行走 spec 落盘。
 
 宿主只提供最小骨架(非规则、非用例)——config 是最顺手的标准跑法
-(双绿自动停机),Playwright 用法本身不设限。幂等。
+(双绿自动停机),Playwright 用法本身不设限。_host-walk 是宿主唯一的
+自造 spec:零任务知识地行走首页+内链,断言零 pageerror 且种子实体名
+可见——与 final 链的 page-health walk 同款,把"评分器能不能看到东西"
+变成批内就能跑绿的门。幂等。
 """
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
 
+# 与 main.py 的 _PAGE_HEALTH_SPEC 同款行走逻辑;实体名从同目录
+# _host-walk.json 读(宿主在开工时由 fixture 编译产出)。
+_HOST_WALK_SPEC = """\
+// _host-walk.spec.ts — HOST-OWNED reachability walk (you do not edit it;
+// your own specs live beside it). It loads the app, walks the home page
+// plus every internal hash link, and asserts: zero uncaught page errors
+// AND every seeded top-level entity name from _host-walk.json visible in
+// some visited page's text — the same way the eval grader looks for them.
+// Run it with:  sh scripts/run-e2e.sh _host-walk.spec.ts
+import { writeFileSync } from 'fs';
+import { test, expect } from '@playwright/test';
+import entities from './_host-walk.json';
+
+const errors: string[] = [];
+
+test('host walk - no page errors, seed entities reachable', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as any).__phErrors = [];
+    window.addEventListener('unhandledrejection', (e) => {
+      (window as any).__phErrors.push(
+        'unhandledrejection: ' + String((e as any)?.reason ?? e));
+    });
+  });
+  page.on('pageerror', (e) => errors.push('pageerror: ' + String(e?.message ?? e)));
+  const seen: string[] = [];
+  const grab = async () => seen.push(String(await page.evaluate(
+    () => (document.body ? document.body.innerText : ''))).slice(0, 6000));
+  await page.goto('/');
+  await page.waitForTimeout(1200);
+  await grab();
+  const links = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('a[href^="#/"]'))
+      .map((a) => (a as HTMLAnchorElement).getAttribute('href') || '')
+      .filter((h, i, arr) => h && arr.indexOf(h) === i)
+      .slice(0, 12));
+  for (const href of links) {
+    await page.evaluate((h) => { location.hash = String(h).slice(1); }, href);
+    await page.waitForTimeout(600);
+    await grab();
+  }
+  const injected = await page.evaluate(() => (window as any).__phErrors || []);
+  const missing = (entities as string[]).filter(
+    (n) => !seen.some((t) => t.toLowerCase().includes(n.toLowerCase())));
+  try {
+    writeFileSync('walk-report.json',
+      JSON.stringify({ checked: entities, missing }));
+  } catch { /* best effort */ }
+  const all = errors.concat(
+    injected,
+    missing.map((m) => 'seed entity not visible anywhere on the walk: ' + m));
+  expect(all, 'page walk: ' + all.slice(0, 6).join(' | ')).toEqual([]);
+});
+"""
+
+
 def stage_selftest_dir(output_dir: Path, smoke_port: int,
-                       subdir: str = "e2e") -> Path:
+                       subdir: str = "e2e",
+                       entity_names: list[str] | None = None) -> Path:
     """落盘模型自测所需的最小骨架(非规则、非用例):playwright config +
     MY-CHECK 示例。该 config 是最顺手的标准跑法(双绿自动停机);
     Playwright 用法本身不再受限。幂等。"""
@@ -106,8 +167,28 @@ test('my check - name what this verifies', async ({ page }) => {
 });
 """
     (stage / "MY-CHECK.spec.ts.example").write_text(example, encoding="utf-8")
+    # 宿主可达性行走:spec + 实体名 fixture(来自需求 fixture 编译;
+    # 空清单时 walk 退化为纯 page-error 检查,仍然有效)。
+    names = [str(n) for n in (entity_names or []) if str(n).strip()]
+    (stage / "_host-walk.json").write_text(
+        json.dumps(names, ensure_ascii=False) + "\n", encoding="utf-8")
+    (stage / "_host-walk.spec.ts").write_text(
+        _HOST_WALK_SPEC, encoding="utf-8")
+    # REQ-6 doom 根因的暂存期闭环:e2e/ 向上解析不到 backend/node_modules
+    # 里的 @playwright/test(评测器不踩——它用镜像自带引擎;踩的是模型
+    # 自测与任何从 e2e/ 发起的 playwright 调用)。相对软链在 backend
+    # 依赖安装完成前悬空无害,装好即通;脚本与手搓调用都被覆盖。
+    try:
+        link = stage / "node_modules"
+        if not link.is_symlink() and not link.exists():
+            link.symlink_to(Path("../backend/node_modules"),
+                            target_is_directory=True)
+    except OSError:
+        pass  # 桥接失败不挡 staging;run-e2e.sh 运行时会重试
     (stage / ".gitignore").write_text(
-        "test-results/\n.playwright-report/\n", encoding="utf-8")
+        "test-results/\n.playwright-report/\nwalk-report.json\n"
+        "node_modules/\n",
+        encoding="utf-8")
     for junk in ("test-results", ".playwright-report"):
         shutil.rmtree(stage / junk, ignore_errors=True)
     return stage

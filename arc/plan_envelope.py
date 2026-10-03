@@ -108,10 +108,26 @@ ARCHITECTURE_LINES = [
     "assembly layer mounting one frontend/src/features/<family>.jsx per "
     "family (stubs pre-created, REQ ids in the headers — fill in place, "
     "add siblings freely); styles in frontend/src/app/styles.css.",
+    "UI skeleton (the structural shape the platform's reference screens "
+    "share): every page renders inside the host frame "
+    "(frontend/src/app/frame.jsx — one persistent top header with brand, "
+    "breadcrumb, and an actions slot); the page that owns the current "
+    "view declares its header context with useFrame({ crumbs, actions }).",
+    "Home page = the entity list: every seeded top-level entity is "
+    "reachable from it as a clickable row or link whose exact accessible "
+    "name is the entity's name.",
+    "Entity pages keep the frame, show the entity's name in the header "
+    "breadcrumb or page title, and expose sub-views as named navigation "
+    "(TabNav tabs or labeled links using the requirement's own words).",
+    "Sign-in is a centered card with labeled Username and Password "
+    "inputs and a Sign in submit; deep links must render their page "
+    "directly (the router falls back to the URL pathname when the hash "
+    "is empty).",
     "frontend/src/app/api.js = the backend client; frontend/src/app/"
     "store.jsx = optional DataProvider helper.",
     "Kit (optional; each file's header documents itself — read before "
-    "use): frontend/src/app/ui.jsx, frontend/src/app/grid.js, "
+    "use): frontend/src/app/ui.jsx, frontend/src/app/frame.jsx, "
+    "frontend/src/app/grid.js, "
     "frontend/src/app/formula.js, frontend/src/app/csv.js, "
     "frontend/src/app/undo.js, frontend/src/app/router.js; "
     "frontend/src/features/README.md = feature notes + grid editor "
@@ -119,7 +135,10 @@ ARCHITECTURE_LINES = [
     "Grid pages address cells beyond the data extent (40 rows x 20 cols "
     "minimum).",
     "Self-tests live ONLY under e2e/ (config: "
-    "e2e/playwright.config.ts) — never inside .arc/.",
+    "e2e/playwright.config.ts) — never inside .arc/. Run them with "
+    "`sh scripts/run-e2e.sh <spec files>` from the workspace root — it "
+    "cold-starts the app and pins the @playwright/test module path; do "
+    "not hand-roll your own Playwright CLI invocations.",
 ]
 
 

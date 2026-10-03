@@ -699,21 +699,45 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertNotIn("SERVER-SIDE VALIDATION", rules)
         self.assertNotIn("UI CONTRACT HYGIENE", rules)
 
-    def test_stage_writes_config_and_example_only(self):
+    def test_stage_writes_config_example_and_host_walk(self):
         import tempfile
         with tempfile.TemporaryDirectory() as td:
             stage = scaffold.stage_selftest_dir(Path(td), 43101)
             names = sorted(p.name for p in stage.iterdir())
             self.assertEqual(
                 names, [".gitignore", "MY-CHECK.spec.ts.example",
-                        "playwright.config.ts"])
+                        "_host-walk.json", "_host-walk.spec.ts",
+                        "node_modules", "playwright.config.ts"])
+            # node_modules 桥接是相对软链(REQ-6 doom 根因的暂存期闭环),
+            # backend 依赖安装前悬空无害
+            self.assertTrue((stage / "node_modules").is_symlink())
             cfg = (stage / "playwright.config.ts").read_text()
             self.assertIn("http://127.0.0.1:43101", cfg)
             self.assertIn("workers: 1", cfg)
-            # 没有宿主编写的 spec(zz-contract-smoke 等)
-            self.assertFalse(names == sorted(names)
-                             and any(n.endswith(".spec.ts")
-                                     for n in names))
+            # 宿主只写 _host-walk(零任务知识行走);其余 spec 均为模型自写
+            self.assertFalse(
+                any(n.endswith(".spec.ts") and n != "_host-walk.spec.ts"
+                    for n in names))
+
+    def test_host_walk_spec_stages_entity_names(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            stage = scaffold.stage_selftest_dir(
+                Path(td), 43101, entity_names=["acme-docs", "第二工作簿"])
+            names = json.loads(
+                (stage / "_host-walk.json").read_text(encoding="utf-8"))
+            self.assertEqual(names, ["acme-docs", "第二工作簿"])
+            spec = (stage / "_host-walk.spec.ts").read_text()
+            self.assertIn("_host-walk.json", spec)
+            self.assertIn("seed entity not visible anywhere on the walk",
+                          spec)
+            # 无实体名时 walk 退化为纯 page-error 检查,spec 仍落盘
+            stage2 = scaffold.stage_selftest_dir(Path(td), 43101,
+                                                 entity_names=[])
+            self.assertEqual(
+                json.loads(
+                    (stage2 / "_host-walk.json").read_text("utf-8")), [])
 
     def test_rules_carry_selftest_surface(self):
         rules = plan_envelope.HOST_STACK_RULES_GOAL_FIRST

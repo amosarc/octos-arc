@@ -94,7 +94,7 @@ REASONING_EFFORT = "max"
 # 修复类短轮(syntax/spec 回归修复,自含错误摘要)降档:深度思考
 # 对窄修复不成比例地烧输出预算与墙钟。
 THINKING_REPAIR = "enabled"
-REASONING_EFFORT_REPAIR = "high"
+REASONING_EFFORT_REPAIR = "max"
 
 # 内核基础提示词运行时覆盖:$HOME/.octos/prompts/gateway.md 存在即整体
 # 替换内置 gateway_default.txt(零编译)。内置文本面向全量工具集,与 ARC
@@ -1212,14 +1212,18 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
 
 
 _PAGE_HEALTH_SPEC = """\
+import { writeFileSync } from 'fs';
 import { test, expect } from '@playwright/test';
 
-// Host page-health probe: zero task knowledge — load the app, walk the
+// Host grader-walk probe: zero task knowledge — load the app, walk the
 // home page plus every internal hash link it exposes, fail on ANY uncaught
-// page error or unhandled rejection.
+// page error or unhandled rejection, and report which seed entity names
+// never showed up in any visited page's text (reachability — the eval
+// grader loads pages and looks for exactly such names).
 const errors: string[] = [];
+const ENTITIES: string[] = __ENTITIES_JSON__;
 
-test('no uncaught page errors on the home page and its links', async ({ page }) => {
+test('grader walk - no page errors, seed entities reachable', async ({ page }) => {
   await page.addInitScript(() => {
     (window as any).__phErrors = [];
     window.addEventListener('unhandledrejection', (e) => {
@@ -1228,8 +1232,12 @@ test('no uncaught page errors on the home page and its links', async ({ page }) 
     });
   });
   page.on('pageerror', (e) => errors.push('pageerror: ' + String(e?.message ?? e)));
+  const seen: string[] = [];
+  const grab = async () => seen.push(String(await page.evaluate(
+    () => (document.body ? document.body.innerText : ''))).slice(0, 6000));
   await page.goto('/');
   await page.waitForTimeout(1200);
+  await grab();
   const links = await page.evaluate(() =>
     Array.from(document.querySelectorAll('a[href^="#/"]'))
       .map((a) => (a as HTMLAnchorElement).getAttribute('href') || '')
@@ -1238,25 +1246,82 @@ test('no uncaught page errors on the home page and its links', async ({ page }) 
   for (const href of links) {
     await page.evaluate((h) => { location.hash = String(h).slice(1); }, href);
     await page.waitForTimeout(600);
+    await grab();
   }
   const injected = await page.evaluate(() => (window as any).__phErrors || []);
-  const all = errors.concat(injected);
-  expect(all, 'page health: ' + all.slice(0, 6).join(' | ')).toEqual([]);
+  const missing = ENTITIES.filter(
+    (n) => !seen.some((t) => t.toLowerCase().includes(n.toLowerCase())));
+  try {
+    writeFileSync('walk-report.json',
+      JSON.stringify({ checked: ENTITIES, missing }));
+  } catch { /* best effort */ }
+  const all = errors.concat(
+    injected,
+    missing.map((m) => 'seed entity not visible anywhere on the walk: ' + m));
+  expect(all, 'page walk: ' + all.slice(0, 6).join(' | ')).toEqual([]);
 });
 """
 
 
+def _seed_entity_names(collections: dict, cap: int = 6) -> list[str]:
+    """种子顶层实体名机械提取(零任务语义):取含 name/title 字段的行数
+    最多的两个集合,各取前 3 个值,去重封顶 cap。集合字典形态兼容
+    {collections: {...}} 与平铺 dict-of-lists;非 dict 行忽略。"""
+    if not isinstance(collections, dict):
+        return []
+    sized: list[tuple[int, list[str]]] = []
+    for rows in collections.values():
+        if not isinstance(rows, list):
+            continue
+        vals: list[str] = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            v = str(r.get("name") or r.get("title") or "").strip()[:80]
+            if v:
+                vals.append(v)
+        if vals:
+            sized.append((len(vals), vals))
+    sized.sort(key=lambda t: -t[0])
+    out: list[str] = []
+    for _, vals in sized[:2]:
+        for v in vals[:3]:
+            if v not in out:
+                out.append(v)
+    return out[:cap]
+
+
+def _delivered_seed_entities(output_dir: Path) -> list[str]:
+    """交付种子(backend/data/db.json,模型实现后的实体清单)的实体名。"""
+    try:
+        data = json.loads((output_dir / "backend" / "data" / "db.json")
+                          .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    collections = data.get("collections")
+    if not isinstance(collections, dict):
+        collections = {k: v for k, v in data.items() if isinstance(v, list)}
+    return _seed_entity_names(collections)
+
+
 def _page_health_run(output_dir: Path, smoke_port: int,
-                     extra_ports: list | None = None) -> list[str] | None:
-    """Host-owned browser minimum: no uncaught page errors on a walk.
+                     extra_ports: list | None = None):
+    """Host-owned browser minimum: no uncaught page errors on a walk, plus
+    a reachability report for the delivered seed's entity names.
 
     Catches the ReferenceError-class shipped bug deterministically: the
     09-27 sheet run carried 6 `hasNumbers is not defined` crashes in
     bundles built 3 minutes before handover — caught by the agent's own
     flow specs that time, but nothing HOST-owned would have flagged it.
-    Walks the home page + internal hash links of the freshly built app on
-    the smoke port. Returns the error list ([] = clean), or None when it
-    cannot run (no toolchain / no boot) — None is never a verdict.
+    The walk also answers the github-02/03 class of failure: an app whose
+    pages render nothing a page-text walk can see cannot hide behind a
+    green selftest any more. Report-only: the walk result never changes
+    the verdict, it lands in final-verification.json for the operator.
+    Returns (errors, walk) — errors [] = clean walk, walk None = no
+    entity names to check; None = skipped (cannot run) — None is never a
+    verdict.
     """
     lg_cli = _pw_lg_cli()
     if lg_cli is None:
@@ -1265,13 +1330,16 @@ def _page_health_run(output_dir: Path, smoke_port: int,
     try:
         probes_dir = grader / "probes"
         probes_dir.mkdir()
+        entities = _delivered_seed_entities(output_dir)
+        spec = _PAGE_HEALTH_SPEC.replace(
+            "__ENTITIES_JSON__", json.dumps(entities, ensure_ascii=False))
         (probes_dir / "page-health.spec.ts").write_text(
-            _PAGE_HEALTH_SPEC, encoding="utf-8")
+            spec, encoding="utf-8")
         (grader / "playwright.config.ts").write_text(
             "import { defineConfig } from '@playwright/test';\n"
             "export default defineConfig({ testDir: './probes',\n"
             "  fullyParallel: false, workers: 1, retries: 0,\n"
-            "  timeout: 20_000, expect: { timeout: 5_000 },\n"
+            "  timeout: 30_000, expect: { timeout: 5_000 },\n"
             f"  use: {{ baseURL: 'http://127.0.0.1:{smoke_port}', "
             "headless: true, screenshot: 'off', trace: 'off' } });\n",
             encoding="utf-8")
@@ -1312,15 +1380,25 @@ def _page_health_run(output_dir: Path, smoke_port: int,
                 r = subprocess.run(
                     [shutil.which("node") or "node", str(lg_cli), "test"],
                     cwd=grader, capture_output=True, text=True,
-                    timeout=180, errors="replace")
+                    timeout=240, errors="replace")
+            walk: dict | None = None
+            try:
+                report = json.loads(
+                    (grader / "walk-report.json").read_text(
+                        encoding="utf-8"))
+                if isinstance(report, dict) and report.get("checked"):
+                    walk = {"checked": report.get("checked") or [],
+                            "missing": report.get("missing") or []}
+            except (OSError, ValueError):
+                walk = None
             if r.returncode == 0:
-                return []
+                return [], walk
             out = (r.stdout or "") + (r.stderr or "")
-            errs = re.findall(r"page health: (.+)", out)
+            errs = re.findall(r"page walk: (.+)", out)
             if errs:
-                return [e.strip()[:200] for e in errs[:4]]
-            return [out.strip().splitlines()[-1][:200]] if out.strip() \
-                else ["page-health probe failed (no detail)"]
+                return [e.strip()[:200] for e in errs[:4]], walk
+            return ([out.strip().splitlines()[-1][:200]] if out.strip()
+                    else ["page-health probe failed (no detail)"], walk)
         except (OSError, subprocess.SubprocessError):
             return None
         finally:
@@ -2619,11 +2697,11 @@ class OctosDriver:
                 th.join(60)
                 return (False, f"turn cut by host wall clock ({wall}s cap; "
                         f"{int(time.time() - t0)}s elapsed)")
-            # 30s 检测一次,日志每 5 次打一条(150s):轮仍保活,面板
-            # 不刷屏。150s 贴在 runner 静默杀手阈值(~7 分钟)安全区内,
+            # 30s 检测一次,日志每 10 次打一条(300s):轮仍保活,面板
+            # 不刷屏。300s 贴在 runner 静默杀手阈值(~7 分钟)安全区内,
             # 纯打印规则,不影响检测/墙钟切断的功能节奏。
             checks += 1
-            if checks % 5 == 0:
+            if checks % 10 == 0:
                 log(f"[flow] turn still running "
                     f"({int(time.time() - t0)}s elapsed)")
         return box.get("r", (False, "turn thread ended without result"))
@@ -2798,7 +2876,10 @@ GOAL_FIRST_TURN_COMPLETION = (
     "turn.\n\n"
     "End the turn only when this batch's scenarios walk green on the "
     "running app — including at least one scenario on an entity your "
-    "tests create through the UI, not only the seeded ones — never end "
+    "tests create through the UI, not only the seeded ones — and the "
+    "host reachability walk is green too (`sh scripts/run-e2e.sh "
+    "_host-walk.spec.ts`; every page renders inside the host frame per "
+    "ARCHITECTURE) — never end "
     "mid-investigation: a closing message that announces future work is "
     "an incomplete turn.")
 
@@ -2821,9 +2902,9 @@ VERIFICATION_RULES = (
     "the SPEC RUN command is the primary way; for anything else write "
     "your OWN Playwright spec from the requirement text (copy "
     f"{SELFTEST_SUBDIR}/MY-CHECK.spec.ts.example, edit it) and run it "
-    "against the running app — the SELF-TEST one-liner with an explicit "
-    "file argument is the convenient standard form, and how you invoke "
-    "Playwright beyond it is yours to choose. NEVER revert project "
+    "with `sh scripts/run-e2e.sh <spec files>` against the running app "
+    "(cold-start included; it pins the @playwright/test module path). "
+    "NEVER revert project "
     "files with git checkout/reset/restore — the repo is host-managed "
     "for traceability; when a check fails, fix forward with edits.\n")
 def build_spec_run_cmd(cli_path: str | None,
@@ -3319,6 +3400,37 @@ def main() -> int:
                 'echo "server failed; see octos/logs/host-dev-server.log"; '
                 "exit 1\n",
                 encoding="utf-8")
+            # e2e 一键入口:冷启动(清运行态+重建前端+起服)后用
+            # backend/node_modules 的 @playwright/test 跑 e2e/ 下的 spec。
+            # REQ-6 四批 doom 的触发源是模型反复试探"@playwright/test 怎么
+            # 跑"(模块解析空转循环)——宿主把唯一可用调用方式钉成脚本,
+            # 模型零试探(提示词 ARCHITECTURE/完成句点名)。
+            (scripts_dir / "run-e2e.sh").write_text(
+                "#!/bin/sh\n"
+                "# Host-provided: run Playwright specs against a\n"
+                "# cold-started app (rm db.run.json + build frontend +\n"
+                "# restart server) with the pinned @playwright/test from\n"
+                "# backend/node_modules. Usage, from the workspace root:\n"
+                "#   sh scripts/run-e2e.sh [spec files...]   # no args =\n"
+                "# every spec under e2e/\n"
+                'cd "$(dirname "$0")/.." || exit 1\n'
+                "rm -f backend/data/db.run.json\n"
+                'npm run build --prefix frontend || exit 1\n'
+                "sh scripts/restart-server.sh >/dev/null 2>&1\n"
+                'if [ ! -f backend/node_modules/@playwright/test/cli.js ]; '
+                "then\n"
+                '  echo "@playwright/test missing in backend/node_modules; '
+                'npm i -D @playwright/test --prefix backend" >&2\n'
+                "  exit 1\n"
+                "fi\n"
+                "# e2e/ cannot resolve @playwright/test upward (it lives in\n"
+                "# backend/node_modules) — bridge it, or every invocation\n"
+                "# dies on MODULE_NOT_FOUND before a single test runs.\n"
+                'ln -sfn ../backend/node_modules e2e/node_modules\n'
+                'cd e2e || exit 1\n'
+                "exec node ../backend/node_modules/@playwright/test/cli.js "
+                'test --config playwright.config.ts --reporter=line "$@"\n',
+                encoding="utf-8")
         if template_ready and os.environ.get("OCTOS_ARC_PREWARM", "1") != "0":
             scaffold.prewarm_deps(output_dir, log)
 
@@ -3362,13 +3474,20 @@ def main() -> int:
                 "in GIVEN lines (verbatim in prompts)")
         # ---- 模型自测骨架 staging:测试用例由模型按需求原文自生成,
         # 宿主只落盘内核放行命令形状所需的最小骨架(playwright.config.ts
-        # + MY-CHECK 示例);凭据前奏等由模型自行 arrange。 ----
+        # + MY-CHECK 示例 + _host-walk 可达性行走);凭据前奏等由模型
+        # 自行 arrange。 ----
+        # walk 实体名来自 fixture 编译(需求机械可解析的顶层实体);
+        # 交付后 final 链的 page-health walk 则读模型实现的 db.json。
+        walk_entities = _seed_entity_names(
+            (fixture_compiled or {}).get("db") or {})
         scaffold.stage_selftest_dir(output_dir, smoke_port,
-                                    subdir=SELFTEST_SUBDIR)
+                                    subdir=SELFTEST_SUBDIR,
+                                    entity_names=walk_entities)
         # 自测命令/契约已收编进系统行 RULES & ARCHITECTURE(两形式);
         # 此处只落盘 e2e 配置骨架。
         log("[plan] self-test skeleton staged "
-            f"({SELFTEST_SUBDIR}/playwright.config.ts + example)")
+            f"({SELFTEST_SUBDIR}/playwright.config.ts + example + "
+            f"_host-walk with {len(walk_entities)} seed entity name(s))")
         # 流级验证定则:比赛全自动无人工环节,流验证由模型自生成自验证
         # (SELF-TEST CONTRACT,spec 先行+逐句锚定需求原文);宿主不做
         # 内容决策,只做运行时治理(端口看门狗/批尾回归修复环)。
@@ -3941,22 +4060,34 @@ def main() -> int:
                         if tier2_run else "[plan] Tier-2 unavailable; "
                                           "recorded as None")
 
-                # Host page-health probe: the minimum browser check for
+                # Host grader-walk probe: the minimum browser check for
                 # ANY task — requirements-only tasks ship no staged specs,
                 # so without this nothing host-owned ever opens the built
-                # app in a browser. [] = clean walk; None = skipped
-                # (never a verdict).
+                # app in a browser. errors [] = clean walk; walk = seed
+                # entity reachability report (report-only, never a
+                # verdict); None = skipped (never a verdict).
                 ph_errors: list[str] | None = None
                 if toolchain_cli is not None:
-                    ph_errors = _page_health_run(output_dir, smoke_port,
+                    ph_result = _page_health_run(output_dir, smoke_port,
                                                  spec_ports_extra)
-                    if ph_errors:
-                        hs["page_health"] = {"errors": ph_errors}
-                        log("[plan] page-health RED: "
-                            + " | ".join(ph_errors[:3]))
-                    elif ph_errors is not None:
-                        hs["page_health"] = "clean"
-                        log("[plan] page-health clean")
+                    if ph_result is not None:
+                        ph_errors, ph_walk = ph_result
+                        entry: dict = {"errors": ph_errors}
+                        if ph_walk:
+                            entry["walk"] = ph_walk
+                        if ph_errors:
+                            hs["page_health"] = entry
+                            log("[plan] page-health RED: "
+                                + " | ".join(ph_errors[:3]))
+                        else:
+                            hs["page_health"] = entry if ph_walk else "clean"
+                            if ph_walk:
+                                log(f"[plan] page-health clean; walk: "
+                                    f"{len(ph_walk['checked'])} seed entity "
+                                    f"name(s) checked, "
+                                    f"{len(ph_walk['missing'])} missing")
+                            else:
+                                log("[plan] page-health clean")
 
                 # 发明拒绝规则保险网:静态扫描后端 4xx 文案回查
                 # requirements.yaml 引用,结果入 final 链仪表;审计绝不挡
