@@ -555,6 +555,47 @@ def _capture_doom_evidence(output_dir, focus_id: str, driver,
         return None
 
 
+def _node_spec_evidence(output_dir: Path, node_ids: list[str],
+                        evidence: dict | None) -> dict[str, dict]:
+    """节点级 spec 证据桥(感知层,零执行语义)。
+
+    节点 id 在 e2e/*.spec.ts 正文中的出现决定 spec→节点归属——工单
+    SCENARIOS 的场景名天然携带 `REQ-x-y-z:` 前缀,模型自写 spec 引用
+    场景名时 id 随之进文件,不依赖文件命名约定。再并上
+    _collect_selftest_evidence 的每文件末次结果:
+      done=有运行且全绿;blocked=任一末次运行有红;
+      unattempted=无文件或从未运行。
+    粒度上限(如实):同一命令跑多文件时计数是聚合值,红会连坐同命令
+    的文件——只影响日志判读,不影响任何执行路径。"""
+    e2e = Path(output_dir) / "e2e"
+    per_spec = (evidence or {}).get("specs") or {}
+    texts: dict[str, str] = {}
+    if e2e.is_dir():
+        for f in sorted(e2e.glob("*.spec.ts")):
+            if f.name.startswith("_host-walk"):
+                continue
+            try:
+                texts[f.name] = f.read_text(encoding="utf-8",
+                                            errors="replace")
+            except OSError:
+                continue
+    out: dict[str, dict] = {}
+    for nid in node_ids:
+        files = [name for name, text in texts.items() if nid in text]
+        results = [rec for name in files for key, rec in per_spec.items()
+                   if key == name or key.endswith("/" + name)
+                   or key.endswith("\\" + name)]
+        if not results:
+            out[nid] = {"verdict": "unattempted", "specs": files}
+        elif any((r.get("failed") or 0) > 0 for r in results):
+            out[nid] = {"verdict": "blocked", "specs": files}
+        elif all((r.get("passed") or 0) > 0 for r in results):
+            out[nid] = {"verdict": "done", "specs": files}
+        else:
+            out[nid] = {"verdict": "unattempted", "specs": files}
+    return out
+
+
 def zero_output_reentry_prompt(turn_core: str) -> str:
     """检测B 重入工单:turn 干净返回但零项目文件落盘(全程只读探索/
     被无标记内核终局收走,如 shell-spiral 盲区)。前缀直书零进展+立即
@@ -2885,11 +2926,13 @@ GOAL_FIRST_TURN_COMPLETION = (
 
 BOOTSTRAP_PREAMBLE = """\
 BOOTSTRAP (first turn of the run only):
-(a) implement the seed: backend/data/db.json from every in-scope GIVEN \
-line (plus a data: section if the requirement has one) — every named \
+(a) implement the seed: backend/data/db.json from every GIVEN line below \
+(plus a data: section if the requirement has one) — every named \
 entity, every account with the exact emails and passwords quoted there \
 (scrypt-hashed via store.hash; your tests sign in with the plaintext \
-passwords), and the ownership/permission relationships the text states.
+passwords), and the ownership/permission relationships the text states. \
+Later work orders carry their own GIVEN lines under the same seed \
+obligation — extend db.json in place, never rebuild it from scratch.
 (b) every actor the GIVEN lines or descriptions sign in as — named \
 humans or role phrases — must be able to sign in and hold the \
 permissions the text states.
@@ -3953,6 +3996,16 @@ def main() -> int:
                     # 不必再从 gate 多行拼推断。平台 e2e 是唯一终裁。
                     log(f"[plan] batch {focus_id} verdict={batch_state} "
                         f"(turn {main_turn_reason})")
+                    if not batch_turn_ok or kernel_cut:
+                        # 节点级感知(只读):blocked 批到底落了什么——
+                        # 法医面,零执行语义;粒度上限(spec 命令聚合
+                        # 红连坐)只影响判读。重排决策属 A/C/B 续跑梯子。
+                        verdicts = _node_spec_evidence(
+                            output_dir, batch_ids,
+                            _collect_selftest_evidence(output_dir))
+                        log("[plan] batch " + focus_id + " nodes: "
+                            + ", ".join(f"{nid}={verdicts[nid]['verdict']}"
+                                        for nid in batch_ids))
 
                     if batch_turn_ok and not kernel_cut:
                         completed_specs.extend(

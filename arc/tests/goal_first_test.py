@@ -1260,6 +1260,62 @@ class DumpRuntimePromptsTests(unittest.TestCase):
                               encoding="utf-8"))
 
 
+class NodeIsolationTests(unittest.TestCase):
+    """节点级 spec 证据桥=感知层(10-03 重审定则)。
+
+    只读:失败批尾一行节点裁决,回答"blocked 批到底落了什么"(法医
+    面)。requeue 执行层同日重审撤销——A/C/B 续跑梯子已含 C 级新会话
+    重跑本批,触发源已被 run-e2e.sh 根修,且粒度收益场景(半程
+    blocked 批)真实 run 未出现、聚合证据可能重做已绿节点。
+    BOOTSTRAP 诚实钉同轮落地:种子义务批次化,in-scope 全量承诺禁
+    回流(最小读取纪律)。"""
+
+    def test_node_spec_evidence_verdicts(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            e2e = root / "e2e"
+            e2e.mkdir()
+            (e2e / "req6-2-1.spec.ts").write_text(
+                "// REQ-6-2-1: Create PR scenario\ntest('a', () => {});")
+            (e2e / "req6-2-2.spec.ts").write_text(
+                "// REQ-6-2-2: Edit PR scenario\ntest('b', () => {});")
+            (e2e / "_host-walk.spec.ts").write_text(
+                "// REQ-6-2-3 must NOT attribute via the host walk")
+            evidence = {"specs": {
+                "e2e/req6-2-1.spec.ts": {"passed": 2, "failed": 0,
+                                         "ts": "t1"},
+                "e2e/req6-2-2.spec.ts": {"passed": None, "failed": 3,
+                                         "ts": "t2"},
+            }}
+            v = main._node_spec_evidence(
+                root, ["REQ-6-2-1", "REQ-6-2-2", "REQ-6-2-3"], evidence)
+            self.assertEqual(v["REQ-6-2-1"]["verdict"], "done")
+            self.assertEqual(v["REQ-6-2-2"]["verdict"], "blocked")
+            self.assertEqual(v["REQ-6-2-3"]["verdict"], "unattempted")
+            self.assertEqual(v["REQ-6-2-1"]["specs"], ["req6-2-1.spec.ts"])
+
+    def test_node_spec_evidence_without_runs(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            e2e = root / "e2e"
+            e2e.mkdir()
+            (e2e / "req7-1.spec.ts").write_text("// REQ-7-1 never ran")
+            v = main._node_spec_evidence(root, ["REQ-7-1"], None)
+            self.assertEqual(v["REQ-7-1"]["verdict"], "unattempted")
+
+    def test_bootstrap_seed_obligation_is_batch_honest(self):
+        # 种子义务批次化(10-03 重审拍板):BOOTSTRAP 只承诺本批 GIVEN,
+        # 后批由每批 SEED 行自愈(extend in place)——禁止 "in-scope
+        # 全量承诺" 回流:它不可兑现且诱导 turn 1 通读全 yaml,违反
+        # 最小读取纪律。
+        self.assertIn("every GIVEN line below", main.BOOTSTRAP_PREAMBLE)
+        self.assertNotIn("in-scope GIVEN line", main.BOOTSTRAP_PREAMBLE)
+        self.assertIn("never rebuild it from scratch",
+                      main.BOOTSTRAP_PREAMBLE)
+
+
 class SeedOwnershipTests(unittest.TestCase):
     """09-30 定则:宿主播种退役——GIVEN 原样进上下文,种子(db.json)
     由模型按需求的 data: 段与 GIVEN 行实现;宿主只留 compile_seed 纯
