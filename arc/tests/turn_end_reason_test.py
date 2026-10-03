@@ -176,12 +176,28 @@ class DoomCallSignatureTests(unittest.TestCase):
                          400)
 
     def test_non_shell_arguments_rendered_empty(self):
-        calls = [{"name": "read", "arguments": {"path": "a.md"}}
+        calls = [{"name": "read", "arguments": {"p": "x"}}
                  for _ in range(5)]
         sig = main.doom_call_signature(calls)
         self.assertEqual(sig["tool"], "read")
         self.assertEqual(sig["count"], 5)
         self.assertEqual(sig["command"], "")
+
+    def test_context_log_cmd_key_extracted(self):
+        # 内核 context-log tools.jsonl 的 bash 行用 cmd 键(hydrate 用
+        # command)——两条数据源都要能点名命令原文。
+        calls = [{"name": "bash", "arguments": {"cmd": "grep -n x f.ts"}}
+                 for _ in range(3)]
+        self.assertEqual(main.doom_call_signature(calls)["command"],
+                         "grep -n x f.ts")
+
+    def test_path_fallback_names_read_loops(self):
+        # read_file 死循环(10-03 REQ-3 双杀形态)的取证点名文件路径。
+        calls = [{"name": "read_file", "arguments": {"path": "a.jsx"}}
+                 for _ in range(4)]
+        sig = main.doom_call_signature(calls)
+        self.assertEqual(sig["tool"], "read_file")
+        self.assertEqual(sig["command"], "a.jsx")
 
 
 class DoomEvidenceCaptureTests(unittest.TestCase):
@@ -194,17 +210,17 @@ class DoomEvidenceCaptureTests(unittest.TestCase):
         driver = type("D", (), {"kernel_terminal": kernel_terminal})()
         if with_tool_method:
             driver.recent_tool_calls = lambda: tool_calls
-        main._capture_doom_evidence(Path(tmp), "REQ-6-2-1", driver,
-                                    logs.append)
+        sig = main._capture_doom_evidence(Path(tmp), "REQ-6-2-1", driver,
+                                          logs.append)
         events = Path(tmp) / "octos" / "doom-events.jsonl"
         lines = (events.read_text().splitlines()
                  if events.exists() else [])
-        return logs, [json.loads(x) for x in lines]
+        return logs, [json.loads(x) for x in lines], sig
 
     def test_capture_writes_event_and_logs_summary(self):
         calls = [_bash_call(1)] + [_bash_call(2) for _ in range(7)]
         with tempfile.TemporaryDirectory() as tmp:
-            logs, records = self._run(tmp, calls)
+            logs, records, sig = self._run(tmp, calls)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["node"], "REQ-6-2-1")
         self.assertEqual(records[0]["tool"], "bash")
@@ -213,21 +229,123 @@ class DoomEvidenceCaptureTests(unittest.TestCase):
         self.assertEqual(records[0]["reason"], DOOM_ROW)
         self.assertTrue(any("[doom] REQ-6-2-1: bash x7" in x
                             for x in logs), logs)
+        # 返回签名供 C 级修复工单点名禁令。
+        self.assertEqual(sig, {"tool": "bash", "count": 7,
+                               "command": "cmd-2"})
 
     def test_no_terminal_no_capture(self):
         with tempfile.TemporaryDirectory() as tmp:
-            logs, records = self._run(tmp, [_bash_call(1)],
-                                      kernel_terminal=None)
+            logs, records, sig = self._run(tmp, [_bash_call(1)],
+                                           kernel_terminal=None)
         self.assertEqual(records, [])
         self.assertEqual(logs, [])
+        self.assertIsNone(sig)
 
     def test_degrades_without_recent_tool_calls(self):
         with tempfile.TemporaryDirectory() as tmp:
-            logs, records = self._run(tmp, [], with_tool_method=False)
+            logs, records, sig = self._run(tmp, [], with_tool_method=False)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].get("tool"), None)
         self.assertTrue(any("no repeated-call signature" in x
                             for x in logs), logs)
+        self.assertIsNone(sig)
+
+
+class RecentToolCallsTests(unittest.TestCase):
+    """OctosDriver.recent_tool_calls:从内核 context-log
+    (<cwd>/.octos/context-logs/*/tools.jsonl)尾部取回调用签名——
+    hydrate 消息投影不带 tool_calls 字段(10-03 平台跑 8/8 取证落空
+    的根因),context-log 是逐调用落盘的权威面。"""
+
+    def _driver(self, cwd: Path) -> main.OctosDriver:
+        return main.OctosDriver(
+            "octos-bin-stub", cwd, {}, cwd / "data", 100,
+            cwd / "events" / "log.jsonl")
+
+    def _write_session(self, cwd: Path, name: str, rows: list,
+                       mtime: float | None = None) -> None:
+        d = cwd / ".octos" / "context-logs" / name
+        d.mkdir(parents=True, exist_ok=True)
+        # str 行原样写入(坏行夹具),dict 行序列化写入。
+        text = "".join(
+            (r if isinstance(r, str)
+             else json.dumps(r, ensure_ascii=False)) + "\n"
+            for r in rows)
+        f = d / "tools.jsonl"
+        f.write_text(text, encoding="utf-8")
+        if mtime is not None:
+            os.utime(f, (mtime, mtime))
+
+    def test_maps_tail_rows_and_newest_session_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            self._write_session(cwd, "20261002-1346", [
+                {"kind": "tool_call", "tool": "bash",
+                 "args": {"cmd": "old-session-call"}},
+            ], mtime=1_000_000)
+            self._write_session(cwd, "20261002-1404", [
+                {"kind": "tool_call", "tool": "bash",
+                 "args": {"cmd": "grep -n x e2e/req2.spec.ts"}},
+                {"kind": "tool_call", "tool": "read_file",
+                 "args": {"path": "a.jsx"}},
+                {"kind": "other", "tool": "noise", "args": {}},
+                "{broken json",
+                {"kind": "tool_call", "tool": "bash",
+                 "args": {"cmd": "npm run build"}},
+            ], mtime=2_000_000)
+            calls = self._driver(cwd).recent_tool_calls()
+        self.assertEqual(calls, [
+            {"name": "bash",
+             "arguments": {"cmd": "grep -n x e2e/req2.spec.ts"}},
+            {"name": "read_file", "arguments": {"path": "a.jsx"}},
+            {"name": "bash", "arguments": {"cmd": "npm run build"}},
+        ])
+
+    def test_limit_returns_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            self._write_session(cwd, "s1", [
+                {"kind": "tool_call", "tool": "bash",
+                 "args": {"cmd": f"c{i}"}} for i in range(5)
+            ])
+            calls = self._driver(cwd).recent_tool_calls(limit=2)
+        self.assertEqual([c["arguments"]["cmd"] for c in calls],
+                         ["c3", "c4"])
+
+    def test_missing_context_logs_degrades_to_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._driver(Path(tmp)).recent_tool_calls(),
+                             [])
+
+
+class FreshSessionRepairPromptTests(unittest.TestCase):
+    """C 级修复工单:新会话先盘点→禁重写→点名被杀命令禁令,后接
+    原批工单正文(完成锚保持最近位置)。"""
+
+    CORE = ("TASK: implement the requirements below (REQ-3-1-1).\n\n"
+            "End the turn only when this batch's scenarios walk green.")
+
+    def test_prompt_surveys_bans_command_and_keeps_core(self):
+        prompt = main.fresh_session_repair_prompt(
+            self.CORE, DOOM_REASON,
+            "grep -n switchToSheet e2e/req2.spec.ts")
+        self.assertTrue(prompt.startswith("FRESH RESTART:"))
+        self.assertIn(DOOM_REASON, prompt)
+        self.assertIn("Survey the current state first", prompt)
+        self.assertIn("do NOT re-implement or rewrite", prompt)
+        self.assertIn("repeating this exact call with identical "
+                      "arguments: `grep -n switchToSheet e2e/req2.spec.ts`",
+                      prompt)
+        self.assertIn("Never run it again unchanged", prompt)
+        self.assertIn("smaller edits", prompt)
+        self.assertTrue(prompt.endswith(self.CORE))
+
+    def test_no_command_omits_ban_line(self):
+        prompt = main.fresh_session_repair_prompt(self.CORE,
+                                                  TRUNCATED_REASON, None)
+        self.assertIn(TRUNCATED_REASON, prompt)
+        self.assertNotIn("Never run it again unchanged", prompt)
+        self.assertTrue(prompt.endswith(self.CORE))
 
 
 class TurnReentryPromptTests(unittest.TestCase):

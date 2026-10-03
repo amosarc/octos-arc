@@ -513,19 +513,23 @@ def doom_call_signature(tool_calls: list[dict]) -> dict | None:
         args = (json.loads(args_raw)
                 if args_raw and isinstance(args_raw, str) else args_raw)
         if isinstance(args, dict):
-            command = str(args.get("command") or "")
+            # 键链:标准 command / 内核 context-log tools.jsonl 的 bash 行
+            # 用 cmd、read_file 行用 path(read 死循环的取证同样要点名)。
+            command = str(args.get("command") or args.get("cmd")
+                          or args.get("path") or "")
     except ValueError:
         command = ""
     return {"tool": name, "count": count, "command": command[:400]}
 
 
 def _capture_doom_evidence(output_dir, focus_id: str, driver,
-                           log) -> None:
+                           log) -> dict | None:
     """内核杀轮取证落盘(尽力而为,绝不抛):重复的命令原文追加到
     octos/doom-events.jsonl(工作区直接可见,随 zip 带回),并在 stderr
-    面板打一行即时可见的摘要。首次切断与重入后再切各采一次。"""
+    面板打一行即时可见的摘要。首次切断与重入后再切各采一次。返回提取
+    的签名(供 C 级修复工单点名禁令),无签名返回 None。"""
     if not driver.kernel_terminal:
-        return
+        return None
     try:
         fetch = getattr(driver, "recent_tool_calls", None)
         sig = (doom_call_signature(fetch()) if callable(fetch) else None)
@@ -542,11 +546,13 @@ def _capture_doom_evidence(output_dir, focus_id: str, driver,
         else:
             log(f"[doom] {focus_id}: kernel cut, no repeated-call "
                f"signature found in session tail")
+        return sig
     except Exception as exc:  # 取证绝不挡批循环
         try:
             log(f"[doom] evidence capture failed: {exc}")
         except Exception:
             pass
+        return None
 
 
 def zero_output_reentry_prompt(turn_core: str) -> str:
@@ -561,6 +567,38 @@ def zero_output_reentry_prompt(turn_core: str) -> str:
         "or specs) before you run anything else. Do not re-read files "
         "you have already read; write from what you already know and "
         "verify afterwards.\n\n")
+    return prefix + turn_core
+
+
+def fresh_session_repair_prompt(turn_core: str, reason: str,
+                                repeated_command: str | None) -> str:
+    """C 级修复工单(新会话):同会话重入仍被内核切断后的最后一轮。
+
+    不动点(同叙述+同调用)是上下文尾部现象,同会话重入压不过——10-03
+    平台跑三批双 doom 实证。本工单在 driver.close() 之后的新会话发出:
+    循环历史全部清零,前缀位引导才真正被消费。与 A/B 的 "do not re-read"
+    相反,新会话必须先盘点磁盘现状;禁重写防推倒好状态;点名禁令把被杀
+    命令原文钉进前缀(取证来自 tools.jsonl,repeated_command 为 None 时
+    省略该行,如 output_truncated 形态)。后接原批工单正文(完成锚保持
+    最近位置);不带 BOOTSTRAP——首 turn 义务已在盘上。"""
+    prefix = (
+        "FRESH RESTART: your previous turns on this batch were cut "
+        "mid-work (" + reason + "). This is a brand-new session with no "
+        "memory of those turns, but their work is on disk. Survey the "
+        "current state first (existing routes/features/e2e specs for "
+        "these requirements), then run the existing specs to see where "
+        "things stand. Fix what is red and implement what is missing; "
+        "do NOT re-implement or rewrite what already exists and works. ")
+    if repeated_command:
+        prefix += (
+            "The previous attempt was killed for repeating this exact "
+            "call with identical arguments: `" + repeated_command + "`. "
+            "Never run it again unchanged: when the check it performs "
+            "keeps failing, read the failure output and change the code "
+            "(or the test's approach) instead of re-running the same "
+            "command. ")
+    prefix += ("When writing large files, write them in several smaller "
+               "edits.\n\n")
     return prefix + turn_core
 
 
@@ -2708,6 +2746,45 @@ class OctosDriver:
             self._session.close()
             self._session = None
 
+    def recent_tool_calls(self, limit: int = 24) -> list[dict]:
+        """doom 杀轮取证:从内核 context-log 尾部取回最近执行的调用。
+
+        权威面是 <cwd>/.octos/context-logs/*/tools.jsonl(内核逐调用
+        落盘,selftest 取证同源);hydrate 消息投影不带 tool_calls 字段
+        (10-03 平台跑 8/8 取证落空的根因)。取 mtime 最新的会话目录=
+        刚被杀的 turn;尾部扫描与内核计数口径无关,少算被软恢复跳过的
+        调用不影响命令原文。任何失败降级为空列表,绝不在取证路径上抛。
+        """
+        try:
+            root = self.cwd / ".octos" / "context-logs"
+            files = sorted(root.glob("*/tools.jsonl"),
+                           key=lambda p: p.stat().st_mtime)
+            if not files:
+                return []
+            # 只读尾部:会话后期单文件可到 MB 级,全读浪费。窗口截断了
+            # 首行才丢弃它(文件不足窗口大小时首行是完整行)。
+            raw = files[-1].read_bytes()
+            data = raw[-65536:]
+            calls: list[dict] = []
+            lines = data.decode("utf-8", errors="replace").splitlines()
+            if len(raw) > 65536:
+                lines = lines[1:]
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict) or rec.get("kind") != "tool_call":
+                    continue
+                calls.append({"name": str(rec.get("tool") or ""),
+                              "arguments": rec.get("args")})
+            return calls[-limit:]
+        except OSError:
+            return []
+
 
 # ---------------------------------------------------------------- prompts
 # 两形式之 TURN(用户参考件 arc/prompts/TURN.md):每轮工单 = 本批家族
@@ -3591,13 +3668,18 @@ def main() -> int:
                 else:
                     wall = turn_wall(len(batch))
                     ok, text = driver.run(node_prompt, min(node_timeout, wall), wall)
-                    # 续跑层,各每批至多一次:
-                    # A=模型侧切断(doom 代收尾/output_truncated)→ 切断理由重入;
+                    # 续跑层,每级每批至多一次:
+                    # A=模型侧切断(doom 代收尾/output_truncated)→ 同会话
+                    #   切断理由重入(良性收尾螺旋,10-03 实证 2/2 救回);
+                    # C=A 后仍被切(双 doom)→ 关会话换新上下文发修复工单
+                    #   (不动点=同叙述+同调用的上下文尾部现象,同会话
+                    #   重入对它免疫,10-03 三批实证复刻同签名再被杀);
                     # B=零真产出(turn 干净返回但零项目文件落盘——纯探索轮/
-                    # shell-spiral 等无标记内核终局盲区)→ 零进展重入。
-                    # 同会话重入,模型带全上下文;预算门与批尾 trim 环同阈值;
+                    #   shell-spiral 等无标记内核终局盲区)→ 零进展重入。
+                    # 同会话重入模型带全上下文;预算门与批尾 trim 环同阈值;
                     # 重入轮结果即最终结果,仍走下方既有五道门。
                     reentry_kind = ""
+                    fresh_repair_ran = False
                     reason = reentry_reason(text, driver.kernel_terminal)
                     if driver.kernel_terminal:
                         # 内核杀轮取证先行(重入可能救活,但首切的
@@ -3612,7 +3694,29 @@ def main() -> int:
                         ok, text = driver.run(
                             turn_reentry_prompt(turn_core, reason),
                             min(node_timeout, wall), wall)
-                    if (ok
+                        re_reason = reentry_reason(text,
+                                                   driver.kernel_terminal)
+                        if (re_reason and not time_up()
+                                and remaining()
+                                >= final_reserve + node_floor):
+                            reentry_kind = "cut+fresh-session"
+                            sig = _capture_doom_evidence(
+                                output_dir, focus_id, driver, log)
+                            log(f"[flow] {focus_id}: re-entry cut again "
+                                f"({re_reason}); fresh-session repair "
+                                "turn starting (C, 1 max)")
+                            # close 后下次 run 惰性重建新 session+profile,
+                            # 循环历史清零,系统行(AGENTS.md)随 profile
+                            # 重注入。
+                            driver.close()
+                            ok, text = driver.run(
+                                fresh_session_repair_prompt(
+                                    turn_core, re_reason,
+                                    (sig or {}).get("command")),
+                                min(node_timeout, wall), wall)
+                            fresh_repair_ran = True
+                    if (not fresh_repair_ran
+                            and ok
                             and not kernel_terminal_marker(
                                 driver.kernel_terminal)
                             and not project_files_changed(output_dir, t0)
@@ -3628,7 +3732,8 @@ def main() -> int:
                 batch_turn_ok = ok
                 kernel_cut = kernel_terminal_marker(driver.kernel_terminal)
                 if kernel_cut:
-                    # 重入后再切(双 doom)的第二笔取证。
+                    # 修复轮(C)仍被切的追加上证;取证读 mtime 最新的
+                    # context-log,即刚结束的这个会话。
                     _capture_doom_evidence(output_dir, focus_id, driver, log)
                 main_turn_reason = _turn_end_reason(ok, text,
                                                     driver.kernel_terminal)
