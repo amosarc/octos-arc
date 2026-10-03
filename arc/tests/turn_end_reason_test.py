@@ -52,11 +52,66 @@ class KernelTerminalMarkerTests(unittest.TestCase):
     def test_model_text_is_no_marker(self):
         self.assertIsNone(main.kernel_terminal_marker(MODEL_TEXT))
 
-    def test_untabled_kernel_marker_is_no_marker(self):
-        # 词表范围钉住:[LOOP DETECTED] 等其余内核终局面尚未收录。
-        self.assertIsNone(
-            main.kernel_terminal_marker(
-                "[LOOP DETECTED] The agent kept calling the same tool."))
+    def test_loop_thrash_row_matches(self):
+        # 10-03 正式赛 REQ-5 真凶:警告注入后复发杀(loop_runner.rs
+        # loop_detected_terminal_message),此前词表漏判 → 假 done →
+        # 重入+修复轮全没触发。前缀长于 "[LOOP DETECTED]" 以避开同词头
+        # 的中途警告行。
+        row = ("[LOOP DETECTED] The agent kept calling the same tool "
+               "with the same arguments even after a warning was "
+               "injected. Stopping the turn to avoid a thrash. Please "
+               "rephrase your request or try a different angle.")
+        self.assertEqual(main.kernel_terminal_marker(row), "loop thrash")
+        self.assertEqual(main.kernel_terminal_marker("\n " + row),
+                         "loop thrash")
+
+    def test_cycle_warning_rows_are_not_markers(self):
+        # 同 "[LOOP DETECTED]" 词头的中途警告行(工具结果,非终局):
+        # 短前缀会把它们误当切断——钉住长前缀纪律。
+        for row in ("[LOOP DETECTED] The last 6 tool calls follow a "
+                    "repeating pattern (cycle length 2). Try a different "
+                    "approach or break the cycle.",
+                    "[LOOP DETECTED] (companion call in the same batch; "
+                    "see paired result for the warning)."):
+            self.assertIsNone(main.kernel_terminal_marker(row), row)
+
+    def test_budget_kills_are_tabled_without_reentry(self):
+        # 预算/终止类切断(budget.rs / retry 耗尽 / 审查):记账面全覆盖
+        # (不再假 done),重入面一律 None(与墙钟/空闲同则)。
+        cases = (
+            ("Token budget exceeded (120000 of 131072).", "token budget"),
+            ("Activity timeout (900s limit).", "activity timeout"),
+            ("Idle progress timeout (300s without progress).",
+             "idle progress timeout"),
+            ("The agent did not complete within 200 iterations. "
+             "The task may be too broad for a single turn.",
+             "max iterations"),
+            ("The requested operation already exhausted its internal "
+             "retries. I stopped a repeated 'bash' call in this turn so "
+             "you do not have to wait for the same work again.",
+             "tool retry exhausted"),
+            ("[Content was blocked by the model's safety filter. "
+             "Please rephrase your request.]", "content filter"),
+            ("[HOOK DENIED] Prompt was blocked by a user_prompt_submit "
+             "hook.", "hook denied"),
+        )
+        for row, label in cases:
+            self.assertEqual(main.kernel_terminal_marker(row), label, row)
+            self.assertIsNone(main.reentry_reason(MODEL_TEXT, row), row)
+            self.assertEqual(main._batch_state(True, label), "blocked")
+            self.assertEqual(main._turn_end_reason(True, MODEL_TEXT, row),
+                             f"kernel cut: {label}")
+
+    def test_green_stop_stays_benign(self):
+        # [green stop] 是设计内良性收尾(内核明说宿主按正常完成处理,
+        # 自测门兜底):永不入切断词表,恒按模型自选收束。
+        row = ("[green stop] The staged acceptance spec passed identically "
+               "twice with no source changes between the runs; the turn "
+               "ended after the wrap-up window to bank the verified "
+               "result. The requirement under work is considered complete.")
+        self.assertIsNone(main.kernel_terminal_marker(row))
+        self.assertEqual(main._turn_end_reason(True, row, row),
+                         "model end_turn")
 
     def test_shell_spiral_marker_matches(self):
         # 2026-10-02 sheet 85s 误杀:spiral 终局以模型文本返回无标记,
@@ -123,6 +178,15 @@ class ReentryReasonTests(unittest.TestCase):
     def test_doom_terminal_reentry(self):
         self.assertEqual(main.reentry_reason(MODEL_TEXT, DOOM_ROW),
                          DOOM_REASON)
+
+    def test_loop_thrash_terminal_reentry(self):
+        # 治理切断新成员:可重入(A 级),再切触发 C 级修复轮。
+        row = ("[LOOP DETECTED] The agent kept calling the same tool "
+               "with the same arguments even after a warning was "
+               "injected. Stopping the turn to avoid a thrash. Please "
+               "rephrase your request or try a different angle.")
+        self.assertEqual(main.reentry_reason(MODEL_TEXT, row),
+                         "aborted by the kernel loop thrash guard")
 
     def test_output_truncated_reentry(self):
         self.assertEqual(main.reentry_reason(TRUNCATED_TEXT, None),

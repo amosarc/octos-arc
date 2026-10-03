@@ -434,13 +434,44 @@ def dump_runtime_prompts(output_dir: Path) -> dict:
 # 送达,行首标记前缀 → 运营短标签。stdio 通道里该行不在 message/delta 流
 # (text 看不到),由 session/hydrate 取回后在此对表;前缀匹配即可,模型
 # 正文不会以这些标记开头。
+# 治理切断(可重入:reentry_reason 经 kernel_governance_marker 触发 A 级
+# 重入,再切触发 C 级修复轮)。loop-thrash 是 10-03 正式赛 REQ-5 真凶:
+# 警告注入后复发杀,前缀必须长于 "[LOOP DETECTED]" ——该前缀同时是中途
+# 警告行("The last N tool calls follow…"/"(companion call…")的词头,
+# 短前缀会把警告误当切断。
 _KERNEL_TERMINAL_MARKERS = (
     ("[DOOM LOOP DETECTED]", "doom loop"),
     ("[SHELL SPIRAL DETECTED]", "shell spiral"),
+    ("[LOOP DETECTED] The agent kept calling", "loop thrash"),
+)
+# 预算/终止类切断(内核 budget.rs 与 retry/审查出口,无括号标记,以完整
+# 句送达):只记账不重入——重入=复活已退役的二轮机会(与墙钟/空闲同则)。
+# 前缀匹配的假阳性(模型正文恰好如此开头)远轻于假 done(整批假 PASSED,
+# REQ-5 实证 -26 分),方向取舍是故意的。
+_KERNEL_BUDGET_MARKERS = (
+    ("Token budget exceeded (", "token budget"),
+    ("Activity timeout (", "activity timeout"),
+    ("Idle progress timeout (", "idle progress timeout"),
+    ("The agent did not complete within ", "max iterations"),
+    ("The requested operation already exhausted its internal retries",
+     "tool retry exhausted"),
+    ("[Content was blocked by the model's safety filter", "content filter"),
+    ("[HOOK DENIED]", "hook denied"),
 )
 
 
 def kernel_terminal_marker(content: str | None) -> str | None:
+    """全部内核切断形态(记账面:batch_state/turn_end_reason/零写入门)。"""
+    c = str(content or "").lstrip()
+    for table in (_KERNEL_TERMINAL_MARKERS, _KERNEL_BUDGET_MARKERS):
+        for prefix, label in table:
+            if c.startswith(prefix):
+                return label
+    return None
+
+
+def kernel_governance_marker(content: str | None) -> str | None:
+    """治理切断面(可重入子集;预算/超时杀不在此列)。"""
     c = str(content or "").lstrip()
     for prefix, label in _KERNEL_TERMINAL_MARKERS:
         if c.startswith(prefix):
@@ -456,13 +487,15 @@ def _batch_state(batch_turn_ok: bool, kernel_cut: str | None) -> str:
 
 
 def reentry_reason(text: str, kernel_terminal: str | None) -> str | None:
-    """批重入触发判定:可续跑的模型侧切断才返回理由串——内核代收尾
-    (doom,经 hydrate 收尾行识别)或 output_truncated(响应撞
-    max_tokens,turn/error 文本按错误码识别)。墙钟/空闲/进程退出等
-    环境或预算性失败返回 None 不续——续跑它们等于旧二轮机会复辟。"""
-    if kernel_terminal_marker(kernel_terminal):
+    """批重入触发判定:可续跑的模型侧切断才返回理由串——内核治理切断
+    (doom/spiral/thrash,经 hydrate 收尾行识别)或 output_truncated
+    (响应撞 max_tokens,turn/error 文本按错误码识别)。墙钟/空闲/进程
+    退出等环境或预算性失败返回 None 不续——续跑它们等于旧二轮机会复辟。
+    预算类内核切断同则不重入(只记账);[green stop] 是设计内良性收尾,
+    不在词表,恒按模型自选收束处理。"""
+    if kernel_governance_marker(kernel_terminal):
         return (f"aborted by the kernel "
-                f"{kernel_terminal_marker(kernel_terminal)} guard")
+                f"{kernel_governance_marker(kernel_terminal)} guard")
     if "output_truncated" in str(text or ""):
         return "cut off by the output length limit mid-response"
     return None
