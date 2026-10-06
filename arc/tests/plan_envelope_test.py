@@ -151,7 +151,9 @@ class HostStackRulesTests(unittest.TestCase):
         # 身义/描述句断言两律后 6676;bba53e1 首页可达律后 6915;
         # 10-03 template-3 REQ-2 全灭法医(菜单瞬显/NativeSelect/引号名
         # 链接/会话头真相)后 7685;同日提示词审计去重(菜单律并回同步
-        # 渲染律/home 行回缩/头部失真句删除)后 7424,帽再次随内容走。
+        # 渲染律/home 行回缩/头部失真句删除)后 7424;10-06 github 全题
+        # 42/100 法医(登录态首页缺实体目录)——home 可达律补会话态
+        # 不变式从句后 7536,帽不动。
         self.assertLessEqual(len(r), 8000)
         # 09-28 CRUD 生成器退役:声明协议/生成层词汇不得回流
         self.assertNotIn("SCHEMA-DRIVEN", r)

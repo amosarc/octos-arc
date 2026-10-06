@@ -251,6 +251,12 @@ class MyCheckExampleTests(unittest.TestCase):
             # 超时的教训进 GESTURE RULE;示例用中性词汇,禁任务味)。
             self.assertIn("combo box BOTH ways", text)
             self.assertIn("getByRole('combobox', { name: 'Field' }", text)
+            # 10-06 github 全题 42/100 法医:自测导航全走 goto 捷径、
+            # 只验便利态(登出态点 Acme Demo 全绿),判分器登录态行走
+            # 全灭——WALK RULE 把"像首次使用者一样验证"钉进示例。
+            self.assertIn("WALK RULE", text)
+            self.assertIn("the session state the scenario starts in", text)
+            self.assertIn("page.goto is only for the initial load", text)
 
 
 class SessionGroupTests(unittest.TestCase):
@@ -783,9 +789,15 @@ class GoalFirstRulesTests(unittest.TestCase):
         # 10-03 github-stage-03 0/41 法医:评分器行走=点可见导航目标,
         # search-only 首页零可点入口 → 40/41 全灭(评测窗零 search/零
         # 仓库 fetch);种子数据写进去就是为了被使用,入口必须可见可达。
+        # 10-06 github 全题 42/100 法医:模型只给登出态建了实体目录,
+        # 登录态首页缩成仓库面板 → 判分器登录后行走全灭;可达律补
+        # 会话态不变式(登录不得缩小登出态可见的入口面)。
         rules = plan_envelope.HOST_STACK_RULES_GOAL_FIRST
         self.assertIn("reachable from the application home page by "
                       "clicking visible links or tabs", rules)
+        self.assertIn("in the session state each scenario starts from",
+                      rules)
+        self.assertIn("signing in never hides an entry", rules)
         self.assertIn("a search box or a typed URL is not an entry point",
                       rules)
         self.assertIn("seeded data exists to be used", rules)
@@ -1053,6 +1065,7 @@ class GoalFirstRulesTests(unittest.TestCase):
         for keep in ("LOCATOR RULE", "GESTURE RULE", "getByRole('region'",
                      "getByRole('option'", "Shift",
                      "PAGE-ERROR RULE", "pageerror", "unhandledrejection",
+                     "WALK RULE",
                      "expect(pageErrors.concat(rejections)"):
             self.assertIn(keep, text)
 

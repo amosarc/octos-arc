@@ -79,7 +79,9 @@ CHARTER_RULES = [
     "menu — the grader verifies session state by reading the header.",
     "Every entity the seed pre-provisions and every feature page that "
     "serves it is reachable from the application home page by clicking "
-    "visible links or tabs — a search box or a typed URL is not an "
+    "visible links or tabs — in the session state each scenario starts "
+    "from, and signing in never hides an entry that signed-out users "
+    "had — a search box or a typed URL is not an "
     "entry point; seeded data exists to be used.",
     "An entity's name renders at most once per page as visible text — "
     "breadcrumb crumb or page heading, never both; the grader's "

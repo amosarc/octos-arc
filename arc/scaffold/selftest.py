@@ -120,6 +120,16 @@ def stage_selftest_dir(output_dir: Path, smoke_port: int,
 // "element not found" and an entire error-path family can be lost that
 // way. The collectors + final expect below turn them red — keep them in
 // every spec you write, register at the top, assert at the end.
+//
+// WALK RULE — reach every page the way a first-time user does: from the
+// home page, in the session state the scenario starts in (sign in through
+// the UI when the GIVEN says signed in), by clicking visible links and
+// tabs; page.goto is only for the initial load. Each family keeps one
+// signed-in spec that walks from the home page to every kind of entity
+// it serves — a page only a typed URL reaches is a page the grader
+// never sees. Derive walk coverage from the requirement text itself:
+// every entity kind, session state, and entry the scenarios mention
+// gets a walk in your own specs — the host walk checks only seed names.
 import { test, expect } from '@playwright/test';
 
 test('my check - name what this verifies', async ({ page }) => {
