@@ -3166,8 +3166,12 @@ fn is_productive_tool_message(content: &str) -> bool {
         return false;
     }
 
-    // Positive: explicit shell success exit code.
-    if trimmed.contains("\nExit code: 0") || trimmed.ends_with("Exit code: 0") {
+    // Positive: explicit shell success exit code. Plain contains(): the
+    // receipt is HEAD-placed since the shell.rs 2026-10-02 fix, so both
+    // anchored forms (`\nExit code: 0` / ends_with) stopped matching and
+    // short successful outputs fell through to the 128-byte heuristic,
+    // starving the budget-exhaustion grace call.
+    if trimmed.contains("Exit code: 0") {
         return true;
     }
 
@@ -3254,6 +3258,19 @@ fn recover_shell_retry(
         .iter()
         .filter(|content| !is_successful_shell_output(content))
         .count();
+
+    // Degeneration gate (2026-10-04 head-receipt forensics): every arm below
+    // TERMINATES the turn, so it must only fire when the window actually
+    // degenerated into failure noise. A single benign no-match grep (exit 1)
+    // anywhere in the window plus one legitimate `git diff` used to arm
+    // DiffLikeSuccess — force-ending a healthy investigative turn with the
+    // raw diff as the assistant reply, indistinguishable downstream from a
+    // genuine model end_turn. Require a failure-DOMINANT window (strict
+    // majority) instead: genuine spirals (all-failure streaks, identical
+    // retry probes) are overwhelmingly failures; healthy rhythms are not.
+    if failed_shells * 2 <= shell_results.len() {
+        return None;
+    }
 
     // Every recovery arm below is gated on `failed_shells` because this is a
     // shell-SPIRAL detector: it only intervenes when the model is stuck
@@ -3397,20 +3414,39 @@ fn resolve_shell_command_key(messages: &[Message], tool_msg_index: usize) -> Opt
     })
 }
 
-/// Failure text of a shell output: the content with any trailing
-/// `Exit code: N` line removed and whitespace trimmed. Empty for outputs
-/// that carry nothing but the exit code — including the shell tool's
-/// "(no output)" sentinel (shell.rs renders empty stdout+stderr as
-/// literally "(no output)\n\nExit code: N"), so several DISTINCT no-match
-/// probes all sharing that sentinel count as no failure text at all and
-/// never concentrate into a spiral signature.
-fn strip_exit_code_suffix(content: &str) -> String {
-    let trimmed = content.trim_end();
-    let without_exit = match trimmed.rsplit_once("Exit code:") {
-        Some((head, tail)) if tail.trim().chars().all(|ch| ch.is_ascii_digit()) => head,
+/// Body of a shell tool output: the content minus its exit-code receipt.
+/// The receipt is HEAD-placed since the shell.rs 2026-10-02 fix —
+/// `Exit code: <token>\n\n` is prepended so downstream tail cuts can never
+/// strip it — so this reader must skip that first line. The legacy
+/// tail-placed `\n\nExit code: N` suffix is still stripped defensively.
+/// Returns the trimmed remainder ("" for a receipt-only output).
+fn shell_output_body(content: &str) -> &str {
+    let trimmed = content.trim();
+    if let Some(rest) = trimmed.strip_prefix("Exit code:") {
+        return match rest.find('\n') {
+            Some(line_end) if !rest[..line_end].trim().is_empty() => rest[line_end..].trim(),
+            _ => "",
+        };
+    }
+    match trimmed.rsplit_once("Exit code:") {
+        Some((head, tail))
+            if !tail.trim().is_empty() && tail.trim().chars().all(|ch| ch.is_ascii_digit()) =>
+        {
+            head.trim()
+        }
         _ => trimmed,
-    };
-    let failure = without_exit.trim();
+    }
+}
+
+/// Failure text of a shell output: the body left after the exit-code receipt
+/// is removed (see [`shell_output_body`]). Empty for outputs that carry
+/// nothing but the receipt — including the shell tool's "(no output)"
+/// sentinel (shell.rs renders empty stdout+stderr as
+/// `Exit code: N\n\n(no output)` since the 2026-10-02 head-placement fix) —
+/// so several DISTINCT no-match probes all sharing that sentinel count as no
+/// failure text at all and never concentrate into a spiral signature.
+fn strip_exit_code_suffix(content: &str) -> String {
+    let failure = shell_output_body(content);
     if failure == "(no output)" {
         String::new()
     } else {
@@ -3737,11 +3773,15 @@ const GREEN_STOP_TERMINAL_MESSAGE: &str =
      complete.";
 
 fn is_useful_shell_output(content: &str) -> bool {
-    let trimmed = content.trim();
-    content.contains("Exit code: 0")
-        && !trimmed.is_empty()
-        && trimmed != "Exit code: 0"
-        && !trimmed.starts_with("(no output)")
+    if !content.contains("Exit code: 0") || content.trim().is_empty() {
+        return false;
+    }
+    // Substantive body: the receipt alone (or the "(no output)" sentinel
+    // behind it) carries nothing the LLM can act on. Body-based so the check
+    // survives the 2026-10-02 head-placed receipt — the old
+    // `starts_with("(no output)")` anchor only matched the tail-era order.
+    let body = shell_output_body(content);
+    !body.is_empty() && body != "(no output)"
 }
 
 /// Tier-1 pass for this iteration (spec kv-cache-friendly-compaction): the
@@ -3801,11 +3841,12 @@ fn is_git_status_short_line(line: &str) -> bool {
     has_status && valid_status && !line[3..].trim().is_empty()
 }
 
+/// Strip the shell success receipt from recovered raw output. The receipt is
+/// head-placed since the shell.rs 2026-10-02 fix (`Exit code: 0\n\n`
+/// prefix); the legacy tail-placed suffix is still stripped defensively
+/// (see [`shell_output_body`]).
 fn strip_success_exit_suffix(content: &str) -> String {
-    content
-        .strip_suffix("\n\nExit code: 0")
-        .unwrap_or(content)
-        .to_string()
+    shell_output_body(content).to_string()
 }
 
 fn push_max_tokens_continuation(messages: &mut Vec<Message>, response: &ChatResponse) {

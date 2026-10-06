@@ -746,6 +746,28 @@ fn recover_shell_retry_output_prefers_diff_like_success() {
             "call_shell_4",
             "fatal: not a git repository\n\nExit code: 128",
         ),
+        // 2026-10-04: the recovery arms now require a failure-DOMINANT
+        // window (strict majority) so a healthy rhythm with one benign
+        // failure cannot be force-ended — this fixture needs a genuinely
+        // degenerate retry shape to exercise the DiffLike preference.
+        assistant_with_calls(vec![tool_call(
+            "call_shell_5",
+            "shell",
+            serde_json::json!({"command": "git diff -- notes.txt"}),
+        )]),
+        tool_out(
+            "call_shell_5",
+            "fatal: not a git repository\n\nExit code: 128",
+        ),
+        assistant_with_calls(vec![tool_call(
+            "call_shell_6",
+            "shell",
+            serde_json::json!({"command": "git diff -- notes.txt"}),
+        )]),
+        tool_out(
+            "call_shell_6",
+            "fatal: not a git repository\n\nExit code: 128",
+        ),
     ];
 
     let recovered = recover_shell_retry(&messages, 4).expect("should recover");
@@ -960,6 +982,19 @@ fn productive_message_rejects_user_approval_denial_even_when_long() {
         "fixture must exceed the 128-byte bound"
     );
     assert!(!is_productive_tool_message(&denial));
+}
+
+#[test]
+fn productive_message_accepts_head_placed_receipt_success() {
+    // shell.rs 2026-10-02 moved the receipt to the HEAD; the old anchored
+    // checks (`\nExit code: 0` / ends_with) stopped matching and short
+    // successful outputs fell to the 128-byte heuristic — starving the
+    // budget-exhaustion grace call for shell-heavy turns.
+    assert!(is_productive_tool_message("Exit code: 0\n\nok"));
+    // Legacy tail-placed receipt stays productive.
+    assert!(is_productive_tool_message("done\n\nExit code: 0"));
+    // A failing receipt is still not progress.
+    assert!(!is_productive_tool_message("Exit code: 1\n\nboom"));
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1853,8 +1888,10 @@ fn distinct_failing_exploration_commands_are_not_a_retry_spiral() {
     // not a loop, and must not trip it.
     let mut messages = vec![Message::user("analyze the makepad repo")];
     // The grep outputs model the REAL shell tool: a no-match grep prints
-    // nothing, and the tool renders empty output as "(no output)" plus the
-    // exit-code suffix (shell.rs), not as a bare "Exit code: 1".
+    // nothing, and the tool renders empty output as the exit-code receipt
+    // plus a "(no output)" sentinel (shell.rs; pre-2026-10-02 tail order
+    // here — the head-placed twin lives in
+    // `head_receipt_no_output_sentinel_blocks_retry_limit_concentration`).
     messages.extend(spiral_shell_exchange(
         "call_1",
         "grep -rn 'Widget' src/",
@@ -1880,6 +1917,137 @@ fn distinct_failing_exploration_commands_are_not_a_retry_spiral() {
         recover_shell_retry(&messages, 4).is_none(),
         "distinct failing commands are exploration, not a retry spiral"
     );
+}
+
+/// 2026-10-04 forensics: since shell.rs moved the exit-code receipt to the
+/// HEAD (`Exit code: N\n\n(no output)`), the "(no output)" sentinel in the
+/// failure-signature extractor went dead — distinct no-match probes with the
+/// same exit code all hashed to one identical failure text and the RetryLimit
+/// arm fired on healthy exploration ("stop retrying shell" spliced mid-work,
+/// turn killed on the second arm).
+#[test]
+fn head_receipt_no_output_sentinel_blocks_retry_limit_concentration() {
+    let mut messages = vec![Message::user("explore the repo")];
+    for (id, command) in [
+        ("call_1", "grep -rn 'Widget' src/"),
+        ("call_2", "grep -rn 'Gadget' lib/"),
+        ("call_3", "grep -rn 'Widget' docs/"),
+        ("call_4", "test -f missing.txt"),
+    ] {
+        messages.extend(spiral_shell_exchange(
+            id,
+            command,
+            "Exit code: 1\n\n(no output)",
+        ));
+    }
+    assert!(
+        recover_shell_retry(&messages, 4).is_none(),
+        "distinct no-output probes share no failure text — never a retry spiral"
+    );
+}
+
+/// 2026-10-04: every recovery arm TERMINATES the turn, so a single benign
+/// no-match grep (exit 1) anywhere in the window plus one legitimate
+/// `git diff` must not force-end a healthy investigative turn and return the
+/// diff as the assistant reply — that shape is indistinguishable downstream
+/// from a genuine model end_turn (a false done).
+#[test]
+fn failure_dominance_gate_spares_healthy_rhythm_with_one_failure() {
+    let mut messages = vec![Message::user("inspect your changes")];
+    messages.extend(spiral_shell_exchange(
+        "call_1",
+        "grep -rn 'missing-symbol' src/",
+        "Exit code: 1\n\n(no output)",
+    ));
+    messages.extend(spiral_shell_exchange(
+        "call_2",
+        "git diff",
+        "Exit code: 0\n\ndiff --git a/main.rs b/main.rs\n--- a/main.rs\n+++ b/main.rs\n@@ -1 +1 @@\n-a\n+b",
+    ));
+    messages.extend(spiral_shell_exchange(
+        "call_3",
+        "cargo build",
+        "Exit code: 0\n\nFinished dev profile",
+    ));
+    messages.extend(spiral_shell_exchange(
+        "call_4",
+        "ls src",
+        "Exit code: 0\n\nmain.rs\nlib.rs",
+    ));
+    assert!(
+        recover_shell_retry(&messages, 4).is_none(),
+        "1 failure + 3 successes is a healthy rhythm, not a degenerate spiral"
+    );
+}
+
+/// The dominance gate must not eat the true positive: a failure-dominant
+/// window that finally produced a diff still recovers it, with the HEAD
+/// receipt stripped from the surfaced content.
+#[test]
+fn dominant_failure_window_with_head_receipt_diff_still_recovers() {
+    let mut messages = vec![Message::user("show the diff")];
+    for i in 1..=3 {
+        messages.extend(spiral_shell_exchange(
+            &format!("call_fail_{i}"),
+            &format!("git -C /repo{i} diff"),
+            "Exit code: 128\n\nfatal: not a git repository",
+        ));
+    }
+    messages.extend(spiral_shell_exchange(
+        "call_ok",
+        "git diff",
+        "Exit code: 0\n\ndiff --git a/notes.txt b/notes.txt\n--- a/notes.txt\n+++ b/notes.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma",
+    ));
+    let recovered =
+        recover_shell_retry(&messages, 4).expect("dominant failure window must recover");
+    assert_eq!(recovered.kind, ShellRetryRecoveryKind::DiffLikeSuccess);
+    assert!(recovered.content.contains("diff --git"));
+    assert!(
+        !recovered.content.contains("Exit code: 0"),
+        "head-placed receipt must be stripped from recovered output"
+    );
+}
+
+#[test]
+fn strip_exit_code_suffix_handles_head_receipt_and_sentinel() {
+    // Head receipt + sentinel → empty: distinct no-output probes must never
+    // concentrate into one failure signature.
+    assert_eq!(strip_exit_code_suffix("Exit code: 1\n\n(no output)"), "");
+    // Head receipt + real error → the error text, receipt excluded.
+    assert_eq!(
+        strip_exit_code_suffix("Exit code: 7\n\ncurl: (7) Failed to connect"),
+        "curl: (7) Failed to connect"
+    );
+    // Signal-named deaths still strip (the token is not numeric).
+    assert_eq!(
+        strip_exit_code_suffix("Exit code: signal 9 (SIGKILL)\n\nkilled"),
+        "killed"
+    );
+    // Receipt-only output.
+    assert_eq!(strip_exit_code_suffix("Exit code: 1"), "");
+    // Legacy tail-placed shapes unchanged.
+    assert_eq!(strip_exit_code_suffix("(no output)\n\nExit code: 1"), "");
+    assert_eq!(
+        strip_exit_code_suffix("could not find Cargo.toml\n\nExit code: 101"),
+        "could not find Cargo.toml"
+    );
+    // No receipt at all.
+    assert_eq!(strip_exit_code_suffix("plain failure"), "plain failure");
+}
+
+#[test]
+fn useful_shell_output_head_receipt_shapes() {
+    // Head-placed receipt (2026-10-02+): the body lives below the first line.
+    assert!(is_useful_shell_output("Exit code: 0\n\ndiff --git a/x b/x"));
+    // The "(no output)" sentinel behind the receipt carries no content.
+    assert!(!is_useful_shell_output("Exit code: 0\n\n(no output)"));
+    // Bare receipt only.
+    assert!(!is_useful_shell_output("Exit code: 0"));
+    // Legacy tail-placed shapes keep working.
+    assert!(is_useful_shell_output("diff --git a/x b/x\n\nExit code: 0"));
+    assert!(!is_useful_shell_output("(no output)\n\nExit code: 0"));
+    // No receipt = not a success at all.
+    assert!(!is_useful_shell_output("diff --git a/x b/x"));
 }
 
 /// Large enough that `truncate_old_tool_results` collapses it.

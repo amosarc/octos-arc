@@ -621,18 +621,26 @@ impl LoopDetector {
 
     /// Result-only error-streak detection (see [`ERROR_STREAK_HINT`]).
     ///
-    /// Hashes the FIRST LINE of each tool result and tracks how many
-    /// CONSECUTIVE results share it. Varying args (each retry a slightly
-    /// different command) evade the (name, args, result) no-progress
-    /// detector above; an identical failing first line does not. Fires
-    /// once per streak — a signature change resets both the counter and
-    /// the fired flag.
+    /// Hashes the FIRST MEANINGFUL line of each tool result — blank lines and
+    /// the shell family's head-placed `Exit code: N` receipt (shell.rs
+    /// 2026-10-02 fix) are skipped, so the signature tracks the failure TEXT
+    /// again — and tracks how many CONSECUTIVE results share it. Varying args
+    /// (each retry a slightly different command) evade the (name, args,
+    /// result) no-progress detector above; an identical failing first line
+    /// does not. Fires once per streak — a signature change resets both the
+    /// counter and the fired flag.
     pub fn record_error_streak(&mut self, result: &str) -> Option<String> {
         let threshold = self.error_streak_threshold;
         if threshold == usize::MAX {
             return None;
         }
-        let first_line = result.lines().next().unwrap_or("");
+        let first_line = result
+            .lines()
+            .find(|line| {
+                let trimmed = line.trim();
+                !trimmed.is_empty() && !trimmed.starts_with("Exit code:")
+            })
+            .unwrap_or("");
         let mut hasher = DefaultHasher::new();
         first_line.hash(&mut hasher);
         let sig = hasher.finish();
@@ -1215,5 +1223,35 @@ mod tests {
         }
         // 各自只有 5 连,均不到 8
         assert!(d.record_error_streak("Error: connection refused").is_none());
+    }
+
+    #[test]
+    fn error_streak_signs_failure_text_below_head_receipt() {
+        // shell.rs 2026-10-02 头置回执:每个 shell 结果以 "Exit code: N"
+        // 开头——签那一行让全家族共享一个签名,且错误词门永远看不到真实
+        // 失败文本。签名必须取回执之下第一行。
+        let mut d = LoopDetector::new(10);
+        for i in 0..7 {
+            assert!(
+                d.record_error_streak(&format!(
+                    "Exit code: 1\n\nError: PUT /api/workbooks/wb-1 -> 400\nattempt {i}"
+                ))
+                .is_none(),
+                "no fire at {i}"
+            );
+        }
+        let hint = d
+            .record_error_streak("Exit code: 1\n\nError: PUT /api/workbooks/wb-1 -> 400\nattempt 7");
+        assert!(
+            hint.is_some(),
+            "expected [REPEATED FAILURE] under the head-placed receipt"
+        );
+        assert!(hint.unwrap().contains("REPEATED FAILURE"));
+        // 回执行本身永不当签名:成功回执+成功体是换签名(重置)而非延续。
+        assert!(d.record_error_streak("Exit code: 0\n\n{\"ok\":true}").is_none());
+        // 空输出哨兵体不含错误词,不触发。
+        for _ in 0..12 {
+            assert!(d.record_error_streak("Exit code: 1\n\n(no output)").is_none());
+        }
     }
 }
