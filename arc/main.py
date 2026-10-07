@@ -2370,39 +2370,6 @@ def session_group_batches(tree: dict, batches: list[list[dict]],
              if batch_fam[bi] in groups[gi]] for gi in order]
 
 
-def describe_family_context(family: dict, batch: list[dict]) -> str:
-    """本批所属家族的 FOLDER 契约逐字(家族级 + 命中子家族级,无截断)。
-
-    未命中本批节点的子家族剪枝(它们随各自工单下发)。
-    """
-    ids = {str(n.get("id")) for n in batch}
-    parts: list[str] = []
-
-    def hit(node: dict) -> bool:
-        return any(str(n.get("id")) in ids
-                   for n in flatten_atomic(node))
-
-    top = str(family.get("description") or "").strip()
-    if top:
-        parts.append(f"[{family.get('id')} — {family.get('name', '')}]\n{top}")
-
-    def walk(node: dict) -> None:
-        for child in node.get("children") or []:
-            if not isinstance(child, dict):
-                continue
-            if str(child.get("type", "")).upper() == "ATOMIC":
-                continue
-            if hit(child):
-                desc = str(child.get("description") or "").strip()
-                if desc:
-                    parts.append(
-                        f"[{child.get('id')} — {child.get('name', '')}]\n{desc}")
-                walk(child)
-
-    walk(family)
-    return "\n\n".join(parts)
-
-
 def group_families(tree: dict, max_batch: int = 6) -> list[list[dict]]:
     """goal-first 调度:一个顶层家族一个工单;超大家族沿子家族边界切。
 

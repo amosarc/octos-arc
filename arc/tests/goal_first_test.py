@@ -1,8 +1,8 @@
 """goal-first 转向单测(09-27 宿主优先→目标优先)。
 
 覆盖:家族调度(group_families)、需求地图(render_requirements_map)、
-家族契约逐字(describe_family_context)、goal-first 契约文案路径点名
-(RULES_MUST_NAME 双断言)、envelope rules_text 覆写、红项 probe 过滤。
+goal-first 契约文案路径点名(RULES_MUST_NAME 双断言)、
+envelope rules_text 覆写、红项 probe 过滤。
 
 Run: python3 arc/goal_first_test.py
 """
@@ -125,24 +125,6 @@ class RequirementsMapTests(unittest.TestCase):
             # 地图不含场景正文,应显著小于整份 yaml
             yaml_size = (req / "requirements.yaml").stat().st_size
             self.assertLess(len(rmap), yaml_size)
-
-
-class FamilyContextTests(unittest.TestCase):
-    def test_family_contract_verbatim_and_pruned(self):
-        fam = main.family_index(TREE)["REQ-1-1-1"]
-        batch = [n for n in main.flatten_atomic(fam)
-                 if n["id"] == "REQ-1-1-1"]
-        ctx = main.describe_family_context(fam, batch)
-        self.assertIn("family one module contract", ctx)
-        self.assertIn("sub-family contract one", ctx)
-        # 未命中子家族剪枝
-        self.assertNotIn("sub-family contract two", ctx)
-
-    def test_full_family_batch_carries_all_subfamilies(self):
-        fam = main.family_index(TREE)["REQ-1-1-1"]
-        ctx = main.describe_family_context(fam, main.flatten_atomic(fam))
-        self.assertIn("sub-family contract one", ctx)
-        self.assertIn("sub-family contract two", ctx)
 
 
 class TurnBlockTests(unittest.TestCase):
