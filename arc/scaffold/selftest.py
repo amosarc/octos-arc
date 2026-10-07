@@ -130,6 +130,15 @@ def stage_selftest_dir(output_dir: Path, smoke_port: int,
 // never sees. Derive walk coverage from the requirement text itself:
 // every entity kind, session state, and entry the scenarios mention
 // gets a walk in your own specs — the host walk checks only seed names.
+//
+// SCREENSHOT RULE — after a flow goes green, capture the pages it
+// touches (decide yourself which pages are worth evidence):
+//   await page.screenshot({ path: 'octos/screenshots/<flow>-<page>.png',
+//                           fullPage: true });
+// (create the folder if needed; fullPage so below-the-fold navigation
+// is in the picture). The host attaches your latest captures back to
+// you at the batch tail for a visual nav check — what you capture is
+// what gets checked; no captures, no check.
 import { test, expect } from '@playwright/test';
 
 test('my check - name what this verifies', async ({ page }) => {

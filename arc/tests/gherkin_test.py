@@ -331,25 +331,26 @@ class RealTaskSmokeTests(unittest.TestCase):
         return main.load_requirement_tree(req_dir)
 
     def test_sheet_req_1_1_1_renders_full_steps(self):
-        tree = self._tree("hackathon--sheet")
+        # 10-06 evolution yaml 换代重锚:旧 REQ-1-1-1 不在覆盖层,迁
+        # REQ-1-2-2(EVO 种子工作簿场景,GIVEN/WHEN/THEN 3 步制)。
+        tree = self._tree("hackathon-evolution--sheet")
         n = next(x for x in
                  (gherkin.__dict__ and __import__("main").flatten_atomic(tree))
-                 if x.get("id") == "REQ-1-1-1")
+                 if x.get("id") == "REQ-1-2-2")
         text = gherkin.render_scenarios(n, "full")
         self.assertIn("Given", text)
         self.assertIn("When ", text)
         self.assertIn("Then ", text)
-        # 工作流指代短语逐字保留(10-02 拍板)。
-        self.assertIn("the requested workflow", text.lower())
-        self.assertIn("`Q3 Sales`", text)
+        # EVO 种子工作簿名逐字在场(evolution GIVEN 的判分实体)。
+        self.assertIn("`EVO-M01-RENAME-OK`", text)
 
     def test_github_real_steps_kept_verbatim(self):
         import main
-        tree = self._tree("hackathon--github")
+        tree = self._tree("hackathon-evolution--github")
         n = next(x for x in main.flatten_atomic(tree)
                  if x.get("id") == "REQ-1-1-1")
         text = gherkin.render_scenarios(n, "full")
-        self.assertIn("Valid-password-123!", text)
+        self.assertIn("Evo-Password-987!", text)
         self.assertIn("Create an account", text)
 
     def _parent_of(self, tree, node):
@@ -366,26 +367,24 @@ class RealTaskSmokeTests(unittest.TestCase):
 
     def test_sheet_turn_path_full_restore(self):
         # TURN 真路径(feature_text):Flow contract + 全场景全步骤逐字
-        # (10-02 全量恢复),工作流指代短语原样在场。
+        # (10-02 全量恢复)。10-06 evolution 重锚 REQ-1-2-2(3 场景)。
         import main
-        tree = self._tree("hackathon--sheet")
+        tree = self._tree("hackathon-evolution--sheet")
         n = next(x for x in main.flatten_atomic(tree)
-                 if x.get("id") == "REQ-1-1-1")
+                 if x.get("id") == "REQ-1-2-2")
         text = gherkin.feature_text(self._parent_of(tree, n), [n])
         self.assertIn("# Flow contract:", text)
-        # 每节点恰一行:REQ-1-1-1 两个变体场景共用同一条契约
-        # (不逐场景继承重复)。
+        # 每节点恰一行:同节点全部场景共用一条契约(不逐场景重复)。
         self.assertEqual(text.count("# Flow contract:"), 1)
-        self.assertIn("`Q3 Sales`", text)
+        self.assertIn("`EVO-M01-RENAME-OK`", text)
         self.assertIn("When ", text)
         self.assertIn("Then ", text)
-        self.assertIn("the requested workflow", text.lower())
-        # 全场景:REQ-1-1-1 两个变体都在场。
-        self.assertEqual(text.count("  Scenario: "), 2)
+        # 全场景:REQ-1-2-2 三个变体都在场。
+        self.assertEqual(text.count("  Scenario: "), 3)
 
     def test_github_turn_path_keeps_real_steps(self):
         import main
-        tree = self._tree("hackathon--github")
+        tree = self._tree("hackathon-evolution--github")
         n = next(x for x in main.flatten_atomic(tree)
                  if x.get("id") == "REQ-1-1-1")
         text = gherkin.feature_text(self._parent_of(tree, n), [n])
@@ -394,35 +393,29 @@ class RealTaskSmokeTests(unittest.TestCase):
 
     def test_real_yaml_scenario_merge_pins(self):
         # 真题对账钉(10-02 拍板:GIVEN+WHEN+THEN 完全一致的场景合并)。
-        # 10-03 yaml 换代重锚:github REQ-1-1-1/REQ-1-1-2 场景改写后
-        # 全部逐字节不同文,合并律正确地不触发(3/4 原样在场);
-        # sheet REQ-1-3-1 仍 4 场景 3 种字节形态 → 4→3 合并照常开火。
+        # 10-06 evolution 换代重锚:evolution 场景全部逐字节不同文
+        # ("Evolution Scenario N" 命名)——合并律正确地不触发,yaml
+        # 场景数与渲染数 1:1(旧 yaml 的 4→3 合并证据随旧题退役)。
         import main
-        tree = self._tree("hackathon--github")
+        tree = self._tree("hackathon-evolution--github")
         n = next(x for x in main.flatten_atomic(tree)
                  if x.get("id") == "REQ-1-1-1")
         text = gherkin.feature_text(self._parent_of(tree, n), [n])
         self.assertEqual(len(n.get("scenarios") or []), 3)
         self.assertEqual(text.count("  Scenario: "), 3)
-        self.assertIn("- Scenario 2", text)
-        self.assertIn("- Scenario 3", text)
+        self.assertIn("Evolution Scenario 2", text)
         n2 = next(x for x in main.flatten_atomic(tree)
                   if x.get("id") == "REQ-1-1-2")
         self.assertEqual(gherkin.feature_text(
-            self._parent_of(tree, n2), [n2]).count("  Scenario: "), 4)
-        # sheet 同律(REQ-1-3-1 4→3);句层零删改钉迁此处:github
-        # yaml 换代后该 GIVEN 句不复存在,sheet 单节点渲染恰 3 次。
-        stree = self._tree("hackathon--sheet")
+            self._parent_of(tree, n2), [n2]).count("  Scenario: "),
+            len(n2.get("scenarios") or []))
+        # sheet 同律:覆盖层节点渲染数=yaml 场景数。
+        stree = self._tree("hackathon-evolution--sheet")
         sn2 = next(x for x in main.flatten_atomic(stree)
-                   if x.get("id") == "REQ-1-3-1")
-        self.assertEqual(len(sn2.get("scenarios") or []), 4)
+                   if x.get("id") == "REQ-1-2-2")
         self.assertEqual(gherkin.feature_text(
-            self._parent_of(stree, sn2), [sn2]).count("  Scenario: "), 3)
-        single = gherkin.render_scenarios(sn2, "full")
-        self.assertEqual(
-            single.count("The visitor starts at the application home "
-                         "page in a fresh unauthenticated browser "
-                         "session."), 3)
+            self._parent_of(stree, sn2), [sn2]).count("  Scenario: "),
+            len(sn2.get("scenarios") or []))
 
 
 class QuotedNamesTests(unittest.TestCase):

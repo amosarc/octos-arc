@@ -29,7 +29,7 @@ import fixture_manifest  # noqa: E402
 import main  # noqa: E402
 import plan_envelope  # noqa: E402
 
-TASKS = ["hackathon--sheet", "hackathon--github"]
+TASKS = ["hackathon-evolution--sheet", "hackathon-evolution--github"]
 SMOKE = 3100
 TOOLCHAIN_CLI = "/tmp/octos-local-grader/node_modules/@playwright/test/cli.js"
 

@@ -1,3 +1,7 @@
 local-grader/
 arc-output/
 __pycache__/
+# evolve 运行产物(本地迭代项目目录)不入库
+hackathon-projects/
+# 基线修复档案=evolve Phase 0 功能性注入件(非工作文档),破 *.md 默认忽略
+!tasks/*/baseline-issues.md

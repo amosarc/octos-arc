@@ -40,6 +40,7 @@ Configuration is via environment variables:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import math
 import os
@@ -1574,6 +1575,121 @@ def _page_health_run(output_dir: Path, smoke_port: int,
         shutil.rmtree(grader, ignore_errors=True)
 
 
+# ----------------------------------------------------------- 视觉核验轮
+# 动机:最大失分面「Could not find a visible navigation target named X」
+# (DOM 里有过但可见时机/可访问名不匹配)——walk 报错字符串说不清
+# "为什么不可见",截图一眼看清。机制:模型在 turn 内自截(拍什么页、
+# 拍不拍归模型决定——宿主不写死定则;MY-CHECK SCREENSHOT RULE 教手法),
+# 宿主只做跨轮机制:把模型拍的图以 FileRef 附回下一轮 User 消息(内核
+# 只内联 User 消息的图)→ 带图请求由 VISUAL_MODEL 路由切视觉模型 →
+# 模型看自己拍的图定位并修 app。内核零改动。
+
+
+def _ensure_workspace_gitignore_line(output_dir: Path, line: str) -> None:
+    """workspace .gitignore 缺行则追加(截图等运行工件不入项目 git)。"""
+    gi = Path(output_dir) / ".gitignore"
+    try:
+        text = gi.read_text(encoding="utf-8") if gi.is_file() else ""
+    except OSError:
+        text = ""
+    if line.rstrip("/") in {ln.strip().rstrip("/")
+                            for ln in text.splitlines()}:
+        return
+    try:
+        with gi.open("a", encoding="utf-8") as fh:
+            if text and not text.endswith("\n"):
+                fh.write("\n")
+            fh.write(line + "\n")
+    except OSError:
+        pass
+
+
+# 模型自截的约定落点:MY-CHECK SCREENSHOT RULE 教的相对路径是
+# octos/screenshots/,而模型从 e2e/ 目录直接跑 playwright 时相对路径
+# 会落进 e2e/octos/screenshots/——两个根都归集,不因 cwd 丢图。
+_SCREENSHOT_ROOTS = ("octos/screenshots", "e2e/octos/screenshots")
+
+
+def _collect_model_screenshots(output_dir: Path, since_ts: float,
+                               cap: int = 6) -> list[Path]:
+    """归集模型本批自截的截图(mtime > since_ts,最新优先,帽 cap)。
+
+    帽是 token 治理(每轮带图请求的图数上限),不是内容决策——拍什么
+    归模型,超帽只截断归集面。零新图返回 [](调用方视为"模型没关注页,
+    不发核验轮",绝不宿主代拍)。"""
+    _ensure_workspace_gitignore_line(output_dir, "octos/")
+    found: list[Path] = []
+    for root in _SCREENSHOT_ROOTS:
+        base = Path(output_dir) / root
+        try:
+            found.extend(p for p in base.rglob("*.png")
+                         if p.is_file() and p.stat().st_mtime > since_ts)
+        except OSError:
+            continue
+    seen: set[str] = set()
+    uniq: list[Path] = []
+    for p in sorted(found, key=lambda p: p.stat().st_mtime, reverse=True):
+        if str(p) not in seen:
+            seen.add(str(p))
+            uniq.append(p)
+    return uniq[:cap]
+
+
+NAV_VISUAL_CHECK_PROMPT = """\
+VISUAL NAV CHECK — the screenshots YOU captured earlier this batch \
+(octos/screenshots/) are ATTACHED to this message ({shots}). Look at \
+them before touching any code.
+Check them for exactly these failure classes:
+1. a navigation target this batch's scenarios need that is missing from \
+the home page, or not visible to a first-time visitor;
+2. a target hidden behind a loading gate, a dropdown, or a hover-only \
+menu (the grader clicks only what is visible within seconds);
+3. the same target name rendered TWICE (a strict-mode double render \
+makes getByRole throw and loses whole families);
+4. an accessible name that drifts from the requirement text verbatim.
+Fix the APP — routes, render timing, labels — NEVER the scenario text. \
+After fixing, re-capture the pages you fixed and re-run \
+`sh scripts/run-e2e.sh _host-walk.spec.ts` and the batch's own specs \
+until green, then end the turn."""
+
+# 红修复轮搭车注记:截图随修复轮消息进场时不单发核验轮(≤1 轮/批)。
+_VISUAL_PIGGYBACK_NOTE = (
+    "\n\nVISUAL EVIDENCE — the screenshots you captured earlier this "
+    "batch are attached to this message. Before fixing, look at them "
+    "for the failure shapes the text above names: invisible or hidden "
+    "navigation targets, loading-gate-hidden content, the same name "
+    "rendered twice, accessible names drifting from the requirement "
+    "text. Fix the APP, never the scenario text.")
+
+
+def _visual_check_prompt_and_media(shots: list[Path],
+                                   ) -> tuple[str | None, list[dict]]:
+    """模型自截截图 → (核验轮 prompt, media FileRefs);不可用 → (None, [])。
+
+    不可用=零张/全是非图片文件/文件缺失——调用方一律视为"模型没留
+    证据面,不发核验轮",绝不宿主代拍。"""
+    if not shots:
+        return None, []
+    from octos_stdio import image_file_refs
+    media = image_file_refs(shots)
+    if not media:
+        return None, []
+    names = ", ".join(Path(m["path"]).name for m in media)
+    prompt = NAV_VISUAL_CHECK_PROMPT.format(shots=names)
+    return prompt, media
+
+
+def _changed_source_paths(changed: list[str]) -> list[str]:
+    """git diff 文件清单 → 源码改动子集(批后回归与视觉核验共用的同一
+    过滤口径;只认实现面,运行工件天然豁免)。"""
+    return [p for p in changed if p and (
+        p.startswith("frontend/src/")
+        or p.startswith("backend/src/")
+        or p in ("frontend/index.html",
+                 "frontend/package.json",
+                 "backend/package.json"))]
+
+
 def _esbuild_bin(output_dir: Path) -> str | None:
     """frontend 的 esbuild(vite 依赖自带,prewarm 后在位);缺则 None。"""
     cand = output_dir / "frontend" / "node_modules" / ".bin" / "esbuild"
@@ -2315,11 +2431,20 @@ _TURN_SEED_LINE = (
     "SEED: backend/data/db.json is what every grading boot starts from "
     "— it must already contain every named item in the GIVEN lines "
     "below. If something is missing, add it to db.json first, then "
-    "delete backend/data/db.run.json so the next boot re-seeds.")
+    "delete backend/data/db.run.json so the next boot re-seeds. "
+    "A db.run.json that reappears after a later test run is expected "
+    "— every boot re-seeds it from db.json and it never ships; delete "
+    "it once after extending db.json, never loop on deleting and "
+    "re-verifying it.")
+# evolve 后缀(§3.1):种子面已有基线,补缺不推倒。
+_TURN_SEED_LINE_EVOLVE = _TURN_SEED_LINE + (
+    " The baseline seed is already in place from the previous round — "
+    "add only what is missing (the new evolution entities), never "
+    "remove existing entities.")
 
 
-def build_turn_features(batch: list[dict],
-                        parent_of: dict[str, dict]) -> str:
+def build_turn_features(batch: list[dict], parent_of: dict[str, dict],
+                        evolve: bool = False) -> str:
     """TURN 正文(批 turn 唯一出处;blocked-retry pass 已于 c6fbb30 移除)。
 
     统一块骨架:TASK → SEED → SCENARIOS(本批 Feature 原文)。本批节点
@@ -2328,13 +2453,13 @@ def build_turn_features(batch: list[dict],
     不列标题——id↔场景绑定由 gherkin `# <id>` 注释承担。SCENARIOS
     正文为空时(批节点在父索引中缺席,Feature 渲染为空)整块省略(连
     同 SEED 行——"GIVEN lines below" 不悬空),且 TASK 回退为直接列
-    编号。
+    编号。evolve=True 换种子行的"只增不删"后缀版。
     """
     task = ", ".join(str(n.get("id") or "") for n in batch)
     features = gherkin.batch_turn_features(batch, parent_of)
     if features.strip():
         parts = [f"TASK: implement the requirements below ({task}).",
-                 _TURN_SEED_LINE,
+                 _TURN_SEED_LINE_EVOLVE if evolve else _TURN_SEED_LINE,
                  "SCENARIOS (verbatim):", features]
     else:
         parts = [f"TASK: implement {task}."]
@@ -2791,12 +2916,16 @@ class OctosDriver:
         return self._session
 
     def run(self, prompt: str, timeout: int,
-            wall: int | None = None) -> tuple[bool, str]:
+            wall: int | None = None,
+            media: list[dict] | None = None) -> tuple[bool, str]:
         """Run one turn. `timeout` is the idle budget (resets on every
         protocol event); `wall` is a hard wall clock for the whole turn
         INCLUDING retries — on expiry the session is killed and whatever
         already landed on disk stays (the batch verdict marks it
-        blocked; the platform's e2e is the final judge)."""
+        blocked; the platform's e2e is the final judge). `media` (stdio
+        lane only) attaches image FileRefs to the turn's User message —
+        the visual-check rounds' screenshot channel; the chat lane has
+        no media channel and silently ignores it."""
         cancel = threading.Event()
         self.kernel_terminal = None
         if self.mode == "chat":
@@ -2804,7 +2933,7 @@ class OctosDriver:
             fn = lambda p: run_octos(self.octos_bin, self.cwd, p, self.env,
                                      self.data_dir, cap, self.max_iterations)
         else:
-            fn = lambda p: self._run_stdio(p, timeout, wall, cancel)
+            fn = lambda p: self._run_stdio(p, timeout, wall, cancel, media)
         ok, text = self._run_with_heartbeat(
             lambda: self._run_with_retries(fn, prompt, cancel), wall, cancel)
         log(f"[flow] turn ended: "
@@ -2956,12 +3085,14 @@ class OctosDriver:
         return ok, text
 
     def _run_stdio(self, prompt: str, timeout: int, wall: int | None = None,
-                   cancel: threading.Event | None = None) -> tuple[bool, str]:
+                   cancel: threading.Event | None = None,
+                   media: list[dict] | None = None) -> tuple[bool, str]:
         try:
             session = self._get_session()
             result = session.run_turn(
                 prompt, timeout=float(timeout),
-                wall_timeout=float(wall) if wall is not None else None)
+                wall_timeout=float(wall) if wall is not None else None,
+                media=media)
         except Exception as exc:
             if cancel is not None and cancel.is_set():
                 # Host-side wall cut: no chat fallback, no retries — return
@@ -3051,7 +3182,9 @@ BOOTSTRAP (first turn of the run only):
 (a) implement the seed: backend/data/db.json from every GIVEN line below \
 (plus a data: section if the requirement has one) — every named \
 entity, every account with the exact emails and passwords quoted there \
-(scrypt-hashed via store.hash; your tests sign in with the plaintext \
+(scrypt-hashed via store.hash, whose output differs on every call by \
+design — compute each hash once and reuse the value; your tests sign \
+in with the plaintext \
 passwords), and the ownership/permission relationships the text states. \
 Later work orders carry their own GIVEN lines under the same seed \
 obligation — extend db.json in place, never rebuild it from scratch.
@@ -3247,7 +3380,626 @@ specs), then finish the turn.\
 
 # ---------------------------------------------------------------- main flow
 
-def main() -> int:
+# ------------------------------------------------------- evolve mode (10-06)
+# 设计文档:arc/docs/evolve-design.md。evolve=在已建成项目上续跑(不清空/
+# 不覆盖/不重置),Phase 0 基线修复+种子只增不删 → 家族批 → 回归网 →
+# 轮末判定;外层自优化闭环 arc/evolve_loop.py。两条硬约束:LLM 链路零
+# 改动;evolve 零环境变量(一切参数走显式 API/CLI)。
+
+
+@dataclasses.dataclass
+class EvolveOptions:
+    """evolve 运行参数(显式 API 通道;CLI 同名旗标映射于此)。"""
+
+    families: list[str] | None = None        # 本轮家族收窄;None=全家族
+    lessons_file: str | Path | None = None   # None=<project>/octos/evolution-lessons.md
+    max_repair_turns: int = 2                # 轮前言/回归红修复轮上限
+    dry_run: bool = False                    # 只装配不调 LLM 不跑轮
+    round_index: int = 1                     # 外层闭环轮次(提交信息/工件目录)
+    time_budget: int | None = None           # 秒;None=沿 OCTOS_TIME_BUDGET 既有通道(显式 API 优先)
+
+
+@dataclasses.dataclass
+class EvolveVerdict:
+    """轮末判定(evolve_loop 三道门的输入;全本地机械信号,零 LLM)。"""
+
+    ok: bool = False
+    round_index: int = 1
+    batch_verdicts: dict = dataclasses.field(default_factory=dict)
+    failed_nodes: list = dataclasses.field(default_factory=list)
+    suite: dict | None = None      # {passed, failed, failed_titles, failed_files}
+    walk: dict | None = None       # {errors, missing}
+    coverage: dict = dataclasses.field(default_factory=dict)
+    phase0: dict | None = None
+    artifacts_dir: str | None = None
+    dry_run: bool = False
+
+
+def detect_evolve_project(output_dir: Path) -> bool:
+    """output_dir 是否已是"已建成应用"(evolve 资格判据)。
+
+    backend 基座在场 + 种子已建(db.json 非空)+ 模型自写 spec 在场。
+    显式 --mode evolve 指向不满足此判据的目录时由调用方拒绝(空目录
+    续跑=无基线可修,必然走错路径)。"""
+    root = Path(output_dir)
+    if not (root / "backend" / "src").is_dir():
+        return False
+    db = root / "backend" / "data" / "db.json"
+    try:
+        has_seed = db.is_file() and db.stat().st_size > 10
+    except OSError:
+        has_seed = False
+    has_specs = any(
+        p.name.endswith(".spec.ts") and not p.name.startswith("_")
+        for p in (root / "e2e").glob("*.spec.ts"))
+    return has_seed and has_specs
+
+
+def _archive_stale_context_logs(output_dir: Path, log=print) -> str | None:
+    """旧运行期 context-logs 整目录改名归档(纯 mv,不删):防 doom/自测
+    证据解析器(recent_tool_calls/_collect_selftest_evidence 按 glob 吃
+    全部会话)读到上一轮会话。本轮内核启动后自建新目录。"""
+    src = Path(output_dir) / ".octos" / "context-logs"
+    if not src.is_dir():
+        return None
+    dst = src.with_name(f"context-logs--baseline-{clock.compact()}")
+    try:
+        src.rename(dst)
+        log(f"[evolve] archived prior context-logs -> {dst.name}")
+        return dst.name
+    except OSError as exc:
+        log(f"[evolve] context-logs archive failed (non-fatal): {exc}")
+        return None
+
+
+def _ensure_evolve_gitignore(output_dir: Path, log=print) -> list[str]:
+    """git 基线提交前的护栏:.gitignore 必须挡住取证大件(项目携带
+    .octos ~百MB/octos 数百 MB),缺行则追加(只增不删)。返回追加行。"""
+    gi = Path(output_dir) / ".gitignore"
+    want = (".octos/", "octos/")
+    try:
+        text = gi.read_text(encoding="utf-8") if gi.is_file() else ""
+    except OSError:
+        text = ""
+    lines = {ln.strip().rstrip("/") for ln in text.splitlines()}
+    missing = [w for w in want if w.rstrip("/") not in lines]
+    if not missing:
+        return []
+    try:
+        with gi.open("a", encoding="utf-8") as fh:
+            if text and not text.endswith("\n"):
+                fh.write("\n")
+            fh.write("# host: forensic artifacts stay out of git\n"
+                     + "\n".join(missing) + "\n")
+        log(f"[evolve] .gitignore appended: {', '.join(missing)}")
+        return missing
+    except OSError as exc:
+        log(f"[evolve] .gitignore append failed: {exc}")
+        return []
+
+
+def _own_suite_specs(output_dir: Path) -> list[str]:
+    """自有套件盘点:模型自写 *.spec.ts(宿主自有 _host-walk/示例除外)。"""
+    e2e = Path(output_dir) / "e2e"
+    if not e2e.is_dir():
+        return []
+    return sorted(
+        p.name for p in e2e.glob("*.spec.ts")
+        if not p.name.startswith("_")
+        and p.name != "MY-CHECK.spec.ts.example")
+
+
+def _spec_family(basename: str) -> str | None:
+    """spec 文件名 → 顶层家族 id。
+
+    双形态:平台态 REQ-1-1-1-x.spec.ts(规格前缀)与模型态
+    req5-issues.spec.ts(小写无连字符)都认;无 REQ 前缀(模型自命名)
+    返回 None(回归谱全量收录,不裁)。"""
+    prefix = plan_envelope.spec_req_prefix(basename)
+    if prefix:
+        parts = prefix.split("-")
+        return "-".join(parts[:2]) if len(parts) >= 2 else prefix
+    m = re.match(r"(?i)^req-?(\d+)", basename)
+    return f"REQ-{m.group(1)}" if m else None
+
+
+def _parse_playwright_json(report: dict) -> tuple:
+    """Playwright JSON reporter 报告 → (passed, failed, failed_titles,
+    failed_files, passed_titles)。
+
+    真实形状(23:08 法医件实证):顶层 suites[](文件级,title/file/
+    column/line/specs,describe 再嵌 suites),叶子 specs[].tests[]。
+    test.status 用 expected/unexpected/flaky/skipped 词汇表
+    (results[].status 是 passed/failed/timedOut——两套词汇,别混);
+    test 无 title,标题=祖先 suite title 链 + spec.title。轮末判定取
+    保守口径:unexpected/flaky/interrupted=挂,skipped 不计。file 归一
+    basename。"""
+    failed_titles: list[str] = []
+    failed_files: list[str] = []
+    passed_titles: list[str] = []
+    passed = failed = 0
+
+    def walk(node: dict, prefix: list[str]) -> None:
+        nonlocal passed, failed
+        title0 = str(node.get("title") or "").strip()
+        chain = prefix + ([title0] if title0 else [])
+        for spec in node.get("specs") or []:
+            fname = str(spec.get("file") or "").rsplit("/", 1)[-1]
+            stitle = " ".join(str(spec.get("title") or "").split())
+            name = " › ".join([*chain, stitle]) if chain else stitle
+            for t in spec.get("tests") or []:
+                st = str(t.get("status") or "")
+                if not st:
+                    rs = t.get("results") or []
+                    st = {"passed": "expected", "failed": "unexpected",
+                          "timedOut": "unexpected"}.get(
+                        str(rs[-1].get("status")), "") if rs else ""
+                if st == "expected":
+                    passed += 1
+                    passed_titles.append(name)
+                elif st in ("unexpected", "flaky", "interrupted"):
+                    failed += 1
+                    failed_titles.append(name)
+                    failed_files.append(fname)
+        for sub in node.get("suites") or []:
+            walk(sub, chain)
+
+    for s in report.get("suites") or []:
+        walk(s, [])
+    return passed, failed, failed_titles, failed_files, passed_titles
+
+
+def run_own_suite(output_dir: Path, smoke_port: int,
+                  spec_files: list[str] | None = None,
+                  artifact_dir: Path | None = None,
+                  log=print) -> dict | None:
+    """宿主侧执行模型自有 e2e(冷启动 + JSON reporter;判定门 G1 与
+    evolve 回归网的执行体)。
+
+    与 scripts/run-e2e.sh 同构的冷启动序列(rm db.run.json → build →
+    restart)后直调 backend/node_modules 的 @playwright/test cli 换
+    JSON reporter。宿主/闭环自跑面——不进模型提示词,不受 verbatim
+    命令治理约束。环境不可跑(cli 缺席/构建失败)→ None;调用方视
+    None 为"未测",绝不当绿。"""
+    root = Path(output_dir)
+    cli = root / "backend" / "node_modules" / "@playwright" / "test" / "cli.js"
+    if not cli.is_file():
+        log("[evolve-suite] @playwright/test cli missing; suite not run")
+        return None
+    env = plan_envelope.boot_env(os.environ, smoke_port, [])
+    env["E2E_BASE_URL"] = f"http://127.0.0.1:{smoke_port}"
+
+    def _sh(cmd: list[str], timeout: int = 1800) -> subprocess.CompletedProcess:
+        return subprocess.run(cmd, cwd=str(root), env=env,
+                              capture_output=True, text=True, timeout=timeout)
+
+    try:
+        _sh(["rm", "-f", "backend/data/db.run.json"])
+        build = _sh(["npm", "run", "build", "--prefix", "frontend"])
+        if build.returncode != 0:
+            log(f"[evolve-suite] frontend build failed: "
+                f"{(build.stderr or build.stdout)[-300:]!r}")
+            return None
+        restart = _sh(["sh", "scripts/restart-server.sh"], timeout=120)
+        health = _sh(["curl", "-sf",
+                      f"http://127.0.0.1:{smoke_port}/api/health"],
+                     timeout=30)
+        if restart.returncode != 0 or health.returncode != 0:
+            log(f"[evolve-suite] server not healthy after cold start "
+                f"(restart rc={restart.returncode}, health "
+                f"rc={health.returncode}); suite not run")
+            return None
+        link = root / "e2e" / "node_modules"
+        if not link.exists():
+            try:
+                link.symlink_to(Path("../backend/node_modules"))
+            except OSError:
+                pass
+        cmd = ["node", "../backend/node_modules/@playwright/test/cli.js",
+               "test", "--config", "playwright.config.ts", "--reporter=json"]
+        if spec_files:
+            cmd += [str(f) for f in spec_files]
+        run = subprocess.run(cmd, cwd=str(root / "e2e"), env=env,
+                             capture_output=True, text=True, timeout=1800)
+        raw = run.stdout
+        start = raw.find("{")
+        report = None
+        if start >= 0:
+            try:
+                report = json.loads(raw[start:])
+            except json.JSONDecodeError:
+                report = None
+        if report is None:
+            log(f"[evolve-suite] JSON report unparsable (rc="
+                f"{run.returncode}): {raw[:200]!r}")
+            if artifact_dir is not None:
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                (artifact_dir / "suite-raw.txt").write_text(
+                    raw[:200000], encoding="utf-8")
+            return None
+        passed, failed, titles, files, p_titles = \
+            _parse_playwright_json(report)
+        if passed + failed == 0:
+            # 0 测试=测量面故障(端口竞争/全局 error),绝不当绿:留原始
+            # 报告供法医,按未测返回(22:18 首跑 73s 即 0/0 的教训)。
+            log(f"[evolve-suite] 0 tests collected (rc={run.returncode}, "
+                f"report errors={len(report.get('errors') or [])}) — "
+                "infra failure, treated as NOT RUN")
+            if artifact_dir is None:
+                artifact_dir = root / "octos" / "evolve-verdicts" / "suite-postmortem"
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            stamp = clock.compact()
+            (artifact_dir / f"suite-zero-{stamp}.json").write_text(
+                json.dumps(report, ensure_ascii=False) + "\n",
+                encoding="utf-8")
+            (artifact_dir / f"suite-zero-{stamp}.stderr").write_text(
+                (run.stderr or "")[:100000], encoding="utf-8")
+            return None
+        if artifact_dir is not None:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / "suite.json").write_text(
+                json.dumps(report, ensure_ascii=False) + "\n",
+                encoding="utf-8")
+        log(f"[evolve-suite] {passed} passed / {failed} failed"
+            + (f" ({', '.join(sorted(set(files))[:4])} ...)"
+               if files else ""))
+        return {"passed": passed, "failed": failed,
+                "failed_titles": titles,
+                "failed_files": sorted(set(files)),
+                "passed_titles": p_titles}
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"[evolve-suite] run failed: {exc}")
+        return None
+
+
+EVOLVE_ROUND_PREAMBLE = """\
+EVOLVE ROUND START (every round of this evolution run): the app under \
+your hands is ALREADY BUILT — an earlier build was graded by the \
+platform grader. Doctrine for EVERY family this round:
+(a) verify first: run the family's own specs against the running app \
+(and consult the screenshots you captured) — do NOT redo what walks \
+green; implement only what is missing, fix only what is red, with \
+surgical edits.
+(b) seed duty: extend backend/data/db.json IN PLACE with every entity \
+the new GIVEN lines pre-provision (exact names, emails, passwords, \
+ownership/permission relationships) — NEVER delete or rename a \
+baseline entity; then delete backend/data/db.run.json so the next \
+boot re-seeds. A scrypt hash differs on every call by design: \
+compute each hash once and reuse the value; never loop on deleting \
+and re-verifying a hash you just wrote.
+(d) capture duty: while you verify, capture screenshots of the home \
+page and the pages you reach into octos/screenshots/ — the host \
+reviews them after this turn.
+"""
+# 并行钉引用的旧名(goal_first_test)——统一轮前言即原 Phase 0 前言的
+# 全量继任者,别名保兼容。
+EVOLVE_BOOTSTRAP_PREAMBLE = EVOLVE_ROUND_PREAMBLE
+
+
+EVOLVE_REGRESSION_REPAIR_PROMPT = (
+    "REGRESSION RED: your changes to shared files broke these previously "
+    "green self-tests ({failed} new failure(s)):\n{titles}\n"
+    "Fix forward with surgical edits, then verify with `sh "
+    "scripts/run-e2e.sh {files}` from the workspace root; never delete "
+    "baseline behavior to make a test pass.")
+
+
+def stage_host_scripts(output_dir: Path, smoke_port: int,
+                      log=print) -> list[str]:
+    """宿主辅助脚本暂存(scripts/restart-server.sh + run-e2e.sh)。
+
+    落盘策略(10-07 拍板):已建成项目上仅 selftest 骨架与 AGENTS.md
+    覆写刷新,其余一律存在即跳过——脚手架/桩本就 write-if-absent,
+    这两个脚本此前无条件覆写,现收口为同律。返回本次写入的相对路径。"""
+    scripts_dir = Path(output_dir) / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    scripts_gitignore = scripts_dir / ".gitignore"
+    if not scripts_gitignore.exists():
+        scripts_gitignore.write_text("*\n", encoding="utf-8")
+    restart = scripts_dir / "restart-server.sh"
+    if restart.exists():
+        log("[plan] scripts/restart-server.sh present; kept as-is "
+            "(no-overwrite rule: only the selftest skeleton and "
+            "AGENTS.md refresh on an already-built project)")
+    else:
+        restart.write_text(
+            "#!/bin/sh\n"
+            "# Host-provided: restart the dev server after backend/src "
+            "changes.\n"
+            'PORT="${1:-' + str(smoke_port) + '}"\n'
+            'cd "$(dirname "$0")/../backend" || exit 1\n'
+            "# lsof 缺席的平台容器 fallback 到按名 kill:本脚本是文件,\n"
+            "# 模式串不进任何 argv,pkill -f 自匹配在这条路径上不可达。\n"
+            'if command -v lsof >/dev/null 2>&1; then\n'
+            '  lsof -ti TCP:"$PORT" -sTCP:LISTEN | xargs -r kill '
+            "2>/dev/null\n"
+            "else\n"
+            '  pkill -f "node src/index.js" 2>/dev/null\n'
+            "fi\n"
+            "sleep 1\n"
+            'mkdir -p ../octos/logs\n'
+            'PORT="$PORT" nohup node src/index.js '
+            '>> ../octos/logs/host-dev-server.log 2>&1 &\n'
+            "i=0; while [ $i -lt 30 ]; do\n"
+            '  curl -sf "http://127.0.0.1:$PORT/api/health" >/dev/null '
+            '2>&1 && { echo \"server ready on $PORT\"; exit 0; }\n'
+            "  sleep 1; i=$((i+1)); done\n"
+            'echo "server failed; see octos/logs/host-dev-server.log"; '
+            "exit 1\n",
+            encoding="utf-8")
+        written.append("scripts/restart-server.sh")
+    run_e2e = scripts_dir / "run-e2e.sh"
+    if run_e2e.exists():
+        log("[plan] scripts/run-e2e.sh present; kept as-is "
+            "(no-overwrite rule)")
+    else:
+        run_e2e.write_text(
+            "#!/bin/sh\n"
+            "# Host-provided: run Playwright specs against a\n"
+            "# cold-started app (rm db.run.json + build frontend +\n"
+            "# restart server) with the pinned @playwright/test from\n"
+            "# backend/node_modules. Usage, from the workspace root:\n"
+            "#   sh scripts/run-e2e.sh [spec files...]   # no args =\n"
+            "# every spec under e2e/\n"
+            'cd "$(dirname "$0")/.." || exit 1\n'
+            "rm -f backend/data/db.run.json\n"
+            'npm run build --prefix frontend || exit 1\n'
+            "sh scripts/restart-server.sh >/dev/null 2>&1\n"
+            'if [ ! -f backend/node_modules/@playwright/test/cli.js ]; '
+            "then\n"
+            '  echo "@playwright/test missing in backend/node_modules; '
+            'npm i -D @playwright/test --prefix backend" >&2\n'
+            "  exit 1\n"
+            "fi\n"
+            "# e2e/ cannot resolve @playwright/test upward (it lives in\n"
+            "# backend/node_modules) — bridge it, or every invocation\n"
+            "# dies on MODULE_NOT_FOUND before a single test runs.\n"
+            'ln -sfn ../backend/node_modules e2e/node_modules\n'
+            'cd e2e || exit 1\n'
+            "exec node ../backend/node_modules/@playwright/test/cli.js "
+            'test --config playwright.config.ts --reporter=line "$@"\n',
+            encoding="utf-8")
+        written.append("scripts/run-e2e.sh")
+    return written
+
+
+def load_lessons_block(project_dir: Path,
+                       lessons_file: str | Path | None,
+                       log=print) -> str:
+    """教训文件读取(在场才返回非空;重发轮挂首批工单,见批循环)。"""
+    path = (Path(lessons_file) if lessons_file
+            else Path(project_dir) / "octos" / "evolution-lessons.md")
+    try:
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
+    except OSError:
+        return ""
+
+
+# 模型侧验证预算(evolve):砍重复全量自测(实测单轮 82-165 次 playwright
+# 跑,大多为整套重复);家族内迭代只跑本族 spec+host-walk,收尾全量一次。
+EVOLVE_VERIFY_BUDGET_NOTE = (
+    "\n\nVERIFICATION BUDGET: while iterating, run only this batch's "
+    "family specs and `_host-walk.spec.ts`; run the FULL own suite at "
+    "most once, right before finishing the turn — repeated full-suite "
+    "runs waste the turn budget.")
+
+
+def build_round_preamble(dossier: str, lessons: str) -> str:
+    """统一轮前言唯一出处(每轮首批工单头部;dry-run 预览同一函数)。
+
+    不区分修复轮/迭代轮:基线档案(在场才注入)+教训(在场才注入)随
+    REQ-1 首批进场,验证优先教义在系统行 RULES(每轮每批可见)。"""
+    parts = [EVOLVE_ROUND_PREAMBLE]
+    if dossier.strip():
+        parts.append(
+            "(c) repair: fix the failures listed under BASELINE ISSUES "
+            "below one by one, then make the own suite prove each "
+            "fix.\n\nBASELINE ISSUES (platform-grader failures this "
+            "app's last graded round):\n" + dossier.strip())
+    if lessons.strip():
+        parts.append(
+            "LESSONS (evidence-extracted from earlier evolution rounds "
+            "— do not repeat these failures):\n" + lessons.strip())
+    return "\n\n".join(parts)
+
+
+
+
+# 模型侧验证预算(evolve):砍重复全量自测(实测单轮 82-165 次 playwright
+# 跑,大多为整套重复);家族内迭代只跑本族 spec+host-walk,收尾全量一次。
+EVOLVE_VERIFY_BUDGET_NOTE = (
+    "\n\nVERIFICATION BUDGET: while iterating, run only this batch's "
+    "family specs and `_host-walk.spec.ts`; run the FULL own suite at "
+    "most once, right before finishing the turn — repeated full-suite "
+    "runs waste the turn budget.")
+
+
+def _scenario_coverage(tree: dict, passed_titles: list[str]) -> dict:
+    """yaml 场景 ↔ 自测通过标题对账(报告型指标,不作门;§5)。"""
+    total = covered = 0
+    by_family: dict[str, dict[str, int]] = {}
+    norm = " ".join(" ".join(passed_titles).split())
+    for folder in tree.get("children") or []:
+        fam = str(folder.get("id") or "?")
+        for node in flatten_atomic(folder):
+            for sc in node.get("scenarios") or []:
+                name = " ".join(str(sc.get("name") or "").split())
+                if not name:
+                    continue
+                total += 1
+                d = by_family.setdefault(fam, {"covered": 0, "total": 0})
+                d["total"] += 1
+                if name in norm:
+                    covered += 1
+                    d["covered"] += 1
+    return {"covered": covered, "total": total, "by_family": by_family}
+
+
+def _dangling_dependencies(tree: dict) -> list[str]:
+    """树内节点 dependencies 指向树外 id(sheet evolution 指旧题 REQ)——
+    家族级依赖边本就优雅跳过;此处仅供 dry-run 报告与注记。"""
+    node_by_id, _ = _node_family_index(tree)
+    out: list[str] = []
+    for nid, node in node_by_id.items():
+        for dep in node.get("dependencies") or []:
+            if str(dep) not in node_by_id:
+                out.append(f"{nid} -> {dep}")
+    return sorted(set(out))
+
+
+def _evolve_dry_run(req_src: Path, output_dir: Path,
+                    options: EvolveOptions, log=print) -> EvolveVerdict:
+    """dry-run:装配到调 LLM 前最后一刻,产物落 <project>/octos/
+    evolve-dry-run/;不调 LLM、不起服务、除该目录外零项目写入。
+
+    需求从临时副本读(避开 requirements/ 副本写入与 prune 语义)。"""
+    tmp = Path(tempfile.mkdtemp(prefix="evolve-dry-"))
+    try:
+        dest = tmp / "requirements"
+        shutil.copytree(req_src, dest)
+        prune_reference_imagery(dest)
+        tree = load_requirement_tree(dest)
+        family_scope = (parse_family_scope(",".join(options.families))
+                        if options.families else frozenset())
+        family_of = family_index(tree)
+        scoped_tree = scope_pruned_tree(tree, family_scope, family_of)
+        fixture_data = fixture_manifest.extract(scoped_tree)
+        fixture_compiled = None
+        try:
+            fixture_compiled = fixture_manifest.compile_seed(fixture_data)
+        except Exception:  # noqa: BLE001 — 与主路径同容错
+            pass
+        fixture_stats = {
+            "uncovered": len((fixture_compiled or {}).get("uncovered") or []),
+            "arrange": len((fixture_compiled or {}).get("arrange") or []),
+            "seeded": len(((fixture_compiled or {}).get("db") or {})
+                          .get("users", [])),
+            "canonical": bool((fixture_compiled or {}).get("canonical")),
+            "kind": (fixture_compiled or {}).get("kind") or "none"}
+        task_rules = fixture_manifest.task_rules(fixture_data, fixture_stats)
+        fixture_rules = fixture_manifest.render_extra_rules(
+            fixture_data, fixture_stats)
+        system_row = build_system_row_context(
+            tree,
+            plan_envelope.render_rules(task_rules, mode="evolve"),
+            fixture_rules, scope=family_scope or None)
+
+        parent_of: dict[str, dict] = {}
+
+        def _idx(node: dict, parent: dict) -> None:
+            for c in node.get("children") or []:
+                if not isinstance(c, dict):
+                    continue
+                if str(c.get("type", "")).upper() == "ATOMIC":
+                    parent_of[str(c.get("id"))] = parent
+                else:
+                    _idx(c, c)
+
+        _idx(tree, tree)
+        batches = group_families(tree, 6)
+        if family_scope:
+            batches = [b for b in batches
+                       if batch_in_scope(b, family_scope, family_of)]
+        batch_texts = {
+            b[0].get("id"): build_turn_features(b, parent_of, evolve=True)
+            + GOAL_FIRST_TURN_COMPLETION.format(
+                smoke=int(os.environ.get("OCTOS_SMOKE_PORT",
+                                         str(plan_envelope.SMOKE_PORT))))
+            for b in batches}
+
+        # 档案与需求同源(dest_req 语义:平台=runner 任务目录,本地=副本;
+        # dry-run 用临时副本承载,零项目写入)。
+        dossier = ""
+        dpath = dest / "baseline-issues.md"
+        if dpath.is_file():
+            dossier = dpath.read_text(encoding="utf-8")
+        lessons_path = (Path(options.lessons_file)
+                        if options.lessons_file
+                        else output_dir / "octos" / "evolution-lessons.md")
+        lessons = (lessons_path.read_text(encoding="utf-8")
+                   if lessons_path.is_file() else "")
+        round_pre = build_round_preamble(dossier, lessons)
+
+        out = output_dir / "octos" / "evolve-dry-run"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "system-row.txt").write_text(system_row, encoding="utf-8")
+        (out / "round-prompt.txt").write_text(round_pre, encoding="utf-8")
+        (out / "phase0-prompt.txt").write_text(round_pre,
+                                              encoding="utf-8")
+        # 视觉核验轮 prompt 预览(真跑在 Phase 0 收口/批尾触发;截图由
+        # 模型自截,归集面在核验轮组装时才有——预览以占位名单格式化)。
+        (out / "visual-check-prompt.txt").write_text(
+            NAV_VISUAL_CHECK_PROMPT.format(
+                shots="(the model's own captures, attached at run time)"),
+            encoding="utf-8")
+        prompts = out / "batch-prompts"
+        prompts.mkdir(exist_ok=True)
+        for bid, text in batch_texts.items():
+            fname = str(bid).replace("/", "-") + ".txt"
+            (prompts / fname).write_text(text, encoding="utf-8")
+        (out / "batch-plan.md").write_text(
+            "# evolve dry-run batch plan\n\n"
+            + "\n".join(
+                f"- batch {b[0].get('id')}: {len(b)} node(s) — "
+                + ", ".join(str(n.get("id")) for n in b)
+                for b in batches) + "\n", encoding="utf-8")
+        (out / "mode-report.md").write_text(
+            "# evolve dry-run mode report\n\n"
+            f"- detect_evolve_project: {detect_evolve_project(output_dir)}\n"
+            f"- scope: {sorted(family_scope) if family_scope else 'ALL'}\n"
+            f"- batches: {len(batches)}; nodes: "
+            f"{sum(len(b) for b in batches)}\n"
+            f"- scenarios: {sum(len(sc.get('scenarios') or []) for sc in flatten_atomic(tree))}\n"
+            f"- prior context-logs to archive: "
+            f"{sorted(p.name for p in (output_dir / '.octos').glob('context-logs*')) if (output_dir / '.octos').is_dir() else []}\n"
+            f"- git repo present: {(output_dir / '.git').exists()}\n"
+            f"- own-suite regression inventory: "
+            f"{_own_suite_specs(output_dir)}\n"
+            f"- dangling dependencies: {_dangling_dependencies(tree)}\n"
+            f"- dossier present: {bool(dossier.strip())}; "
+            f"lessons present: {bool(lessons.strip())}\n",
+            encoding="utf-8")
+        log(f"[evolve] dry-run artifacts -> {out}")
+        return EvolveVerdict(ok=False, round_index=options.round_index,
+                             dry_run=True, artifacts_dir=str(out))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def run_evolve(task_dir: str | Path, project_dir: str | Path, *,
+               families: list[str] | None = None,
+               lessons_file: str | Path | None = None,
+               max_repair_turns: int = 2,
+               dry_run: bool = False,
+               round_index: int = 1,
+               time_budget: int | None = None,
+               log=print) -> EvolveVerdict | int:
+    """evolve 显式 API 唯一入口(外层闭环/CLI 都经此;零环境变量)。
+
+    返回 EvolveVerdict(dry-run/异常路径可能返回 int 兼容 main 语义)。"""
+    argv = [str(task_dir), "--output-dir", str(project_dir),
+            "--mode", "evolve"]
+    if families:
+        argv += ["--families", ",".join(families)]
+    if lessons_file:
+        argv += ["--lessons-file", str(lessons_file)]
+    argv += ["--max-repair-turns", str(max_repair_turns),
+             "--round-index", str(round_index)]
+    if time_budget is not None:
+        argv += ["--time-budget", str(time_budget)]
+    if dry_run:
+        argv.append("--dry-run")
+    options = EvolveOptions(
+        families=list(families) if families else None,
+        lessons_file=lessons_file, max_repair_turns=max_repair_turns,
+        dry_run=dry_run, round_index=round_index,
+        time_budget=time_budget)
+    return main(argv, evolve_options=options)
+
+
+def main(argv=None, evolve_options: EvolveOptions | None = None
+         ) -> int | EvolveVerdict:
     parser = argparse.ArgumentParser(description="Octos agent bundle for ARC-Bench")
     parser.add_argument(
         "requirement_path",
@@ -3266,7 +4018,58 @@ def main() -> int:
     parser.add_argument("--web-port", type=int,
                         default=int(os.environ.get("ARCBENCH_WEB_PORT",
                                                    os.environ.get("ARC_WEB_PORT", "3000"))))
-    args = parser.parse_args()
+    # evolve 模式(10-06 设计文档):显式 CLI/参数通道,零环境变量;
+    # --mode auto(缺省)按工作区形态检测(平台铺 prior project 后裸调
+    # main.py 也能正确走 evolve)。
+    parser.add_argument("--mode", choices=("create", "evolve", "auto"),
+                        default="auto",
+                        help="create=fresh scaffold run (default "
+                             "behavior unchanged); evolve=continue an "
+                             "already-built project (incremental repair "
+                             "+ evolution requirements)")
+    parser.add_argument("--families", default=None,
+                        help="evolve only: comma-separated family ids for "
+                             "this round (None=all); takes precedence over "
+                             "OCTOS_ARC_FAMILIES")
+    parser.add_argument("--lessons-file", default=None,
+                        help="evolve only: lessons file path (default "
+                             "<output>/octos/evolution-lessons.md)")
+    parser.add_argument("--max-repair-turns", type=int, default=2,
+                        help="evolve only: repair-turn budget for "
+                             "round-preamble reds and post-batch regressions")
+    parser.add_argument("--round-index", type=int, default=1,
+                        help="evolve only: outer-loop round number "
+                             "(commit messages / verdict artifacts)")
+    parser.add_argument("--time-budget", type=int, default=None,
+                        help="evolve only: per-round budget in seconds "
+                             "(explicit API value takes precedence over "
+                             "OCTOS_TIME_BUDGET)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="evolve only: assemble prompts/plan/probes "
+                             "into <output>/octos/evolve-dry-run/ without "
+                             "calling the LLM or writing project files")
+    args = parser.parse_args(argv)
+    if evolve_options is not None:
+        # API 通道优先于 CLI 同名旗标(run_evolve 是唯一规范入口)。
+        if evolve_options.families:
+            args.families = ",".join(evolve_options.families)
+        if evolve_options.lessons_file:
+            args.lessons_file = str(evolve_options.lessons_file)
+        args.max_repair_turns = evolve_options.max_repair_turns
+        if evolve_options.dry_run:
+            args.dry_run = True
+        if evolve_options.time_budget is not None:
+            args.time_budget = evolve_options.time_budget
+        args.round_index = evolve_options.round_index
+    # evolve 参数单一事实源:下游全部读 evolve_cfg(不再直接读旗标)。
+    evolve_cfg = EvolveOptions(
+        families=[f.strip() for f in (args.families or "").split(",")
+                  if f.strip()] or None,
+        lessons_file=args.lessons_file,
+        max_repair_turns=args.max_repair_turns,
+        dry_run=args.dry_run,
+        round_index=max(1, args.round_index),
+        time_budget=args.time_budget)
 
     if args.dump_prompts:
         target = (Path(args.dump_prompts) if args.dump_prompts != "AUTO"
@@ -3324,7 +4127,6 @@ def main() -> int:
                     break
                 time.sleep(50)
 
-    req_src = Path(args.requirement_path).resolve()
     # On ARC-Bench the runner hands us the template workspace via
     # ARCBENCH_TEMPLATE_DIR; generated code must land there for preview/tests.
     if args.output_dir:
@@ -3334,6 +4136,37 @@ def main() -> int:
     else:
         output_dir = Path.cwd() / "workspace" / f"run-{clock.compact()}"
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── evolve 模式解析(显式 > 自动检测;平台裸调用走 auto 安全网)──
+    req_src = Path(args.requirement_path).resolve()
+    if args.mode == "evolve":
+        evolve = True
+        if not detect_evolve_project(output_dir):
+            raise SystemExit(
+                "[evolve] --mode evolve requires an already-built project "
+                "(backend/src + non-empty backend/data/db.json + model "
+                f"specs under e2e/); {output_dir} does not qualify")
+    elif args.mode == "auto" and detect_evolve_project(output_dir):
+        evolve = True
+        log("[mode] auto -> evolve (existing built app detected); "
+            "incremental repair + evolution requirements")
+    else:
+        evolve = False
+        if args.mode == "auto":
+            log("[mode] auto -> create (no existing app detected)")
+    if evolve and args.dry_run:
+        # dry-run:纯装配面,不进主路径(requirements/ 副本、scaffold、
+        # git、会话全部不碰),唯一写入=<project>/octos/evolve-dry-run/。
+        return _evolve_dry_run(req_src, output_dir, evolve_cfg, log)
+    if args.dry_run and not evolve:
+        raise SystemExit("[evolve] --dry-run is only meaningful with "
+                         "--mode evolve (or auto-detected evolve)")
+    if evolve:
+        # 唯二项目级预备动作(§9 清单 #17/#18):归档旧会话取证件(纯
+        # mv)+ .gitignore 护栏(只增不删)。git init 基线提交在主路径
+        # ensure_repo 处自然发生(项目现无 .git)。
+        _archive_stale_context_logs(output_dir, log)
+        _ensure_evolve_gitignore(output_dir, log)
 
     # Mirror ARC: copy the requirement input into the workspace. On the
     # platform the requirement dir already lives outside the template repo,
@@ -3376,6 +4209,12 @@ def main() -> int:
         elif _raw_scope.strip().lower() in ("", "all", "*"):
             _raw_scope = ""
         family_scope = parse_family_scope(_raw_scope)
+        if evolve and args.families:
+            # evolve 收窄轮(外层闭环传入):显式参数优先于 env 通道。
+            family_scope = parse_family_scope(args.families)
+            log(f"[evolve] round scope (explicit): "
+                f"{','.join(sorted(family_scope)) or 'ALL'} "
+                "(overrides OCTOS_ARC_FAMILIES)")
         family_of = family_index(tree)
         # 两形式之 AGENTS.md 的 children map 承载全树;模型可见细节与
         # 种子基线/探针一律 scope 化——scope 外家族不进任何上下文。
@@ -3469,7 +4308,14 @@ def main() -> int:
                         f"{os.environ['OCTOS_TIME_BUDGET']}s")
                 except ValueError:
                     pass
-        budget = int(os.environ.get("OCTOS_TIME_BUDGET", "0"))
+        if evolve and evolve_cfg.time_budget:
+            # 显式 API 预算优先于 OCTOS_TIME_BUDGET(本地迭代轮用;
+            # 平台路径不受影响)。
+            budget = int(evolve_cfg.time_budget)
+            log(f"[evolve] time budget (explicit API): {budget}s "
+                "(takes precedence over OCTOS_TIME_BUDGET)")
+        else:
+            budget = int(os.environ.get("OCTOS_TIME_BUDGET", "0"))
         # Per-turn hard wall, decoupled from the budget: bounds a turn
         # that stays inside its iteration cap but crawls. A wall-cut turn
         # lands on disk and goes blocked (no host recovery gate).
@@ -3534,67 +4380,7 @@ def main() -> int:
             # (AGENTS.md ARCHITECTURE 点名),不放交付代码区也不藏 .arc。
             # 目录内自忽略 .gitignore(内容 `*`)——git status/脏收据看不
             # 见,但文件对模型照常可读写。
-            scripts_dir = output_dir / "scripts"
-            scripts_dir.mkdir(parents=True, exist_ok=True)
-            scripts_gitignore = scripts_dir / ".gitignore"
-            if not scripts_gitignore.exists():
-                scripts_gitignore.write_text("*\n", encoding="utf-8")
-            (scripts_dir / "restart-server.sh").write_text(
-                "#!/bin/sh\n"
-                "# Host-provided: restart the dev server after backend/src "
-                "changes.\n"
-                'PORT="${1:-' + str(smoke_port) + '}"\n'
-                'cd "$(dirname "$0")/../backend" || exit 1\n'
-                "# lsof 缺席的平台容器 fallback 到按名 kill:本脚本是文件,\n"
-                "# 模式串不进任何 argv,pkill -f 自匹配在这条路径上不可达。\n"
-                'if command -v lsof >/dev/null 2>&1; then\n'
-                '  lsof -ti TCP:"$PORT" -sTCP:LISTEN | xargs -r kill '
-                "2>/dev/null\n"
-                "else\n"
-                '  pkill -f "node src/index.js" 2>/dev/null\n'
-                "fi\n"
-                "sleep 1\n"
-                'mkdir -p ../octos/logs\n'
-                'PORT="$PORT" nohup node src/index.js '
-                '>> ../octos/logs/host-dev-server.log 2>&1 &\n'
-                "i=0; while [ $i -lt 30 ]; do\n"
-                '  curl -sf "http://127.0.0.1:$PORT/api/health" >/dev/null '
-                "2>&1 && { echo \"server ready on $PORT\"; exit 0; }\n"
-                "  sleep 1; i=$((i+1)); done\n"
-                'echo "server failed; see octos/logs/host-dev-server.log"; '
-                "exit 1\n",
-                encoding="utf-8")
-            # e2e 一键入口:冷启动(清运行态+重建前端+起服)后用
-            # backend/node_modules 的 @playwright/test 跑 e2e/ 下的 spec。
-            # REQ-6 四批 doom 的触发源是模型反复试探"@playwright/test 怎么
-            # 跑"(模块解析空转循环)——宿主把唯一可用调用方式钉成脚本,
-            # 模型零试探(提示词 ARCHITECTURE/完成句点名)。
-            (scripts_dir / "run-e2e.sh").write_text(
-                "#!/bin/sh\n"
-                "# Host-provided: run Playwright specs against a\n"
-                "# cold-started app (rm db.run.json + build frontend +\n"
-                "# restart server) with the pinned @playwright/test from\n"
-                "# backend/node_modules. Usage, from the workspace root:\n"
-                "#   sh scripts/run-e2e.sh [spec files...]   # no args =\n"
-                "# every spec under e2e/\n"
-                'cd "$(dirname "$0")/.." || exit 1\n'
-                "rm -f backend/data/db.run.json\n"
-                'npm run build --prefix frontend || exit 1\n'
-                "sh scripts/restart-server.sh >/dev/null 2>&1\n"
-                'if [ ! -f backend/node_modules/@playwright/test/cli.js ]; '
-                "then\n"
-                '  echo "@playwright/test missing in backend/node_modules; '
-                'npm i -D @playwright/test --prefix backend" >&2\n'
-                "  exit 1\n"
-                "fi\n"
-                "# e2e/ cannot resolve @playwright/test upward (it lives in\n"
-                "# backend/node_modules) — bridge it, or every invocation\n"
-                "# dies on MODULE_NOT_FOUND before a single test runs.\n"
-                'ln -sfn ../backend/node_modules e2e/node_modules\n'
-                'cd e2e || exit 1\n'
-                "exec node ../backend/node_modules/@playwright/test/cli.js "
-                'test --config playwright.config.ts --reporter=line "$@"\n',
-                encoding="utf-8")
+            stage_host_scripts(output_dir, smoke_port, log=log)
         if template_ready and os.environ.get("OCTOS_ARC_PREWARM", "1") != "0":
             scaffold.prewarm_deps(output_dir, log)
 
@@ -3716,7 +4502,8 @@ def main() -> int:
         # 在 profile create 后注入;load_bootstrap_files 无 cap)常驻系统行 0 号位——每分段付 1 次,轮轮缓存命中;挥发物
         # (进度/家族细节/批节点)留工单。
         # goal-first 契约:frontend/src 全域归模型/UI kit 降为工具箱。
-        rules_text = plan_envelope.render_rules(task_rules)
+        rules_text = plan_envelope.render_rules(
+            task_rules, mode="evolve" if evolve else "create")
         # 全局层内容传给 driver→session,在 profile create 后落盘到
         # per-profile data 目录的 AGENTS.md(内核系统行 bootstrap 读取点)。
         system_row_ctx = build_system_row_context(
@@ -3805,6 +4592,15 @@ def main() -> int:
         # The batch's own staged specs (spec-first lazy gate below); the
         # skeleton turn leaves it empty.
         batch_specs: list[str] = []
+        # evolve 轮内状态(§4):已完成批家族面(回归谱裁剪)、已完成批
+        # 节点 id 集(回归"新红"判定=红标题命中已完成节点,兄弟批未实现
+        # 的红不误触发修复)、Phase 0 摘要与基线红集、轮次号、轮末判定。
+        completed_families: set[str] = set()
+        completed_node_ids: set[str] = set()
+        phase0_summary: dict | None = None
+        phase0_red_titles: set[str] = set()
+        round_index = evolve_cfg.round_index
+        evolve_verdict: EvolveVerdict | None = None
 
         try:
             # 骨架轮已退役:有模板时首家族批 turn 携带 BOOTSTRAP 前言
@@ -3815,7 +4611,9 @@ def main() -> int:
                     "OCTOS_ARC_HOST_SCAFFOLD=0 requires the legacy skeleton "
                     "turn, which was retired on 09-30 — re-enable host "
                     "scaffolding or restore the skeleton machinery.")
-            runtime.git.commit("chore: host template ready")
+            runtime.git.commit(
+                f"chore: evolve round {round_index} start" if evolve
+                else "chore: host template ready")
 
             failed: list[str] = []
             # skip 节点的真实原因(deadline/budget/auth)——终局 test 事件
@@ -3897,7 +4695,8 @@ def main() -> int:
                 # 全局层(地图+契约+播种契约)常驻系统行;工单=批节点
                 # TASK+SCENARIOS 本批原文。turn_core=无 BOOTSTRAP 的工单
                 # 正文,重入轮复用(重发 BOOTSTRAP 违"仅首轮"契约)。
-                turn_core = build_turn_features(batch, parent_of)
+                turn_core = build_turn_features(batch, parent_of,
+                                                evolve=evolve)
                 batch_specs = sorted(
                     {f for nid in batch_ids
                      for f in (spec_map.get(nid) or [])})
@@ -3911,11 +4710,26 @@ def main() -> int:
                         batch_specs)
                 turn_core += GOAL_FIRST_TURN_COMPLETION.format(
                     smoke=smoke_port)
-                if idx == 1:
+                if evolve:
+                    turn_core += EVOLVE_VERIFY_BUDGET_NOTE
+                if idx == 1 and not evolve:
                     # 骨架轮退役:首家族批携带 BOOTSTRAP 前言(种子/共享
                     # API 面/家族 stub 在位)——有模板时首 turn 就是 REQ-1
-                    # 的正式轮。
+                    # 的正式轮。evolve 不挂:首轮义务(健康盘点/种子扩展/
+                    # 基线修复)由 Phase 0 承载(§4)。
                     node_prompt = BOOTSTRAP_PREAMBLE + turn_core
+                elif idx == 1 and evolve:
+                    # 统一轮前言(每轮同形):基线档案+教训+种子扩展义务
+                    # 随 REQ-1 首批工单进场——不区分修复轮/迭代轮,模型
+                    # 自检(spec+截图)判定已实现即跳过、红则修。
+                    dossier_path = dest_req / "baseline-issues.md"
+                    dossier = (dossier_path.read_text(encoding="utf-8")
+                               if dossier_path.is_file() else "")
+                    lessons_txt = load_lessons_block(
+                        output_dir, args.lessons_file, log)
+                    node_prompt = (build_round_preamble(dossier,
+                                                        lessons_txt)
+                                   + turn_core)
                 else:
                     node_prompt = turn_core
                 if template_ready:
@@ -3930,6 +4744,7 @@ def main() -> int:
                 except Exception:
                     pre_batch_head = None
                 batch_turn_ok = True
+                visual_done = False
                 main_turn_reason = "not run: auth exhausted"
                 reentry_kind = ""
                 if driver.auth_exhausted:
@@ -4049,6 +4864,10 @@ def main() -> int:
                     # already implemented earlier). The specs are the
                     # contract: we run the batch's staged specs ourselves —
                     # green = accept, red = genuinely lazy → batch failed.
+                    # evolve 下同律换自有套件(按本批家族过滤):基线已实
+                    # 现的家族批合法地零改动收束(轮 2 REQ-2-2-1 实证:
+                    # 全量自测绿+host-walk 绿却被记 failed)。
+                    verified_ok = False
                     if tests_dir and batch_specs:
                         v_run = _run_staged_playwright(
                             output_dir, smoke_port, tests_dir,
@@ -4057,11 +4876,28 @@ def main() -> int:
                             log(f"[gate] {focus_id}: no file change but "
                                 f"batch specs green ({v_run[0]}p) — "
                                 "verification-only turn, accepting")
-                        else:
-                            v_run = None
-                    else:
-                        v_run = None
-                    if v_run is None:
+                            verified_ok = True
+                    elif evolve:
+                        # 全量自有套件+节点 id 命中判定:本批节点的
+                        # 场景全绿即接受——兄弟子批未实现的红不连坐
+                        # (轮 3 教训:族级过滤把 REQ-2-3 的孤儿红算到
+                        # REQ-2-1-1 头上)。标题内嵌 REQ-x-y-z,天然可配。
+                        g = run_own_suite(output_dir, smoke_port, log=log)
+                        ids = {str(n.get("id")).lower() for n in batch}
+                        if g and g["passed"] > 0:
+                            hit = [t for t in g["failed_titles"]
+                                   if any(i in t.lower() for i in ids)]
+                            if not hit:
+                                log(f"[gate] {focus_id}: no file change; "
+                                    f"own suite {g['passed']}p/"
+                                    f"{g['failed']}f with zero red on "
+                                    "this batch's node ids — "
+                                    "verification-only turn, accepting")
+                                verified_ok = True
+                            else:
+                                log(f"[gate] {focus_id}: own suite red on "
+                                    f"this batch: {hit[:3]}")
+                    if not verified_ok:
                         log(f"[gate] {focus_id}: turn ok but no project "
                             "file changed")
                         for nid in batch_ids:
@@ -4133,6 +4969,15 @@ def main() -> int:
                             f for nid in batch_ids
                             for f in (spec_map.get(nid) or []))
                         completed_specs = sorted(set(completed_specs))
+                        if evolve:
+                            # 家族面记账:该家族的自有 spec 进回归谱;
+                            # 节点面记账:回归新红判定用(标题命中)。
+                            completed_node_ids.update(batch_ids)
+                            for nid in batch_ids:
+                                fam = family_of.get(str(nid))
+                                if fam is not None:
+                                    completed_families.add(
+                                        str(fam.get("id")))
                     if (batch_turn_ok and not kernel_cut and tests_dir
                             and pre_batch_head
                             and not time_up()
@@ -4152,13 +4997,7 @@ def main() -> int:
                                 "HEAD"]).stdout.split()
                         except Exception:
                             changed = []
-                        source_changed = [
-                            p for p in changed if p and (
-                                p.startswith("frontend/src/")
-                                or p.startswith("backend/src/")
-                                or p in ("frontend/index.html",
-                                         "frontend/package.json",
-                                         "backend/package.json"))]
+                        source_changed = _changed_source_paths(changed)
                         if source_changed and completed_specs:
                             log(f"[plan] batch {focus_id} changed source "
                                 f"({', '.join(source_changed[:3])}); "
@@ -4173,6 +5012,20 @@ def main() -> int:
                                     f"{g_run[1]}f — repairing while the "
                                     "context is hot")
                                 r_wall = turn_wall(len(batch))
+                                # 视觉搭车:模型本批自截的图直接附修复
+                                # 轮消息(它看见自己拍的现场),本批不
+                                # 再单发核验轮(≤1 轮/批)。没图不搭。
+                                v_media: list[dict] | None = None
+                                v_note = ""
+                                if os.environ.get("OCTOS_ARC_VISUAL_CHECK",
+                                                   "1") != "0":
+                                    _, v_media = \
+                                        _visual_check_prompt_and_media(
+                                            _collect_model_screenshots(
+                                                output_dir, t0))
+                                    if v_media:
+                                        v_note = _VISUAL_PIGGYBACK_NOTE
+                                        visual_done = True
                                 get_repair_driver().run(
                                     SPEC_REGRESSION_REPAIR_PROMPT.format(
                                         failed=", ".join(g_run[2] or []),
@@ -4184,11 +5037,128 @@ def main() -> int:
                                             final_spec_files(
                                                 g_run, output_dir)))
                                     + batch_req_block(
-                                        batch, parent_of),
-                                    min(node_timeout, r_wall), r_wall)
+                                        batch, parent_of)
+                                    + v_note,
+                                    min(node_timeout, r_wall), r_wall,
+                                    media=v_media)
                             elif g_run:
                                 log(f"[plan] regression green: "
                                     f"{g_run[0]}p/{g_run[1]}f")
+                    if (batch_turn_ok and not kernel_cut and evolve
+                            and not tests_dir
+                            and pre_batch_head
+                            and not time_up()
+                            and os.environ.get("OCTOS_ARC_HOST_GRADE",
+                                               "1") != "0"):
+                        # evolve 回归网(§4.4):无 staged specs 的任务
+                        # (hackathon 系)以模型自有套件为回归谱——谱=开跑
+                        # 盘点的既有 spec ∪ 已完成批家族的 spec;只对
+                        # "新红"(相对 Phase 0 基线红)触发修复,已知红
+                        # 留给收窄轮与轮末判定。
+                        try:
+                            changed = runtime.git.run([
+                                "diff", "--name-only", pre_batch_head,
+                                "HEAD"]).stdout.split()
+                        except Exception:
+                            changed = []
+                        source_changed = _changed_source_paths(changed)
+                        spec_spectrum = [
+                            s for s in _own_suite_specs(output_dir)
+                            if (_spec_family(s) is None
+                                or _spec_family(s) in completed_families)]
+                        if source_changed and spec_spectrum:
+                            log(f"[evolve] batch {focus_id} changed "
+                                f"source ({', '.join(source_changed[:3])});"
+                                f" regression over {len(spec_spectrum)} "
+                                "own spec(s)")
+                            g = run_own_suite(output_dir, smoke_port,
+                                              spec_files=spec_spectrum,
+                                              log=log)
+                            if g:
+                                # 新红=标题命中已完成批节点的红(且非
+                                # Phase 0 已知红)——兄弟批未实现的红不
+                                # 算回归,不该触发修复。
+                                done_ids = {i.lower()
+                                            for i in completed_node_ids}
+                                new_reds = [
+                                    t for t in g["failed_titles"]
+                                    if any(i in t.lower() for i in done_ids)
+                                    and t not in phase0_red_titles]
+                                if g["failed"] > 0 and new_reds:
+                                    log(f"[evolve] regression NEW RED: "
+                                        f"{len(new_reds)} new failure(s) "
+                                        "— repairing while the context "
+                                        "is hot")
+                                    r_wall = turn_wall(len(batch))
+                                    # 视觉搭车(与 create 位同款):模型
+                                    # 本批自截图附修复轮,没图不搭。
+                                    v_media: list[dict] | None = None
+                                    v_note = ""
+                                    if os.environ.get(
+                                            "OCTOS_ARC_VISUAL_CHECK",
+                                            "1") != "0":
+                                        _, v_media = \
+                                            _visual_check_prompt_and_media(
+                                                _collect_model_screenshots(
+                                                    output_dir, t0))
+                                        if v_media:
+                                            v_note = _VISUAL_PIGGYBACK_NOTE
+                                            visual_done = True
+                                    get_repair_driver().run(
+                                        EVOLVE_REGRESSION_REPAIR_PROMPT.format(
+                                            failed=len(new_reds),
+                                            titles="\n".join(
+                                                f"- {t}" for t in
+                                                new_reds[:30]),
+                                            files=" ".join(g["failed_files"])
+                                            or "")
+                                        + v_note,
+                                        min(node_timeout, r_wall), r_wall,
+                                        media=v_media)
+                                    run_own_suite(
+                                        output_dir, smoke_port,
+                                        spec_files=spec_spectrum, log=log)
+                                elif g["failed"] > 0:
+                                    log(f"[evolve] regression red but all "
+                                        f"known (Phase 0 baseline: "
+                                        f"{g['failed']}f) — no repair "
+                                        "turn, narrowing round will "
+                                        "handle")
+
+                    # ── 视觉核验轮(≤1 轮/批):批 done、源码有变、且
+                    # 模型本批自截了图 → 归集附回给它自己看(带图请求路
+                    # 由 VISUAL_MODEL)。拍什么页、拍不拍归模型决定——
+                    # 零图即不发核验轮,宿主绝不代拍(宿主不写死定则)。
+                    # OCTOS_ARC_VISUAL_CHECK=0 为运维总闸。
+                    if (not visual_done
+                            and batch_turn_ok and not kernel_cut
+                            and pre_batch_head
+                            and not time_up()
+                            and remaining() >= final_reserve + node_floor
+                            and os.environ.get("OCTOS_ARC_HOST_GRADE",
+                                               "1") != "0"
+                            and os.environ.get("OCTOS_ARC_VISUAL_CHECK",
+                                               "1") != "0"):
+                        try:
+                            v_changed = _changed_source_paths(
+                                runtime.git.run([
+                                    "diff", "--name-only", pre_batch_head,
+                                    "HEAD"]).stdout.split())
+                        except Exception:
+                            v_changed = []
+                        if v_changed:
+                            v_prompt, v_media = \
+                                _visual_check_prompt_and_media(
+                                    _collect_model_screenshots(
+                                        output_dir, t0))
+                            if v_prompt:
+                                log(f"[visual] batch {focus_id} nav check "
+                                    f"turn ({len(v_media)} model "
+                                    "screenshot(s))")
+                                v_wall = turn_wall(1)
+                                driver.run(v_prompt,
+                                           min(node_timeout, v_wall),
+                                           v_wall)
 
             # Final verification pass (read-only): the host measures
             # whatever landed — staged specs (Tier-2), page-health,
@@ -4196,6 +5166,7 @@ def main() -> int:
             # No final LLM turn: the batch turns were the model's only
             # chances to drive the app; this pass never repairs.
             ok, text = False, "skipped: time budget"
+            hs: dict = {}
             if time_up():
                 log("[flow] time budget exhausted; skipping final verification")
             else:
@@ -4204,7 +5175,6 @@ def main() -> int:
                 # 先停看门狗,否则两拍死亡判会把宿主 dev server 复活进去
                 # 抢端口。停止后不复活,交给各链自己的 boot。
                 dev_watchdog_stop.set()
-                hs: dict = {}
                 tier2_run = None
                 if os.environ.get("OCTOS_ARC_HOST_GRADE",
                                   "1") != "0":
@@ -4336,6 +5306,66 @@ def main() -> int:
             # 先停看门狗再清场——顺序反了清场会被看门狗拉回来。
             dev_watchdog_stop.set()
             _stop_dev_server(smoke_port)
+            # ── evolve 轮末判定(§5 三门;外层闭环的输入)──
+            # G1=冷启动自有套件全绿;G2=page-health 行走净+种子实体零
+            # 缺席;G3=批账本全 done。三门全过才算达标(预算耗尽=未测
+            # =不达标)。判定跑自起的服务用完即还(下方 _stop)。handover
+            # 删 db.run.json 仍是最后动作,顺序不受影响。
+            if evolve:
+                v_dir = (output_dir / "octos" / "evolve-verdicts"
+                         / f"round-{round_index}")
+                suite_v: dict | None = None
+                if not time_up():
+                    suite_v = run_own_suite(output_dir, smoke_port,
+                                            artifact_dir=v_dir, log=log)
+                    _stop_dev_server(smoke_port)
+                walk_v: dict | None = None
+                ph = hs.get("page_health") if isinstance(
+                    hs.get("page_health"), dict) else None
+                if ph is not None:
+                    walk_v = {
+                        "errors": list(ph.get("errors") or []),
+                        "missing": list(
+                            (ph.get("walk") or {}).get("missing") or [])}
+                batch_verdicts = {
+                    str(n.get("id")):
+                        plan_statuses.get(str(n.get("id")), "pending")
+                    for n in atomic_nodes}
+                g3 = (not failed and bool(batch_verdicts)
+                      and all(v == "done" for v in batch_verdicts.values()))
+                g1 = bool(suite_v and suite_v["failed"] == 0
+                          and suite_v["passed"] > 0)
+                g2 = bool(walk_v and not walk_v["errors"]
+                          and not walk_v["missing"])
+                coverage = _scenario_coverage(
+                    tree, (suite_v or {}).get("passed_titles") or [])
+                evolve_verdict = EvolveVerdict(
+                    ok=bool(g1 and g2 and g3),
+                    round_index=round_index,
+                    batch_verdicts=batch_verdicts,
+                    failed_nodes=list(failed),
+                    suite=suite_v, walk=walk_v, coverage=coverage,
+                    phase0=phase0_summary, artifacts_dir=str(v_dir))
+                try:
+                    v_dir.mkdir(parents=True, exist_ok=True)
+                    (v_dir / "verdict.json").write_text(
+                        json.dumps(dataclasses.asdict(evolve_verdict),
+                                   ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8")
+                    fv = output_dir / "octos" / "final-verification.json"
+                    if fv.is_file():
+                        shutil.copy2(fv, v_dir / "final-verification.json")
+                except OSError as exc:
+                    log(f"[evolve] verdict artifact write failed: {exc}")
+                log(
+                    f"[evolve] round {round_index} verdict: "
+                    f"{'GREEN' if evolve_verdict.ok else 'RED'} "
+                    f"(G1 suite="
+                    f"{'pass' if g1 else ('fail' if suite_v else 'untested')}"
+                    f", G2 walk="
+                    f"{'pass' if g2 else ('fail' if walk_v else 'untested')}"
+                    f", G3 batches={'pass' if g3 else 'fail'}; coverage="
+                    f"{coverage['covered']}/{coverage['total']})")
         finally:
             dev_watchdog_stop.set()
             watchdog_stop.set()
@@ -4388,6 +5418,9 @@ def main() -> int:
             f"{output_dir / 'octos' / 'prompts'}")
         _log_mirrored_logs(output_dir)
         _handover_pristine_seed(output_dir)
+        # evolve:判定对象随调用返给外层闭环(run_evolve→evolve_loop)。
+        if evolve and evolve_verdict is not None:
+            return evolve_verdict
         return 0
     except Exception as exc:  # platform judges by events, not exit code
         # 平台只看退出码与 SDK 事件；traceback 必须同时落在 stdout/stderr

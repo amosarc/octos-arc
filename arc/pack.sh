@@ -99,7 +99,7 @@ EOF
 # public-tests 不进包(2026-09-26 正式比赛决策):平台挂载 /workspace/tests
 # 或 ARCBENCH_TESTS_DIR 优先生效;两者皆缺的任务走 no-staged-specs 的
 # 模型自测契约(main.py locate_acceptance_tests 的包内回落分支因此休眠)。
-cp main.py plan_envelope.py fixture_manifest.py octos_stdio.py clock.py rejection_audit.py gherkin.py requirements.txt "$PKG/"
+cp main.py plan_envelope.py fixture_manifest.py octos_stdio.py clock.py rejection_audit.py gherkin.py evolve_loop.py requirements.txt "$PKG/"
 cp -R arcbench_agent_runtime scaffold bin "$PKG/"
 # 自验工具链零打包(2026-09-27 决策):生产/仿真 runner 镜像自带全局
 # @playwright/test@1.57.0 + chromium-1200,_ensure_host_toolchain /

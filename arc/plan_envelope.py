@@ -189,12 +189,68 @@ def build_rules(*sources: list[str]) -> str:
     return "\n".join(f"- {r}" for r in rules)
 
 
-def render_rules(task_rules: list[str] | None = None) -> str:
-    """系统行第三段:全局法则 + 任务贡献规则(去重合并)+ 架构清单。"""
+# ── evolve 模式叙事(10-06 设计文档 arc/docs/evolve-design.md §3.1)──
+# 三条 create 叙事对已有项目为假,按子串唯一锚整行替换;进化守则只进
+# evolve 的 RULES。create 路径字节不变(HOST_STACK_RULES_GOAL_FIRST 钉)。
+EVOLVE_ARCHITECTURE_SUBS: tuple[tuple[str, str], ...] = (
+    ("ALL API endpoints are YOURS",
+     "ALL API endpoints are YOURS: backend/src/routes/ already "
+     "implements the baseline families — edit the existing route files "
+     "in place, add sibling files freely — routes, payload shapes, "
+     "validation, and error messages follow the requirement text, "
+     "nothing else."),
+    ("backend/data/db.json ships EMPTY",
+     "backend/data/db.json already holds the baseline seed: EXTEND it "
+     "in place with every new entity the GIVEN lines pre-provision "
+     "(exact names, emails, passwords, ownership/permission "
+     "relationships) — never delete or rename a baseline entity; "
+     "expose every requirement-named entity through your API."),
+    ("frontend/src/main.jsx = React entry",
+     "frontend/src/main.jsx = React entry; frontend/src/app/App.jsx = "
+     "the assembly layer mounting one frontend/src/features/<family>"
+     ".jsx per family (existing families are already implemented — "
+     "edit in place, add siblings freely; brand-new families have "
+     "stubs pre-created, REQ ids in the headers); styles in "
+     "frontend/src/app/styles.css."),
+)
+EVOLVE_CHARTER_ADDENDUM = (
+    "The app already satisfies the baseline requirements: make surgical "
+    "changes — never rewrite a working flow wholesale, and never remove "
+    "baseline behavior the evolution text does not explicitly retract.")
+EVOLVE_CHARTER_VERIFY_FIRST = (
+    "Verify before building: for every family, FIRST run its own specs "
+    "against the running app (and consult the screenshots you captured) "
+    "— when a scenario already walks green, do NOT re-implement it; "
+    "implement only what is missing and fix only what is red.")
+
+
+def architecture_lines(mode: str = "create") -> list[str]:
+    """架构事实清单(mode=evolve 时套用三条叙事替换,锚=行首子串)。"""
+    if mode != "evolve":
+        return list(ARCHITECTURE_LINES)
+    out: list[str] = []
+    for line in ARCHITECTURE_LINES:
+        replaced = next(
+            (new for anchor, new in EVOLVE_ARCHITECTURE_SUBS
+             if line.startswith(anchor)), None)
+        out.append(replaced if replaced is not None else line)
+    return out
+
+
+def render_rules(task_rules: list[str] | None = None,
+                 mode: str = "create") -> str:
+    """系统行第三段:全局法则 + 任务贡献规则(去重合并)+ 架构清单。
+
+    mode=evolve:架构三条换演化版(已有项目上"从零建种子/填桩"为假),
+    并追加进化守则+验证优先教义(外科手术式改动;自检已绿不重复实现)。"""
     header = ("RULES & ARCHITECTURE (these bind every turn of every "
               "family):")
-    return (header + "\n" + build_rules(CHARTER_RULES, task_rules or [])
-            + "\nARCHITECTURE:\n" + build_rules(ARCHITECTURE_LINES))
+    charter = (list(CHARTER_RULES)
+               + [EVOLVE_CHARTER_ADDENDUM, EVOLVE_CHARTER_VERIFY_FIRST]
+               if mode == "evolve" else CHARTER_RULES)
+    return (header + "\n" + build_rules(charter, task_rules or [])
+            + "\nARCHITECTURE:\n"
+            + build_rules(architecture_lines(mode)))
 
 
 HOST_STACK_RULES_GOAL_FIRST = render_rules()

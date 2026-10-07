@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "arc"))
 import gherkin  # noqa: E402
 import main  # noqa: E402
 
-TASKS = ["hackathon--sheet", "hackathon--github"]
+TASKS = ["hackathon-evolution--sheet", "hackathon-evolution--github"]
 OUT = ROOT / "context-sim-out" / "gherkin"
 
 

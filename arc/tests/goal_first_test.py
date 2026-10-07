@@ -9,6 +9,7 @@ Run: python3 arc/goal_first_test.py
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import sys
 import unittest
@@ -105,16 +106,21 @@ class RequirementsMapTests(unittest.TestCase):
             self.assertIn(desc, rmap, f"map lost {nid} description")
 
     def test_real_task_maps_carry_every_atomic(self):
-        for task in ("hackathon--github", "hackathon--sheet"):
+        for task in ("hackathon-evolution--github",
+                     "hackathon-evolution--sheet"):
             req = Path(__file__).resolve().parent.parent / "tasks" / task
             if not (req / "requirements.yaml").exists():
                 continue
             tree = main.load_requirement_tree(req)
             rmap = main.render_requirements_map(tree)
+            # 空白归一比较:evolution 双描述节点以 "Original Feature
+            # Description" 起头,首 40 字符窗跨换行;地图渲染带缩进,
+            # 逐字匹配误报——意图钉是"描述在场",非缩进形状。
+            flat = " ".join(rmap.split())
             atomics = main.flatten_atomic(tree)
             lost = [str(n.get("id")) for n in atomics
-                    if str(n.get("description") or "").strip()[:40]
-                    not in rmap]
+                    if " ".join(str(n.get("description") or "")
+                                .split())[:60] not in flat]
             self.assertEqual(lost, [], f"{task} map lost descriptions")
             # 地图不含场景正文,应显著小于整份 yaml
             yaml_size = (req / "requirements.yaml").stat().st_size
@@ -176,6 +182,10 @@ class TurnBlockTests(unittest.TestCase):
         self.assertNotIn("REQ-2-1 (", blob)
         self.assertIn("SEED: backend/data/db.json", blob)
         self.assertIn("delete backend/data/db.run.json", blob)
+        # 10-06 REQ-4-4 doom 法医:契约只教删、没讲"删后重现=正常",
+        # 模型把 e2e 重建的活本当异常,陷入删↔验乒乓(50s 13 连发
+        # 被内核杀)。防循环句与删除指令同载体进场。
+        self.assertIn("never loop on deleting and re-verifying", blob)
         self.assertLess(blob.index("TASK:"), blob.index("SEED:"))
         self.assertLess(blob.index("SEED:"),
                         blob.index("SCENARIOS (verbatim):"))
@@ -210,7 +220,7 @@ class TurnBlockTests(unittest.TestCase):
     def test_real_sheet_turn_sections(self):
         # sheet 真树烟测:装配面只剩 TASK+SCENARIOS。
         req_dir = Path(__file__).resolve().parent.parent / "tasks" / \
-            "hackathon--sheet"
+            "hackathon-evolution--sheet"
         if not (req_dir / "requirements.yaml").is_file():
             self.skipTest("sheet task not present")
         tree = main.load_requirement_tree(req_dir)
@@ -314,8 +324,11 @@ class SessionGroupTests(unittest.TestCase):
         self.assertEqual([[1], [0]], groups)
 
     def test_real_sheet_two_groups(self):
+        # 10-06 evolution 换代重锚:覆盖层 dependencies 全部悬空指向
+        # 旧题 REQ(树外 id)→ 家族级依赖边全部消失 → SCC=7 个单家族组
+        # (旧题的 2↔5 环随旧 yaml 退役;悬空优雅跳过正是本钉)。
         req_dir = Path(__file__).resolve().parent.parent / "tasks" / \
-            "hackathon--sheet"
+            "hackathon-evolution--sheet"
         if not (req_dir / "requirements.yaml").is_file():
             self.skipTest("sheet task not present")
         tree = main.load_requirement_tree(req_dir)
@@ -323,27 +336,24 @@ class SessionGroupTests(unittest.TestCase):
         groups = main.session_group_batches(tree, batches,
                                             main.family_index(tree),
                                             policy="scc")
-        # 2↔5 环经 5→3→2 把 3/4 吸入同一 SCC:{REQ-1} | {REQ-2,3,4,5}
-        self.assertEqual(2, len(groups))
-        self.assertEqual([0], groups[0])
-        self.assertEqual([1, 2, 3, 4], groups[1])
+        self.assertEqual(7, len(groups))
+        self.assertEqual([[i] for i in range(7)], groups)
 
     def test_real_sheet_family_policy_five_groups(self):
-        # family 档(默认):每家族一会话,文档序(环在 REQ-2 处破,与
-        # 三跑执行顺序一致)。
+        # family 档(默认):每家族一会话,文档序(悬空依赖零边)。
         req_dir = Path(__file__).resolve().parent.parent / "tasks" / \
-            "hackathon--sheet"
+            "hackathon-evolution--sheet"
         if not (req_dir / "requirements.yaml").is_file():
             self.skipTest("sheet task not present")
         tree = main.load_requirement_tree(req_dir)
         batches = main.group_families(tree)
         groups = main.session_group_batches(tree, batches,
                                             main.family_index(tree))
-        self.assertEqual([[0], [1], [2], [3], [4]], groups)
+        self.assertEqual([[i] for i in range(7)], groups)
 
     def test_real_github_singleton_groups_in_doc_order(self):
         req_dir = Path(__file__).resolve().parent.parent / "tasks" / \
-            "hackathon--github"
+            "hackathon-evolution--github"
         if not (req_dir / "requirements.yaml").is_file():
             self.skipTest("github task not present")
         tree = main.load_requirement_tree(req_dir)
@@ -1403,6 +1413,22 @@ class NodeIsolationTests(unittest.TestCase):
         self.assertIn("never rebuild it from scratch",
                       main.BOOTSTRAP_PREAMBLE)
 
+    def test_prompt_states_nondeterministic_hash_and_reset_once(self):
+        # 10-06 github 42/100 两真 doom 根因落句(context-logs 逐 iter
+        # 还原):①store.hash 随机盐——同一密码每次输出不同,REQ-1-1-1
+        # 模型 8 连复读求"稳定值"被杀;②db.run.json 删后重现=正常
+        # (每 boot 从种子重拷),REQ-4-4 模型删↔验乒乓被杀。两信息
+        # 缺口在诱发点旁(SEED 行/两 BOOTSTRAP)补齐。
+        self.assertIn("differs on every call by design",
+                      main.BOOTSTRAP_PREAMBLE)
+        self.assertIn("compute each hash once and reuse the value",
+                      main.BOOTSTRAP_PREAMBLE)
+        self.assertIn("never loop on deleting and re-verifying",
+                      main._TURN_SEED_LINE)
+        ev = main.EVOLVE_BOOTSTRAP_PREAMBLE
+        self.assertIn("differs on every call by design", ev)
+        self.assertIn("never loop on deleting and re-verifying", ev)
+
 
 class SeedOwnershipTests(unittest.TestCase):
     """09-30 定则:宿主播种退役——GIVEN 原样进上下文,种子(db.json)
@@ -1458,7 +1484,7 @@ class SeedOwnershipTests(unittest.TestCase):
 
     def test_github_given_verbatim_smoke(self):
         req_dir = (Path(__file__).resolve().parent.parent / "tasks"
-                   / "hackathon--github")
+                   / "hackathon-evolution--github")
         if not (req_dir / "requirements.yaml").exists():
             self.skipTest("github task file not present")
         tree = main.load_requirement_tree(req_dir)
@@ -1473,6 +1499,104 @@ class SeedOwnershipTests(unittest.TestCase):
         self.assertIn("org-owner@example.test", blob)
         self.assertNotIn("seeded by host", blob)
 
+
+class VisualCheckTests(unittest.TestCase):
+    """视觉核验轮(10-07,模型自截制):拍什么页、拍不拍归模型决定
+    (MY-CHECK SCREENSHOT RULE 教手法);宿主只做跨轮机制——归集本批
+    新图、帽内 FileRef 附回下一轮 User 消息,带图请求由 VISUAL_MODEL
+    路由切视觉模型。内核零改动。"""
+
+    def test_image_file_refs_shape_and_filters(self):
+        import octos_stdio
+        with tempfile.TemporaryDirectory() as tmp:
+            png = Path(tmp) / "home.png"
+            png.write_bytes(b"\x89PNG\r\n")
+            refs = octos_stdio.image_file_refs(
+                [png, Path(tmp) / "missing.png", Path(tmp) / "notes.txt"])
+            self.assertEqual(len(refs), 1)
+            self.assertEqual(refs[0]["mime"], "image/png")
+            self.assertEqual(refs[0]["size_bytes"], 6)
+            self.assertTrue(Path(refs[0]["path"]).is_absolute())
+        self.assertEqual(octos_stdio.image_file_refs([]), [])
+
+    def test_turn_start_params_media_wire_shape(self):
+        import octos_stdio
+        legacy = octos_stdio.build_turn_start_params("s1", "t1", "hello")
+        self.assertEqual(legacy, {
+            "session_id": "s1", "turn_id": "t1",
+            "input": [{"kind": "text", "text": "hello"}]})
+        self.assertNotIn("media", legacy)
+        media = [{"path": "/tmp/x.png", "mime": "image/png",
+                  "size_bytes": 3}]
+        with_media = octos_stdio.build_turn_start_params(
+            "s1", "t2", "look", media=media)
+        self.assertEqual(with_media["media"], media)
+
+    def test_collect_model_screenshots_mtime_and_cap(self):
+        import time as _time
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = root / "octos" / "screenshots"
+            new = root / "e2e" / "octos" / "screenshots"
+            old.mkdir(parents=True)
+            new.mkdir(parents=True)
+            t0 = _time.time() - 60
+            for name, parent, mtime in (
+                    ("stale.png", old, t0 - 30),
+                    ("a.png", old, t0 + 1),
+                    ("b.png", new, t0 + 2),
+                    ("c.txt", old, t0 + 3)):
+                f = parent / name
+                f.write_bytes(b"\x89PNG\r\n")
+                os.utime(f, (mtime, mtime))
+            shots = main._collect_model_screenshots(root, t0, cap=2)
+            self.assertEqual([p.name for p in shots], ["b.png", "a.png"])
+            # 帽是 token 治理:超帽截断归集面,不裁内容决策。
+            self.assertLessEqual(len(shots), 2)
+
+    def test_visual_check_prompt_and_media_contract(self):
+        self.assertEqual(main._visual_check_prompt_and_media([]),
+                         (None, []))
+        with tempfile.TemporaryDirectory() as tmp:
+            shot = Path(tmp) / "home.png"
+            shot.write_bytes(b"\x89PNG\r\n")
+            prompt, media = main._visual_check_prompt_and_media([shot])
+            self.assertIsNotNone(prompt)
+            self.assertIn("home.png", prompt)
+            self.assertIn("YOU captured", prompt)
+            self.assertIn("NEVER the scenario text", prompt)
+            self.assertEqual(len(media), 1)
+
+    def test_nav_visual_check_prompt_unique_source(self):
+        # 唯一出处:dry-run 预览与真跑核验轮共用同一常量(文案改动
+        # 两处同步,不许出现第二份手抄)。
+        self.assertEqual(main.NAV_VISUAL_CHECK_PROMPT.count("{shots}"), 1)
+        self.assertNotIn("{targets}", main.NAV_VISUAL_CHECK_PROMPT)
+        self.assertNotIn("{misses}", main.NAV_VISUAL_CHECK_PROMPT)
+        self.assertIn("scripts/run-e2e.sh _host-walk.spec.ts",
+                      main.NAV_VISUAL_CHECK_PROMPT)
+        self.assertIn("never the scenario text",
+                      main._VISUAL_PIGGYBACK_NOTE)
+
+    def test_mycheck_example_teaches_screenshot_rule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = scaffold.stage_selftest_dir(Path(tmp), 43101,
+                                                entity_names=["X"])
+            example = (stage / "MY-CHECK.spec.ts.example").read_text(
+                encoding="utf-8")
+        self.assertIn("SCREENSHOT RULE", example)
+        self.assertIn("octos/screenshots/", example)
+        self.assertIn("fullPage: true", example)
+        # 机制边界:拍什么页由模型决定(定则:宿主不写死)。
+        self.assertIn("decide yourself", example)
+
+    def test_changed_source_paths_shared_filter(self):
+        self.assertEqual(main._changed_source_paths([
+            "frontend/src/App.jsx", "backend/src/routes/issues.js",
+            "octos/screenshots/b01/home.png", "e2e/MY-CHECK.spec.ts",
+            "frontend/index.html", "frontend/dist/index.html"]),
+            ["frontend/src/App.jsx", "backend/src/routes/issues.js",
+             "frontend/index.html"])
 
 
 if __name__ == "__main__":

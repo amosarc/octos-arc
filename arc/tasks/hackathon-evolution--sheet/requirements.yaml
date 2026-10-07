@@ -1,0 +1,529 @@
+id: ROOT
+name: Evolution Requirements for an Online Spreadsheet Data Workspace
+type: FOLDER
+dependencies: []
+description: |
+  This evolution extends the generated spreadsheet workspace. Every scenario uses
+  an independent EVO-prefixed pre-provisioned workbook and must remain independent
+  of the baseline evaluation seed.
+children:
+- id: REQ-1
+  name: Workbook Access and Lifecycle
+  type: FOLDER
+  dependencies: []
+  description: |
+    Evolution changes for workbook lifecycle behavior.
+  children:
+  - id: REQ-1-2
+    name: Workbook Creation and Naming
+    type: FOLDER
+    dependencies: []
+    description: |
+      Evolution changes for workbook naming.
+    children:
+    - id: REQ-1-2-2
+      name: Rename a Workbook
+      type: ATOMIC
+      dependencies:
+      - REQ-1-1-1
+      description: >
+        Original Feature Description
+
+
+        Users can change the workbook name on the workbook editor page.
+        Next to the editor title is a button with the accessible name "Rename workbook";
+        clicking it displays a text box labeled "Workbook name", prefilled with the
+        last saved name, and a "Save" button. After leading and trailing spaces are
+        trimmed, the name must not be empty; an empty name must be rejected with "Workbook
+        name cannot be empty". After a successful save, both the editor title and
+        the home-page link display the new name; if saving fails, an error is shown
+        and the original name remains displayed. Reopening the workbook shows the
+        most recently saved name.
+
+
+        Modified Feature Description
+
+        Workbook names retain the original behavior and must additionally contain at
+        most 80 characters after trimming. Names are unique across all workbooks without
+        regard to letter case. A name longer than 80 characters is rejected with
+        "Workbook name must be 80 characters or fewer". A case-insensitive duplicate
+        is rejected with "Workbook name already exists". In either rejection case,
+        the editor title, home-page link, and prefilled "Workbook name" field retain
+        the last successful name.
+      scenarios:
+      - name: REQ-1-2-2 - trim and persist an available workbook name
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-M01-RENAME-OK` with active worksheet `IdentityLog` and cell F3 value `unreviewed`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-M01-RENAME-OK`, clicks "Rename workbook", enters `  FY26 Procurement Ledger  ` in "Workbook name", and clicks "Save".
+        - keyword: THEN
+          content: The editor displays exactly `FY26 Procurement Ledger`; after refresh, "Workbook name" is prefilled with exactly `FY26 Procurement Ledger` and cell F3 still displays `unreviewed`.
+      - name: REQ-1-2-2 - reject a case-insensitive duplicate workbook name
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-M01-RENAME-DUP` with active worksheet `IdentityLog`, plus a separate workbook named `EVO-M01-ARCHIVE-RESERVED`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-M01-RENAME-DUP`, clicks "Rename workbook", enters `evo-m01-archive-reserved` in "Workbook name", and clicks "Save".
+        - keyword: THEN
+          content: The exact message "Workbook name already exists" is visible; the editor title and the "Workbook name" field still display `EVO-M01-RENAME-DUP`, including after refresh.
+      - name: REQ-1-2-2 - reject a workbook name longer than 80 characters
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-M01-RENAME-LIMIT` with active worksheet `LimitProbe` and cell C2 value `limit sentinel`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-M01-RENAME-LIMIT`, clicks "Rename workbook", enters the 81-character value `EVO-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA` in "Workbook name", and clicks "Save".
+        - keyword: THEN
+          content: The exact message "Workbook name must be 80 characters or fewer" is visible; after refresh the title remains `EVO-M01-RENAME-LIMIT` and cell C2 displays `limit sentinel`.
+- id: REQ-2
+  name: Worksheets and Table Structure
+  type: FOLDER
+  dependencies: []
+  description: |
+    Evolution changes for worksheet lifecycle behavior.
+  children:
+  - id: REQ-2-1
+    name: Worksheet Lifecycle
+    type: FOLDER
+    dependencies: []
+    description: |
+      Evolution changes for worksheet names.
+    children:
+    - id: REQ-2-1-3
+      name: Rename a Worksheet
+      type: ATOMIC
+      dependencies:
+      - REQ-1-1-1
+      description: >
+        Original Feature Description
+
+
+        Users change a worksheet name from the worksheet tab menu. The
+        "Rename" menu item opens a dialog named "Rename worksheet", containing a text
+        box labeled "Worksheet name" prefilled with the current name and a "Save"
+        button. After trimming leading and trailing spaces, the new name must not
+        be empty and must be unique within the same workbook; an empty name displays
+        "Worksheet name cannot be empty", and a duplicate name displays "Worksheet
+        name already exists". After a successful save, the tab displays the new name;
+        if saving fails, the name is duplicate, or the name is empty, an error is
+        displayed and the original name remains. Refreshing or reopening shows the
+        most recently saved successful name.
+
+
+        Modified Feature Description
+
+        Worksheet names retain the original behavior and must contain at most 50
+        characters after trimming. Uniqueness is case-insensitive within the current
+        workbook. A longer name displays "Worksheet name must be 50 characters or
+        fewer"; a name differing from an existing tab only by letter case displays
+        "Worksheet name already exists". Failed saves retain the tab and prefilled
+        dialog value.
+      scenarios:
+      - name: REQ-2-1-3 - trim and persist an available worksheet name
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-M02-SHEET-OK` with active worksheet `HarborDraft`, worksheet `LedgerView`, and cell D5 value `dock marker` in `HarborDraft`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-M02-SHEET-OK`, opens "Worksheet options for HarborDraft", clicks "Rename", enters `  Dispatch Register  ` in "Worksheet name", and clicks "Save".
+        - keyword: THEN
+          content: The active tab is exactly `Dispatch Register`; after refresh it remains active, cell D5 displays `dock marker`, and the rename dialog is prefilled with `Dispatch Register`.
+      - name: REQ-2-1-3 - reject a worksheet name differing only by case
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-M02-SHEET-DUP` with worksheets `Meridian` and `ArchiveBay`, with `ArchiveBay` active.
+        - keyword: WHEN
+          content: The visitor opens `EVO-M02-SHEET-DUP`, opens "Worksheet options for ArchiveBay", clicks "Rename", enters `meridian` in "Worksheet name", and clicks "Save".
+        - keyword: THEN
+          content: The exact message "Worksheet name already exists" is visible; `ArchiveBay` remains the active tab and the rename dialog still contains `ArchiveBay` after refresh.
+      - name: REQ-2-1-3 - reject a worksheet name longer than 50 characters
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-M02-SHEET-LIMIT` with active worksheet `LengthGauge` and cell G4 value `sheet sentinel`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-M02-SHEET-LIMIT`, opens "Worksheet options for LengthGauge", clicks "Rename", enters the 51-character value `BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB` in "Worksheet name", and clicks "Save".
+        - keyword: THEN
+          content: The exact message "Worksheet name must be 50 characters or fewer" is visible; after refresh `LengthGauge` remains active and cell G4 displays `sheet sentinel`.
+- id: REQ-3
+  name: Cell and Range Editing
+  type: FOLDER
+  dependencies: []
+  description: |
+    Evolution changes for cell editing.
+  children:
+  - id: REQ-3-1
+    name: Direct Data Entry
+    type: FOLDER
+    dependencies: []
+    description: |
+      Evolution changes for direct data entry.
+    children:
+    - id: REQ-3-1-1
+      name: Edit a Cell Through the Grid or Formula Bar
+      type: ATOMIC
+      dependencies: []
+      description: |
+        Original Feature Description
+
+        After selecting a cell in the current active worksheet, users can modify its content directly in the grid or formula bar. Cells support text, numbers, boolean-like values, date text, and formulas beginning with an equals sign. Pressing Enter or clicking another cell commits the change; pressing Escape cancels an uncommitted change. Ordinary cells show the same input in the grid and formula bar; formula cells show the calculated result in the grid and the original submitted formula in the formula bar. After a source value is committed, directly and indirectly dependent formulas update their results. Values, original formulas, and results persist after refresh. If a commit fails, an error is displayed, the grid and formula bar continue to show the last successful value or formula, and dependent results remain unchanged.
+
+        Modified Feature Description
+
+        Pressing Delete clears every cell in the current selected rectangle. Clearing a
+        formula removes its original formula and recalculates dependent cells. The
+        selection remains active, cleared cells display empty text, and the formula
+        bar is empty when a cleared cell is selected. The cleared state persists after
+        refresh.
+      scenarios:
+      - name: REQ-3-1-1 - clear a text cell with Delete
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-M03-CLEAR-TEXT` with active worksheet `Staging`, where cell H4 contains `obsolete tag`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-M03-CLEAR-TEXT`, selects cell H4, and presses Delete.
+        - keyword: THEN
+          content: Cell H4 is selected and displays empty text; its "Formula bar" value is empty and remains empty after refresh.
+      - name: REQ-3-1-1 - clear a formula and recalculate its dependent result
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-M03-CLEAR-FORMULA` with active worksheet `Calculations`, cell B7 value `13`, cell C7 formula `=B7*5`, and cell D7 formula `=C7+2`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-M03-CLEAR-FORMULA`, selects cell C7, and presses Delete.
+        - keyword: THEN
+          content: Cell C7 and its "Formula bar" are empty, cell D7 displays `2`, and both results remain after refresh.
+      - name: REQ-3-1-1 - clear every cell in a selected rectangular range
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-M03-CLEAR-RANGE` with active worksheet `Matrix`, where H4:I5 contains `Amber/Delta` and `Kite/Orchid` in row order.
+        - keyword: WHEN
+          content: The visitor opens `EVO-M03-CLEAR-RANGE`, selects H4:I5, and presses Delete.
+        - keyword: THEN
+          content: Cells H4, I4, H5, and I5 each display empty text and expose aria-selected="true"; after refresh all four cells remain empty.
+- id: REQ-5
+  name: Data Organization and Analysis
+  type: FOLDER
+  dependencies: []
+  description: |
+    Evolution changes for data organization and validation.
+  children:
+  - id: REQ-5-1
+    name: Sorting and Filtering
+    type: FOLDER
+    dependencies: []
+    description: |
+      Evolution changes for filters.
+    children:
+    - id: REQ-5-1-2
+      name: Filter Rows by Value or Condition
+      type: ATOMIC
+      dependencies:
+      - REQ-1-3-2
+      - REQ-3-1-3
+      description: |
+        Original Feature Description
+
+        Users create a filter for a data region with headers in the current active worksheet through "Create filter" in the "Data" menu. Each header provides a button with the accessible name "Filter <header text>"; the dialog with the same name supports selecting specific values and condition options named "Text contains", "Greater than", "Before", "Is empty", and "Is not empty". The value-filter dialog provides "Clear selection", checkboxes generated from distinct source values, and "Apply"; each checkbox uses the displayed source value as its accessible name. The condition dialog provides a combo box labeled "Condition", a text box labeled "Value", and "Apply". "Text contains", "Greater than", and "Before" use the "Value" text box; "Is empty" and "Is not empty" require no value. Conditions on different columns are combined with AND; nonmatching rows are hidden only and are neither deleted nor reordered. After refresh or reopening, the same rows remain visible. CSV export and pivot summarization still include hidden rows within the filtered range. "Clear filter" restores all source records in their original order and with their original values; after refresh all remain visible, while formula and validation behavior are unchanged.
+
+        Modified Feature Description
+
+        A currently applied filter can be saved through "Save filter view" in the
+        "Data" menu. The save interface has a text box labeled
+        "Filter view name" and a "Save view" button. Names are trimmed, nonempty,
+        and unique within the workbook; duplicates display "Filter view name already
+        exists" and remains open after a rejected save. "Filter views" opens a
+        view-management interface with controls named for saved views. Choosing a
+        view replaces current filters and keeps that interface open with the view
+        selected; "Delete filter view" removes
+        the selected view, restores all source rows, and leaves their values unchanged. Saved views and their
+        criteria persist after refresh.
+      scenarios:
+      - name: REQ-5-1-2 - save a two-condition filter view
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-M04-FILTER-SAVE` with active worksheet `Workload`, range D3:F7 headed `Workstream/Phase/Load`, and rows `Atlas/Queued/17`, `Atlas/Active/31`, `Beacon/Queued/22`, and `Cirrus/Queued/9`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-M04-FILTER-SAVE`, creates a filter for D3:F7, applies `Text contains` value `Atlas` to "Filter Workstream", applies `Greater than` value `20` to "Filter Load", opens "Save filter view", enters `Atlas active load` in "Filter view name", and clicks "Save view".
+        - keyword: THEN
+          content: Only row 5 containing `Atlas/Active/31` is visible, and after refresh "Filter views" contains exactly `Atlas active load` with the same visible row.
+      - name: REQ-5-1-2 - apply a persisted saved filter view
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-M04-FILTER-APPLY` with active worksheet `Workload`, range D3:F7 headed `Workstream/Phase/Load`, and saved filter view `Queued lanes` selecting Phase values `Queued`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-M04-FILTER-APPLY`, opens "Filter views" in the "Data" menu, and clicks `Queued lanes`.
+        - keyword: THEN
+          content: Rows containing `Atlas/Queued/17`, `Beacon/Queued/22`, and `Cirrus/Queued/9` are visible while the `Atlas/Active/31` row is hidden; the same state remains after refresh.
+      - name: REQ-5-1-2 - reject and delete a saved filter view
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-M04-FILTER-DELETE` with active worksheet `Workload`, range D3:F7 headed `Workstream/Phase/Load`, and saved filter view `Queued lanes`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-M04-FILTER-DELETE`, creates a filter for D3:F7, opens "Save filter view", enters ` queued lanes ` in "Filter view name", clicks "Save view", then opens "Filter views", chooses `Queued lanes`, and clicks "Delete filter view".
+        - keyword: THEN
+          content: The exact message "Filter view name already exists" is visible after the first save attempt; after deletion "Filter views" no longer contains `Queued lanes`, all source rows remain visible, and the deletion persists after refresh.
+  - id: REQ-5-2
+    name: Data Validation
+    type: FOLDER
+    dependencies: []
+    description: |
+      Evolution changes for validation messages.
+    children:
+    - id: REQ-5-2-1
+      name: Set Dropdown or Numeric Validation for a Range
+      type: ATOMIC
+      dependencies:
+      - REQ-3-1-1
+      description: >
+        Original Feature Description
+
+
+        Users select a target range and click "Data validation" in the "Data" menu. A dialog named "Data validation" provides a combo box labeled "Rule type"; "Dropdown" uses a text box labeled "Allowed values", where comma-separated items are trimmed of leading and trailing spaces; "Number range" uses text boxes labeled "Minimum" and "Maximum"; the "Save" button applies an inclusive rule. After a valid save succeeds, the dialog closes. A dropdown cell provides a button with the accessible name "Open dropdown for <cell coordinate>"; each option uses the ARIA option role and the trimmed allowed value as its accessible name. If an invalid value is entered through the grid, formula bar, paste, or range move, the entire operation is rejected and the original value remains; an invalid dropdown value displays "Please select one of the following values: <comma-separated allowed values>", while an invalid number displays "Please enter a number between <minimum> and <maximum>". In the persisted multi-cell 0-to-100 boundary scenario, rejecting 101 in B3 displays "Please enter a number from 0 to 100". If any target in a bulk operation is invalid, all targets retain their original values. Rules remain active after refresh. When an existing rule is reopened, the dialog is prefilled with the rule type and parameters and displays a "Delete rule" button; saving a modification makes the new range effective immediately, deleting removes the constraint, and either successful operation closes the dialog without changing existing cell values.
+
+
+        Modified Feature Description
+
+        The "Data validation" dialog additionally provides an optional text box
+        labeled "Error message". When nonempty, its trimmed value replaces the
+        standard rejection message for every invalid entry path. Reopening a rule
+        prefills this value. Updating or clearing it takes effect immediately and
+        persists after refresh.
+      scenarios:
+      - name: REQ-5-2-1 - show a custom numeric error from the formula bar
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-M05-VALIDATION-FORMULA` with active worksheet `Thresholds`, cell J6 value `37`, and a number-range validation rule of 25 to 75 with error message `Capacity must be from 25 to 75`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-M05-VALIDATION-FORMULA`, selects J6, enters `88` in "Formula bar", and presses Enter.
+        - keyword: THEN
+          content: The exact message "Capacity must be from 25 to 75" is visible, J6 remains `37`, and the same result occurs after refresh when entering `88` through "Formula bar".
+      - name: REQ-5-2-1 - show a custom dropdown error from the grid
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-M05-VALIDATION-GRID` with active worksheet `Thresholds`, cell K8 value `Ready`, and a dropdown rule `Ready, Holding, Released` with error message `Choose a queue state`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-M05-VALIDATION-GRID`, edits K8 through its grid editor, enters `Paused`, and presses Enter.
+        - keyword: THEN
+          content: The exact message "Choose a queue state" is visible; K8 remains `Ready`, and after refresh the same invalid grid entry is rejected with the same message.
+      - name: REQ-5-2-1 - persist an updated custom error message
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-M05-VALIDATION-EDIT` with active worksheet `Thresholds`, cell L4 value `42`, and a number-range validation rule of 25 to 75 with error message `Capacity must be from 25 to 75`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-M05-VALIDATION-EDIT`, opens "Data validation" for L4, replaces "Error message" with `Allocate between 25 and 75`, clicks "Save", selects L4, enters `24` in "Formula bar", and presses Enter.
+        - keyword: THEN
+          content: The exact message "Allocate between 25 and 75" is visible, L4 remains `42`, and reopening "Data validation" after refresh shows the same "Error message" value.
+- id: REQ-6
+  name: Spreadsheet Navigation Enhancements
+  type: FOLDER
+  dependencies: []
+  description: |
+    New navigation and text-editing capabilities.
+  children:
+  - id: REQ-6-1
+    name: Freeze Panes
+    type: FOLDER
+    dependencies: []
+    description: |
+      Freeze pane behavior.
+    children:
+    - id: REQ-6-1-1
+      name: Freeze Rows and Columns
+      type: ATOMIC
+      dependencies:
+      - REQ-3-1-3
+      description: |
+        Users open the "View" menu to freeze spreadsheet headings. "Freeze rows through <row number>" freezes every row through the selected row; "Freeze columns through <column letters>" freezes every column through the selected column; and "Freeze panes at <cell coordinate>" freezes rows above and columns to the left of the selected cell. The editor exposes the saved state through a button named exactly "Frozen rows: <count>; columns: <count>", which remains unchanged after refresh.
+      scenarios:
+      - name: REQ-6-1-1 - freeze the first row
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-N01-FREEZE-ROW` with active worksheet `ScrollLedger`, headers in row 1, and data through row 40.
+        - keyword: WHEN
+          content: The visitor opens `EVO-N01-FREEZE-ROW`, selects B1, opens "View", and clicks "Freeze rows through 1".
+        - keyword: THEN
+          content: 'The editor displays the button "Frozen rows: 1; columns: 0" and displays the same button after refresh.'
+      - name: REQ-6-1-1 - freeze the first column
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-N01-FREEZE-COLUMN` with active worksheet `ScrollLedger`, headers in row 1, and data through column L.
+        - keyword: WHEN
+          content: The visitor opens `EVO-N01-FREEZE-COLUMN`, selects A8, opens "View", and clicks "Freeze columns through A".
+        - keyword: THEN
+          content: 'The editor displays the button "Frozen rows: 0; columns: 1" and displays the same button after refresh.'
+      - name: REQ-6-1-1 - freeze both row and column panes
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-N01-FREEZE-BOTH` with active worksheet `ScrollLedger`, headers in row 1, and data through row 40 and column L.
+        - keyword: WHEN
+          content: The visitor opens `EVO-N01-FREEZE-BOTH`, selects C4, opens "View", and clicks "Freeze panes at C4".
+        - keyword: THEN
+          content: 'The editor displays the button "Frozen rows: 3; columns: 2" and displays the same button after refresh.'
+  - id: REQ-6-2
+    name: Find and Replace
+    type: FOLDER
+    dependencies: []
+    description: |
+      Find and replace behavior.
+    children:
+    - id: REQ-6-2-1
+      name: Find and Replace Cell Text
+      type: ATOMIC
+      dependencies:
+      - REQ-3-1-1
+      description: |
+        Users open "Find and replace" from the "Edit" menu. Its dialog has text boxes labeled "Find" and "Replace with", a "Match case" checkbox, and buttons "Find next" and "Replace all". A cell matches when its entire displayed value equals the Find text. With "Match case" unchecked, comparison is case-insensitive; with it checked, comparison is case-sensitive. "Find next" selects the next matching cell and displays "Match <current> of <total>". "Replace all" changes all matching cells in the current worksheet and displays "Replaced <count> cells". All successful replacements persist after refresh.
+      scenarios:
+      - name: REQ-6-2-1 - find the next matching cell
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-N02-FIND-NEXT` with active worksheet `Narrative`, where E4, E7, and E11 contain `Cobalt`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-N02-FIND-NEXT`, selects A1, opens "Edit", clicks "Find and replace", enters `Cobalt` in "Find", and clicks "Find next" twice.
+        - keyword: THEN
+          content: Cell E7 is selected and the dialog displays exactly "Match 2 of 3".
+      - name: REQ-6-2-1 - replace all matching text in the active worksheet
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-N02-REPLACE-ALL` with active worksheet `Narrative`, where F3, F6, and F9 contain `Cobalt` and F12 contains `Copper`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-N02-REPLACE-ALL`, opens "Edit", clicks "Find and replace", enters `Cobalt` in "Find", enters `Indigo` in "Replace with", and clicks "Replace all".
+        - keyword: THEN
+          content: The dialog displays exactly "Replaced 3 cells"; F3, F6, and F9 display `Indigo`, F12 displays `Copper`, and these values remain after refresh.
+      - name: REQ-6-2-1 - replace only exact-case matches
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-N02-CASE-SENSITIVE` with active worksheet `Narrative`, where G3 contains `Cobalt`, G4 contains `cobalt`, and G5 contains `Cobalt-7`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-N02-CASE-SENSITIVE`, opens "Edit", clicks "Find and replace", enters `Cobalt` in "Find", enters `Azure` in "Replace with", checks "Match case", and clicks "Replace all".
+        - keyword: THEN
+          content: The dialog displays exactly "Replaced 1 cells"; G3 displays `Azure`, while G4 and G5 retain `cobalt` and `Cobalt-7` after refresh.
+- id: REQ-7
+  name: Reference and Formatting Enhancements
+  type: FOLDER
+  dependencies: []
+  description: |
+    New named-range and conditional-formatting capabilities.
+  children:
+  - id: REQ-7-1
+    name: Named Ranges
+    type: FOLDER
+    dependencies: []
+    description: |
+      Named range behavior.
+    children:
+    - id: REQ-7-1-1
+      name: Create and Edit Named Ranges
+      type: ATOMIC
+      dependencies:
+      - REQ-4-1-1
+      description: |
+        The "Data" menu provides "Named ranges", which opens a dialog named "Named ranges". "Add named range" opens fields labeled "Name" and "Range" with a "Save" button. Names must start with a letter. Saved names are available in formulas as range references. Each saved name exposes an "Edit <name>" button; changing its range recalculates dependent formulas immediately and persists after refresh. Invalid names display "Named range must start with a letter".
+      scenarios:
+      - name: REQ-7-1-1 - create a named range and use it in a formula
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-N03-NAMED-CREATE` with active worksheet `ForecastModel`, where J3:J5 contain `18`, `24`, and `31`, and L3 is empty.
+        - keyword: WHEN
+          content: The visitor opens `EVO-N03-NAMED-CREATE`, opens "Data", clicks "Named ranges", clicks "Add named range", enters `CapacityPlan` in "Name", enters `ForecastModel!J3:J5` in "Range", clicks "Save", selects L3, enters `=SUM(CapacityPlan)` in "Formula bar", and presses Enter.
+        - keyword: THEN
+          content: The "Named ranges" dialog lists `CapacityPlan`, L3 displays `73`, and after refresh the formula bar for L3 contains `=SUM(CapacityPlan)`.
+      - name: REQ-7-1-1 - reject an invalid named range name
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-N03-NAMED-INVALID` with active worksheet `ForecastModel` and values `6` and `14` in K2:K3.
+        - keyword: WHEN
+          content: The visitor opens `EVO-N03-NAMED-INVALID`, opens "Data", clicks "Named ranges", clicks "Add named range", enters `1stBatch` in "Name", enters `ForecastModel!K2:K3` in "Range", and clicks "Save".
+        - keyword: THEN
+          content: The exact message "Named range must start with a letter" is visible, and "Named ranges" contains no entry named `1stBatch` after refresh.
+      - name: REQ-7-1-1 - update an existing named range
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-N03-NAMED-UPDATE` with active worksheet `ForecastModel`, named range `MarginBase` referring to K2:K3 with values `5` and `8`, value `12` in K4, and M2 formula `=SUM(MarginBase)`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-N03-NAMED-UPDATE`, opens "Data", clicks "Named ranges", clicks "Edit MarginBase", replaces "Range" with `ForecastModel!K2:K4`, and clicks "Save".
+        - keyword: THEN
+          content: M2 displays `25`; after refresh, "Edit MarginBase" shows `ForecastModel!K2:K4` in "Range" and M2 still displays `25`.
+  - id: REQ-7-2
+    name: Conditional Formatting
+    type: FOLDER
+    dependencies: []
+    description: |
+      Conditional formatting behavior.
+    children:
+    - id: REQ-7-2-1
+      name: Create, Edit, and Delete Conditional Formatting Rules
+      type: ATOMIC
+      dependencies:
+      - REQ-3-1-3
+      description: |
+        The "Format" menu provides "Conditional formatting", opening a dialog named "Conditional formatting". Users select a target range, choose a rule type from "Condition", enter a required "Value", choose a "Style" option named "Red fill", "Yellow fill", or "Green fill", and click "Save". "Greater than" applies to parseable numeric values and "Text contains" applies to text values. A matching cell displays the selected visible fill style, while a nonmatching cell in the target range does not display that style. The dialog lists saved rules with "Edit rule 1" and "Delete rule 1" controls. Editing applies the replacement immediately; deleting removes the visible fill. Rules and their effects persist after refresh.
+      scenarios:
+      - name: REQ-7-2-1 - apply a numeric threshold format
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-N04-FORMAT-NUMBER` with active worksheet `Signals`, where J4:J6 contain `11`, `29`, and `46`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-N04-FORMAT-NUMBER`, selects J4:J6, opens "Format", clicks "Conditional formatting", chooses "Greater than" in "Condition", enters `25` in "Value", chooses "Red fill" in "Style", and clicks "Save".
+        - keyword: THEN
+          content: J5 and J6 have background color rgb(254, 226, 226), J4 does not have that color, and the same colors remain after refresh.
+      - name: REQ-7-2-1 - apply a text-match format
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-N04-FORMAT-TEXT` with active worksheet `Signals`, where K4:K6 contain `Watch`, `Stable`, and `Elevated`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-N04-FORMAT-TEXT`, selects K4:K6, opens "Format", clicks "Conditional formatting", chooses "Text contains" in "Condition", enters `Watch` in "Value", chooses "Yellow fill" in "Style", and clicks "Save".
+        - keyword: THEN
+          content: K4 has background color rgb(254, 249, 195), K5 and K6 do not have that color, and the rule remains listed after refresh.
+      - name: REQ-7-2-1 - edit and delete a conditional formatting rule
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-N04-FORMAT-EDIT` with active worksheet `Signals`, cells L3:L5 containing `16`, `28`, and `39`, and rule 1 applying Red fill for values greater than 20.
+        - keyword: WHEN
+          content: The visitor opens `EVO-N04-FORMAT-EDIT`, opens "Format", clicks "Conditional formatting", clicks "Edit rule 1", chooses "Green fill" in "Style", clicks "Save", then reopens "Conditional formatting" and clicks "Delete rule 1".
+        - keyword: THEN
+          content: L4 and L5 briefly use background color rgb(220, 252, 231) after the edit, and after deletion none of L3:L5 has a conditional background color, including after refresh.
+- id: REQ-8
+  name: Cell Annotation Enhancements
+  type: FOLDER
+  dependencies: []
+  description: |
+    New cell note capability.
+  children:
+  - id: REQ-8-1
+    name: Cell Notes
+    type: FOLDER
+    dependencies: []
+    description: |
+      Cell note behavior.
+    children:
+    - id: REQ-8-1-1
+      name: Create, Edit, and Delete a Cell Note
+      type: ATOMIC
+      dependencies:
+      - REQ-3-1-1
+      description: |
+        Users select one cell, open the "Insert" menu, and click "Add note". The dialog is named "Note for <cell coordinate>" and contains a text box labeled "Note", a "Save note" button, and, for an existing note, buttons "Edit note" and "Delete note". Saving a note adds a button named "Open note for <cell coordinate>" to that cell. Opening a note displays its exact text. Editing replaces the text, and deleting removes both the note and its open button. Note changes persist after refresh without changing the cell value.
+      scenarios:
+      - name: REQ-8-1-1 - create and persist a cell note
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-N05-NOTE-CREATE` with active worksheet `ReviewQueue`, where D8 contains `Manifest R41` and has no note.
+        - keyword: WHEN
+          content: The visitor opens `EVO-N05-NOTE-CREATE`, selects D8, opens "Insert", clicks "Add note", enters `Confirm the harbor reference before release` in "Note", and clicks "Save note".
+        - keyword: THEN
+          content: D8 still displays `Manifest R41`, "Open note for D8" is visible, and opening it displays exactly `Confirm the harbor reference before release`, including after refresh.
+      - name: REQ-8-1-1 - edit an existing cell note
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-N05-NOTE-EDIT` with active worksheet `ReviewQueue`, where F6 contains `Gate Rho` and has note `Awaiting controller sign-off`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-N05-NOTE-EDIT`, clicks "Open note for F6", clicks "Edit note", replaces "Note" with `Controller signed at 14:20`, and clicks "Save note".
+        - keyword: THEN
+          content: Opening "Open note for F6" displays exactly `Controller signed at 14:20`, F6 still displays `Gate Rho`, and the updated note remains after refresh.
+      - name: REQ-8-1-1 - delete an existing cell note
+        steps:
+        - keyword: GIVEN
+          content: The visitor is unauthenticated and the system pre-provisions workbook `EVO-N05-NOTE-DELETE` with active worksheet `ReviewQueue`, where J3 contains `Route Zeta` and has note `Retire after audit`.
+        - keyword: WHEN
+          content: The visitor opens `EVO-N05-NOTE-DELETE`, clicks "Open note for J3", and clicks "Delete note".
+        - keyword: THEN
+          content: '"Open note for J3" is not visible, J3 still displays `Route Zeta`, and both results remain after refresh.'

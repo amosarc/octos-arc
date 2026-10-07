@@ -23,6 +23,52 @@ class OctosProtocolError(RuntimeError):
     pass
 
 
+# turn/start media 通道的图片类型白名单(与内核 vision.rs 的扩展名→MIME
+# 映射同口径;非白名单文件在组装期静默跳过,不发坏帧)。
+_IMAGE_MIME = {".png": "image/png", ".jpg": "image/jpeg",
+               ".jpeg": "image/jpeg", ".gif": "image/gif",
+               ".webp": "image/webp"}
+
+
+def image_file_refs(paths) -> list[dict]:
+    """本地图片文件 → turn/start `media` FileRef 列表。
+
+    FileRef 形状由内核 TurnStartParams.media 钉死(crates/octos-core/
+    src/ui_protocol.rs:1160:path/mime/size_bytes);path 用绝对路径
+    (内核对图片透传不落 uploads/)。缺失文件与非图片后缀静默跳过——
+    调用方(视觉核验轮)对"一张都没取到"自行降级,这里不做策略。"""
+    out: list[dict] = []
+    for p in paths:
+        path = Path(p)
+        mime = _IMAGE_MIME.get(path.suffix.lower())
+        if mime is None:
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        out.append({"path": str(path.resolve()), "mime": mime,
+                    "size_bytes": size})
+    return out
+
+
+def build_turn_start_params(session_id: str, turn_id: str, text: str,
+                            media: list[dict] | None = None) -> dict:
+    """turn/start payload(纯函数,钉媒体通道的线上形状)。
+
+    media 缺省时与历史 payload 逐字节一致;带图时序列化为
+    `media: [...]`,内核把 User 消息图片 base64 内联进请求(带图请求
+    由 VISUAL_MODEL 路由切视觉模型)。"""
+    params: dict = {
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "input": [{"kind": "text", "text": text}],
+    }
+    if media:
+        params["media"] = list(media)
+    return params
+
+
 class OctosStdioSession:
     def __init__(self, octos_bin: str, cwd: Path, env: dict, data_dir: Path,
                  on_event: Callable[[str, dict], None] | None = None,
@@ -286,7 +332,8 @@ class OctosStdioSession:
         self._send("session/open", params, want_response=True, timeout=timeout)
 
     def run_turn(self, text: str, timeout: float = 1800.0,
-                 wall_timeout: float | None = None) -> tuple[bool, str]:
+                 wall_timeout: float | None = None,
+                 media: list[dict] | None = None) -> tuple[bool, str]:
         """Run one turn; stream events to on_event. Returns (ok, full_text).
 
         `timeout` is an IDLE budget, not a wall clock: the deadline resets
@@ -301,13 +348,17 @@ class OctosStdioSession:
         it the wall defaults to 3x the idle budget (min 1h) — which let a
         single 2667s reasoning-heavy turn starve four sibling nodes on
         2026-09-20.
+
+        `media`, when given, is a list of FileRef dicts (see
+        image_file_refs) attached to the turn's User message — the only
+        channel the kernel inlines into the LLM request (tool results
+        cannot carry images). Image-bearing requests are routed to the
+        VISUAL_MODEL by the kernel when one is configured.
         """
         turn_id = str(uuid.uuid4())
-        self._send("turn/start", {
-            "session_id": self.session_id,
-            "turn_id": turn_id,
-            "input": [{"kind": "text", "text": text}],
-        }, want_response=True, timeout=60.0)
+        self._send("turn/start", build_turn_start_params(
+            self.session_id, turn_id, text, media),
+            want_response=True, timeout=60.0)
 
         chunks: list[str] = []
         hard_deadline = time.monotonic() + (
