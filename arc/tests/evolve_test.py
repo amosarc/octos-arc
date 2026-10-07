@@ -30,6 +30,17 @@ class EvolveNarrativeTests(unittest.TestCase):
         self.assertNotIn("ships EMPTY", r)            # create 假叙事不得进场
         self.assertNotIn("fill the stubs in place", r)
 
+    def test_evolve_charter_carries_page_reaudit(self):
+        # 10-08 sheet-1.0 演进轮法医:12 挂里 7 挂死于 init 既有页面
+        # 形态(面包屑+h1 双渲染实体名/重命名错误双 alert)——baseline
+        # 应用带着旧形态进演进题,改老页必须整页按律重审,否则既有
+        # 形态原样继承到演进场景。重审律只进 evolve 的 RULES。
+        r = plan_envelope.render_rules(mode="evolve")
+        self.assertIn("re-audit the whole page", r)
+        self.assertIn("ride along from the baseline", r)
+        self.assertNotIn("re-audit the whole page",
+                         plan_envelope.HOST_STACK_RULES_GOAL_FIRST)
+
     def test_create_rules_unchanged(self):
         r = plan_envelope.render_rules(mode="create")
         self.assertIn("ships EMPTY", r)

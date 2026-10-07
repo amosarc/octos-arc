@@ -249,6 +249,19 @@ class MyCheckExampleTests(unittest.TestCase):
             self.assertIn("WALK RULE", text)
             self.assertIn("the session state the scenario starts in", text)
             self.assertIn("page.goto is only for the initial load", text)
+            # 10-08 sheet-1.0 演进轮 18/30 法医:三个可达性契约死法
+            # (对话框自命名≠开者引号名→全族超时;命名控件藏未命名
+            # 中间按钮后;格内嵌 UI 污染单元格精确文本)——自测必须
+            # 按评分器语义(命名对话框作用域/容器全文)驱动才照得
+            # 出来,三 RULE 钉进示例。
+            self.assertIn("DIALOG-NAME RULE", text)
+            self.assertIn("as its own accessible name", text)
+            self.assertIn("getByRole('dialog', { name: X })", text)
+            self.assertIn("OPEN-PRESENT RULE", text)
+            self.assertIn("intermediate click is a wall", text)
+            self.assertIn("CELL-TEXT RULE", text)
+            self.assertIn("CSS-sized visible box", text)
+            self.assertIn("inside a container, re-assert", text)
 
 
 class SessionGroupTests(unittest.TestCase):
@@ -826,6 +839,20 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertIn("a search box or a typed URL is not an entry point",
                       rules)
         self.assertIn("seeded data exists to be used", rules)
+
+    def test_rules_pin_named_surface_contract(self):
+        # 10-08 sheet-1.0 演进轮 18/30 法医三死法:①查找替换对话框自
+        # 命名 "Text tools"≠需求 "Find and replace"→评分器
+        # getByRole('dialog',{name}) 作用域永不解析 0/3;②条件组合
+        # 框藏 "Filter by condition"(需求未命名)中间按钮后→2 挂;
+        # ③批注按钮进格→单元格文本污染 "still displays X" 精确断言
+        # →2 挂。一面三律压缩单行进 charter(8800 帽内),细则在
+        # MY-CHECK 三 RULE。
+        rules = plan_envelope.HOST_STACK_RULES_GOAL_FIRST
+        self.assertIn("is itself named X", rules)
+        self.assertIn("present at open", rules)
+        self.assertIn("never behind an unnamed extra step", rules)
+        self.assertIn("never changes its displayed text", rules)
 
     def test_rules_pin_grader_walk_mechanics(self):
         # 10-03 template-3 法医:首页 slug≠yaml 引号名"Acme Demo"→
@@ -1612,6 +1639,44 @@ class VisualCheckTests(unittest.TestCase):
             "frontend/index.html", "frontend/dist/index.html"]),
             ["frontend/src/App.jsx", "backend/src/routes/issues.js",
              "frontend/index.html"])
+
+
+class HandoverPristineSeedTests(unittest.TestCase):
+    """交付清场:删 backend/data/db.run.json;任何失败形态都不得抛。
+
+    10-08 拍板:清理失败只落日志,不得带崩宿主进程(github-1.0 评测窗
+    debug.log:394 实证正常路径已删;此处钉死四种失败形态的永不抛)。"""
+
+    def test_removes_run_db_when_present(self):
+        with tempfile.TemporaryDirectory() as td:
+            data = Path(td) / "backend" / "data"
+            data.mkdir(parents=True)
+            (data / "db.run.json").write_text("{}", encoding="utf-8")
+            main._handover_pristine_seed(Path(td))
+            self.assertFalse((data / "db.run.json").exists())
+
+    def test_absent_file_and_missing_tree_no_raise(self):
+        with tempfile.TemporaryDirectory() as td:
+            main._handover_pristine_seed(Path(td))  # 连 backend/ 都没有
+            (Path(td) / "backend").write_text("not a dir", encoding="utf-8")
+            main._handover_pristine_seed(Path(td))  # 路径形态破坏仍不抛
+
+    def test_locked_unlink_logs_not_raises(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as td:
+            data = Path(td) / "backend" / "data"
+            data.mkdir(parents=True)
+            (data / "db.run.json").write_text("{}", encoding="utf-8")
+            with mock.patch.object(Path, "unlink", side_effect=OSError("locked")):
+                main._handover_pristine_seed(Path(td))  # OSError 被吞,只落日志
+            self.assertTrue((data / "db.run.json").exists())
+
+    def test_unexpected_exception_swallowed(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch.object(Path, "exists",
+                                   side_effect=RuntimeError("boom")):
+                main._handover_pristine_seed(Path(td))  # 广义异常同样不抛
 
 
 if __name__ == "__main__":

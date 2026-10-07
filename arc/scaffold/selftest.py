@@ -102,6 +102,32 @@ def stage_selftest_dir(output_dir: Path, smoke_port: int,
 // grader's getByRole('region') times out (an entire family was lost
 // exactly that way). Assert with the ROLE the requirement names.
 //
+// DIALOG-NAME RULE — a surface the text opens from a named control and
+// then calls "its dialog" / "its panel" carries that control's quoted
+// name as its own accessible name: the grader scopes every control
+// inside it to getByRole('dialog', { name: X }), so a differently-named
+// dialog is unreachable and everything in it times out (a whole family
+// died to one wrong name). In your spec, open the surface and address
+// its fields exactly that way.
+//
+// OPEN-PRESENT RULE — every control the text names as part of a dialog
+// or panel is present the moment that surface opens — never behind a
+// mode switch, expander, or second button the text does not name: the
+// grader performs only the steps the text describes, and an unnamed
+// intermediate click is a wall (a hidden combo box timed out scenarios
+// while the feature itself worked). If your spec needs a click the
+// text never mentions, fix the APP, never the spec.
+//
+// CELL-TEXT RULE — UI embedded in a value-bearing container (grid cell,
+// table row, list item) must not change that container's displayed
+// text: carry the marker's accessible name with aria-label, keep its
+// visible label out of the container's text content, AND give the
+// marker a CSS-sized visible box — an aria-label-only empty button is
+// zero-size and reads as invisible (two runs died on opposite horns
+// of exactly this contract). A "still displays X" assertion must read
+// exactly X. After embedding any control inside a container, re-assert
+// the container's full text.
+//
 // MAIN-LANDMARK RULE — when the requirement says a link or control is
 // "on the home page" / "on the <X> page", the grader looks for it INSIDE
 // the page's <main> landmark: getByRole('main').getByRole('link', ...).

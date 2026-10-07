@@ -240,21 +240,31 @@ def _handover_pristine_seed(output_dir: Path) -> None:
 
     必须是 postflight 的最后一步(任何删后再启动的服务器都会让 run 文件
     回流),且异常路径同样覆盖;删不掉要大声报错——幂等双删 + 硬断言。
+    整体永不抛(10-08 拍板):清理失败只落日志,不得带崩宿主进程——
+    评测 boot 本就从种子重拷 run 文件,删失败最坏情形=评测起点带运行态,
+    ERROR 行足够定位;宿主在此退出反而丢掉其余收尾件。
     """
-    run_db = output_dir / "backend" / "data" / "db.run.json"
-    for _ in range(2):
-        if not run_db.exists():
-            return
+    try:
+        run_db = output_dir / "backend" / "data" / "db.run.json"
+        for _ in range(2):
+            if not run_db.exists():
+                return
+            try:
+                run_db.unlink()
+                log("[postflight] removed backend/data/db.run.json — "
+                    "eval will boot from the seed")
+            except OSError as exc:
+                log(f"[postflight] could not remove db.run.json: {exc}")
+                break
+        if run_db.exists():
+            log("[postflight] ERROR: backend/data/db.run.json still present "
+                "at handover — eval may boot from stale runtime state")
+    except Exception as exc:  # noqa: BLE001 — 交付清场永不崩宿主
         try:
-            run_db.unlink()
-            log("[postflight] removed backend/data/db.run.json — "
-                "eval will boot from the seed")
-        except OSError as exc:
-            log(f"[postflight] could not remove db.run.json: {exc}")
-            break
-    if run_db.exists():
-        log("[postflight] ERROR: backend/data/db.run.json still present "
-            "at handover — eval may boot from stale runtime state")
+            log(f"[postflight] db.run.json cleanup failed unexpectedly: "
+                f"{type(exc).__name__}: {exc}")
+        except Exception:
+            pass  # 连日志都写不进时,沉默退出也胜过带崩宿主
 
 
 def _prune_acceptance_junk(output_dir: Path, tests_dir: Path | None,

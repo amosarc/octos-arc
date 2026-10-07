@@ -29,6 +29,10 @@ import scaffold
 written = scaffold.scaffold(pathlib.Path("template"))
 print("template/: 由 scaffold 现生成 %d 件" % len(written))
 PYEOF
+# 打包门强制清运行态:scaffold 单源只写种子 db.json,不产 run 文件;
+# 此删是零风险兜底(10-08 拍板)——脏 run 文件一旦随包铺成平台初始
+# 工作区,评测起点即带运行态。
+rm -f template/backend/data/db.run.json
 cat > template/template.yaml <<'EOF'
 schema_version: "1.0"
 id: web-react-express

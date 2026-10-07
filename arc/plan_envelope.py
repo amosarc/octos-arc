@@ -108,6 +108,14 @@ CHARTER_RULES = [
     "breadcrumb crumb or page heading, never both; the grader's "
     "getByText(name, { exact: true }) dies on the second match, so "
     "duplication is an APP defect.",
+    # 10-08 sheet-1.0 演进轮 18/30 法医三死法压缩律:对话框继承开者
+    # 引号名("Text tools"≠"Find and replace" 全族超时)/命名控件开即
+    # 在场(藏未命名中间按钮后)/格内嵌 UI 不改格显示文本(批注按钮
+    # 污染"still displays X" 精确断言)。细则进 MY-CHECK 三 RULE。
+    "A surface opened from a control named X (“its dialog”) is itself "
+    "named X, and controls the text names inside it are present at "
+    "open — never behind an unnamed extra step; UI inside a cell never "
+    "changes its displayed text.",
     "Never regress an already-green family; after editing shared files, "
     "re-run every green family's spec.",
 ]
@@ -243,6 +251,15 @@ EVOLVE_CHARTER_VERIFY_FIRST = (
     "against the running app (and consult the screenshots you captured) "
     "— when a scenario already walks green, do NOT re-implement it; "
     "implement only what is missing and fix only what is red.")
+# 10-08 sheet-1.0 演进轮法医:7/12 挂死于 init 既有页面形态(面包屑
+# +h1 双渲染、双 alert)——baseline 应用带着旧缺陷进演进题,改老页
+# 必须整页按律重审,否则既有形态原样继承到演进场景里。
+EVOLVE_CHARTER_REAUDIT = (
+    "When you modify a page an earlier round shipped, re-audit the "
+    "whole page against these rules before finishing it — duplicated "
+    "names, controls hidden behind unnamed steps, and cell text "
+    "polluted by embedded UI ride along from the baseline, and the "
+    "evolution's scenarios grade the page you touched as it is.")
 
 
 def architecture_lines(mode: str = "create") -> list[str]:
@@ -267,7 +284,8 @@ def render_rules(task_rules: list[str] | None = None,
     header = ("RULES & ARCHITECTURE (these bind every turn of every "
               "family):")
     charter = (list(CHARTER_RULES)
-               + [EVOLVE_CHARTER_ADDENDUM, EVOLVE_CHARTER_VERIFY_FIRST]
+               + [EVOLVE_CHARTER_ADDENDUM, EVOLVE_CHARTER_VERIFY_FIRST,
+                  EVOLVE_CHARTER_REAUDIT]
                if mode == "evolve" else CHARTER_RULES)
     return (header + "\n" + build_rules(charter, task_rules or [])
             + "\nARCHITECTURE:\n"
