@@ -102,6 +102,16 @@ def stage_selftest_dir(output_dir: Path, smoke_port: int,
 // grader's getByRole('region') times out (an entire family was lost
 // exactly that way). Assert with the ROLE the requirement names.
 //
+// MAIN-LANDMARK RULE — when the requirement says a link or control is
+// "on the home page" / "on the <X> page", the grader looks for it INSIDE
+// the page's <main> landmark: getByRole('main').getByRole('link', ...).
+// Entry links the text names (e.g. "Sign in", "Sign up", "Forgot
+// password" for signed-out visitors) must render inside <main>'s
+// content — header chrome does not count (24 scenarios were lost to
+// exactly this: links lived in the header, main-scoped lookups timed
+// out). One control, one accessible name: never duplicate the link in
+// both header and main.
+//
 // GESTURE RULE — drive every selection-driven flow with BOTH drag AND
 // click+Shift-click, every dialog flow with mouse AND keyboard (Enter
 // commits, Escape cancels), and every combo box BOTH ways: selectOption()

@@ -64,6 +64,10 @@ CHARTER_RULES = [
     "On any page no two controls share an accessible name — the grader's "
     "getByRole(role, { name }) dies on ambiguity, so ambiguity is an APP "
     "defect.",
+    "A control the requirement calls 'on the home page' (or any page) "
+    "lives INSIDE that page's <main> landmark — the grader scopes "
+    "entry-link lookups to getByRole('main'); header chrome does not "
+    "count.",
     "Navigation chrome — tab bars, named links, menus, and every item "
     "inside a menu — renders synchronously, never gated behind a data "
     "fetch or rebuilt on open; only the data area may wait — the grader "
