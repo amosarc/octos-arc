@@ -447,6 +447,39 @@ class RunScopeTests(unittest.TestCase):
         self.assertIn("- REQ-2:", outline)
         self.assertNotIn("- REQ-3:", outline)
 
+    def test_map_outline_lists_family_direct_atomic_children(self):
+        # evolution 任务形状:二级 FOLDER/ATOMIC 混挂——家族直挂的
+        # ATOMIC=子家族同级特性,必须进地图(跳过=模型从地图看不见
+        # 该特性,而 plan_envelope 只许读 map 映射的行号区间,导航
+        # 面随之断裂)。更深层的 ATOMIC 仍随各自工单到达,不入图。
+        tree = node("ROOT", "FOLDER", [
+            node("REQ-1", "FOLDER", [
+                node("REQ-1-1", "FOLDER", [
+                    node("REQ-1-1-1", description="deep"),
+                ], name="Sub Family"),
+                node("REQ-1-2", description="direct atomic",
+                     name="Direct Feature"),
+            ], name="Family"),
+        ])
+        outline = main.render_map_outline(tree)
+        self.assertIn("    REQ-1-2: Direct Feature", outline)
+        self.assertNotIn("REQ-1-1-1:", outline)
+        # AGENTS.md 装配面(build_system_row_context 地图段)同源
+        ctx = main.build_system_row_context(tree, "rules", "fx")
+        self.assertIn("REQ-1-2: Direct Feature", ctx)
+
+    def test_map_outline_direct_atomic_carries_line_span(self):
+        # 行号区间随二级 ATOMIC 给出——"读 ONLY mapped ranges"定点
+        # 导航的主载荷
+        tree = node("ROOT", "FOLDER", [
+            node("REQ-2", "FOLDER", [
+                node("REQ-2-1", description="d21", name="D21"),
+            ], name="F2"),
+        ], description="root")
+        tree["children"][0]["children"][0]["_lines"] = (12, 34)
+        outline = main.render_map_outline(tree)
+        self.assertIn("    REQ-2-1: D21 (lines 12-34)", outline)
+
     def test_family_stubs_scope_prunes_generation(self):
         # taskshape 家族 stub(误删恢复):家族宇宙=范围裁剪树,
         # REQ-1 范围只生成 req1 家族的 feature/route stub

@@ -2065,13 +2065,16 @@ def _family_in_scope(fid: str, scope: frozenset[str]) -> bool:
 
 def render_map_outline(tree: dict,
                        scope: frozenset[str] | None = None) -> str:
-    """标题树:全部家族/子家族 id+name(无任何描述,~1-2KB)。
+    """标题树:家族+子家族层级 id+name(无任何描述,~1-2KB)。
 
     系统行常驻层与工单指针共用的"地图骨架"——模型由此知道全局有什么、
     去哪定点读 requirements.yaml;行号区间随标题给出(load 时挂在
-    节点 "_lines"),定点读一步直达无需先 grep 定位。scope=运行范围时
-    只保留范围内家族:范围外家族不进地图,AGENTS.md 只描述本 run
-    要实现的内容。"""
+    节点 "_lines"),定点读一步直达无需先 grep 定位。层级规则:家族
+    直挂子节点(第二层)无论 FOLDER/ATOMIC 一律入图——evolution 任务
+    二级 FOLDER/ATOMIC 混挂,直挂 ATOMIC=子家族同级特性,跳过会让
+    模型从地图看不见它们;更深层的 ATOMIC 仍随各自工单到达,只有
+    FOLDER 标题入图。scope=运行范围时只保留范围内家族:范围外家族
+    不进地图,AGENTS.md 只描述本 run 要实现的内容。"""
     def tag(node: dict) -> str:
         span = node.get("_lines")
         return f" (lines {span[0]}-{span[1]})" if span else ""
@@ -2092,7 +2095,8 @@ def render_map_outline(tree: dict,
             for child in folder.get("children") or []:
                 if not isinstance(child, dict):
                     continue
-                if str(child.get("type", "")).upper() == "ATOMIC":
+                if (depth > 1
+                        and str(child.get("type", "")).upper() == "ATOMIC"):
                     continue
                 lines.append(f"{pad}{child.get('id')}: "
                              f"{' '.join(str(child.get('name') or '').split())}"
