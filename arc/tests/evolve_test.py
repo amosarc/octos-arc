@@ -475,11 +475,22 @@ class CliExitCodeTests(unittest.TestCase):
         def _se():
             raise SystemExit(2)
 
+        # 本地:放行(运维退出码语义保留)
         main.main = _se
         try:
             with self.assertRaises(SystemExit):
                 main._run_cli()
         finally:
+            main.main = orig
+        # 平台:物理不可非零——SystemExit 一律转 0
+        import os as _os
+        _os.environ["ARCBENCH_TEMPLATE_DIR"] = "/workspace/template"
+        main.main = _se
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(main._run_cli(), 0)
+        finally:
+            del _os.environ["ARCBENCH_TEMPLATE_DIR"]
             main.main = orig
 
     def test_verdict_object_maps_to_zero(self):
