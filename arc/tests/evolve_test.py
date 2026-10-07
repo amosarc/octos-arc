@@ -451,6 +451,37 @@ class CliExitCodeTests(unittest.TestCase):
     """__main__ 退出码契约钉:EvolveVerdict 对象→0(sys.exit(非int)
     =exit 1,曾把成功轮害成非零、打断评测器);int 原样。"""
 
+    def test_run_cli_swallows_crash_exits_zero(self):
+        # __main__ 终极兜底钉:try 外表面崩溃 → traceback 落 stderr、
+        # 退出码 0(评测器不被打断);SystemExit 放行。注入崩溃验证守卫,
+        # 绝不真调 main(免污染工作区)。
+        import contextlib
+        import io
+
+        def _boom():
+            raise RuntimeError("pre-try surface crash")
+
+        err = io.StringIO()
+        orig = main.main
+        main.main = _boom
+        try:
+            with contextlib.redirect_stderr(err):
+                rc = main._run_cli()
+        finally:
+            main.main = orig
+        self.assertEqual(rc, 0)
+        self.assertIn("pre-try surface crash", err.getvalue())
+
+        def _se():
+            raise SystemExit(2)
+
+        main.main = _se
+        try:
+            with self.assertRaises(SystemExit):
+                main._run_cli()
+        finally:
+            main.main = orig
+
     def test_verdict_object_maps_to_zero(self):
         v = main.EvolveVerdict(ok=False, dry_run=True)
         self.assertEqual(main._cli_exit_code(v), 0)

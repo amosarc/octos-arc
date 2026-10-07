@@ -5697,5 +5697,20 @@ def _cli_exit_code(result) -> int:
     return result if isinstance(result, int) else 0
 
 
+def _run_cli() -> int:
+    """__main__ 终极兜底:main() 的 except Exception 只护 try 内部,
+    try 外表面(requirements 拷贝/AgentRuntime 初始化/mode 解析)与
+    except 路径里的收尾件自身抛错都会裸崩 exit 1,打断评测器(轮 7 的
+    静默死亡同疑此面)。契约不变:traceback 落 stderr 工件,退出码
+    恒 0;SystemExit 放行(CLI 误用守卫/argparse 语义保留)。"""
+    try:
+        return _cli_exit_code(main())
+    except SystemExit:
+        raise
+    except BaseException:
+        traceback.print_exc()
+        return 0
+
+
 if __name__ == "__main__":
-    sys.exit(_cli_exit_code(main()))
+    sys.exit(_run_cli())

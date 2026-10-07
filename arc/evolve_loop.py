@@ -209,14 +209,26 @@ def run_evolution_rounds(task_dir: str | Path, project_dir: str | Path, *,
         log(f"[evolve-loop] round {round_no} starting "
             f"(families={','.join(families) if families else 'ALL'}, "
             f"git HEAD={head[:8] if head else 'none'})")
-        verdict = arc_main.run_evolve(
-            task_dir, project_dir,
-            families=families,
-            max_repair_turns=2,
-            dry_run=dry_run,
-            round_index=round_no,
-            time_budget=time_budget,
-            log=log)
+        try:
+            verdict = arc_main.run_evolve(
+                task_dir, project_dir,
+                families=families,
+                max_repair_turns=2,
+                dry_run=dry_run,
+                round_index=round_no,
+                time_budget=time_budget,
+                log=log)
+        except SystemExit:
+            raise
+        except BaseException as exc:  # noqa: BLE001 — 轮级兜底
+            import traceback
+            traceback.print_exc()
+            log(f"[evolve-loop] round {round_no} crashed "
+                f"({type(exc).__name__}: {exc}); synthesizing failed "
+                "verdict and continuing")
+            verdict = arc_main.EvolveVerdict(
+                ok=False, round_index=round_no,
+                phase0={"turn_reason": f"run crashed: {exc}"})
         if not isinstance(verdict, arc_main.EvolveVerdict):
             # 异常路径(main 兜底返回 int):按失败轮处理,工件面取盘上。
             log(f"[evolve-loop] round {round_no} returned no verdict "
