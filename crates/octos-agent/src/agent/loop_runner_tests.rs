@@ -914,6 +914,49 @@ fn shell_retry_terminal_user_message_strips_system_prefix() {
     assert!(sanitized.contains("I tried multiple shell approaches"));
 }
 
+/// Success-kind spiral terminal content must lead with the governance
+/// marker too: the ARC host attributes turn ends by prefix-matching the
+/// final reply, and a bare extracted shell output made the kernel kill
+/// look like "model end_turn" — verdict=done, batch falsely PASSED,
+/// re-entry never fired (2026-10-08 fix).
+#[test]
+fn shell_spiral_success_terminal_content_leads_with_marker() {
+    let extracted = shell_spiral_terminal_content(&ShellSpiralOutcome {
+        recovery: ShellRetryRecovery {
+            kind: ShellRetryRecoveryKind::DiffLikeSuccess,
+            content: "diff --git a/src/main.rs b/src/main.rs\n+fixed\n".into(),
+        },
+        decision: LoopDecision::Exhausted,
+    });
+    assert!(
+        extracted.starts_with("[SHELL SPIRAL DETECTED]"),
+        "success-kind extraction must carry the marker first, got: {extracted}"
+    );
+    // The useful output survives as the reply body.
+    assert!(extracted.contains("diff --git a/src/main.rs"));
+    // Empty extraction still carries the marker — the kill must stay
+    // attributable even with nothing to show.
+    let empty = shell_spiral_terminal_content(&ShellSpiralOutcome {
+        recovery: ShellRetryRecovery {
+            kind: ShellRetryRecoveryKind::UsefulSuccess,
+            content: "\n".into(),
+        },
+        decision: LoopDecision::Escalate,
+    });
+    assert!(empty.starts_with("[SHELL SPIRAL DETECTED]"));
+    // RetryLimit keeps the sanitized framing under the same marker.
+    let retry = shell_spiral_terminal_content(&ShellSpiralOutcome {
+        recovery: ShellRetryRecovery {
+            kind: ShellRetryRecoveryKind::RetryLimit,
+            content: "[SHELL RETRY LIMIT] Repeated shell repair attempts did not converge. Stop retrying shell and summarize the blocker.\n\nLatest shell output:\ncould not find Cargo.toml".into(),
+        },
+        decision: LoopDecision::Exhausted,
+    });
+    assert!(retry.starts_with("[SHELL SPIRAL DETECTED]"));
+    assert!(!retry.contains("[SHELL RETRY LIMIT]"));
+    assert!(retry.contains("could not find Cargo.toml"));
+}
+
 /// Helper: builds a 4-call shell-streak with all failures, exactly the
 /// shape the live mini1 session had at 19:35–19:36 PDT on 2026-05-10
 /// before the user asked unrelated questions.
@@ -2324,7 +2367,12 @@ async fn green_stop_fuse_ends_turn_after_identical_double_green() {
     };
     let calls = Arc::new(AtomicUsize::new(0));
     let mut tools = ToolRegistry::new();
-    tools.register(StaticResultTool::new("shell", green_output, true, calls.clone()));
+    tools.register(StaticResultTool::new(
+        "shell",
+        green_output,
+        true,
+        calls.clone(),
+    ));
     let scripted: Vec<ChatResponse> = std::iter::once(tool_use(vec![spec_call.clone()], 10, 20))
         .chain(std::iter::once(tool_use(vec![spec_call], 10, 20)))
         .chain((1..=8).map(|n| tool_use(vec![curl(n)], 10, 20)))

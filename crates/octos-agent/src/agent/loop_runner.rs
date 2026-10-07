@@ -25,7 +25,7 @@ use super::{Agent, AssistantSegmentProvenance, ConversationResponse, TASK_REPORT
 use crate::harness_errors::HarnessError;
 use crate::harness_events::write_event_to_sink;
 use crate::hooks::{HookEvent, HookPayload, HookResult};
-use crate::loop_detect::{is_shell_family_tool, LoopDetector};
+use crate::loop_detect::{LoopDetector, is_shell_family_tool};
 use crate::progress::ProgressEvent;
 use crate::prompt_context::PromptContextPhase;
 use crate::tools::{TURN_ATTACHMENT_CTX, TurnAttachmentContext};
@@ -1503,9 +1503,11 @@ impl Agent {
                                         //     content as terminal content.
                                         //   - Success kinds: recovery.content
                                         //     is RAW shell output extracted
-                                        //     from the noise. Original
-                                        //     return-as-content was correct
-                                        //     for these.
+                                        //     from the noise — returned as
+                                        //     the terminal body, but MARKER-
+                                        //     wrapped (see
+                                        //     `shell_spiral_terminal_content`)
+                                        //     so the kill stays attributable.
                                         let should_splice = matches!(
                                             (
                                                 &outcome.recovery.kind,
@@ -1538,16 +1540,8 @@ impl Agent {
                                                 continue 'agent_loop;
                                             }
                                         }
-                                        let terminal_content = if matches!(
-                                            outcome.recovery.kind,
-                                            ShellRetryRecoveryKind::RetryLimit,
-                                        ) {
-                                            shell_retry_terminal_user_message(
-                                                &outcome.recovery.content,
-                                            )
-                                        } else {
-                                            outcome.recovery.content
-                                        };
+                                        let terminal_content =
+                                            shell_spiral_terminal_content(&outcome);
                                         warn!(
                                             recovery_kind = ?outcome.recovery.kind,
                                             decision = %outcome.decision,
@@ -1869,9 +1863,11 @@ impl Agent {
                                 // Everything else (RetryLimit+Exhausted,
                                 // success-kind extractions) returns the
                                 // recovery content as the terminal assistant
-                                // reply, matching original behaviour for the
-                                // success kinds and bounding the LLM-summary
-                                // attempt to a single shot for RetryLimit.
+                                // reply (marker-wrapped — see
+                                // `shell_spiral_terminal_content`), matching
+                                // original behaviour for the success kinds
+                                // and bounding the LLM-summary attempt to a
+                                // single shot for RetryLimit.
                                 let should_splice = matches!(
                                     (&outcome.recovery.kind, outcome.decision),
                                     (
@@ -1893,14 +1889,8 @@ impl Agent {
                                         continue;
                                     }
                                 }
-                                let terminal_content = if matches!(
-                                    outcome.recovery.kind,
-                                    ShellRetryRecoveryKind::RetryLimit,
-                                ) {
-                                    shell_retry_terminal_user_message(&outcome.recovery.content)
-                                } else {
-                                    outcome.recovery.content
-                                };
+                                let terminal_content =
+                                    shell_spiral_terminal_content(&outcome);
                                 warn!(
                                     recovery_kind = ?outcome.recovery.kind,
                                     decision = %outcome.decision,
@@ -3234,7 +3224,8 @@ fn is_synthetic_loop_guard_content(content: &str) -> bool {
 fn recover_shell_retry(
     messages: &[Message],
     min_shell_streak: usize,
-) -> Option<ShellRetryRecovery> {    let recent = recent_tool_results(messages, min_shell_streak * 3);
+) -> Option<ShellRetryRecovery> {
+    let recent = recent_tool_results(messages, min_shell_streak * 3);
     let shell_results: Vec<&str> = recent
         .iter()
         // `bash`/`exec_command` are registered aliases of `shell`; the
@@ -3503,9 +3494,12 @@ fn resolve_tool_name(messages: &[Message], tool_msg_index: usize) -> Option<&str
 ///    is at least better than another infinite loop).
 ///  - `(DiffLikeSuccess | ValidationSuccess | UsefulSuccess, _)` →
 ///    `recovery.content` is RAW shell output extracted from the
-///    spiraling noise. It IS useful as a user-facing reply; keep the
-///    original return-as-content path. Do NOT splice — that would
-///    mis-attribute older successful output to the latest shell call.
+///    spiraling noise. It IS useful as a user-facing reply, so it stays
+///    the terminal body — but MARKER-wrapped (see
+///    [`shell_spiral_terminal_content`]) so downstream turn-end
+///    attribution sees a kernel cut, not a model end_turn. Do NOT
+///    splice — that would mis-attribute older successful output to the
+///    latest shell call.
 pub(crate) struct ShellSpiralOutcome {
     pub(crate) recovery: ShellRetryRecovery,
     pub(crate) decision: LoopDecision,
@@ -3563,9 +3557,7 @@ fn latest_tool_batch_index(messages: &[Message], target: &str) -> Option<usize> 
         // match silently skipped alias-named lanes where the spiral recovery
         // gate and splice must still engage.
         let matches = match resolve_tool_name(messages, idx) {
-            Some(name) => {
-                name == target || (target == "shell" && is_shell_family_tool(&name))
-            }
+            Some(name) => name == target || (target == "shell" && is_shell_family_tool(&name)),
             None => false,
         };
         if matches {
@@ -3574,6 +3566,17 @@ fn latest_tool_batch_index(messages: &[Message], target: &str) -> Option<usize> 
     }
     None
 }
+
+/// Shared governance marker for EVERY shell-spiral terminal exit. This
+/// content IS the final assistant reply, so without a marker it is
+/// indistinguishable from a genuine model end_turn downstream (the ARC
+/// host reads the reply text / persisted final row to attribute turn
+/// ends — a bare recovered text made a governance kill look like "model
+/// end_turn", verdict=done, and the re-entry guard never fired). The
+/// prefix must stay byte-stable and FIRST: the host prefix-matches
+/// `[SHELL SPIRAL DETECTED]` in its kernel-cut vocabulary.
+const SHELL_SPIRAL_TERMINAL_MARKER: &str = "[SHELL SPIRAL DETECTED] This turn was stopped \
+because repeated shell approaches did not converge.\n\n";
 
 /// Sanitize the system-shaped `[SHELL RETRY LIMIT]` content for the
 /// terminal Exhausted path so the user-facing assistant reply isn't a
@@ -3594,23 +3597,55 @@ fn shell_retry_terminal_user_message(content: &str) -> String {
     while let Some(stripped) = tail.strip_prefix(PREFIX) {
         tail = stripped;
     }
-    // Marker line first: this content IS the final assistant reply, so
-    // without a marker it is indistinguishable from a genuine model
-    // end_turn downstream (the ARC host reads the reply text / persisted
-    // final row to attribute turn ends — a bare recovered text made a
-    // governance kill look like "model end_turn", verdict=done).
-    const MARKER: &str = "[SHELL SPIRAL DETECTED] This turn was stopped \
-because repeated shell approaches did not converge.\n\n";
     if tail.trim().is_empty() {
         format!(
-            "{MARKER}I tried multiple shell approaches but couldn't \
+            "{SHELL_SPIRAL_TERMINAL_MARKER}I tried multiple shell approaches but couldn't \
 converge on an answer. Please rephrase or give me a more specific direction."
         )
     } else {
         format!(
-            "{MARKER}I tried multiple shell approaches but couldn't \
+            "{SHELL_SPIRAL_TERMINAL_MARKER}I tried multiple shell approaches but couldn't \
 converge on an answer. Latest output:\n\n{tail}"
         )
+    }
+}
+
+/// Success-kind spiral arms (DiffLikeSuccess / ValidationSuccess /
+/// UsefulSuccess): the detector extracted a stable, useful output from the
+/// spiraling noise, but the turn is still KERNEL-terminated, never a model
+/// end_turn. The raw extraction alone is indistinguishable downstream from
+/// a genuine model wrap-up (the host prefix-matches the final reply to
+/// attribute the turn end — a bare output made the kill look like "model
+/// end_turn", verdict=done, batch falsely PASSED, re-entry never fired), so
+/// the same [`SHELL_SPIRAL_TERMINAL_MARKER`] line must lead here too. One
+/// marker prefix for all spiral exits keeps a single host-side vocabulary
+/// entry.
+fn shell_spiral_extracted_terminal_message(content: &str) -> String {
+    let tail = content.trim_end_matches('\n');
+    if tail.trim().is_empty() {
+        format!(
+            "{SHELL_SPIRAL_TERMINAL_MARKER}I stopped repeating shell approaches and ended \
+this turn before another model call."
+        )
+    } else {
+        format!(
+            "{SHELL_SPIRAL_TERMINAL_MARKER}I stopped repeating shell approaches. Most useful \
+output recovered from them:\n\n{tail}"
+        )
+    }
+}
+
+/// Terminal assistant-reply content for any shell-spiral outcome that
+/// leaves the `(RetryLimit, Escalate)` splice-and-continue path: the
+/// RetryLimit arm gets the sanitized user framing, success-kind
+/// extractions get the marker-wrapped raw output. Both carry the
+/// `[SHELL SPIRAL DETECTED]` marker line first — see
+/// [`SHELL_SPIRAL_TERMINAL_MARKER`].
+fn shell_spiral_terminal_content(outcome: &ShellSpiralOutcome) -> String {
+    if matches!(outcome.recovery.kind, ShellRetryRecoveryKind::RetryLimit) {
+        shell_retry_terminal_user_message(&outcome.recovery.content)
+    } else {
+        shell_spiral_extracted_terminal_message(&outcome.recovery.content)
     }
 }
 
@@ -3766,8 +3801,7 @@ fn loop_detected_terminal_message() -> String {
 /// the model was told to wrap up, and the grace iterations elapsed. The
 /// host's node loop treats this as a normal completed turn and gates the
 /// on-disk result with its own rehearsal.
-const GREEN_STOP_TERMINAL_MESSAGE: &str =
-    "[green stop] The staged acceptance spec passed identically twice with no \
+const GREEN_STOP_TERMINAL_MESSAGE: &str = "[green stop] The staged acceptance spec passed identically twice with no \
      source changes between the runs; the turn ended after the wrap-up window \
      to bank the verified result. The requirement under work is considered \
      complete.";
