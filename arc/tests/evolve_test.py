@@ -374,6 +374,76 @@ class RegressionEnforcementTests(unittest.TestCase):
             main.fresh_session_repair_prompt("T", "r", None))
 
 
+class StableSuiteMeasureTests(unittest.TestCase):
+    """稳定红门钉(10-07 sheet 法医):高红率复测一次,只认两轮都红的
+    标题——瞬时噪声红不进修复链;低红率直接过。"""
+
+    def test_transient_noise_dropped(self):
+        readings = [
+            {"passed": 30, "failed": 20,
+             "failed_titles": [f"noise{i}" for i in range(15)]
+             + [f"real{i}" for i in range(5)],
+             "failed_files": ["a.spec.ts"] * 20, "passed_titles": []},
+            {"passed": 45, "failed": 5,
+             "failed_titles": [f"real{i}" for i in range(5)],
+             "failed_files": ["a.spec.ts"] * 5, "passed_titles": []},
+        ]
+        out = main.stable_suite_measure(
+            lambda: readings.pop(0), log=lambda *a: None)
+        self.assertEqual(out["failed"], 5)
+        self.assertTrue(all(t.startswith("real") for t in out["failed_titles"]))
+
+    def test_low_red_rate_no_remeasure(self):
+        calls = []
+
+        def once():
+            calls.append(1)
+            return {"passed": 40, "failed": 2, "failed_titles": ["x", "y"],
+                    "failed_files": ["a.spec.ts"], "passed_titles": []}
+        out = main.stable_suite_measure(once, log=lambda *a: None)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(out["failed"], 2)
+
+    def test_green_or_none_passthrough(self):
+        self.assertIsNone(main.stable_suite_measure(
+            lambda: None, log=lambda *a: None))
+        g = {"passed": 5, "failed": 0, "failed_titles": [],
+             "failed_files": [], "passed_titles": []}
+        self.assertEqual(main.stable_suite_measure(
+            lambda: g, log=lambda *a: None)["failed"], 0)
+
+
+class RollbackContainmentTests(unittest.TestCase):
+    """伤害遏制回滚钉:失败的修复轮半改回滚到 HEAD;运行态文件豁免。"""
+
+    def test_rollback_only_uncommitted(self):
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            def git(*a):
+                sp.run(["git", "-C", str(root), *a], capture_output=True,
+                       check=True)
+            git("init", "-q")
+            git("config", "user.email", "t@t"); git("config", "user.name", "t")
+            (root / "src").mkdir()
+            (root / "src/a.js").write_text("committed\n", encoding="utf-8")
+            (root / "backend/data").mkdir(parents=True)
+            (root / "backend/data/db.run.json").write_text(
+                "{}", encoding="utf-8")
+            git("add", "-A"); git("commit", "-qm", "base")
+            # 修复轮半改:源码 + 运行态
+            (root / "src/a.js").write_text("half-edit poison\n",
+                                           encoding="utf-8")
+            (root / "backend/data/db.run.json").write_text(
+                "{poison}", encoding="utf-8")
+            rolled = main.rollback_uncommitted(
+                root, ["src/a.js", "backend/data/db.run.json"],
+                log=lambda *a: None)
+            self.assertEqual(rolled, ["src/a.js"])  # 运行态豁免
+            self.assertEqual((root / "src/a.js").read_text(
+                encoding="utf-8"), "committed\n")   # 半改已撤
+
+
 class CliExitCodeTests(unittest.TestCase):
     """__main__ 退出码契约钉:EvolveVerdict 对象→0(sys.exit(非int)
     =exit 1,曾把成功轮害成非零、打断评测器);int 原样。"""

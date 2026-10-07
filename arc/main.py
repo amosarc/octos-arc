@@ -3558,6 +3558,92 @@ def _parse_playwright_json(report: dict) -> tuple:
     return passed, failed, failed_titles, failed_files, passed_titles
 
 
+def _sweep_smoke_port(smoke_port: int, log=print) -> None:
+    """清场单飞:杀冒烟口全部监听者——被切断 turn 的孤儿 playwright/
+    服务器会与宿主冷启动抢端口,把回归读数染噪(10-07 sheet 轮实证:同
+    提交净环境 5 红 vs 宿主 20 红,15 个噪声红)。lsof 缺席回退精确模式
+    pkill(直 argv 无 sh 包装,无自匹配面);看门狗两拍死亡判会把宿主
+    自己的 dev server 拉回来,误杀无害。"""
+    try:
+        out = subprocess.run(
+            ["lsof", "-ti", f"TCP:{smoke_port}", "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=20)
+        pids = [p for p in (out.stdout or "").split() if p.strip()]
+        if not pids and out.returncode != 0:
+            subprocess.run(["pkill", "-f", "node src/index.js"],
+                           capture_output=True, timeout=20)
+            return
+        for pid in pids:
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+        if pids:
+            log(f"[sweep] smoke port {smoke_port}: reaped {len(pids)} "
+                "listener(s)")
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"[sweep] smoke port sweep failed (non-fatal): {exc}")
+
+
+def stable_suite_measure(measure, threshold: float = 0.10,
+                         log=print) -> dict | None:
+    """稳定红门(10-07 sheet 法医定案):红率超阈值时复测一次,只认两轮
+    都红的标题——孤儿进程/端口竞争的瞬时红不再喂给修复轮与止损判定
+    (REQ-8 修复轮正是被噪声红毒去改坏共享引擎,29→1)。measure() 返回
+    run_own_suite 形状的 dict 或 None;低红率/复测不可得时按首轮算。"""
+    g = measure()
+    if not g or g["failed"] == 0:
+        return g
+    total = g["passed"] + g["failed"]
+    if total <= 0 or g["failed"] / total <= threshold:
+        return g
+    log(f"[evolve-suite] red rate {g['failed']}/{total} > "
+        f"{threshold:.0%} — re-measuring once (noise guard)")
+    g2 = measure()
+    if not g2:
+        return g
+    stable = sorted(set(g["failed_titles"]) & set(g2["failed_titles"]))
+    if g2["failed"] > len(stable):
+        log(f"[evolve-suite] noise guard: {g2['failed'] - len(stable)} "
+            f"transient red(s) dropped, {len(stable)} stable red(s) "
+            "remain")
+    stable_set = set(stable)
+    files = sorted({f for t, f in zip(g2["failed_titles"],
+                                      g2["failed_files"])
+                    if t in stable_set})
+    return {**g2, "failed": len(stable), "failed_titles": stable,
+            "failed_files": files}
+
+
+# 回滚豁免:运行态/构建产物不入伤害遏制面(只回滚源码面半改)。
+_CONTAIN_DENY = ("backend/data/db.run.json", "dist/", "test-results/",
+                 ".playwright-report", "node_modules")
+
+
+def rollback_uncommitted(cwd: Path, paths: list[str],
+                         log=print) -> list[str]:
+    """伤害遏制回滚:把列表内文件恢复到 HEAD(只动它们的未提交改动)。
+    用于止损的修复轮——被切断/变差的修复半改留在工作区会把应用改崩
+    (REQ-8 修复轮 29→1 实证;主轮成果已提交入库不受影响,与语法门
+    git reset 同族的宿主侧手术)。返回实际回滚的文件。"""
+    targets = [p for p in paths if p and not p.startswith(_CONTAIN_DENY)]
+    if not targets:
+        return []
+    try:
+        out = subprocess.run(
+            ["git", "checkout", "HEAD", "--", *targets],
+            cwd=str(cwd), capture_output=True, text=True, timeout=60)
+        if out.returncode == 0:
+            log(f"[contain] rolled back failed-repair edits: "
+                f"{', '.join(targets[:6])}")
+            return targets
+        log(f"[contain] rollback failed: {out.stderr[-160:]}")
+        return []
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"[contain] rollback error: {exc}")
+        return []
+
+
 def run_own_suite(output_dir: Path, smoke_port: int,
                   spec_files: list[str] | None = None,
                   artifact_dir: Path | None = None,
@@ -3583,6 +3669,7 @@ def run_own_suite(output_dir: Path, smoke_port: int,
                               capture_output=True, text=True, timeout=timeout)
 
     try:
+        _sweep_smoke_port(smoke_port, log)   # 清场单飞:先杀孤儿监听者
         _sh(["rm", "-f", "backend/data/db.run.json"])
         build = _sh(["npm", "run", "build", "--prefix", "frontend"])
         if build.returncode != 0:
@@ -5146,9 +5233,11 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                 f"source ({', '.join(source_changed[:3])});"
                                 f" regression over {len(spec_spectrum)} "
                                 "own spec(s)")
-                            g = run_own_suite(output_dir, smoke_port,
-                                              spec_files=spec_spectrum,
-                                              log=log)
+                            g = stable_suite_measure(
+                                lambda: run_own_suite(
+                                    output_dir, smoke_port,
+                                    spec_files=spec_spectrum, log=log),
+                                log=log)
                             if g:
                                 # 新红=谱内文件级(谱只含已完成家族+无族
                                 # 文件,谱内任何红都是回归候选)——10-07
@@ -5207,9 +5296,11 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                         repair_cut = kernel_terminal_marker(
                                             get_repair_driver()
                                             .kernel_terminal)
-                                        g2 = run_own_suite(
-                                            output_dir, smoke_port,
-                                            spec_files=spec_spectrum,
+                                        g2 = stable_suite_measure(
+                                            lambda: run_own_suite(
+                                                output_dir, smoke_port,
+                                                spec_files=spec_spectrum,
+                                                log=log),
                                             log=log)
                                         attempt += 1
                                         if g2 is None:
@@ -5225,6 +5316,26 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                                 f"{g['failed']}f) — "
                                                 "leaving the rest to the "
                                                 "round boundary")
+                                            if repair_cut or g[
+                                                    "failed"] > prev_failed:
+                                                # 伤害遏制:修复轮被切断
+                                                # 或把红修多了 → 其未提交
+                                                # 半改回滚到 HEAD(REQ-8
+                                                # 修复轮 29→1 的反面:
+                                                # 毒不留工作区)。主轮成果
+                                                # 已提交,不受影响。
+                                                try:
+                                                    dirty = runtime.git \
+                                                        .run(["diff",
+                                                              "--name-only",
+                                                              "HEAD"]) \
+                                                        .stdout.split()
+                                                except Exception:
+                                                    dirty = []
+                                                if dirty:
+                                                    rollback_uncommitted(
+                                                        output_dir, dirty,
+                                                        log=log)
                                             break
                                         prev_failed = g["failed"]
                                         new_reds = _regression_new_reds(
@@ -5452,8 +5563,11 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                          / f"round-{round_index}")
                 suite_v: dict | None = None
                 if not time_up():
-                    suite_v = run_own_suite(output_dir, smoke_port,
-                                            artifact_dir=v_dir, log=log)
+                    suite_v = stable_suite_measure(
+                        lambda: run_own_suite(
+                            output_dir, smoke_port,
+                            artifact_dir=v_dir, log=log),
+                        log=log)
                     _stop_dev_server(smoke_port)
                 walk_v: dict | None = None
                 ph = hs.get("page_health") if isinstance(
