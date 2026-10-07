@@ -61,6 +61,39 @@ class EvolveNarrativeTests(unittest.TestCase):
         self.assertIn("SCENARIOS (verbatim):", evo)
 
 
+class VerifyBudgetNoteTests(unittest.TestCase):
+    """收轮义务+共享面纪律(evolve 专属注记,批循环追加;sheet 轮 REQ-6
+    实证:自报全量绿+宿主冷测 20 红——"至多一次"改"必须一次且全绿")。"""
+
+    def test_obligation_and_discipline_present(self):
+        n = main.EVOLVE_VERIFY_BUDGET_NOTE
+        self.assertIn("run the FULL own suite ONCE, cold", n)
+        self.assertIn("blocks the end of this turn", n)
+        self.assertIn("first suspect", n)
+        self.assertIn("SHARED-SURFACE DISCIPLINE", n)
+        self.assertIn("scratch/debug spec files", n)
+
+    def test_note_not_baked_into_turn_features(self):
+        # 分层:工单正文不含预算注记(由批循环追加),create 工单天然不带。
+        tree = main.load_requirement_tree(
+            TASKS / "hackathon-evolution--sheet")
+        parent_of: dict = {}
+
+        def _idx(node, parent):
+            for c in node.get("children") or []:
+                if not isinstance(c, dict):
+                    continue
+                if str(c.get("type", "")).upper() == "ATOMIC":
+                    parent_of[str(c.get("id"))] = parent
+                else:
+                    _idx(c, c)
+
+        _idx(tree, tree)
+        batch = main.group_families(tree)[0]
+        blob = main.build_turn_features(batch, parent_of, evolve=True)
+        self.assertNotIn("VERIFICATION BUDGET", blob)
+
+
 class RoundPreambleTests(unittest.TestCase):
     def test_dossier_and_lessons_injected_only_when_present(self):
         with_dossier = main.build_round_preamble(

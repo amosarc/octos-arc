@@ -3787,13 +3787,28 @@ def load_lessons_block(project_dir: Path,
         return ""
 
 
-# 模型侧验证预算(evolve):砍重复全量自测(实测单轮 82-165 次 playwright
-# 跑,大多为整套重复);家族内迭代只跑本族 spec+host-walk,收尾全量一次。
+# 模型侧验证预算+收轮义务(evolve)。两轮迭代定形:
+# ①经济律(10-07 早):批内迭代只跑本族 spec+host-walk,砍 82-165 次/轮
+#   的整套重复;
+# ②收轮义务(10-07 晚,sheet 轮 REQ-6 实证:模型自报"全量 27/27 绿"、
+#   宿主 4 分钟后冷测 27绿/20红——"至多跑一次"是许可不是义务,模型
+#   省略后带着跨族红收轮):收尾必须冷跑一次全量且全绿,跨族红阻断
+#   收轮(第一嫌疑人=本批共享面改动);顺手清 scratch spec(probe 类
+#   曾混进轮末判定面)。
 EVOLVE_VERIFY_BUDGET_NOTE = (
     "\n\nVERIFICATION BUDGET: while iterating, run only this batch's "
-    "family specs and `_host-walk.spec.ts`; run the FULL own suite at "
-    "most once, right before finishing the turn — repeated full-suite "
-    "runs waste the turn budget.")
+    "family specs and `_host-walk.spec.ts`. Before you finish the turn, "
+    "run the FULL own suite ONCE, cold (`sh scripts/run-e2e.sh` with no "
+    "arguments): every spec under e2e/ must pass — including baseline "
+    "families' specs and specs you wrote in earlier batches. A red in "
+    "ANY family blocks the end of this turn: your own recent shared-"
+    "file edits are the first suspect — fix forward surgically and "
+    "re-run the full suite before ending. Delete scratch/debug spec "
+    "files (probe scripts) before finishing.\n"
+    "SHARED-SURFACE DISCIPLINE: edits to shared core files (the route "
+    "index, app kernel/grid modules, backend/data/db.json) are the top "
+    "regression source — keep them minimal, and re-run the full own "
+    "suite immediately after touching any of them.")
 
 
 def build_round_preamble(dossier: str, lessons: str) -> str:
@@ -3816,14 +3831,6 @@ def build_round_preamble(dossier: str, lessons: str) -> str:
 
 
 
-
-# 模型侧验证预算(evolve):砍重复全量自测(实测单轮 82-165 次 playwright
-# 跑,大多为整套重复);家族内迭代只跑本族 spec+host-walk,收尾全量一次。
-EVOLVE_VERIFY_BUDGET_NOTE = (
-    "\n\nVERIFICATION BUDGET: while iterating, run only this batch's "
-    "family specs and `_host-walk.spec.ts`; run the FULL own suite at "
-    "most once, right before finishing the turn — repeated full-suite "
-    "runs waste the turn budget.")
 
 
 def _regression_new_reds(failed_titles: list[str],
