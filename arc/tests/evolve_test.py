@@ -288,6 +288,59 @@ class LoopTests(unittest.TestCase):
             self.assertIn("round5 line", text)
 
 
+class RegressionEnforcementTests(unittest.TestCase):
+    """回归强制力四件套钉(10-07,对 sheet 轮完整日志核实的修正)。"""
+
+    def test_new_reds_file_level(self):
+        # 旧树 id/无 id 标题全数计入(曾 20 红喂成 6 条)。
+        titles = [
+            "req1-workbook.spec.ts › REQ-1-1-1 view and open seeded workbook",
+            "req4-formula.spec.ts › REQ-4-1-1 basic expressions",
+            "probe.spec.ts › probe5",
+            "req1-2-2-rename.spec.ts › REQ-1-2-2 rename trims spaces",
+        ]
+        reds = main._regression_new_reds(titles)
+        self.assertEqual(len(reds), 4)
+        known = main._regression_new_reds(titles, {titles[3]})
+        self.assertEqual(known, titles[:3])
+
+    def test_repair_stop_loss(self):
+        # 修复轮被切断=半改在场,恒停。
+        self.assertTrue(main._repair_should_stop(20, 5, True))
+        # 恶化超 30% 停(REQ-8 形态:23→51)。
+        self.assertTrue(main._repair_should_stop(23, 51, False))
+        self.assertTrue(main._repair_should_stop(20, 27, False))
+        # 改善/持平/小幅波动继续。
+        self.assertFalse(main._repair_should_stop(20, 26, False))
+        self.assertFalse(main._repair_should_stop(20, 20, False))
+        self.assertFalse(main._repair_should_stop(20, 0, False))
+
+    def test_max_iterations_cut_detection(self):
+        self.assertTrue(main._is_max_iterations_cut("max iterations"))
+        self.assertTrue(
+            main._is_max_iterations_cut("Turn ended: max iterations"))
+        self.assertFalse(main._is_max_iterations_cut("doom loop"))
+        self.assertFalse(main._is_max_iterations_cut("loop thrash"))
+        self.assertFalse(main._is_max_iterations_cut(None))
+
+    def test_prompts_carry_reconciliation_context(self):
+        p = main.EVOLVE_REGRESSION_REPAIR_PROMPT.format(
+            failed=3, titles="- t1\n- t2\n- t3", files="req1.spec.ts",
+            changed="backend/src/routes/index.js, sheet-kernel.js")
+        self.assertIn("Files this batch changed since its start", p)
+        self.assertIn("sheet-kernel.js", p)
+        c = main.fresh_session_repair_prompt(
+            "TASK BODY", "cut by the per-turn iteration cap", None,
+            changed_files=["frontend/src/features/sheet-kernel.js"])
+        self.assertIn("cut MID-EDIT", c)
+        self.assertIn("sheet-kernel.js", c)
+        self.assertIn("Reconcile that half-state FIRST", c)
+        # 不带清单时无对账段(向后兼容)。
+        self.assertNotIn(
+            "MID-EDIT",
+            main.fresh_session_repair_prompt("T", "r", None))
+
+
 class CliExitCodeTests(unittest.TestCase):
     """__main__ 退出码契约钉:EvolveVerdict 对象→0(sys.exit(非int)
     =exit 1,曾把成功轮害成非零、打断评测器);int 原样。"""

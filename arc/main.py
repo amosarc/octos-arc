@@ -646,7 +646,9 @@ def zero_output_reentry_prompt(turn_core: str) -> str:
 
 
 def fresh_session_repair_prompt(turn_core: str, reason: str,
-                                repeated_command: str | None) -> str:
+                                repeated_command: str | None,
+                                changed_files: list[str] | None = None
+                                ) -> str:
     """C 级修复工单(新会话):同会话重入仍被内核切断后的最后一轮。
 
     不动点(同叙述+同调用)是上下文尾部现象,同会话重入压不过——10-03
@@ -664,6 +666,13 @@ def fresh_session_repair_prompt(turn_core: str, reason: str,
         "these requirements), then run the existing specs to see where "
         "things stand. Fix what is red and implement what is missing; "
         "do NOT re-implement or rewrite what already exists and works. ")
+    if changed_files:
+        prefix += (
+            "Your previous attempt was cut MID-EDIT; these files were "
+            "left half-changed: " + ", ".join(changed_files) + ". "
+            "Reconcile that half-state FIRST — either finish the change "
+            "to a consistent state or back it out to a consistent "
+            "state — before continuing. ")
     if repeated_command:
         prefix += (
             "The previous attempt was killed for repeating this exact "
@@ -3678,7 +3687,9 @@ EVOLVE_BOOTSTRAP_PREAMBLE = EVOLVE_ROUND_PREAMBLE
 
 EVOLVE_REGRESSION_REPAIR_PROMPT = (
     "REGRESSION RED: your changes to shared files broke these previously "
-    "green self-tests ({failed} new failure(s)):\n{titles}\n"
+    "green self-tests ({failed} failure(s)):\n{titles}\n"
+    "Files this batch changed since its start: {changed}\n"
+    "Check those changes first — the breakage almost always lives there. "
     "Fix forward with surgical edits, then verify with `sh "
     "scripts/run-e2e.sh {files}` from the workspace root; never delete "
     "baseline behavior to make a test pass.")
@@ -3813,6 +3824,36 @@ EVOLVE_VERIFY_BUDGET_NOTE = (
     "family specs and `_host-walk.spec.ts`; run the FULL own suite at "
     "most once, right before finishing the turn — repeated full-suite "
     "runs waste the turn budget.")
+
+
+def _regression_new_reds(failed_titles: list[str],
+                         known_red_titles=()) -> list[str]:
+    """谱内文件级新红判定:回归谱只含已完成家族+无族文件的 spec,谱内
+    任何红都是回归候选——不按标题节点 id 过滤(sheet 轮 11:06 实证:基线
+    旧 spec 标题引用旧树 id(REQ-1-1-1/REQ-4-1-1),id 级过滤把 20 红喂成
+    6 条,修复轮盲修-1)。known=历史基线红(Phase 0 时代残留,通常空)。"""
+    known = set(known_red_titles or ())
+    return [t for t in (failed_titles or []) if t not in known]
+
+
+def _repair_should_stop(prev_failed: int, new_failed: int,
+                        repair_cut: bool) -> bool:
+    """回归修复止损门(REQ-8 教训:修复轮被内核切断留半截编辑,复测
+    29绿→1绿灾难性恶化)。修复轮被切断=半改在场,恒停;红数恶化超 30%
+    亦停——变差方向上不再投修复轮,交轮边界处置。"""
+    if repair_cut:
+        return True
+    return new_failed > math.ceil(max(1, prev_failed) * 1.3)
+
+
+def _is_max_iterations_cut(kernel_terminal: str | None) -> bool:
+    """max-iterations 预算类切断识别(区别于 doom/spiral 治理类)。
+
+    词表原将预算类排除在重入外(防旧二轮机会复辟);10-07 拍板修正:
+    迭代帽切断常发生在重调试 turn 手握根因诊断时,小批 cap 仅 100——
+    弃上下文 C 级(新会话=满额新迭代预算)是正解,不走 doom 类的 A 级
+    同会话续跑(旧会话上下文已近迭代顶,续跑大概率再撞帽)。"""
+    return "max iteration" in str(kernel_terminal or "").lower()
 
 
 def _scenario_coverage(tree: dict, passed_titles: list[str]) -> dict:
@@ -4813,6 +4854,33 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                     (sig or {}).get("command")),
                                 min(node_timeout, wall), wall)
                             fresh_repair_ran = True
+                    if (not fresh_repair_ran and not reason
+                            and _is_max_iterations_cut(
+                                driver.kernel_terminal)
+                            and not time_up()
+                            and remaining() >= final_reserve + node_floor):
+                        # 迭代帽切断→C 级弃上下文重试(10-07 拍板):新会话
+                        # =满额新迭代预算;工单三件套=需求正文+切断事实+
+                        # 半态对账清单(批 diff 点名半改文件)。
+                        reentry_kind = "max-iterations+fresh-session"
+                        log(f"[flow] {focus_id}: turn hit the iteration "
+                            "cap with work on disk; fresh-session retry "
+                            "(C, 1 max)")
+                        try:
+                            mi_changed = _changed_source_paths(
+                                runtime.git.run([
+                                    "diff", "--name-only", pre_batch_head,
+                                    "HEAD"]).stdout.split())
+                        except Exception:
+                            mi_changed = []
+                        driver.close()
+                        ok, text = driver.run(
+                            fresh_session_repair_prompt(
+                                turn_core,
+                                "cut by the per-turn iteration cap",
+                                None, changed_files=mi_changed),
+                            min(node_timeout, wall), wall)
+                        fresh_repair_ran = True
                     if (not fresh_repair_ran
                             and ok
                             and not kernel_terminal_marker(
@@ -5075,55 +5143,116 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                               spec_files=spec_spectrum,
                                               log=log)
                             if g:
-                                # 新红=标题命中已完成批节点的红(且非
-                                # Phase 0 已知红)——兄弟批未实现的红不
-                                # 算回归,不该触发修复。
-                                done_ids = {i.lower()
-                                            for i in completed_node_ids}
-                                new_reds = [
-                                    t for t in g["failed_titles"]
-                                    if any(i in t.lower() for i in done_ids)
-                                    and t not in phase0_red_titles]
+                                # 新红=谱内文件级(谱只含已完成家族+无族
+                                # 文件,谱内任何红都是回归候选)——10-07
+                                # 修正:不再按标题节点 id 过滤,旧树 id
+                                # (REQ-1-1-1/REQ-4-1-1)与无 id 标题
+                                # (probe5)曾被误归"已知红",20 红只喂 6。
+                                new_reds = _regression_new_reds(
+                                    g["failed_titles"], phase0_red_titles)
                                 if g["failed"] > 0 and new_reds:
                                     log(f"[evolve] regression NEW RED: "
-                                        f"{len(new_reds)} new failure(s) "
-                                        "— repairing while the context "
-                                        "is hot")
+                                        f"{len(new_reds)} failure(s) in "
+                                        "completed-family specs — "
+                                        "repairing while the context is "
+                                        "hot")
                                     r_wall = turn_wall(len(batch))
-                                    # 视觉搭车(与 create 位同款):模型
-                                    # 本批自截图附修复轮,没图不搭。
-                                    v_media: list[dict] | None = None
-                                    v_note = ""
-                                    if os.environ.get(
-                                            "OCTOS_ARC_VISUAL_CHECK",
-                                            "1") != "0":
-                                        _, v_media = \
-                                            _visual_check_prompt_and_media(
-                                                _collect_model_screenshots(
-                                                    output_dir, t0))
-                                        if v_media:
-                                            v_note = _VISUAL_PIGGYBACK_NOTE
-                                            visual_done = True
-                                    get_repair_driver().run(
-                                        EVOLVE_REGRESSION_REPAIR_PROMPT.format(
-                                            failed=len(new_reds),
-                                            titles="\n".join(
-                                                f"- {t}" for t in
-                                                new_reds[:30]),
-                                            files=" ".join(g["failed_files"])
-                                            or "")
-                                        + v_note,
-                                        min(node_timeout, r_wall), r_wall,
-                                        media=v_media)
-                                    run_own_suite(
-                                        output_dir, smoke_port,
-                                        spec_files=spec_spectrum, log=log)
+                                    attempt = 0
+                                    prev_failed = g["failed"]
+                                    unresolved = bool(new_reds)
+                                    while (unresolved
+                                           and attempt
+                                           < evolve_cfg.max_repair_turns
+                                           and not time_up()
+                                           and remaining()
+                                           >= final_reserve + node_floor):
+                                        # 视觉搭车(首轮带图,没图不搭)。
+                                        v_media: list[dict] | None = None
+                                        v_note = ""
+                                        if os.environ.get(
+                                                "OCTOS_ARC_VISUAL_CHECK",
+                                                "1") != "0":
+                                            _, v_media = \
+                                                _visual_check_prompt_and_media(
+                                                    _collect_model_screenshots(
+                                                        output_dir, t0))
+                                            if v_media:
+                                                v_note = \
+                                                    _VISUAL_PIGGYBACK_NOTE
+                                                visual_done = True
+                                        get_repair_driver().run(
+                                            EVOLVE_REGRESSION_REPAIR_PROMPT
+                                            .format(
+                                                failed=len(new_reds),
+                                                titles="\n".join(
+                                                    f"- {t}" for t in
+                                                    new_reds[:30]),
+                                                files=" ".join(
+                                                    g["failed_files"])
+                                                or "",
+                                                changed=", ".join(
+                                                    source_changed)
+                                                or "(none recorded)")
+                                            + v_note,
+                                            min(node_timeout, r_wall),
+                                            r_wall,
+                                            media=v_media)
+                                        repair_cut = kernel_terminal_marker(
+                                            get_repair_driver()
+                                            .kernel_terminal)
+                                        g2 = run_own_suite(
+                                            output_dir, smoke_port,
+                                            spec_files=spec_spectrum,
+                                            log=log)
+                                        attempt += 1
+                                        if g2 is None:
+                                            break  # 未测=未解,交轮边界
+                                        g = g2
+                                        if _repair_should_stop(
+                                                prev_failed, g["failed"],
+                                                repair_cut):
+                                            log(
+                                                "[evolve] repair stop-loss "
+                                                f"(cut={bool(repair_cut)},"
+                                                f" {prev_failed}f→"
+                                                f"{g['failed']}f) — "
+                                                "leaving the rest to the "
+                                                "round boundary")
+                                            break
+                                        prev_failed = g["failed"]
+                                        new_reds = _regression_new_reds(
+                                            g["failed_titles"],
+                                            phase0_red_titles)
+                                        unresolved = bool(new_reds)
+                                        if not unresolved:
+                                            log("[evolve] regression "
+                                                "repaired green after "
+                                                f"{attempt} turn(s)")
+                                    if unresolved and new_reds \
+                                            and not time_up():
+                                        # 未解红降级:账本/教训当场如实
+                                        # (sheet 轮 REQ-6 曾 verdict=done
+                                        # 带着 21 红,堆到 REQ-7 才爆发)。
+                                        detail = (
+                                            "unresolved regression: "
+                                            f"{len(new_reds)} red(s) "
+                                            f"after {attempt} repair "
+                                            "turn(s)")
+                                        log(f"[evolve] batch {focus_id} "
+                                            "demoted to blocked: "
+                                            + detail)
+                                        for nid in batch_ids:
+                                            plan_statuses[nid] = "blocked"
+                                            events \
+                                                .mark_implementation_failed(
+                                                    nid, detail)
+                                            if nid not in failed:
+                                                failed.append(nid)
                                 elif g["failed"] > 0:
                                     log(f"[evolve] regression red but all "
-                                        f"known (Phase 0 baseline: "
-                                        f"{g['failed']}f) — no repair "
-                                        "turn, narrowing round will "
-                                        "handle")
+                                        f"known reds ({g['failed']}f) — "
+                                        "no repair turn, round boundary "
+                                        "will handle")
 
                     # ── 视觉核验轮(≤1 轮/批):批 done、源码有变、且
                     # 模型本批自截了图 → 归集附回给它自己看(带图请求路
