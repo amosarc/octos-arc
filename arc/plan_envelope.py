@@ -38,6 +38,23 @@ CHARTER_RULES = [
     "The requirement text wins over the app, over your specs, over seeded "
     "data, and over this file; quoted names are exact accessible names "
     "and quoted rules bind verbatim.",
+    # 字段合同三律(10-07 16 分案法医:需求原文自带双轨标记语法——弯引号
+    # “X”=UI 控件名/消息,反引号 `X`=数据值;16 分案即 “Sign in” on the
+    # home page 未编译成 main 内 role=link name='Sign in')。
+    "A quoted \u201cname\u201d in the text is the exact accessible name of the "
+    "control its sentence names — button NAMED X, textbox/input LABELED "
+    "Y, visible LINK Z, heading, tab, menu: render that role, that name; "
+    "a backticked `value` is literal data — enter, seed, and where a "
+    "THEN says it displays, display it verbatim.",
+    "\u201cThe exact message\u201d binds exact text (several listed = show them "
+    "together); \u201cvisible/visibly\u201d = the page's main content, never "
+    "header chrome or hover; \u201cthe page address identifies X\u201d = X in "
+    "the URL; \u201cafter reload / persists across reload\u201d = assert again "
+    "after page.reload().",
+    "A walk sentence ('clicks \u201cA\u201d, opens \u201cB\u201d') is the spec's click "
+    "sequence via role+name from the GIVEN's session state; before "
+    "finishing, walk every quoted \u201cname\u201d in the family's text as a "
+    "checklist — one with no rendered counterpart is an APP defect.",
     "The grader walks ONLY the operations the requirement names — never "
     "make a step mandatory that the text does not describe.",
     "Reject (a 4xx, a validation error, a disabled submit) only where "

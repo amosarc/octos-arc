@@ -163,6 +163,27 @@ class NoWipePinTests(unittest.TestCase):
         self._sentinel = sentinel
         return tmp
 
+    def test_frame_is_host_refreshed_other_files_absent_only(self):
+        import scaffold as sc
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            # 模型自植的 HeaderAuth 版 frame + 哨兵模型件
+            frame = root / "frontend/src/app/frame.jsx"
+            frame.parent.mkdir(parents=True)
+            frame.write_text("// model-mutated frame with HeaderAuth\n",
+                             encoding="utf-8")
+            sentinel = root / "frontend/src/features/req1.jsx"
+            sentinel.parent.mkdir(parents=True)
+            sentinel.write_text("// model work\n", encoding="utf-8")
+            written = sc.scaffold(root, log=lambda *a: None)
+            self.assertIn("frontend/src/app/frame.jsx", written)
+            kit = frame.read_text(encoding="utf-8")
+            self.assertNotIn("HeaderAuth", kit)          # 反模式被 kit 覆盖清除
+            self.assertIn("app-header-actions", kit)      # 新 kit(演化版基底的当前版)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"),
+                             "// model work\n")          # 模型件不覆盖
+            self.assertNotIn("frontend/src/features/req1.jsx", written)
+
     def test_scaffold_and_stubs_never_overwrite_model_work(self):
         tmp = self._pseudo_project()
         tree = main.load_requirement_tree(

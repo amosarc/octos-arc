@@ -112,6 +112,15 @@ def stage_selftest_dir(output_dir: Path, smoke_port: int,
 // out). One control, one accessible name: never duplicate the link in
 // both header and main.
 //
+// FIELD CHECKLIST — every “quoted name” in the node's text names a
+// control you must render and assert (getByRole/getByLabel with the
+// exact name, scoped to main for entry links); every `backticked
+// value` is data to enter or seed verbatim; every "the exact message"
+// is an exact-text assertion; every "the page address identifies X" is
+// a toHaveURL(/X/) assertion; every "after reload" clause re-asserts
+// post page.reload(). Enumerate them from the text BEFORE writing the
+// spec — a name you cannot assert is a missing field: fix the APP.
+//
 // GESTURE RULE — drive every selection-driven flow with BOTH drag AND
 // click+Shift-click, every dialog flow with mouse AND keyboard (Enter
 // commits, Escape cancels), and every combo box BOTH ways: selectOption()

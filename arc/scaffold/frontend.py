@@ -144,15 +144,21 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 // component that owns the current page (two callers fight over chrome):
 //   useFrame({ crumbs: [{ label: 'acme-docs', href: '#/repos/acme-docs' }],
 //              actions: <button>New issue</button> });
+// The header actions slot is for SESSION CHROME ONLY (the account menu
+// when signed in). Entry links the requirement names as living "on the
+// home page" (e.g. Sign in / Sign up / Forgot password for visitors)
+// belong INSIDE the page's <main> content — the grader scopes those
+// lookups to getByRole('main'); header chrome does not count.
 const FrameContext = createContext({ setChrome: () => {} });
 
-export function AppFrame({ brand = 'App', children }) {
+export function AppFrame({ brand = 'App', search = null, children }) {
   const [chrome, setChrome] = useState({ crumbs: [], actions: null });
   const value = useMemo(() => ({ setChrome }), []);
   return (
     <FrameContext.Provider value={value}>
       <header className="app-header">
-        <span className="app-brand">{brand}</span>
+        <a href="#/" className="app-brand">Home</a>
+        {search}
         <nav className="app-crumbs" aria-label="Breadcrumb">
           {(chrome.crumbs || []).map((c) => (
             c.href

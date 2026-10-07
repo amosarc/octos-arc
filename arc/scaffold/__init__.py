@@ -41,20 +41,30 @@ __all__ = [
 ]
 
 
-def scaffold(output_dir: Path) -> list[str]:
+# 宿主自有件=运行时必覆盖(增量演化下随 kit 升级):frame.jsx 的页头
+# chrome 契约是宿主决策——10-07 16 分案实证模型曾自植 HeaderAuth 把
+# "Sign in"入口放上页头,评分器 main 域定位 24 场景全灭;kit 收口后
+# 每轮以当前版覆盖,入口链接归位 <main> 的义务由 RULES 承载。
+HOST_REFRESH_FILES = {"frontend/src/app/frame.jsx"}
+
+
+def scaffold(output_dir: Path, log=print) -> list[str]:
     """幂等落盘完整可启动模板(write-if-absent),返回本次写入的相对路径。
 
     backend 基座(HTTP/cookie/存储/遥测 + routes 空扩展点)与 frontend
     五件套由宿主预置;业务语义(routes 里的全部 API、种子数据、UI)留给
-    模型——见 manifest 内各文件角色。
+    模型——见 manifest 内各文件角色。例外:HOST_REFRESH_FILES(页头
+    chrome 契件 frame.jsx)无条件覆盖——宿主自有面,随 kit 演进刷新。
     """
     root = Path(output_dir)
     written: list[str] = []
     for rel, (content, _role) in SCAFFOLD_FILES.items():
         target = root / rel
-        if target.exists():
+        if target.exists() and rel not in HOST_REFRESH_FILES:
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            log(f"[scaffold] host-owned {rel} refreshed (kit upgrade)")
         target.write_text(content, encoding="utf-8")
         written.append(rel)
     return written

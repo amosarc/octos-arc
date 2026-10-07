@@ -119,7 +119,9 @@ class ScaffoldLifecycleTests(unittest.TestCase):
             self.assertEqual(sorted(written), sorted(sc.SCAFFOLD_FILES))
             for rel in sc.SCAFFOLD_FILES:
                 self.assertTrue((out / rel).is_file(), rel)
-            self.assertEqual(sc.scaffold(out), [], "second call writes nothing")
+            # frame.jsx=宿主自有件每调必刷(HOST_REFRESH);其余零写
+            self.assertEqual(sc.scaffold(out), ["frontend/src/app/frame.jsx"],
+                             "second call refreshes only the host-owned frame")
             # write-if-absent:已有文件不被覆写
             (out / ".npmrc").write_text("custom\n")
             sc.scaffold(out)

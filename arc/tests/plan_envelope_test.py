@@ -154,7 +154,8 @@ class HostStackRulesTests(unittest.TestCase):
         # 渲染律/home 行回缩/头部失真句删除)后 7424;10-06 github 全题
         # 42/100 法医(登录态首页缺实体目录)——home 可达律补会话态
         # 不变式从句后 7536,帽不动。
-        self.assertLessEqual(len(r), 8000)
+        # 8800 = 字段合同三律入宪(10-07 16 分案:标记语法→角色编译)
+        self.assertLessEqual(len(r), 8800)
         # 09-28 CRUD 生成器退役:声明协议/生成层词汇不得回流
         self.assertNotIn("SCHEMA-DRIVEN", r)
         self.assertNotIn("schema.json", r)
@@ -230,7 +231,7 @@ class HostScaffoldTests(unittest.TestCase):
                           (out / "backend" / ".npmrc").read_text())
 
             # idempotent: second call writes nothing
-            self.assertEqual(sc.scaffold(out), [])
+            self.assertEqual(sc.scaffold(out), ["frontend/src/app/frame.jsx"])
             # existing files are NOT overwritten
             (out / ".npmrc").write_text("custom\n")
             sc.scaffold(out)

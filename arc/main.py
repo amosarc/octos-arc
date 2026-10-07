@@ -3736,6 +3736,11 @@ and re-verifying a hash you just wrote.
 (d) capture duty: while you verify, capture screenshots of the home \
 page and the pages you reach into octos/screenshots/ — the host \
 reviews them after this turn.
+(e) field fidelity: re-walk the quoted \u201cnames\u201d of each family's text \
+as a checklist; an old spec that predates a quoted name or asserts it \
+loosely (unscoped where entry links belong in main, no URL assertion \
+where a THEN names the address) must be strengthened before its green \
+counts.
 """
 # 并行钉引用的旧名(goal_first_test)——统一轮前言即原 Phase 0 前言的
 # 全量继任者,别名保兼容。
