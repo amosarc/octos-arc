@@ -1543,15 +1543,40 @@ _NO_CAPTURE_NOTE = (
     "no new screenshots (octos/screenshots/) — the visual nav check did "
     "not run. If you change pages this batch, capture them per the "
     "SCREENSHOT RULE so the check has evidence.")
+_HOST_WALK_DUP_NOTE = (
+    "HOST-WALK OBSERVATION: the exact text '{name}' matches {count} "
+    "separate visible text nodes on {page}. This is locator physics, "
+    "not a content judgment — the grader's getByText(name, "
+    "{{ exact: true }}) resolves to {count} elements and dies on the "
+    "second match under any requirement. Deduplicate the rendering "
+    "(one visible exact match per page).")
+
+
+def _walk_duplicates(report: dict | None) -> list[dict]:
+    """walk-report 的 duplicates 类目(形态校验,越界值丢弃)。"""
+    if not isinstance(report, dict):
+        return []
+    out = []
+    for d in report.get("duplicates") or []:
+        if (isinstance(d, dict) and d.get("name")
+                and int(d.get("count") or 0) >= 2):
+            out.append(d)
+    return out
+
+
+def _dup_key(d: dict) -> str:
+    """两振门/送达集共用的发现键:name@page 尾段。"""
+    return f"{d['name']}@{str(d.get('page') or '')[-40:]}"
 
 
 def _host_walk_finding_keys(report: dict | None) -> list[str]:
-    """report → 发现键(lost:/missing:/login: 前缀),去重用。"""
+    """report → 发现键(lost:/missing:/dup:/login: 前缀),去重用。"""
     if not isinstance(report, dict):
         return []
     keys = [f"lost:{x}" for x in
             (report.get("signed_in_lost") or [])[:6]]
     keys += [f"missing:{x}" for x in (report.get("missing") or [])[:6]]
+    keys += [f"dup:{_dup_key(d)}" for d in _walk_duplicates(report)[:6]]
     login = str(report.get("login") or "")
     if login.startswith("failed"):
         keys.append(f"login:{login[:80]}")
@@ -1583,7 +1608,31 @@ def _host_walk_notes(report: dict | None,
             and f"login:{login[:80]}" not in known):
         notes.append(
             _HOST_WALK_LOGIN_NOTE.format(detail=login[8:][:120]))
+    for d in _walk_duplicates(report):
+        if f"dup:{_dup_key(d)}" not in known:
+            notes.append(_HOST_WALK_DUP_NOTE.format(
+                name=d["name"], count=d.get("count"),
+                page=d.get("page")))
     return notes
+
+
+def _host_walk_gate(report: dict | None,
+                    streaks: dict[str, int]) -> list[dict]:
+    """结构门(10-08 拍板,物理不变量豁免):duplicates 连续第二个
+    传感窗仍在→判红明细。streaks=调用方持有的连续计数(就地更新:
+    当前在发生的 +1,消失的删除);首见只计数不判(留改造中间态与
+    驳回权,观察句走 notes 通道)。纯函数,零副作用除 streaks。"""
+    dups = _walk_duplicates(report)
+    current = {_dup_key(d) for d in dups}
+    for k in [k for k in streaks if k not in current]:
+        del streaks[k]
+    gated = []
+    for d in dups:
+        k = _dup_key(d)
+        streaks[k] = streaks.get(k, 0) + 1
+        if streaks[k] >= 2:
+            gated.append(d)
+    return gated
 
 
 def _host_walk_sensor(output_dir: Path, smoke_port: int) -> dict | None:
@@ -1592,9 +1641,10 @@ def _host_walk_sensor(output_dir: Path, smoke_port: int) -> dict | None:
     与 _page_health_run 的本质差异:不 boot/不杀服务/不动 db.run.json
     (evolve 批间活本必须存活)——只对在跑的 dev server 打 playwright。
     跑不动(端口没起/playwright 缺失/dist 未建/spec 未 staged)一律
-    None=零观测;异常吞掉,传感永不抛。staged 无登录凭据(无账号
-    任务,如 sheet)时直接跳过——传感只为登录态丢失这一类死法而
-    存在,空跑批尾 ~9s/批纯耗。"""
+    None=零观测;异常吞掉,传感永不抛。跳过条件(10-08 反转)=无名
+    单亦无凭据:唯一性腿(结构门判据)只需要名字清单,无账号任务
+    (如 sheet)照跑,批尾 ~9s/批成本由 OCTOS_ARC_HOST_WALK_NOTES=0
+    总闸统一关停。"""
     try:
         e2e = output_dir / SELFTEST_SUBDIR
         cfg_path = e2e / "_host-walk.json"
@@ -1605,7 +1655,11 @@ def _host_walk_sensor(output_dir: Path, smoke_port: int) -> dict | None:
         staged = json.loads(cfg_path.read_text(encoding="utf-8"))
         login = (staged.get("login")
                  if isinstance(staged, dict) else None) or None
-        if not login:
+        names = ((staged.get("names")
+                  if isinstance(staged, dict) else None) or [])
+        # 10-08 反转:无登录凭据不再整腿跳过——唯一性腿(结构门)
+        # 只需要名字清单;真正零可观测面(无名无凭据)才跳。
+        if not login and not names:
             return None
         cli = _pw_lg_cli()
         if cli is None:
@@ -4899,6 +4953,9 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
             # ——同一发现至多 nudge 一次,模型驳回即安静;发现消失即
             # 释锁,回归可重报。OCTOS_ARC_HOST_WALK_NOTES=0 运维总闸。
             delivered_walk_findings: set[str] = set()
+            # 结构门两振计数:duplicates 发现的连续传感窗计数(键消失
+            # 即清零;首见观察、再见判红)。
+            walk_dup_streaks: dict[str, int] = {}
             # 会话策略:family(默认)每家族一会话,依赖全由工单闭包双段
             # 注入承载,组间环容忍拓扑(成环破文档序并告警);scc=互达
             # 成环家族共组;single=全程单会话。OCTOS_ARC_SEGMENT_BATCHES>0
@@ -5601,6 +5658,39 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                     delivered_walk_findings.update(
                                         _host_walk_finding_keys(
                                             walk_report))
+                                    # 结构门(10-08 拍板,物理不变量豁免
+                                    # 于传感非门定则):重复精确文本命中
+                                    # 连续第二个传感窗仍在→本批晚降级
+                                    # blocked(仿回归降级),修复走既有
+                                    # 红处理梯子。首见只走观察句。
+                                    # OCTOS_ARC_HOST_WALK_GATE=0 总闸。
+                                    if os.environ.get(
+                                            "OCTOS_ARC_HOST_WALK_GATE",
+                                            "1") != "0":
+                                        gated = _host_walk_gate(
+                                            walk_report, walk_dup_streaks)
+                                        for d in gated:
+                                            detail = (
+                                                "host walk gate: '"
+                                                + str(d.get("name"))
+                                                + "' matches "
+                                                + str(d.get("count"))
+                                                + " exact-text nodes on "
+                                                + str(d.get("page"))
+                                                + " (strict-mode "
+                                                "locator physics; "
+                                                "persists across two "
+                                                "batch tails)")
+                                            log(f"[host-walk] batch "
+                                                f"{focus_id} GATE: "
+                                                + detail)
+                                            for nid in batch_ids:
+                                                plan_statuses[nid] = (
+                                                    "blocked")
+                                                events                                                     .mark_implementation_failed(
+                                                        nid, detail)
+                                                if nid not in failed:
+                                                    failed.append(nid)
                                 if walk_notes:
                                     log(f"[host-walk] batch {focus_id} "
                                         "sensor: "

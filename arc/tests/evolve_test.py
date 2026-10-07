@@ -12,11 +12,50 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import evolve_loop  # noqa: E402
 import main  # noqa: E402
 import plan_envelope  # noqa: E402
 import scaffold  # noqa: E402
 
 TASKS = Path(__file__).resolve().parent.parent / "tasks"
+
+
+class RoundChainingTests(unittest.TestCase):
+    """接续(10-08 拍板):轮号自动推导 + evolve-state 标记。
+
+    sheet-0.9→1.0 重掷 7 分净额的根治件——接续为默认语义,重掷须
+    --fresh 显式。"""
+
+    def test_next_round_number_with_gaps(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(
+                evolve_loop.next_round_number(Path(td)), 1)  # 空工程
+            base = Path(td) / "octos" / "evolve-verdicts"
+            for n in (1, 4, 5, 6):  # 崩溃续号实证形态(带洞)
+                (base / f"round-{n}").mkdir(parents=True)
+            (base / "round-notanumber").mkdir()   # 非数字忽略
+            (base / "suite-postmortem").mkdir()   # 非轮目录忽略
+            (base / "round-9").write_text("file")  # 同名文件非目录忽略
+            self.assertEqual(
+                evolve_loop.next_round_number(Path(td)), 7)
+
+    def test_evolve_state_roundtrip(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            evolve_loop.write_evolve_state(
+                Path(td), 2, False, log=lambda *a: None)
+            data = evolve_loop._read_evolve_state(Path(td))
+            self.assertEqual(data.get("last_round"), 2)
+            self.assertIs(data.get("ok"), False)
+            self.assertIn("ts", data)
+            # 无文件/坏 JSON → {}(接续横幅静默降级)
+            self.assertEqual(
+                evolve_loop._read_evolve_state(Path(td) / "nope"), {})
+            (Path(td) / "octos" / "evolve-state.json").write_text(
+                "{broken", encoding="utf-8")
+            self.assertEqual(
+                evolve_loop._read_evolve_state(Path(td)), {})
 
 
 class EvolveNarrativeTests(unittest.TestCase):

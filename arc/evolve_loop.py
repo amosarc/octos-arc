@@ -36,6 +36,57 @@ def lessons_path(project_dir: Path) -> Path:
     return Path(project_dir) / "octos" / "evolution-lessons.md"
 
 
+def evolve_state_path(project_dir: Path) -> Path:
+    return Path(project_dir) / "octos" / "evolve-state.json"
+
+
+def next_round_number(project_dir: Path) -> int:
+    """续跑轮号推导:evolve-verdicts/round-N 取最大 N+1,无目录=1。
+
+    目录序可能带洞(崩溃续号 1,4,5,6 实证),取 max 而非计数;解析
+    失败的目录名忽略。"""
+    base = Path(project_dir) / "octos" / "evolve-verdicts"
+    best = 0
+    try:
+        for child in base.iterdir():
+            m = re.fullmatch(r"round-(\d+)", child.name)
+            if child.is_dir() and m:
+                best = max(best, int(m.group(1)))
+    except OSError:
+        return 1
+    return best + 1
+
+
+def write_evolve_state(project_dir: Path, round_no: int, ok: bool,
+                       log=print) -> None:
+    """轮末交付状态标记(接续判据,尽力而为不抛)。
+
+    比数 evolve-verdicts 目录更稳:目录可能是陈旧工件/手工拷贝残留,
+    状态文件由本轮写入,带 git HEAD 与时间戳可对账。"""
+    try:
+        path = evolve_state_path(project_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "last_round": round_no, "ok": bool(ok),
+            "git_head": _git_head(project_dir),
+            "ts": datetime.now().isoformat(timespec="seconds"),
+        }, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError as exc:
+        try:
+            log(f"[evolve-loop] evolve-state write failed: {exc}")
+        except Exception:
+            pass
+
+
+def _read_evolve_state(project_dir: Path) -> dict:
+    try:
+        data = json.loads(
+            evolve_state_path(project_dir).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def _git_head(project_dir: Path) -> str | None:
     try:
         out = subprocess.run(
@@ -185,7 +236,7 @@ def run_evolution_rounds(task_dir: str | Path, project_dir: str | Path, *,
                          max_rounds: int = 3,
                          keep_lessons_rounds: int = 3,
                          dry_run: bool = False,
-                         start_round: int = 1,
+                         start_round: int | None = None,
                          families: list[str] | None = None,
                          time_budget: int | None = None,
                          log=print) -> list:
@@ -194,9 +245,22 @@ def run_evolution_rounds(task_dir: str | Path, project_dir: str | Path, *,
     统一迭代策略(10-07 拍板):不区分修复轮/迭代轮——每轮一律全家族
     文档序从 REQ-1 出发,模型自检(spec+截图)已实现即跳过、红则修;
     不做宿主侧跨轮跳批与自动收窄(families 仅作运维手动覆盖)。
-    start_round>1=崩溃后续号;time_budget=每轮秒数(显式 API)。"""
+    start_round=None(默认)=接续推导(10-08 拍板):evolve-verdicts
+    取 max round+1,接续横幅报上轮状态;显式传参仍覆盖(崩溃续号)。
+    time_budget=每轮秒数(显式 API)。"""
     task_dir = Path(task_dir).resolve()
     project_dir = Path(project_dir).resolve()
+    derived = start_round is None
+    if derived:
+        start_round = next_round_number(project_dir)
+    prior_state = _read_evolve_state(project_dir)
+    if derived and start_round > 1:
+        log(f"[evolve-loop] CONTINUING from delivered state: "
+            f"round {start_round} next "
+            f"(prior round {prior_state.get('last_round', '?')} "
+            f"verdict={'green' if prior_state.get('ok') else 'red'}, "
+            f"git HEAD={(prior_state.get('git_head') or 'none')[:8]}) "
+            "— reset intentionally with run-evolution.sh --fresh")
     families_all = _all_families(task_dir, project_dir)
     log(f"[evolve-loop] task={task_dir.name} project={project_dir.name} "
         f"families={','.join(families_all)} max_rounds={max_rounds} "
@@ -237,6 +301,9 @@ def run_evolution_rounds(task_dir: str | Path, project_dir: str | Path, *,
                 ok=False, round_index=round_no,
                 phase0={"turn_reason": "run aborted (no verdict)"})
         verdicts.append(verdict)
+        if not verdict.dry_run:  # 预览轮不落接续状态(横幅不被冒烟污染)
+            write_evolve_state(project_dir, round_no, bool(verdict.ok),
+                               log=log)
         if verdict.dry_run:
             log("[evolve-loop] dry-run complete; no rounds to iterate")
             break
@@ -270,9 +337,10 @@ def main(argv=None) -> int:
     parser.add_argument("--max-rounds", type=int, default=3)
     parser.add_argument("--keep-lessons-rounds", type=int, default=3)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--start-round", type=int, default=1,
-                        help="resume numbering (lessons file keeps prior "
-                             "rounds; e.g. 2 after a crashed round 1)")
+    parser.add_argument("--start-round", type=int, default=None,
+                        help="resume numbering (default: continue from "
+                             "evolve-verdicts max round + 1 — pass 1 to "
+                             "force a fresh numbering)")
     parser.add_argument("--families", default=None,
                         help="explicit scope for the FIRST round "
                              "(comma-separated; narrowing takes over "

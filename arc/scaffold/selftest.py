@@ -30,6 +30,12 @@ _HOST_WALK_SPEC = """\
 //     and — when _host-walk.json carries seed login credentials — which
 //     names the signed-in pages no longer show. Findings land in
 //     walk-report.json and the console; you judge and act.
+//   counted (10-08 structure gate feed): per visited page, how many
+//     separate leaf text nodes exactly equal each staged/scanned name.
+//     A count >= 2 is locator physics, not content — the grader's
+//     getByText(name, { exact: true }) dies on the second match under
+//     ANY requirement — so the host gates on it (two consecutive
+//     batch tails), unlike the reported classes above.
 // The report ledger unions the staged names with a runtime scan of
 // backend/data/db.run.json (fallback db.json), so entities seeded later
 // in the round are covered too.
@@ -65,6 +71,26 @@ const LEDGER: string[] = Array.from(new Set([...ENTITIES, ...ledgerScan()]));
 const has = (seen: string[], n: string) =>
   seen.some((t) => t.toLowerCase().includes(n.toLowerCase()));
 
+// Exact-text match counts per visited page (leaf nodes only, trimmed
+// equality): the number the grader's getByText(name, { exact: true })
+// would resolve to on that page — 2+ is a strict-mode death.
+const duplicates: { page: string; name: string; count: number }[] = [];
+const dupScan = async (page: any, href: string): Promise<void> => {
+  const counts: Record<string, number> = await page.evaluate(
+    (names: string[]) => {
+      const want = new Set(names.map((n) => n.trim()));
+      const out: Record<string, number> = {};
+      for (const el of Array.from(document.body.querySelectorAll('*'))) {
+        if (el.childElementCount) continue; // leaf text nodes only
+        const t = (el.textContent || '').trim();
+        if (t && want.has(t)) out[t] = (out[t] || 0) + 1;
+      }
+      return out;
+    }, LEDGER);
+  for (const [name, count] of Object.entries(counts))
+    if (count >= 2) duplicates.push({ page: href, name, count });
+};
+
 const legErrors: Record<string, string[]> = { out: [], inn: [] };
 let leg = 'out';
 
@@ -75,6 +101,7 @@ const walkPages = async (page: any): Promise<string[]> => {
   await page.goto('/');
   await page.waitForTimeout(1200);
   await grab();
+  await dupScan(page, '/');
   const links = await page.evaluate(() =>
     Array.from(document.querySelectorAll('a[href^="#/"]'))
       .map((a) => (a as HTMLAnchorElement).getAttribute('href') || '')
@@ -84,6 +111,7 @@ const walkPages = async (page: any): Promise<string[]> => {
     await page.evaluate((h) => { location.hash = String(h).slice(1); }, href);
     await page.waitForTimeout(600);
     await grab();
+    await dupScan(page, href);
   }
   return seen;
 };
@@ -165,7 +193,8 @@ test('host walk - no page errors, seed entities reachable', async ({ page }) => 
     writeFileSync('walk-report.json', JSON.stringify({
       checked: LEDGER, missing, signed_in_lost: signedInLost,
       nowhere, login: loginStatus,
-      leg2_page_errors: legErrors.inn }));
+      leg2_page_errors: legErrors.inn,
+      duplicates: duplicates.slice(0, 24) }));
   } catch { /* best effort */ }
   if (signedInLost.length)
     console.log('[host-walk] signed-in pages no longer show (report-only, '
@@ -179,6 +208,10 @@ test('host walk - no page errors, seed entities reachable', async ({ page }) => 
   if (legErrors.inn.length)
     console.log('[host-walk] signed-in leg page errors (report-only): '
       + legErrors.inn.slice(0, 3).join(' | '));
+  if (duplicates.length)
+    console.log('[host-walk] duplicate exact-text matches (strict-mode '
+      + 'locator physics): ' + duplicates.slice(0, 6).map(
+        (d) => d.name + ' x' + d.count + ' @' + d.page).join(', '));
 
   // 唯一的门:行走页面零未捕获异常(任何需求下都是 bug 的物理事实)。
   // 实体可见性不再断言——名单失明时旧门给过假绿(github-42 案),
@@ -271,6 +304,16 @@ def stage_selftest_dir(output_dir: Path, smoke_port: int,
 // a toHaveURL(/X/) assertion; every "after reload" clause re-asserts
 // post page.reload(). Enumerate them from the text BEFORE writing the
 // spec — a name you cannot assert is a missing field: fix the APP.
+//
+// UNIQUENESS RULE — when a THEN says a name or message "displays" or
+// "displays exactly" X, assert it with getByText(X, { exact: true })
+// and require exactly ONE match (toHaveCount(1) — never reach for
+// .first()): a name rendered in both the breadcrumb and the heading,
+// or one error shown in two role=alert elements, sails through a
+// heading-scoped or .first() assert while the grader's unscoped exact
+// lookup dies on the second match (a rename family was lost exactly
+// that way, on both shapes at once). Error messages also get a
+// getByRole('alert') singleton assert.
 //
 // GESTURE RULE — drive every selection-driven flow with BOTH drag AND
 // click+Shift-click, every dialog flow with mouse AND keyboard (Enter

@@ -262,6 +262,15 @@ class MyCheckExampleTests(unittest.TestCase):
             self.assertIn("CELL-TEXT RULE", text)
             self.assertIn("CSS-sized visible box", text)
             self.assertIn("inside a container, re-assert", text)
+            # 10-08 sheet-1.0 双渲染×3/双 alert×2(5 挂)的自测习语:
+            # FIELD CHECKLIST 的 exact-text 句曾被"绿但不对版"断言
+            # 替换(heading 作用域/.first() 均绿,评分器 getByText
+            # exact 双命中死)——UNIQUENESS 把"恰好一个命中"钉成
+            # 习语,错误消息另加 alert 单例断言。
+            self.assertIn("UNIQUENESS RULE", text)
+            self.assertIn("getByText(X, { exact: true })", text)
+            self.assertIn("exactly ONE match", text)
+            self.assertIn("getByRole('alert') singleton assert", text)
 
 
 class SessionGroupTests(unittest.TestCase):
@@ -814,6 +823,11 @@ class GoalFirstRulesTests(unittest.TestCase):
             # 判定权钉死:登录腿措辞必须交模型判定,不得引入硬断言
             self.assertIn("judge against the requirement text", spec)
             self.assertNotIn("signed_in_lost).toBeVisible", spec)
+            # 10-08 唯一性腿:叶子精确匹配计数进 walk-report 的
+            # duplicates 键(结构门判据面),措辞钉"物理非内容"。
+            self.assertIn("childElementCount", spec)  # 只数叶子文本
+            self.assertIn("duplicates", spec)
+            self.assertIn("locator physics", spec)
 
     def test_host_walk_notes_and_sensor_gates(self):
         # 传感→中性观察的纯函数面:零发现=零句;发现/登录失败各成句;
@@ -848,6 +862,26 @@ class GoalFirstRulesTests(unittest.TestCase):
         keys = set(main._host_walk_finding_keys(rep))
         self.assertEqual(keys, {"lost:evo-audit-org"})
         self.assertEqual(len(main._host_walk_notes(rep, keys)), 0)
+        # 10-08 结构门判据面:duplicates 类目→dup: 键+首见观察句
+        # (物理不变量措辞),送达过即安静。
+        dup_rep = {"duplicates": [
+            {"page": "#/repos/acme/widgets", "name": "Widgets",
+             "count": 2}],
+            "signed_in_lost": [], "login": "ok"}
+        dkeys = main._host_walk_finding_keys(dup_rep)
+        self.assertEqual(dkeys, ["dup:Widgets@#/repos/acme/widgets"])
+        dup_notes = main._host_walk_notes(dup_rep)
+        self.assertEqual(len(dup_notes), 1)
+        self.assertIn("locator physics", dup_notes[0])
+        self.assertIn("Widgets", dup_notes[0])
+        self.assertEqual(
+            len(main._host_walk_notes(
+                dup_rep, set(main._host_walk_finding_keys(dup_rep)))), 0)
+        # 形态校验:count<2/缺 name 的条目丢弃
+        bad = {"duplicates": [{"name": "X", "count": 1},
+                              {"page": "p", "count": 3}]}
+        self.assertEqual(main._walk_duplicates(bad), [])
+
         rep2 = {"signed_in_lost": ["evo-audit-org", "new-org"],
                 "missing": [], "login": "ok"}
         only_new = main._host_walk_notes(rep2, keys)
@@ -858,8 +892,8 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertEqual(
             len(main._host_walk_notes(rep, set())), 1)
         with tempfile.TemporaryDirectory() as td:
-            # 无 staged 件 → 零观测;staged 无登录凭据(无账号任务,
-            # 如 sheet)→ 传感跳过,批尾不空跑。
+            # 无 staged 件 → 零观测;staged 有名字无凭据(10-08
+            # 反转后 sheet 类照跑)→ 此处因 tmp 无 dist/服务仍 None。
             self.assertIsNone(
                 main._host_walk_sensor(Path(td), 43101))
             e2e = Path(td) / "e2e"
@@ -870,6 +904,27 @@ class GoalFirstRulesTests(unittest.TestCase):
                 '{"names": ["w"], "login": null}')
             self.assertIsNone(
                 main._host_walk_sensor(Path(td), 43101))
+
+    def test_host_walk_structure_gate_two_strike(self):
+        # 10-08 拍板:物理不变量豁免于传感非门定则——重复精确文本
+        # 命中连续第二个传感窗仍在才判红(首见观察、消失清零、
+        # 同名不同页=不同键)。
+        d1 = {"duplicates": [{"page": "#/w/one", "name": "Widgets",
+                              "count": 2}]}
+        streaks: dict = {}
+        self.assertEqual(main._host_walk_gate(d1, streaks), [])  # 首见
+        self.assertEqual(streaks, {"Widgets@#/w/one": 1})
+        gated = main._host_walk_gate(d1, streaks)  # 再见判红
+        self.assertEqual(gated, d1["duplicates"])
+        self.assertEqual(main._host_walk_gate({}, streaks), [])  # 消失清零
+        self.assertEqual(streaks, {})
+        # 同名不同页=独立键,互不连坐
+        d2 = {"duplicates": [{"page": "#/w/two", "name": "Widgets",
+                              "count": 3}]}
+        main._host_walk_gate(d2, streaks)
+        self.assertEqual(main._host_walk_gate(d2, streaks),
+                         d2["duplicates"])
+        self.assertEqual(streaks, {"Widgets@#/w/two": 2})
 
     def test_fixture_walk_login_first_password_account(self):
         # 凭据源=fixture 首个带明文密码的种子账号(email 从种子 users
