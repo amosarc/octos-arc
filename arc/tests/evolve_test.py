@@ -288,6 +288,18 @@ class LoopTests(unittest.TestCase):
             self.assertIn("round5 line", text)
 
 
+class CliExitCodeTests(unittest.TestCase):
+    """__main__ 退出码契约钉:EvolveVerdict 对象→0(sys.exit(非int)
+    =exit 1,曾把成功轮害成非零、打断评测器);int 原样。"""
+
+    def test_verdict_object_maps_to_zero(self):
+        v = main.EvolveVerdict(ok=False, dry_run=True)
+        self.assertEqual(main._cli_exit_code(v), 0)
+        self.assertEqual(main._cli_exit_code(main.EvolveVerdict(ok=True)), 0)
+        self.assertEqual(main._cli_exit_code(0), 0)
+        self.assertEqual(main._cli_exit_code(1), 1)
+
+
 class HostScriptsNoOverwriteTests(unittest.TestCase):
     """脚手架落盘策略钉(10-07 拍板):已建成项目上仅 selftest 骨架与
     AGENTS.md 覆写刷新,宿主辅助脚本存在即跳过(不覆写)。"""

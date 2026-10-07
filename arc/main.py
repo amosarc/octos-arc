@@ -5440,5 +5440,13 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
         return 0
 
 
+def _cli_exit_code(result) -> int:
+    """__main__ 边界退出码映射:evolve 返回 EvolveVerdict 对象(进程内
+    供 evolve_loop 消费),CLI 边界一律映射 0——仓库契约"一切路径 exit 0,
+    产物与事件说话"(sys.exit(非int)=打印对象并 exit 1,10-07 实测把
+    成功的 sheet 轮害成非零失败、评测器被打断)。"""
+    return result if isinstance(result, int) else 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_cli_exit_code(main()))
