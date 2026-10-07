@@ -388,10 +388,13 @@ class StableSuiteMeasureTests(unittest.TestCase):
              "failed_titles": [f"real{i}" for i in range(5)],
              "failed_files": ["a.spec.ts"] * 5, "passed_titles": []},
         ]
+        # 第二轮的 files 是去重集(短于标题数)——不得 zip 配对截断
+        readings[1]["failed_files"] = ["a.spec.ts"]
         out = main.stable_suite_measure(
             lambda: readings.pop(0), log=lambda *a: None)
         self.assertEqual(out["failed"], 5)
         self.assertTrue(all(t.startswith("real") for t in out["failed_titles"]))
+        self.assertEqual(out["failed_files"], ["a.spec.ts"])
 
     def test_low_red_rate_no_remeasure(self):
         calls = []

@@ -3607,10 +3607,9 @@ def stable_suite_measure(measure, threshold: float = 0.10,
         log(f"[evolve-suite] noise guard: {g2['failed'] - len(stable)} "
             f"transient red(s) dropped, {len(stable)} stable red(s) "
             "remain")
-    stable_set = set(stable)
-    files = sorted({f for t, f in zip(g2["failed_titles"],
-                                      g2["failed_files"])
-                    if t in stable_set})
+    # failed_files 是去重集合(与标题不对齐,勿 zip 配对):有稳定红则
+    # 整集保留,无则清空——修复命令只消费文件名集合语义。
+    files = list(g2["failed_files"]) if stable else []
     return {**g2, "failed": len(stable), "failed_titles": stable,
             "failed_files": files}
 
