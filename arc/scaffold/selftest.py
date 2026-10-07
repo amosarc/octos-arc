@@ -3,9 +3,10 @@
 
 宿主只提供最小骨架(非规则、非用例)——config 是最顺手的标准跑法
 (双绿自动停机),Playwright 用法本身不设限。_host-walk 是宿主唯一的
-自造 spec:零任务知识地行走首页+内链,断言零 pageerror 且种子实体名
-可见——与 final 链的 page-health walk 同款,把"评分器能不能看到东西"
-变成批内就能跑绿的门。幂等。
+自造 spec:零任务知识地行走首页+内链(有种子凭据时加登录腿),断言
+零 pageerror(任何需求下都是 bug 的物理事实),实体可见性/登录态丢失
+一律 report-only 落 walk-report.json——判定权在模型(需求原文在它
+手里),平台 e2e 唯一终裁。幂等。
 """
 from __future__ import annotations
 
@@ -15,29 +16,59 @@ from pathlib import Path
 
 
 # 与 main.py 的 _PAGE_HEALTH_SPEC 同款行走逻辑;实体名从同目录
-# _host-walk.json 读(宿主在开工时由 fixture 编译产出)。
+# _host-walk.json 读(宿主在开工时由 fixture 编译产出,携带种子登录
+# 凭据时附加登录腿)。登录腿=传感非门:发现只落 walk-report.json
+# 与控制台,判定权在模型(需求原文在它手里)。
 _HOST_WALK_SPEC = """\
 // _host-walk.spec.ts — HOST-OWNED reachability walk (you do not edit it;
-// your own specs live beside it). It loads the app, walks the home page
-// plus every internal hash link, and asserts: zero uncaught page errors
-// AND every seeded top-level entity name from _host-walk.json visible in
-// some visited page's text — the names the eval grader looks for.
+// your own specs live beside it). Two legs, one asserted fact:
+//   asserted (both legs contribute): zero uncaught page errors on any
+//     visited page — a page that throws is a bug under every requirement,
+//     so this alone stays a gate.
+//   reported (never asserted — the requirement text, not this walk,
+//     decides): staged seed entity names not seen on the signed-out walk,
+//     and — when _host-walk.json carries seed login credentials — which
+//     names the signed-in pages no longer show. Findings land in
+//     walk-report.json and the console; you judge and act.
+// The report ledger unions the staged names with a runtime scan of
+// backend/data/db.run.json (fallback db.json), so entities seeded later
+// in the round are covered too.
 // Run it with:  sh scripts/run-e2e.sh _host-walk.spec.ts
-import { writeFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 import { test, expect } from '@playwright/test';
-import entities from './_host-walk.json';
+import cfgRaw from './_host-walk.json';
 
-const errors: string[] = [];
+const cfg: any = cfgRaw;
+const ENTITIES: string[] = Array.isArray(cfg) ? cfg : (cfg.names || []);
+const LOGIN = (!Array.isArray(cfg) && cfg.login) ? cfg.login : null;
 
-test('host walk - no page errors, seed entities reachable', async ({ page }) => {
-  await page.addInitScript(() => {
-    (window as any).__phErrors = [];
-    window.addEventListener('unhandledrejection', (e) => {
-      (window as any).__phErrors.push(
-        'unhandledrejection: ' + String((e as any)?.reason ?? e));
-    });
-  });
-  page.on('pageerror', (e) => errors.push('pageerror: ' + String(e?.message ?? e)));
+const ledgerScan = (): string[] => {
+  const names: string[] = [];
+  let data: any = null;
+  for (const p of ['../backend/data/db.run.json', '../backend/data/db.json']) {
+    try { data = JSON.parse(readFileSync(p, 'utf8')); break; } catch { /* next */ }
+  }
+  const cols = (data && data.collections) || {};
+  for (const rows of Object.values(cols) as any[][]) {
+    if (!Array.isArray(rows)) continue;
+    let taken = 0;
+    for (const r of rows) {
+      if (!r || typeof r !== 'object') continue;
+      const v = String(r.displayName || r.name || r.title || '').trim();
+      if (v.length >= 5 && !names.includes(v)) { names.push(v); taken += 1; }
+      if (taken >= 4) break;
+    }
+  }
+  return names.slice(0, 40);
+};
+const LEDGER: string[] = Array.from(new Set([...ENTITIES, ...ledgerScan()]));
+const has = (seen: string[], n: string) =>
+  seen.some((t) => t.toLowerCase().includes(n.toLowerCase()));
+
+const legErrors: Record<string, string[]> = { out: [], inn: [] };
+let leg = 'out';
+
+const walkPages = async (page: any): Promise<string[]> => {
   const seen: string[] = [];
   const grab = async () => seen.push(String(await page.evaluate(
     () => (document.body ? document.body.innerText : ''))).slice(0, 6000));
@@ -54,27 +85,121 @@ test('host walk - no page errors, seed entities reachable', async ({ page }) => 
     await page.waitForTimeout(600);
     await grab();
   }
-  const injected = await page.evaluate(() => (window as any).__phErrors || []);
-  const missing = (entities as string[]).filter(
-    (n) => !seen.some((t) => t.toLowerCase().includes(n.toLowerCase())));
+  return seen;
+};
+
+// UI-generic sign-in: home -> Sign in entry -> fill the form that owns
+// the password field (identifier = its non-password input; submit = its
+// submit button). Scoping to the password's form keeps header search
+// boxes from stealing the identifier slot. Returns '' on success.
+const trySignIn = async (page: any, identArg: string, pwArg: string): Promise<string> => {
   try {
-    writeFileSync('walk-report.json',
-      JSON.stringify({ checked: entities, missing }));
+    await page.goto('/');
+    await page.waitForTimeout(800);
+    const link = page.getByRole('link', { name: 'Sign in' });
+    const btn = page.getByRole('button', { name: 'Sign in' });
+    if (await link.count()) await link.first().click({ timeout: 4000 });
+    else if (await btn.count()) await btn.first().click({ timeout: 4000 });
+    else return 'no sign-in entry on the home page';
+    await page.waitForTimeout(600);
+    const form = page.locator('form',
+      { has: page.locator('input[type=password]') });
+    const pwBox = page.locator('input[type=password]').first();
+    await pwBox.fill(pwArg, { timeout: 4000 });
+    let ident = form.locator('input:not([type=password])').first();
+    if (!(await ident.count()))
+      ident = page.locator('input:not([type=password]):visible').first();
+    await ident.fill(identArg, { timeout: 4000 });
+    const submitBtn = form.locator('button[type=submit]').first();
+    const anyBtn = form.getByRole('button').first();
+    if (await submitBtn.count()) await submitBtn.click({ timeout: 4000 });
+    else if (await anyBtn.count()) await anyBtn.click({ timeout: 4000 });
+    else await page.keyboard.press('Enter');
+    await page.waitForTimeout(1800);
+    if (await page.locator('input[type=password]:visible').count())
+      return 'still on the sign-in page after submit';
+    return '';
+  } catch (e: any) {
+    return String((e && e.message) || e).slice(0, 120);
+  }
+};
+
+test('host walk - no page errors, seed entities reachable', async ({ page }) => {
+  // 双腿(登出行走+登录传感)天然长于单场景:本测试单独放宽到 30s,
+  // config 的 10s 仍是模型自写 spec 的评分器语义,不动。
+  test.setTimeout(30_000);
+  await page.addInitScript(() => {
+    (window as any).__phErrors = [];
+    window.addEventListener('unhandledrejection', (e) => {
+      (window as any).__phErrors.push(
+        'unhandledrejection: ' + String((e as any)?.reason ?? e));
+    });
+  });
+  page.on('pageerror', (e) => legErrors[leg].push(
+    'pageerror: ' + String(e?.message ?? e)));
+  const seenOut = await walkPages(page);
+  const injectedOut = await page.evaluate(() => (window as any).__phErrors || []);
+  const missing = ENTITIES.filter((n) => !has(seenOut, n));
+
+  // leg 2 — signed-in sensor (REPORT-ONLY: findings never fail this test)
+  let seenIn: string[] = [];
+  let loginStatus = 'skipped (no seed credentials staged)';
+  if (LOGIN && LOGIN.username) {
+    leg = 'inn';
+    let reason = await trySignIn(page, LOGIN.username, LOGIN.password || '');
+    if (reason && LOGIN.email && LOGIN.email !== LOGIN.username)
+      reason = await trySignIn(page, LOGIN.email, LOGIN.password || '');
+    if (!reason) {
+      loginStatus = 'ok';
+      seenIn = await walkPages(page);
+    } else {
+      loginStatus = 'failed: ' + reason;
+    }
+    leg = 'out';
+  }
+  const signedInLost = (seenIn.length || loginStatus === 'ok')
+    ? LEDGER.filter((n) => has(seenOut, n) && !has(seenIn, n)) : [];
+  const nowhere = LEDGER.filter(
+    (n) => !has(seenOut, n) && !has(seenIn, n));
+  try {
+    writeFileSync('walk-report.json', JSON.stringify({
+      checked: LEDGER, missing, signed_in_lost: signedInLost,
+      nowhere, login: loginStatus,
+      leg2_page_errors: legErrors.inn }));
   } catch { /* best effort */ }
-  const all = errors.concat(
-    injected,
-    missing.map((m) => 'seed entity not visible anywhere on the walk: ' + m));
-  expect(all, 'page walk: ' + all.slice(0, 6).join(' | ')).toEqual([]);
+  if (signedInLost.length)
+    console.log('[host-walk] signed-in pages no longer show (report-only, '
+      + 'judge against the requirement text): ' + signedInLost.join(', '));
+  if (missing.length)
+    console.log('[host-walk] staged seed names not visible anywhere on '
+      + 'the signed-out walk (report-only, judge against the requirement '
+      + 'text): ' + missing.join(', '));
+  if (loginStatus.startsWith('failed'))
+    console.log('[host-walk] sign-in attempt ' + loginStatus);
+  if (legErrors.inn.length)
+    console.log('[host-walk] signed-in leg page errors (report-only): '
+      + legErrors.inn.slice(0, 3).join(' | '));
+
+  // 唯一的门:行走页面零未捕获异常(任何需求下都是 bug 的物理事实)。
+  // 实体可见性不再断言——名单失明时旧门给过假绿(github-42 案),
+  // 事实降报告,判定权归模型与平台 e2e。
+  const pageErrs = legErrors.out.concat(injectedOut);
+  expect(pageErrs, 'page walk: ' + pageErrs.slice(0, 6).join(' | '))
+    .toEqual([]);
 });
 """
 
 
 def stage_selftest_dir(output_dir: Path, smoke_port: int,
                        subdir: str = "e2e",
-                       entity_names: list[str] | None = None) -> Path:
+                       entity_names: list[str] | None = None,
+                       login: dict | None = None) -> Path:
     """落盘模型自测所需的最小骨架(非规则、非用例):playwright config +
     MY-CHECK 示例。该 config 是最顺手的标准跑法(双绿自动停机);
-    Playwright 用法本身不再受限。幂等。"""
+    Playwright 用法本身不再受限。幂等。
+
+    login={username, email, password} 时写入 _host-walk.json,行走 spec
+    附加登录腿(传感非门);无凭据时 login=null,腿自动跳过。"""
     stage = Path(output_dir) / subdir
     stage.mkdir(parents=True, exist_ok=True)
     cfg = ("import { defineConfig } from '@playwright/test';\n"
@@ -228,11 +353,12 @@ test('my check - name what this verifies', async ({ page }) => {
 });
 """
     (stage / "MY-CHECK.spec.ts.example").write_text(example, encoding="utf-8")
-    # 宿主可达性行走:spec + 实体名 fixture(来自需求 fixture 编译;
-    # 空清单时 walk 退化为纯 page-error 检查,仍然有效)。
+    # 宿主可达性行走:spec + 实体名/登录凭据 fixture(来自需求 fixture
+    # 编译;空清单时 walk 退化为纯 page-error 检查,仍然有效)。
     names = [str(n) for n in (entity_names or []) if str(n).strip()]
     (stage / "_host-walk.json").write_text(
-        json.dumps(names, ensure_ascii=False) + "\n", encoding="utf-8")
+        json.dumps({"names": names, "login": login},
+                   ensure_ascii=False) + "\n", encoding="utf-8")
     (stage / "_host-walk.spec.ts").write_text(
         _HOST_WALK_SPEC, encoding="utf-8")
     # REQ-6 doom 根因的暂存期闭环:e2e/ 向上解析不到 backend/node_modules

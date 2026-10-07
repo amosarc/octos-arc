@@ -567,18 +567,21 @@ def doom_call_signature(tool_calls: list[dict]) -> dict | None:
 
 
 def _capture_doom_evidence(output_dir, focus_id: str, driver,
-                           log) -> dict | None:
+                           log, reason_override: str | None = None) -> dict | None:
     """内核杀轮取证落盘(尽力而为,绝不抛):重复的命令原文追加到
     octos/doom-events.jsonl(工作区直接可见,随 zip 带回),并在 stderr
     面板打一行即时可见的摘要。首次切断与重入后再切各采一次。返回提取
-    的签名(供 C 级修复工单点名禁令),无签名返回 None。"""
-    if not driver.kernel_terminal:
+    的签名(供 C 级修复工单点名禁令),无签名返回 None。
+    reason_override:无标记终局(ok 返回但尾部同签名连发=疑似未标记
+    spiral,10-08 兜底)走同一取证通道,reason 用覆盖文案。"""
+    if not (driver.kernel_terminal or reason_override):
         return None
     try:
         fetch = getattr(driver, "recent_tool_calls", None)
         sig = (doom_call_signature(fetch()) if callable(fetch) else None)
         record = {"ts": clock.iso(), "node": focus_id,
-                  "reason": str(driver.kernel_terminal), **(sig or {})}
+                  "reason": str(reason_override or driver.kernel_terminal),
+                  **(sig or {})}
         octos_dir = output_dir / "octos"
         octos_dir.mkdir(parents=True, exist_ok=True)
         with open(octos_dir / "doom-events.jsonl", "a",
@@ -1486,6 +1489,142 @@ def _delivered_seed_entities(output_dir: Path) -> list[str]:
     if not isinstance(collections, dict):
         collections = {k: v for k, v in data.items() if isinstance(v, list)}
     return _seed_entity_names(collections)
+
+
+def _fixture_walk_login(fixture: dict) -> dict | None:
+    """fixture 首个带明文密码的种子账号 → 行走登录腿凭据。
+
+    fixture["logins"] 行={username, password, role}(email 在种子 users
+    行,回填);无凭据返回 None(spec 端腿自动跳过)。宿主只转录需求
+    原文点名的凭证,零合成。"""
+    for row in fixture.get("logins") or []:
+        if not (isinstance(row, dict) and row.get("username")
+                and row.get("password")):
+            continue
+        email = ""
+        for u in (fixture.get("db") or {}).get("users") or []:
+            if (isinstance(u, dict)
+                    and u.get("username") == row.get("username")):
+                email = str(u.get("email") or "")
+                break
+        return {"username": str(row["username"]),
+                "email": email or str(row["username"]),
+                "password": str(row["password"])}
+    return None
+
+
+# ------------------------------------------------- 批尾双腿行走传感
+# 动机:github 两轮同类死法(登录态首页缺实体目录,42 案 ~47 挂 +
+# 演进案 audit×3/reactions×2)——登出态 host-walk 物理不可见,模型
+# 自测又全 goto 捷径。传感非门(10-08 拍板):宿主对内容零裁决,
+# 发现只作为中性观察交模型判定(需求原文在模型手里);绝不红、
+# 绝不进任何 verdict/green-stop。
+_HOST_WALK_NOTE = (
+    "HOST-WALK OBSERVATION (report-only — the requirement text, not the "
+    "host, decides): a two-session-state walk of the running app "
+    "observed that signed-in pages no longer show these names that "
+    "signed-out pages showed: {lost}. If any scenario starts signed in "
+    "and opens one of them, it must be reachable from the signed-in "
+    "home — verify and fix if that is what the text requires; "
+    "otherwise say why and continue.")
+_HOST_WALK_LOGIN_NOTE = (
+    "HOST-WALK OBSERVATION (report-only): the walk could not sign in "
+    "through the UI as the seeded account ({detail}). If the "
+    "requirement's scenarios sign in, verify the sign-in flow yourself.")
+_HOST_WALK_MISSING_NOTE = (
+    "HOST-WALK OBSERVATION (report-only — the requirement text, not the "
+    "host, decides): the walk never saw these staged seed names on any "
+    "page it visited: {names}. If the requirement's scenarios open them, "
+    "they must be reachable by clicking visible links from the home page "
+    "in the session state the scenario starts in — verify and fix if "
+    "that is what the text requires; otherwise say why and continue.")
+_NO_CAPTURE_NOTE = (
+    "VISUAL CHANNEL NOTE: the previous batch changed source but captured "
+    "no new screenshots (octos/screenshots/) — the visual nav check did "
+    "not run. If you change pages this batch, capture them per the "
+    "SCREENSHOT RULE so the check has evidence.")
+
+
+def _host_walk_finding_keys(report: dict | None) -> list[str]:
+    """report → 发现键(lost:/missing:/login: 前缀),去重用。"""
+    if not isinstance(report, dict):
+        return []
+    keys = [f"lost:{x}" for x in
+            (report.get("signed_in_lost") or [])[:6]]
+    keys += [f"missing:{x}" for x in (report.get("missing") or [])[:6]]
+    login = str(report.get("login") or "")
+    if login.startswith("failed"):
+        keys.append(f"login:{login[:80]}")
+    return keys
+
+
+def _host_walk_notes(report: dict | None,
+                     delivered: set[str] | None = None) -> list[str]:
+    """walk-report.json → 中性观察句列表(纯函数,零副作用)。
+
+    delivered 非空时只返回其中未送达过的新发现——同一发现至多消耗
+    模型一次注意力,模型驳回即安静;发现消失(修好)由调用方从
+    delivered 释锁,回归可重报。"""
+    if not isinstance(report, dict):
+        return []
+    known = delivered if delivered is not None else set()
+    notes: list[str] = []
+    lost = [str(x) for x in report.get("signed_in_lost") or []][:6]
+    new_lost = [n for n in lost if f"lost:{n}" not in known]
+    if new_lost:
+        notes.append(_HOST_WALK_NOTE.format(lost=", ".join(new_lost)))
+    missing = [str(x) for x in report.get("missing") or []][:6]
+    new_missing = [n for n in missing if f"missing:{n}" not in known]
+    if new_missing:
+        notes.append(
+            _HOST_WALK_MISSING_NOTE.format(names=", ".join(new_missing)))
+    login = str(report.get("login") or "")
+    if (login.startswith("failed")
+            and f"login:{login[:80]}" not in known):
+        notes.append(
+            _HOST_WALK_LOGIN_NOTE.format(detail=login[8:][:120]))
+    return notes
+
+
+def _host_walk_sensor(output_dir: Path, smoke_port: int) -> dict | None:
+    """批尾双腿行走传感(只读):直接跑 staged 的 _host-walk.spec.ts。
+
+    与 _page_health_run 的本质差异:不 boot/不杀服务/不动 db.run.json
+    (evolve 批间活本必须存活)——只对在跑的 dev server 打 playwright。
+    跑不动(端口没起/playwright 缺失/dist 未建/spec 未 staged)一律
+    None=零观测;异常吞掉,传感永不抛。staged 无登录凭据(无账号
+    任务,如 sheet)时直接跳过——传感只为登录态丢失这一类死法而
+    存在,空跑批尾 ~9s/批纯耗。"""
+    try:
+        e2e = output_dir / SELFTEST_SUBDIR
+        cfg_path = e2e / "_host-walk.json"
+        spec = e2e / "_host-walk.spec.ts"
+        cfg = e2e / "playwright.config.ts"
+        if not (spec.is_file() and cfg.is_file() and cfg_path.is_file()):
+            return None
+        staged = json.loads(cfg_path.read_text(encoding="utf-8"))
+        login = (staged.get("login")
+                 if isinstance(staged, dict) else None) or None
+        if not login:
+            return None
+        cli = _pw_lg_cli()
+        if cli is None:
+            return None
+        if not (output_dir / "frontend" / "dist" / "index.html").is_file():
+            return None
+        with socket.create_connection(("127.0.0.1", smoke_port),
+                                      timeout=2):
+            pass
+        subprocess.run(
+            [shutil.which("node") or "node", str(cli), "test",
+             "--config", str(cfg), "_host-walk.spec.ts"],
+            cwd=str(e2e), capture_output=True, text=True, timeout=180,
+            errors="replace")
+        report = json.loads(
+            (e2e / "walk-report.json").read_text(encoding="utf-8"))
+        return report if isinstance(report, dict) else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
 
 
 def _page_health_run(output_dir: Path, smoke_port: int,
@@ -2417,6 +2556,9 @@ _TURN_SEED_CONTRACT = False
 # 与交付两次删除即蒸发。此行把修补导向持久面:先写 db.json,删活本让
 # 下次 boot 重拷(store 首 boot 拷贝语义模型自实现)。与已退役的 SEED
 # CONTRACT 块不同:不重复引用种子句,只给行动指令。
+# 哈希句(10-08 github-1.0 REQ-5-4 复发后从 BOOTSTRAP 迁来):随机盐
+# 诱惑每轮播种都在复发,一次性首轮警告会被百条消息沉底——与 db.run.json
+# 防循环句同载进每 turn。
 _TURN_SEED_LINE = (
     "SEED: backend/data/db.json is what every grading boot starts from "
     "— it must already contain every named item in the GIVEN lines "
@@ -2425,7 +2567,10 @@ _TURN_SEED_LINE = (
     "A db.run.json that reappears after a later test run is expected "
     "— every boot re-seeds it from db.json and it never ships; delete "
     "it once after extending db.json, never loop on deleting and "
-    "re-verifying it.")
+    "re-verifying it. Seed passwords as scrypt hashes via store.hash, "
+    "whose output differs on every call by design — compute each "
+    "account's hash once and reuse the value; your tests sign in with "
+    "the plaintext password.")
 # evolve 后缀(§3.1):种子面已有基线,补缺不推倒。
 _TURN_SEED_LINE_EVOLVE = _TURN_SEED_LINE + (
     " The baseline seed is already in place from the previous round — "
@@ -4548,16 +4693,23 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
         # 自行 arrange。 ----
         # walk 实体名来自 fixture 编译(需求机械可解析的顶层实体);
         # 交付后 final 链的 page-health walk 则读模型实现的 db.json。
+        # 登录腿凭据=fixture 首个带明文密码的种子账号(email 从种子
+        # users 行回填;无账号任务 login=null,腿自动跳过——sheet 类
+        # 零影响)。
         walk_entities = _seed_entity_names(
             (fixture_compiled or {}).get("db") or {})
+        walk_login = _fixture_walk_login(fixture_compiled or {})
         scaffold.stage_selftest_dir(output_dir, smoke_port,
                                     subdir=SELFTEST_SUBDIR,
-                                    entity_names=walk_entities)
+                                    entity_names=walk_entities,
+                                    login=walk_login)
         # 自测命令/契约已收编进系统行 RULES & ARCHITECTURE(两形式);
         # 此处只落盘 e2e 配置骨架。
         log("[plan] self-test skeleton staged "
             f"({SELFTEST_SUBDIR}/playwright.config.ts + example + "
-            f"_host-walk with {len(walk_entities)} seed entity name(s))")
+            f"_host-walk with {len(walk_entities)} seed entity name(s)"
+            + (", signed-in sensor leg"
+               if walk_login else ", no seed login (leg skipped)") + ")")
         # 流级验证定则:比赛全自动无人工环节,流验证由模型自生成自验证
         # (SELF-TEST CONTRACT,spec 先行+逐句锚定需求原文);宿主不做
         # 内容决策,只做运行时治理(端口看门狗/批尾回归修复环)。
@@ -4740,6 +4892,13 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
             # 用它,而不是误导性的 "final verification did not pass"
             # (skip 的节点从未被验证过)。
             skip_reasons: dict[str, str] = {}
+            # 批尾行走传感/零图提醒的中性观察,挂到下一批首 turn 送达
+            # (本批无视觉轮可搭车时);发完即清,不跨轮累积。
+            pending_host_notes: list[str] = []
+            # 已送达且当前仍在发生的行走发现键(lost:/missing:/login:)
+            # ——同一发现至多 nudge 一次,模型驳回即安静;发现消失即
+            # 释锁,回归可重报。OCTOS_ARC_HOST_WALK_NOTES=0 运维总闸。
+            delivered_walk_findings: set[str] = set()
             # 会话策略:family(默认)每家族一会话,依赖全由工单闭包双段
             # 注入承载,组间环容忍拓扑(成环破文档序并告警);scc=互达
             # 成环家族共组;single=全程单会话。OCTOS_ARC_SEGMENT_BATCHES>0
@@ -4852,6 +5011,14 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                    + turn_core)
                 else:
                     node_prompt = turn_core
+                if pending_host_notes:
+                    # 上批批尾的行走传感/零图观察,中性转述搭本批首
+                    # turn 送达——宿主只报事实,判定权在模型。
+                    node_prompt = ("".join(f"{n}\n\n" for n in pending_host_notes)
+                                   + node_prompt)
+                    log(f"[host-walk] {len(pending_host_notes)} note(s) "
+                        "from the previous batch prepended to this turn")
+                    pending_host_notes.clear()
                 if template_ready:
                     _ensure_dev_server(output_dir, smoke_port,
                                        spec_ports_extra, log)
@@ -5044,12 +5211,40 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                             else:
                                 log(f"[gate] {focus_id}: own suite red on "
                                     f"this batch: {hit[:3]}")
+                    # spiral 兜底(10-08 拍板):无标记 ok 截断(shell-spiral
+                    # 收尾文本无标记,归因词表够不到)在"文件不变"上的
+                    # 最后一道网——扫尾部同签名连发,≥3 即按 doom 同类
+                    # 取证记账。specs 已绿仍接受(工作在别轮落地,只补
+                    # 归因);无绿证据则失败明细点名重复命令(C 级修复
+                    # 禁令的原料)。阈值取 3 与内核 nudge 阶梯对齐,避免
+                    # "同命令跑两次测试后正常收尾"的合法尾部误伤。
+                    spiral_note = ""
+                    try:
+                        _fetch = getattr(driver, "recent_tool_calls", None)
+                        _sig = (doom_call_signature(_fetch())
+                                if callable(_fetch) else None)
+                    except Exception:
+                        _sig = None
+                    if _sig and _sig.get("count", 0) >= 3:
+                        spiral_note = (f"; suspected unmarked spiral "
+                                       f"({_sig['tool'] or '?'} x"
+                                       f"{_sig['count']} identical: "
+                                       f"{_sig['command'][:160]})")
+                        _capture_doom_evidence(
+                            output_dir, focus_id, driver, log,
+                            reason_override=(
+                                "suspected unmarked spiral (ok returned, "
+                                "no file change, tail identical calls)"))
+                    if verified_ok and spiral_note:
+                        log(f"[gate] {focus_id}: accepted on spec "
+                            f"evidence{spiral_note}")
                     if not verified_ok:
                         log(f"[gate] {focus_id}: turn ok but no project "
-                            "file changed")
+                            f"file changed{spiral_note}")
                         for nid in batch_ids:
                             events.mark_implementation_failed(
-                                nid, "turn made no file changes")
+                                nid, "turn made no file changes"
+                                + spiral_note)
                             failed.append(nid)
                         continue
                 syn = js_syntax_errors(output_dir)
@@ -5379,11 +5574,45 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                         except Exception:
                             v_changed = []
                         if v_changed:
+                            shots = _collect_model_screenshots(
+                                output_dir, t0)
                             v_prompt, v_media = \
-                                _visual_check_prompt_and_media(
-                                    _collect_model_screenshots(
-                                        output_dir, t0))
+                                _visual_check_prompt_and_media(shots)
+                            # ── 批尾双腿行走传感(只读,不 boot 不回种):
+                            # 对在跑的 dev server 直接跑 staged
+                            # _host-walk.spec.ts;发现=中性观察,只注入
+                            # 未送达过的新发现(驳回即安静,回归重报),
+                            # 有视觉轮则搭车,否则挂 pending 下一批首
+                            # turn 送达。传感永不红、永不作判据。
+                            # OCTOS_ARC_HOST_WALK_NOTES=0 总闸。
+                            walk_notes: list[str] = []
+                            try:
+                                if os.environ.get(
+                                        "OCTOS_ARC_HOST_WALK_NOTES",
+                                        "1") != "0":
+                                    walk_report = _host_walk_sensor(
+                                        output_dir, smoke_port)
+                                    walk_notes = _host_walk_notes(
+                                        walk_report,
+                                        delivered_walk_findings)
+                                    # 送达集=当前仍在发生的发现;消失即
+                                    # 释锁(修好后又坏可重报)。
+                                    delivered_walk_findings.clear()
+                                    delivered_walk_findings.update(
+                                        _host_walk_finding_keys(
+                                            walk_report))
+                                if walk_notes:
+                                    log(f"[host-walk] batch {focus_id} "
+                                        "sensor: "
+                                        + " | ".join(
+                                            n.splitlines()[0][:80]
+                                            for n in walk_notes))
+                            except Exception:
+                                walk_notes = []
                             if v_prompt:
+                                if walk_notes:
+                                    v_prompt = ("\n\n".join(walk_notes)
+                                                + "\n\n" + v_prompt)
                                 log(f"[visual] batch {focus_id} nav check "
                                     f"turn ({len(v_media)} model "
                                     "screenshot(s))")
@@ -5391,6 +5620,15 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                 driver.run(v_prompt,
                                            min(node_timeout, v_wall),
                                            v_wall)
+                            elif walk_notes or not shots:
+                                # 无视觉轮可搭车(典型=零图):观察挂起,
+                                # 零图另附视觉通道提醒,下一批首 turn 送达。
+                                if not shots:
+                                    walk_notes.append(_NO_CAPTURE_NOTE)
+                                pending_host_notes.extend(walk_notes)
+                                log(f"[host-walk] batch {focus_id}: "
+                                    f"{len(walk_notes)} note(s) queued "
+                                    "for the next batch turn")
 
             # Final verification pass (read-only): the host measures
             # whatever landed — staged specs (Tier-2), page-health,

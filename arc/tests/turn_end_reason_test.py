@@ -314,6 +314,29 @@ class DoomEvidenceCaptureTests(unittest.TestCase):
                             for x in logs), logs)
         self.assertIsNone(sig)
 
+    def test_reason_override_captures_unmarked_spiral(self):
+        # 10-08 兜底:无标记 ok 截断(shell-spiral 收尾文本无标记,
+        # kernel_terminal=None 词表够不到)由懒门尾部连扫触发,同一
+        # 取证通道走 reason_override——记账可区分"确认内核杀"与
+        # "疑似未标记 spiral"。
+        calls = [_bash_call(1)] + [_bash_call(2) for _ in range(6)]
+        logs = []
+        driver = type("D", (), {"kernel_terminal": None})()
+        driver.recent_tool_calls = lambda: calls
+        with tempfile.TemporaryDirectory() as tmp:
+            sig = main._capture_doom_evidence(
+                Path(tmp), "REQ-5-4", driver, logs.append,
+                reason_override="suspected unmarked spiral")
+            events = Path(tmp) / "octos" / "doom-events.jsonl"
+            records = [json.loads(x)
+                       for x in events.read_text().splitlines()]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["reason"], "suspected unmarked spiral")
+        self.assertEqual(records[0]["count"], 6)
+        self.assertEqual(sig["command"], "cmd-2")
+        self.assertTrue(any("[doom] REQ-5-4: bash x6" in x for x in logs),
+                        logs)
+
 
 class RecentToolCallsTests(unittest.TestCase):
     """OctosDriver.recent_tool_calls:从内核 context-log

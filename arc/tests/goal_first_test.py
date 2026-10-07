@@ -769,19 +769,123 @@ class GoalFirstRulesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             stage = scaffold.stage_selftest_dir(
                 Path(td), 43101, entity_names=["acme-docs", "第二工作簿"])
-            names = json.loads(
+            cfg = json.loads(
                 (stage / "_host-walk.json").read_text(encoding="utf-8"))
-            self.assertEqual(names, ["acme-docs", "第二工作簿"])
+            self.assertEqual(cfg, {"names": ["acme-docs", "第二工作簿"],
+                                   "login": None})
             spec = (stage / "_host-walk.spec.ts").read_text()
             self.assertIn("_host-walk.json", spec)
-            self.assertIn("seed entity not visible anywhere on the walk",
-                          spec)
+            # 拆①留②(10-08 拍板):实体可见断言退役(名单失明时给过
+            # 假绿,github-42 案)——事实降报告+console 中性行;唯一的
+            # 门=零 pageerror(任何需求下都是 bug 的物理事实)。
+            self.assertNotIn(
+                "seed entity not visible anywhere on the walk", spec)
+            self.assertIn("staged seed names not visible anywhere", spec)
+            self.assertIn("judge against the requirement", spec)
+            self.assertIn("'page walk: '", spec)
             # 无实体名时 walk 退化为纯 page-error 检查,spec 仍落盘
             stage2 = scaffold.stage_selftest_dir(Path(td), 43101,
                                                  entity_names=[])
             self.assertEqual(
                 json.loads(
-                    (stage2 / "_host-walk.json").read_text("utf-8")), [])
+                    (stage2 / "_host-walk.json").read_text("utf-8")),
+                {"names": [], "login": None})
+
+    def test_host_walk_spec_carries_signed_in_sensor_leg(self):
+        # 10-08 github 两轮同类死法(登录态首页缺实体目录):登出腿
+        # 物理不可见该面 → 行走 spec 加登录腿(传感非门:发现只进
+        # walk-report.json,腿内任何失败不得 fail 测试)+运行期
+        # db.run.json/db.json 扫描兜后种实体。
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            stage = scaffold.stage_selftest_dir(
+                Path(td), 43101, entity_names=["acme-docs"],
+                login={"username": "alice", "email": "a@x.test",
+                       "password": "pw"})
+            cfg = json.loads(
+                (stage / "_host-walk.json").read_text(encoding="utf-8"))
+            self.assertEqual(cfg["login"]["username"], "alice")
+            spec = (stage / "_host-walk.spec.ts").read_text()
+            self.assertIn("REPORT-ONLY", spec)
+            self.assertIn("signed_in_lost", spec)
+            self.assertIn("db.run.json", spec)
+            self.assertIn("trySignIn", spec)
+            # 判定权钉死:登录腿措辞必须交模型判定,不得引入硬断言
+            self.assertIn("judge against the requirement text", spec)
+            self.assertNotIn("signed_in_lost).toBeVisible", spec)
+
+    def test_host_walk_notes_and_sensor_gates(self):
+        # 传感→中性观察的纯函数面:零发现=零句;发现/登录失败各成句;
+        # 执行器在无 staged spec/无服务时一律 None=零观测(绝不抛)。
+        import tempfile
+        self.assertEqual(main._host_walk_notes(None), [])
+        self.assertEqual(main._host_walk_notes({}), [])
+        self.assertEqual(main._host_walk_notes(
+            {"signed_in_lost": [], "login": "ok"}), [])
+        notes = main._host_walk_notes(
+            {"signed_in_lost": ["evo-audit-org", "Evo reaction issue s1"],
+             "login": "ok"})
+        self.assertEqual(len(notes), 1)
+        self.assertIn("evo-audit-org", notes[0])
+        self.assertIn("the requirement text, not the host", notes[0])
+        # 拆①留②:missing(登出行走未见 staged 名)同升中性观察
+        miss = main._host_walk_notes(
+            {"missing": ["acme-docs"], "signed_in_lost": [], "login": "ok"})
+        self.assertEqual(len(miss), 1)
+        self.assertIn("acme-docs", miss[0])
+        self.assertIn("never saw these staged seed names", miss[0])
+        login_notes = main._host_walk_notes(
+            {"signed_in_lost": [],
+             "login": "failed: still on the sign-in page"})
+        self.assertEqual(len(login_notes), 1)
+        self.assertIn("verify the sign-in flow", login_notes[0])
+        self.assertIn("VISUAL CHANNEL NOTE", main._NO_CAPTURE_NOTE)
+        # nudge 收紧(10-08 拍板):同一发现至多送达一次(模型驳回即
+        # 安静),新增照报;发现消失释锁,回归可重报。
+        rep = {"signed_in_lost": ["evo-audit-org"], "missing": [],
+               "login": "ok"}
+        keys = set(main._host_walk_finding_keys(rep))
+        self.assertEqual(keys, {"lost:evo-audit-org"})
+        self.assertEqual(len(main._host_walk_notes(rep, keys)), 0)
+        rep2 = {"signed_in_lost": ["evo-audit-org", "new-org"],
+                "missing": [], "login": "ok"}
+        only_new = main._host_walk_notes(rep2, keys)
+        self.assertEqual(len(only_new), 1)
+        self.assertIn("new-org", only_new[0])
+        self.assertNotIn("evo-audit-org", only_new[0])
+        # 释锁:调用方在发现消失时清空 delivered(批尾实现),回归重报
+        self.assertEqual(
+            len(main._host_walk_notes(rep, set())), 1)
+        with tempfile.TemporaryDirectory() as td:
+            # 无 staged 件 → 零观测;staged 无登录凭据(无账号任务,
+            # 如 sheet)→ 传感跳过,批尾不空跑。
+            self.assertIsNone(
+                main._host_walk_sensor(Path(td), 43101))
+            e2e = Path(td) / "e2e"
+            e2e.mkdir()
+            (e2e / "_host-walk.spec.ts").write_text("// x")
+            (e2e / "playwright.config.ts").write_text("// x")
+            (e2e / "_host-walk.json").write_text(
+                '{"names": ["w"], "login": null}')
+            self.assertIsNone(
+                main._host_walk_sensor(Path(td), 43101))
+
+    def test_fixture_walk_login_first_password_account(self):
+        # 凭据源=fixture 首个带明文密码的种子账号(email 从种子 users
+        # 行回填);无凭据/空 fixture → None(腿跳过,sheet 类零影响)。
+        fx = {"logins": [{"username": "alice", "password": "pw",
+                          "role": "seed"}],
+              "db": {"users": [{"username": "alice",
+                                "email": "alice@x.test"}]}}
+        self.assertEqual(
+            main._fixture_walk_login(fx),
+            {"username": "alice", "email": "alice@x.test",
+             "password": "pw"})
+        self.assertEqual(
+            main._fixture_walk_login(
+                {"logins": [{"username": "bob", "password": ""}]}), None)
+        self.assertEqual(main._fixture_walk_login({}), None)
 
     def test_rules_carry_selftest_surface(self):
         rules = plan_envelope.HOST_STACK_RULES_GOAL_FIRST
@@ -1470,6 +1574,14 @@ class NodeIsolationTests(unittest.TestCase):
         ev = main.EVOLVE_BOOTSTRAP_PREAMBLE
         self.assertIn("differs on every call by design", ev)
         self.assertIn("never loop on deleting and re-verifying", ev)
+        # 10-08 github-1.0 REQ-5-4 复发(家族会话 174 条消息时 store.hash
+        # ×7 复读被杀,首轮 BOOTSTRAP 警告已沉底):哈希句从一次性投放
+        # 迁到每 turn 的 SEED 行——随机盐诱惑每轮播种都复发,警告必须
+        # 与诱惑同频。EVOLVE 变体自动继承。
+        self.assertIn("compute each account's hash once and reuse",
+                      main._TURN_SEED_LINE)
+        self.assertIn("compute each account's hash once and reuse",
+                      main._TURN_SEED_LINE_EVOLVE)
 
 
 class SeedOwnershipTests(unittest.TestCase):
