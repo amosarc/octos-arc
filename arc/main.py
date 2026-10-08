@@ -4379,9 +4379,27 @@ def _repair_left_worse_state(repair_cut: bool, remeasured: dict | None,
     return bool(repair_cut or remeasured["failed"] > prev_failed)
 
 
+def _staged_repair_worse(repair_cut: bool, remeasured: tuple | None,
+                         prev_failed: int) -> bool:
+    """create 路(staged 回归)的伤害遏制判定:staged runner 返回
+    (passed, failed, titles) 元组,而 _repair_left_worse_state 的测量体
+    口径是 dict(evolve 路传 stable_suite_measure 的 dict)——元组直传
+    会在 remeasured["failed"] 上 TypeError,把"修复轮正常收尾+复测
+    可得"这一最常见路径炸进整跑 fatal(10-08 审查修正)。"""
+    return _repair_left_worse_state(
+        repair_cut,
+        {"failed": remeasured[1]} if remeasured is not None else None,
+        prev_failed)
+
+
 def _is_max_iterations_cut(kernel_terminal: str | None) -> bool:
     """max-iterations 预算类切断识别(区别于 doom/spiral 治理类)。
 
+    入参须是 kernel_terminal_marker 归一后的标签("max iterations"),
+    不是收尾行原文:内核文案(budget.rs)整句是 "The agent did not
+    complete within N iterations. …"(spawn 提示里的 max_iterations 带
+    下划线),不含带空格的 "max iteration" 子串——裸原文匹配恒 False,
+    C 级重试曾因此整支死代码(10-08 审查修正:调用点改传标签)。
     词表原将预算类排除在重入外(防旧二轮机会复辟);10-07 拍板修正:
     迭代帽切断常发生在重调试 turn 手握根因诊断时,小批 cap 仅 100——
     弃上下文 C 级(新会话=满额新迭代预算)是正解,不走 doom 类的 A 级
@@ -5431,7 +5449,8 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                     if (not fresh_repair_ran and not reason
                             and not driver.auth_exhausted
                             and _is_max_iterations_cut(
-                                driver.kernel_terminal)
+                                kernel_terminal_marker(
+                                    driver.kernel_terminal))
                             and not time_up()
                             and remaining() >= final_reserve + node_floor):
                         # 迭代帽切断→C 级弃上下文重试(10-07 拍板):新会话
@@ -5780,7 +5799,7 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                 else:
                                     log("[plan] post-repair regression "
                                         "re-measure unavailable")
-                                worse = _repair_left_worse_state(
+                                worse = _staged_repair_worse(
                                     repair_cut, g2_run, g_run[1])
                                 if worse:
                                     log("[contain] regression repair cut "
@@ -6438,6 +6457,20 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
         # 工件里，否则秒退原因只存在 traceability 记录中、无法排查。
         log(f"[fatal] {type(exc).__name__}: {exc}")
         traceback.print_exc()
+        # 清场与成功路径同则(先停看门狗再让位 dev server):handover 删
+        # db.run.json 之后,任何活着的 dev server 写回都会让运行态文件复活;
+        # 看门狗不停,刚杀的 server 十秒内还会被两拍死亡判拉回来。异常
+        # 发生点可能早于这些局部名的绑定(装配段),那时既无看门狗也无
+        # server 可停,缺名静默跳过。
+        try:
+            dev_watchdog_stop.set()
+            watchdog_stop.set()
+        except UnboundLocalError:
+            pass
+        try:
+            _stop_dev_server(smoke_port, output_dir)
+        except UnboundLocalError:
+            pass
         _postflight_structure_check(output_dir)
         _free_web_port(args.web_port, output_dir)
         _ensure_eval_telemetry(output_dir)

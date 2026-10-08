@@ -436,6 +436,20 @@ class RegressionEnforcementTests(unittest.TestCase):
         self.assertFalse(main._repair_left_worse_state(
             False, {"failed": 5}, 20))
 
+    def test_staged_repair_containment_adapts_tuple(self):
+        # create 路 staged runner 返回 (passed, failed, titles) 元组——
+        # 元组直传 dict 口径的 _repair_left_worse_state 会在
+        # remeasured["failed"] 上 TypeError,"修复轮正常收尾+复测可得"
+        # 的常态路径曾把整跑炸进 fatal(10-08 审查修正)。
+        self.assertTrue(main._staged_repair_worse(True, None, 20))
+        self.assertFalse(main._staged_repair_worse(False, None, 20))
+        self.assertTrue(
+            main._staged_repair_worse(False, (12, 30, "x"), 20))
+        self.assertFalse(
+            main._staged_repair_worse(False, (27, 20, "x"), 20))
+        self.assertFalse(
+            main._staged_repair_worse(False, (30, 0, "x"), 20))
+
     def test_max_iterations_cut_detection(self):
         self.assertTrue(main._is_max_iterations_cut("max iterations"))
         self.assertTrue(
@@ -443,6 +457,21 @@ class RegressionEnforcementTests(unittest.TestCase):
         self.assertFalse(main._is_max_iterations_cut("doom loop"))
         self.assertFalse(main._is_max_iterations_cut("loop thrash"))
         self.assertFalse(main._is_max_iterations_cut(None))
+
+    def test_max_iterations_cut_needs_normalized_label(self):
+        # 内核收尾行原文(budget.rs 文案,spawn 提示里的 max_iterations
+        # 带下划线)不含带空格的 "max iteration" 子串——裸原文判据恒
+        # False,C 级重试曾整支死代码。生产接线必须先过
+        # kernel_terminal_marker 归一:原文 → 标签 → 本判据。
+        raw = ("The agent did not complete within 100 iterations. "
+               "The task may be too broad for a single turn — try "
+               "breaking it into smaller steps, or re-spawn it with a "
+               "higher `max_iterations` — the spawn tool accepts a "
+               "`max_iterations` field (up to 300).")
+        self.assertFalse(main._is_max_iterations_cut(raw))
+        label = main.kernel_terminal_marker(raw)
+        self.assertEqual(label, "max iterations")
+        self.assertTrue(main._is_max_iterations_cut(label))
 
     def test_prompts_carry_reconciliation_context(self):
         p = main.EVOLVE_REGRESSION_REPAIR_PROMPT.format(
