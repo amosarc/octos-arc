@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -443,6 +444,56 @@ class RegressionEnforcementTests(unittest.TestCase):
         self.assertNotIn(
             "MID-EDIT",
             main.fresh_session_repair_prompt("T", "r", None))
+
+    def test_half_state_inventory_reads_worktree(self):
+        # 半改在批 commit(梯子之后)之前=未提交工作树态:porcelain 才
+        # 拿得到,pre_batch_head..HEAD 的 committed 区间 diff 此刻恒空
+        # (10-08 修正:mi_changed 曾恒空,对账段从未生效)。
+        class FakeGit:
+            def __init__(self, stdout=None, error=None):
+                self.stdout, self.error, self.seen = stdout, error, None
+
+            def run(self, argv):
+                if self.error:
+                    raise self.error
+                self.seen = argv
+                return SimpleNamespace(stdout=self.stdout)
+
+        quiet = lambda *_: None  # noqa: E731
+        git = FakeGit(
+            " M backend/src/routes/index.js\n"
+            "?? frontend/src/features/new-panel.jsx\n"
+            "?? notes.md\n"
+            "M  octos/state/x.json\n")
+        self.assertEqual(
+            main._worktree_changed_source_files(git, log=quiet),
+            ["backend/src/routes/index.js",
+             "frontend/src/features/new-panel.jsx"])
+        self.assertIn("--porcelain", git.seen)
+        # rename 两侧都进清单(源码侧)。
+        self.assertEqual(
+            main._worktree_changed_source_files(FakeGit(
+                "R  frontend/src/old.js -> frontend/src/moved.js\n"),
+                log=quiet),
+            ["frontend/src/old.js", "frontend/src/moved.js"])
+        # git 失败降级为空清单,不挡修复轮。
+        self.assertEqual(
+            main._worktree_changed_source_files(
+                FakeGit(error=RuntimeError("boom")), log=quiet),
+            [])
+
+    def test_known_reds_release_and_refilter(self):
+        # 已知未解红不再喂修复轮;标题被修好即释锁,回归再红按新红重报
+        # (10-08 接线:known 集此前从未传入调用点,"全是已知红"分支
+        # 不可达,稳定基线红每批重烧修复轮并误降级)。
+        known = {"a red", "fixed-gone"}
+        self.assertEqual(
+            main._new_reds_with_release(known, ["a red", "b red"]),
+            ["b red"])
+        self.assertEqual(known, {"a red"})
+        self.assertEqual(
+            main._new_reds_with_release(known, ["fixed-gone"]),
+            ["fixed-gone"])
 
 
 class StableSuiteMeasureTests(unittest.TestCase):

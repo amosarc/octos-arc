@@ -1671,7 +1671,9 @@ def _host_walk_notes(report: dict | None,
             and f"login:{login[:80]}" not in known):
         notes.append(
             _HOST_WALK_LOGIN_NOTE.format(detail=login[8:][:120]))
-    for d in _walk_duplicates(report):
+    # dup 观察句与发现键(_host_walk_finding_keys)同帽 [:6]:帽外
+    # 发现不进送达集,观察句不限帽会在下一窗重发(10-08 修正)。
+    for d in _walk_duplicates(report)[:6]:
         if f"dup:{_dup_key(d)}" not in known:
             notes.append(_HOST_WALK_DUP_NOTE.format(
                 name=d["name"], count=d.get("count"),
@@ -1684,7 +1686,12 @@ def _host_walk_gate(report: dict | None,
     """结构门(10-08 拍板,物理不变量豁免):duplicates 连续第二个
     传感窗仍在→判红明细。streaks=调用方持有的连续计数(就地更新:
     当前在发生的 +1,消失的删除);首见只计数不判(留改造中间态与
-    驳回权,观察句走 notes 通道)。纯函数,零副作用除 streaks。"""
+    驳回权,观察句走 notes 通道)。report 非 dict(本窗零观测,如
+    服务死/工具链缺)不结算——"没观测"≠"发现消失",按消失清零会把
+    攒了一振的 streak 抹掉,传感抖动窗与判红窗交织时两振永远凑不齐
+    (10-08 复审修正)。纯函数,零副作用除 streaks。"""
+    if not isinstance(report, dict):
+        return []
     dups = _walk_duplicates(report)
     current = {_dup_key(d) for d in dups}
     for k in [k for k in streaks if k not in current]:
@@ -3536,23 +3543,28 @@ def build_spec_run_cmd(cli_path: str | None,
     tail = f" {files}" if files else ""
     # 冷启动前缀(评测同构):清运行态 → 重建前端 → 从种子起服 → 跑
     # specs;本地绿必须出自同一起点(热状态+旧 dist 的绿,评测冷启动会红)。
-    # rm 永不失败;build 失败整链停止(先见构建错误);restart 失败容忍。
+    # rm 永不失败;build 失败整链停止——测试不得跑在旧 dist 上(10-08
+    # 修正:旧串尾的裸 "; " 会让 build 红后测试照样执行,restart 失败
+    # 容忍用 || true 承载);brace 组收口("; }"),POSIX 单行合法。
     cold_start = ("rm -f backend/data/db.run.json && "
                   "npm run build --prefix frontend && "
-                  "sh scripts/restart-server.sh >/dev/null 2>&1; ")
+                  "{ sh scripts/restart-server.sh >/dev/null 2>&1 "
+                  "|| true; ")
     if cli_path:
         return (
             f"{VERIFICATION_RULES}"
             "SPEC RUN (host-provided, deps preinstalled — use verbatim "
             "from the workspace root, cold-start prefix included):\n"
             f"{cold_start}node {cli_path} test --config "
-            f".arc/acceptance/playwright.config.ts --reporter=line{tail}\n")
+            f".arc/acceptance/playwright.config.ts --reporter=line"
+            f"{tail}; }}\n")
     return (
         f"{VERIFICATION_RULES}"
         "SPEC RUN (host-provided fallback — use verbatim from the "
         "workspace root, cold-start prefix included):\n"
         f"{cold_start}npx --yes @playwright/test test --config "
-        f".arc/acceptance/playwright.config.ts --reporter=line{tail}\n")
+        f".arc/acceptance/playwright.config.ts --reporter=line"
+        f"{tail}; }}\n")
 
 
 def final_spec_files(tier2_run, output_dir: Path) -> list[str] | None:
@@ -4015,6 +4027,24 @@ def _rollback_half_state(git, output_dir: Path, log=print) -> list[str]:
                                 log=log)
 
 
+def _worktree_changed_source_files(git, log=print) -> list[str]:
+    """工作树半改源码清单:porcelain 口径(tracked 修改+untracked 新建,
+    rename 两侧都算)再过滤到实现面——C 级修复工单的半态对账原料。
+
+    半改发生在批 commit(梯子之后)之前,pre_batch_head..HEAD 的
+    committed 区间 diff 此刻恒空,半改只能从工作树状态取(与
+    _rollback_half_state 同口径)。git 失败返回空清单——工单省略对账
+    段,不挡修复轮。"""
+    try:
+        status = git.run(["-c", "core.quotepath=off",
+                          "status", "--porcelain"]).stdout
+    except Exception as exc:  # noqa: BLE001 — 清单缺席只降级,不挡修复轮
+        log(f"[flow] half-state inventory failed: {exc}")
+        return []
+    tracked, untracked = _porcelain_changes(status)
+    return _changed_source_paths(tracked + untracked)
+
+
 def run_own_suite(output_dir: Path, smoke_port: int,
                   spec_files: list[str] | None = None,
                   artifact_dir: Path | None = None,
@@ -4301,9 +4331,20 @@ def _regression_new_reds(failed_titles: list[str],
     """谱内文件级新红判定:回归谱只含已完成家族+无族文件的 spec,谱内
     任何红都是回归候选——不按标题节点 id 过滤(sheet 轮 11:06 实证:基线
     旧 spec 标题引用旧树 id(REQ-1-1-1/REQ-4-1-1),id 级过滤把 20 红喂成
-    6 条,修复轮盲修-1)。known=历史基线红(Phase 0 时代残留,通常空)。"""
+    6 条,修复轮盲修-1)。known=本轮已尝试未解的红标题(调用方跨批持有,
+    经 _new_reds_with_release 释锁)。"""
     known = set(known_red_titles or ())
     return [t for t in (failed_titles or []) if t not in known]
+
+
+def _new_reds_with_release(known_red_titles: set[str],
+                           failed_titles: list[str]) -> list[str]:
+    """测量后新红判定(就地释锁):标题不在本场红单=已被修好,先从已知
+    未解集释放——回归再红时按新红重报(同 host-walk 送达集语义);再过
+    滤出新红。释锁只在本函数被调时发生,即只对真测得(非 None)的测量
+    生效。"""
+    known_red_titles &= set(failed_titles or [])
+    return _regression_new_reds(failed_titles, known_red_titles)
 
 
 def _repair_should_stop(prev_failed: int, new_failed: int,
@@ -4816,8 +4857,15 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                 os.environ.get("AGENT_RUN_TIMEOUT_SECONDS")
             if outer_timeout:
                 try:
-                    os.environ["OCTOS_TIME_BUDGET"] = str(
-                        max(0, int(outer_timeout) - 3600))
+                    outer_s = int(outer_timeout)
+                    derived = outer_s - 3600
+                    if derived <= 0:
+                        # 外层超时盖不住 3600s final 预留时,max(0,…)会
+                        # 得 0=无限预算——软着陆反被关掉,流程等外层硬杀
+                        # (语义反转,10-08 修正)。改取小预算(超时−300s)
+                        # 让流程尽快自落、收尾件照跑。
+                        derived = max(60, outer_s - 300)
+                    os.environ["OCTOS_TIME_BUDGET"] = str(derived)
                     log("[flow] soft-landing budget derived from outer "
                         f"timeout {outer_timeout}s: "
                         f"{os.environ['OCTOS_TIME_BUDGET']}s")
@@ -5093,6 +5141,16 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                     f"{THINKING_REPAIR}, effort={REASONING_EFFORT_REPAIR})")
             return repair_driver
 
+        def repair_llm_available() -> bool:
+            """修复链 LLM 可用性(10-08 补齐):主/修复 driver 任一凭证
+            烧穿即不可用——两者共享同一网关 key,A/C/B 梯子级的 auth 守卫
+            此前只盖主 driver,语法/回归/视觉各修复轮仍会白烧注定失败的
+            调用。只读判 driver,不触发惰性创建。"""
+            if driver.auth_exhausted:
+                return False
+            return not (repair_driver is not None
+                        and repair_driver.auth_exhausted)
+
         # 契约随分层装配走(全局层在系统行,模块层在工单);进度账本是
         # 宿主本地 dict(供工单进度行/事件标记消费)。
         plan_statuses: dict[str, str] = {
@@ -5109,6 +5167,10 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
         # 的红不误触发修复)、Phase 0 摘要与基线红集、轮次号、轮末判定。
         completed_families: set[str] = set()
         completed_node_ids: set[str] = set()
+        # 回归网已知未解红(本轮内):修复轮烧尽仍未解的红标题——后续批不
+        # 再对其重复投修复轮、不误降级当前批(轮末 G1 统一收口);下次
+        # 测量标题消失(被修好)即释锁,回归再红按新红重报。
+        known_red_titles: set[str] = set()
         round_index = evolve_cfg.round_index
         evolve_verdict: EvolveVerdict | None = None
 
@@ -5352,18 +5414,13 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                             and remaining() >= final_reserve + node_floor):
                         # 迭代帽切断→C 级弃上下文重试(10-07 拍板):新会话
                         # =满额新迭代预算;工单三件套=需求正文+切断事实+
-                        # 半态对账清单(批 diff 点名半改文件)。
+                        # 半态对账清单(工作树半改点名,porcelain 口径)。
                         reentry_kind = "max-iterations+fresh-session"
                         log(f"[flow] {focus_id}: turn hit the iteration "
                             "cap with work on disk; fresh-session retry "
                             "(C, 1 max)")
-                        try:
-                            mi_changed = _changed_source_paths(
-                                runtime.git.run([
-                                    "diff", "--name-only", pre_batch_head,
-                                    "HEAD"]).stdout.split())
-                        except Exception:
-                            mi_changed = []
+                        mi_changed = _worktree_changed_source_files(
+                            runtime.git, log)
                         driver.close()
                         ok, text = driver.run(
                             fresh_session_repair_prompt(
@@ -5509,7 +5566,15 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                             events.mark_implementation_failed(
                                 nid, "turn made no file changes"
                                 + spiral_note)
-                            failed.append(nid)
+                            # 账本同落 blocked(10-08 复审修正:continue
+                            # 早退曾把 statuses 留在 "active" 第四态进
+                            # verdict.json);skip_reasons 让终局 test 事件
+                            # 用真因,不再落到误导性的 "final verification
+                            # did not pass"。
+                            skip_reasons[nid] = "turn made no file changes"
+                            plan_statuses[nid] = "blocked"
+                            if nid not in failed:
+                                failed.append(nid)
                         continue
                 syn = js_syntax_errors(output_dir)
                 if syn:
@@ -5517,6 +5582,10 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                         f"error(s): {syn[:3]}")
                     for rg_attempt in range(1, 3):
                         if time_up():
+                            break
+                        if not repair_llm_available():
+                            log(f"[gate] {focus_id}: syntax repair "
+                                "skipped (auth failure limit reached)")
                             break
                         get_repair_driver().run(
                             syntax_repair_prompt(syn), 2400, 2400)
@@ -5628,7 +5697,16 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                 output_dir, smoke_port, tests_dir,
                                 spec_ports_extra,
                                 spec_files=completed_specs)
-                            if g_run and g_run[1] > 0:
+                            if (g_run and g_run[1] > 0
+                                    and not repair_llm_available()):
+                                # 凭证烧穿:不投修复轮也不复测(半改无从
+                                # 产生,无需伤害遏制),红交 final Tier-2
+                                # 记账(10-08 补齐,与主梯子同则)。
+                                log(f"[plan] regression RED: {g_run[0]}p/"
+                                    f"{g_run[1]}f — repair skipped "
+                                    "(auth failure limit reached); final "
+                                    "Tier-2 records the reds")
+                            elif g_run and g_run[1] > 0:
                                 log(f"[plan] regression RED: {g_run[0]}p/"
                                     f"{g_run[1]}f — repairing while the "
                                     "context is hot")
@@ -5730,8 +5808,8 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                 # 修正:不再按标题节点 id 过滤,旧树 id
                                 # (REQ-1-1-1/REQ-4-1-1)与无 id 标题
                                 # (probe5)曾被误归"已知红",20 红只喂 6。
-                                new_reds = _regression_new_reds(
-                                    g["failed_titles"])
+                                new_reds = _new_reds_with_release(
+                                    known_red_titles, g["failed_titles"])
                                 if g["failed"] > 0 and new_reds:
                                     log(f"[evolve] regression NEW RED: "
                                         f"{len(new_reds)} failure(s) in "
@@ -5752,12 +5830,17 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                     attempt = 0
                                     prev_failed = g["failed"]
                                     unresolved = bool(new_reds)
+                                    if not repair_llm_available():
+                                        log("[evolve] regression repair "
+                                            "turns skipped: auth failure "
+                                            "limit reached")
                                     while (unresolved
                                            and attempt
                                            < evolve_cfg.max_repair_turns
                                            and not time_up()
                                            and remaining()
-                                           >= final_reserve + node_floor):
+                                           >= final_reserve + node_floor
+                                           and repair_llm_available()):
                                         get_repair_driver().run(
                                             EVOLVE_REGRESSION_REPAIR_PROMPT
                                             .format(
@@ -5814,13 +5897,20 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                                     log=log)
                                             break
                                         prev_failed = g["failed"]
-                                        new_reds = _regression_new_reds(
+                                        new_reds = _new_reds_with_release(
+                                            known_red_titles,
                                             g["failed_titles"])
                                         unresolved = bool(new_reds)
                                         if not unresolved:
                                             log("[evolve] regression "
                                                 "repaired green after "
                                                 f"{attempt} turn(s)")
+                                    if unresolved:
+                                        # 修复轮烧尽仍未解:记入已知红,
+                                        # 后续批不再重复投修复轮/误降级,
+                                        # 轮末 G1 统一收口;后续测量中被
+                                        # 修好即释锁,回归再红按新红重报。
+                                        known_red_titles.update(new_reds)
                                     if unresolved and new_reds \
                                             and not time_up():
                                         # 未解红降级:账本/教训当场如实
@@ -5885,7 +5975,10 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                             walk_notes = _host_walk_notes(
                                 walk_report, delivered_walk_findings)
                             walk_keys = _host_walk_finding_keys(walk_report)
-                            walk_window_ran = True
+                            # 只有真观测(report 非 None)才算窗口已跑:
+                            # None 窗不结算送达集——按空 keys 结算等于全量
+                            # 释锁,传感恢复后同发现重发(10-08 复审修正)。
+                            walk_window_ran = walk_report is not None
                             # 结构门(10-08 拍板,物理不变量豁免于传感
                             # 非门定则):重复精确文本命中连续第二个传感
                             # 窗仍在→本批晚降级 blocked(仿回归降级),
@@ -5966,14 +6059,19 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                     log(f"[visual] batch {focus_id}: nav "
                                         f"check left {len(syn_v)} JS "
                                         f"syntax error(s): {syn_v[:3]}")
-                                    get_repair_driver().run(
-                                        syntax_repair_prompt(syn_v),
-                                        2400, 2400)
-                                    syn_v = js_syntax_errors(output_dir)
-                                    if syn_v:
+                                    if not repair_llm_available():
                                         log(f"[visual] batch {focus_id}: "
-                                            "syntax still broken after "
-                                            f"repair: {syn_v[:3]}")
+                                            "syntax repair skipped (auth "
+                                            "failure limit reached)")
+                                    else:
+                                        get_repair_driver().run(
+                                            syntax_repair_prompt(syn_v),
+                                            2400, 2400)
+                                        syn_v = js_syntax_errors(output_dir)
+                                        if syn_v:
+                                            log(f"[visual] batch {focus_id}: "
+                                                "syntax still broken after "
+                                                f"repair: {syn_v[:3]}")
                             elif not shots:
                                 # 视觉轮够格却零图:附视觉通道提醒;挂起
                                 # 交由下方送达兜底统一处理。
@@ -5993,6 +6091,25 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                     if walk_window_ran:
                         delivered_walk_findings.clear()
                         delivered_walk_findings.update(walk_keys)
+
+            # 末批挂起观察兜底(10-08 补齐):pending_host_notes 挂的是
+            # "下一批首 turn 送达",末批之后没有下一批——落档随 zip 带回,
+            # 不再静默丢失。
+            if pending_host_notes:
+                try:
+                    notes_path = (output_dir / "octos"
+                                  / "host-walk-pending-notes.md")
+                    notes_path.parent.mkdir(parents=True, exist_ok=True)
+                    notes_path.write_text(
+                        "# undelivered host-walk notes (final batch had "
+                        "no next turn to ride)\n\n"
+                        + "\n\n".join(f"- {n}" for n in pending_host_notes)
+                        + "\n", encoding="utf-8")
+                    log(f"[host-walk] {len(pending_host_notes)} note(s) "
+                        "from the final batch archived "
+                        "(octos/host-walk-pending-notes.md)")
+                except OSError as exc:
+                    log(f"[host-walk] pending-note archive failed: {exc}")
 
             # 轮尾两振结算(10-08 两洞补齐之一):末批的双渲染没有下
             # 一个批尾传感窗;在 final 链停看门狗/boot 自起服务之前,
@@ -6240,7 +6357,11 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
             elif plan_statuses.get(node_id) == "done":
                 events.mark_test_passed(
                     node_id, "implementation turn completed")
-            elif ok:
+            elif ok and node_id in scoped_node_ids:
+                # 全绿兜底只裁本轮 scope 内节点(10-08 修正):范围轮的
+                # Tier-2 只跑了范围内 specs,范围外节点从未实现却会在此
+                # 被标 passed——与"范围外不生成工单/不计进度/不进 Tier-2"
+                # 定则冲突;全量轮 scoped_node_ids=全树,口径不变。
                 events.mark_test_passed(
                     node_id, "final host verification all green")
         runtime.git.commit("chore: final verification pass")

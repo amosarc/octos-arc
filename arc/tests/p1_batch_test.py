@@ -137,11 +137,19 @@ check("wall floor 120",
 # --- build_spec_run_cmd (run6 fixes: per-batch filter + verification rules) ---
 cmd = main.build_spec_run_cmd("/path/to/cli.js", ["A.spec.ts", "B.spec.ts"])
 check("spec cmd: files appended as filters",
-      cmd.rstrip().endswith("--reporter=line A.spec.ts B.spec.ts"), cmd[-80:])
+      cmd.rstrip().endswith(
+          "--reporter=line A.spec.ts B.spec.ts; }"), cmd[-80:])
 check("spec cmd: green-stop marker (.arc/acceptance) present",
       ".arc/acceptance/playwright.config.ts" in cmd)
 check("spec cmd: git rollback banned",
       "git checkout/reset/restore" in cmd)
+# 10-08 修正:build 失败不得再放行测试(旧串尾裸 "; " 会照样跑,测试
+# 落在旧 dist 上)。brace 组承载"build 绿才跑测试,restart 失败容忍"。
+check("spec cmd: build failure stops the chain (brace group)",
+      "frontend && { sh scripts/restart-server.sh" in cmd
+      and "2>&1 || true; " in cmd
+      and "2>&1; node" not in cmd and "2>&1; npx" not in cmd,
+      cmd[-160:])
 # 09-27 目标优先定则:测试用例由模型根据需求自生成——旧"禁止自写
 # Playwright"政策翻转,新政策=自写 spec 走被批准命令形状;2026-10 起
 # 唯一入口钉死为 scripts/run-e2e.sh(REQ-6 模块解析 doom 根修)。
@@ -154,17 +162,17 @@ cmd_full = main.build_spec_run_cmd("/path/to/cli.js")
 # 无过滤断言只看命令行(末行)本身,不再扫整段提示词。
 cmd_full_line = cmd_full.rstrip().splitlines()[-1]
 check("spec cmd: no filter → full suite (final verification)",
-      cmd_full_line.endswith("--reporter=line")
-      and not cmd_full_line.endswith(".spec.ts"))
+      cmd_full_line.endswith("--reporter=line; }")
+      and not cmd_full_line.endswith(".spec.ts; }"))
 
 cmd_fallback = main.build_spec_run_cmd(None, ["A.spec.ts"])
 check("spec cmd: npx fallback carries filter",
-      cmd_fallback.rstrip().endswith("--reporter=line A.spec.ts")
+      cmd_fallback.rstrip().endswith("--reporter=line A.spec.ts; }")
       and "npx --yes @playwright/test" in cmd_fallback)
 
 check("spec cmd: empty file entries dropped",
       main.build_spec_run_cmd("/c", ["", "A.spec.ts"]).rstrip()
-      .endswith("--reporter=line A.spec.ts"))
+      .endswith("--reporter=line A.spec.ts; }"))
 
 print()
 print()

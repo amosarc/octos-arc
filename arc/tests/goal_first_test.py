@@ -881,6 +881,18 @@ class GoalFirstRulesTests(unittest.TestCase):
         bad = {"duplicates": [{"name": "X", "count": 1},
                               {"page": "p", "count": 3}]}
         self.assertEqual(main._walk_duplicates(bad), [])
+        # dup 观察句与发现键同帽 [:6](10-08 修正):帽外发现不进送达集,
+        # 观察句不限帽会在下一窗重发。
+        many = {"duplicates": [
+            {"page": f"#/w/{i}", "name": f"N{i}", "count": 2}
+            for i in range(8)], "signed_in_lost": [], "login": "ok"}
+        many_notes = main._host_walk_notes(many)
+        self.assertEqual(len(many_notes), 6)
+        self.assertEqual(
+            len(main._host_walk_finding_keys(many)), 6)
+        delivered_many = set(main._host_walk_finding_keys(many))
+        self.assertEqual(
+            len(main._host_walk_notes(many, delivered_many)), 0)
 
         rep2 = {"signed_in_lost": ["evo-audit-org", "new-org"],
                 "missing": [], "login": "ok"}
@@ -925,6 +937,13 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertEqual(main._host_walk_gate(d2, streaks),
                          d2["duplicates"])
         self.assertEqual(streaks, {"Widgets@#/w/two": 2})
+        # 零观测(None=服务死/工具链缺,非"观察到消失")不清 streak:
+        # "没观测"≠"发现消失",清零会让传感抖动窗把攒了一振的计数抹掉
+        # (10-08 复审修正);{} 才是真·零发现观测,照常清零。
+        self.assertEqual(main._host_walk_gate(None, streaks), [])
+        self.assertEqual(streaks, {"Widgets@#/w/two": 2})
+        self.assertEqual(main._host_walk_gate({}, streaks), [])
+        self.assertEqual(streaks, {})
 
     def test_round_tail_walk_settlement_two_strike(self):
         # 10-08 两洞补齐之一:末批双渲染没有下一批尾窗——轮尾结算窗
