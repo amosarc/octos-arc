@@ -338,6 +338,35 @@ class DoomEvidenceCaptureTests(unittest.TestCase):
                         logs)
 
 
+class DoomEvidenceGateTests(unittest.TestCase):
+    """_doom_evidence_due(批循环取证调用点的门):kernel_terminal 在正常
+    end_turn 后同样是模型收尾正文——裸 truthiness 会把每个成功批记成
+    假 doom(doom-events 账本 15/17 误标的根因);只有真切断(治理/
+    output_truncated/预算类记账标记)才落账本。"""
+
+    def test_normal_end_turn_is_not_due(self):
+        self.assertFalse(main._doom_evidence_due(None, MODEL_TEXT))
+        self.assertFalse(main._doom_evidence_due(None, None))
+        self.assertFalse(main._doom_evidence_due("", ""))
+
+    def test_governance_cut_is_due(self):
+        self.assertTrue(main._doom_evidence_due(None, DOOM_ROW))
+        self.assertTrue(main._doom_evidence_due(
+            main.reentry_reason("...", DOOM_ROW), DOOM_ROW))
+
+    def test_budget_cut_is_due(self):
+        row = ("The agent did not complete within 200 iterations. "
+               "The task may be too broad for a single turn.")
+        self.assertTrue(main._doom_evidence_due(None, row))
+
+    def test_output_truncated_is_due_via_reason(self):
+        # output_truncated 形态:reason 来自 turn 文本,kernel_terminal
+        # 可能只是截断正文(无标记)——reason 兜住取证面。
+        reason = "cut off by the output length limit mid-response"
+        self.assertTrue(main._doom_evidence_due(reason, None))
+        self.assertTrue(main._doom_evidence_due(reason, MODEL_TEXT))
+
+
 class RecentToolCallsTests(unittest.TestCase):
     """OctosDriver.recent_tool_calls:从内核 context-log
     (<cwd>/.octos/context-logs/*/tools.jsonl)尾部取回调用签名——

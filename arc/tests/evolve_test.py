@@ -420,6 +420,22 @@ class RegressionEnforcementTests(unittest.TestCase):
         self.assertFalse(main._repair_should_stop(20, 20, False))
         self.assertFalse(main._repair_should_stop(20, 0, False))
 
+    def test_repair_containment_decision(self):
+        # _repair_left_worse_state(伤害遏制判定,create/evolve 两路共用):
+        # 复测不可得只认切断——evolve 分支此前 break 跳过回滚,切断半改
+        # 漏进下一批(10-08 补齐,与 create 路径同则钉死)。
+        self.assertTrue(main._repair_left_worse_state(True, None, 20))
+        self.assertFalse(main._repair_left_worse_state(False, None, 20))
+        # 测得:切断恒 worse(半改在场,红数再好也不留);未切断看红数。
+        self.assertTrue(main._repair_left_worse_state(
+            True, {"failed": 0}, 20))
+        self.assertTrue(main._repair_left_worse_state(
+            False, {"failed": 30}, 20))
+        self.assertFalse(main._repair_left_worse_state(
+            False, {"failed": 20}, 20))
+        self.assertFalse(main._repair_left_worse_state(
+            False, {"failed": 5}, 20))
+
     def test_max_iterations_cut_detection(self):
         self.assertTrue(main._is_max_iterations_cut("max iterations"))
         self.assertTrue(

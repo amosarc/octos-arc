@@ -504,6 +504,16 @@ def kernel_governance_marker(content: str | None) -> str | None:
     return None
 
 
+def _doom_evidence_due(reason: str | None,
+                       kernel_terminal: str | None) -> bool:
+    """批 turn 后是否落 doom 取证:reason(治理切断/output_truncated)或
+    记账标记(预算类切断)在场才采。kernel_terminal 在正常 end_turn 后
+    同样是模型收尾正文(octos_stdio 于 turn/completed 无条件赋值),裸
+    truthiness 会把每个成功批都记成假 doom——doom-events 账本 15/17
+    误标的根因(10-08 复审修正)。"""
+    return bool(reason or kernel_terminal_marker(kernel_terminal))
+
+
 def _batch_state(batch_turn_ok: bool, kernel_cut: str | None) -> str:
     """批终局账面:done 只属于模型自选收束的 turn;内核代收尾(doom 等)
     与失败 turn 一律 blocked——被杀轮的"完成"是假的(零写入也会被记
@@ -4357,6 +4367,18 @@ def _repair_should_stop(prev_failed: int, new_failed: int,
     return new_failed > math.ceil(max(1, prev_failed) * 1.3)
 
 
+def _repair_left_worse_state(repair_cut: bool, remeasured: dict | None,
+                             prev_failed: int) -> bool:
+    """修复轮后是否需要伤害遏制(半改清零):被切断恒 worse(半改在场,
+    与测量无关);测得红数比修复前多亦 worse;复测不可得只认切断——
+    未切断的编辑无从判劣,留下交轮边界/final 记账。create 与 evolve
+    两条回归修复路共用同则(10-08 统一:evolve 复测 None 分支此前跳过
+    回滚,切断半改漏进下一批)。"""
+    if remeasured is None:
+        return repair_cut
+    return bool(repair_cut or remeasured["failed"] > prev_failed)
+
+
 def _is_max_iterations_cut(kernel_terminal: str | None) -> bool:
     """max-iterations 预算类切断识别(区别于 doom/spiral 治理类)。
 
@@ -5370,7 +5392,7 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                     reentry_kind = ""
                     fresh_repair_ran = False
                     reason = reentry_reason(text, driver.kernel_terminal)
-                    if driver.kernel_terminal:
+                    if _doom_evidence_due(reason, driver.kernel_terminal):
                         # 内核杀轮取证先行(重入可能救活,但首切的
                         # 重复命令原文仍要留档)。
                         _capture_doom_evidence(output_dir, focus_id,
@@ -5755,12 +5777,11 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                     log(f"[plan] post-repair regression: "
                                         f"{g2_run[0]}p/{g2_run[1]}f "
                                         f"(was {g_run[0]}p/{g_run[1]}f)")
-                                    worse = (repair_cut
-                                             or g2_run[1] > g_run[1])
                                 else:
                                     log("[plan] post-repair regression "
                                         "re-measure unavailable")
-                                    worse = repair_cut
+                                worse = _repair_left_worse_state(
+                                    repair_cut, g2_run, g_run[1])
                                 if worse:
                                     log("[contain] regression repair cut "
                                         "or made things worse; rolling "
@@ -5871,6 +5892,20 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                             log=log)
                                         attempt += 1
                                         if g2 is None:
+                                            # 未测=未解,交轮边界;切断的
+                                            # 修复轮半改已在盘上(测量缺席
+                                            # 看不见红数变化)——伤害遏制
+                                            # 与 create 路径同则,复测不可
+                                            # 得只认切断(10-08 补齐:此前
+                                            # break 跳过回滚,半改漏进下一
+                                            # 批)。未切断的编辑留下,残余
+                                            # 红交轮末 G1/final 记账。
+                                            if _repair_left_worse_state(
+                                                    repair_cut, None,
+                                                    prev_failed):
+                                                _rollback_half_state(
+                                                    runtime.git, output_dir,
+                                                    log=log)
                                             break  # 未测=未解,交轮边界
                                         g = g2
                                         if _repair_should_stop(
@@ -5883,8 +5918,9 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                                 f"{g['failed']}f) — "
                                                 "leaving the rest to the "
                                                 "round boundary")
-                                            if repair_cut or g[
-                                                    "failed"] > prev_failed:
+                                            if _repair_left_worse_state(
+                                                    repair_cut, g,
+                                                    prev_failed):
                                                 # 伤害遏制:修复轮被切断
                                                 # 或把红修多了 → 其未提交
                                                 # 半改清零(REQ-8 修复轮
