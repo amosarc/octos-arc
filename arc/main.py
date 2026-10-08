@@ -218,6 +218,20 @@ def log(msg: str) -> None:
         pass
 
 
+def _env_int(name: str, default: int) -> int:
+    """env 整数参数防腐:缺失/空白→default;垃圾值→大声回落 default。
+    退出码契约下(一切路径 exit 0),一个手滑的 env 不该把整跑炸成
+    run_failed(10-08 修正:int() 直转曾对任意 OCTOS_* 数值参数裸奔)。"""
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        log(f"[env] {name}={raw!r} is not an integer; using {default}")
+        return default
+
+
 def _ensure_eval_telemetry(output_dir: Path) -> None:
     """评测期遥测兜底(委托 scaffold.telemetry.ensure):平台的 func/e2e
     失败明细不下发,应用自身把评测流量与前端异常写
@@ -720,8 +734,7 @@ def _turn_end_reason(ok: bool, text: str,
     return "error: " + t[:160]
 
 
-def _postflight_structure_check(
-        output_dir: Path, web_port: int = plan_envelope.WEB_PORT) -> None:
+def _postflight_structure_check(output_dir: Path) -> None:
     """Diagnose and repair the deliverable layout the runner checks.
 
     The runner requires PROJECT_DIR/frontend and PROJECT_DIR/backend after
@@ -732,9 +745,8 @@ def _postflight_structure_check(
     produced, and if the app was scaffolded exactly one level deep
     (output_dir/<app>/frontend etc.), lift it into place.
 
-    Also free the web port: round 14 died on EADDRINUSE :3000 at evaluation
-    time because a smoke-test server from a failed generation turn was still
-    holding it.
+    (评分口清理由调用方 _free_web_port 承担——10-08 起带 foreign 进程
+    保护;本函数从没收过这个职责,签名里死参数与旧 docstring 同步清掉。)
     """
     tree_lines = []
     for root, dirs, files in os.walk(output_dir):
@@ -773,8 +785,13 @@ def _postflight_structure_check(
         "runner will reject the template")
 
 
-def _free_web_port(web_port: int) -> None:
-    """Best-effort kill of whatever still listens on the app port."""
+def _free_web_port(web_port: int, output_dir: Path | None = None) -> None:
+    """Best-effort kill of whatever still listens on the app port.
+
+    output_dir given → 只杀 cwd 在本工作区内的进程(与 _port_watchdog
+    同一条 foreign 定则:runner 机跨租户共享,round 17 曾被外部进程占
+    口——外部监听者只记日志不动手,误杀会破坏别人的评测)。output_dir
+    缺席(无工作区上下文的调用方)保留旧的全体 kill 语义。"""
     # Log only when a PID was really killed: a bare `lsof | xargs -r kill`
     # exits 0 even with an empty port and would log a misleading "freed".
     try:
@@ -786,17 +803,40 @@ def _free_web_port(web_port: int) -> None:
     if not pids:
         log(f"[postflight] port {web_port} already free")
         return
-    for cmd in (["fuser", "-k", f"{web_port}/tcp"],
-                ["sh", "-c", f"lsof -ti :{web_port} | xargs -r kill"]):
+    if output_dir is None:
+        for cmd in (["fuser", "-k", f"{web_port}/tcp"],
+                    ["sh", "-c", f"lsof -ti :{web_port} | xargs -r kill"]):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True,
+                                   timeout=15)
+                if r.returncode == 0:
+                    log(f"[postflight] killed {len(pids)} listener(s) on "
+                        f"port {web_port} via {cmd[0]}: {pids}")
+                    return
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+        log(f"[postflight] port {web_port} cleanup attempted "
+            "(no tool matched)")
+        return
+    root = str(output_dir).rstrip("/")
+    killed: list[str] = []
+    for pid in pids:
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            if r.returncode == 0:
-                log(f"[postflight] killed {len(pids)} listener(s) on port "
-                    f"{web_port} via {cmd[0]}: {pids}")
-                return
-        except (OSError, subprocess.TimeoutExpired):
+            cwd = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            cwd = ""
+        if not cwd.startswith(root):
+            log(f"[postflight] port {web_port} held by foreign process "
+                f"{pid} (cwd={cwd or '?'}); leaving it")
             continue
-    log(f"[postflight] port {web_port} cleanup attempted (no tool matched)")
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+            killed.append(pid)
+        except (ProcessLookupError, PermissionError, ValueError):
+            pass
+    if killed:
+        log(f"[postflight] killed {len(killed)} of our listener(s) on "
+            f"port {web_port}: {killed}")
 
 
 def _port_watchdog(web_port: int, output_dir: Path,
@@ -855,19 +895,42 @@ def _ensure_dev_server(output_dir: Path, smoke_port: int,
     return _boot_dev_server(output_dir, smoke_port, extra_ports, log)
 
 
-def _stop_dev_server(smoke_port: int) -> None:
-    """宿主托管的 dev server 在 Tier-2/page-health 前必须让位(它们要自行冷启动)。"""
+def _stop_dev_server(smoke_port: int,
+                     output_dir: Path | None = None) -> None:
+    """宿主托管的 dev server 在 Tier-2/page-health 前必须让位(它们要自行冷启动)。
+
+    output_dir given → 只杀 cwd 在本工作区内的监听者(与 _free_web_port/
+    _port_watchdog 同一条 foreign 定则:runner 机跨租户共享,外部进程只记
+    日志不动手;让位失败时自起链 EADDRINUSE→None=未测,下游本就按未测
+    降级)。缺席=旧全体 kill 语义(无工作区上下文的调用方)。"""
     try:
         out = subprocess.run(["lsof", "-ti", f"TCP:{smoke_port}",
                               "-sTCP:LISTEN"], capture_output=True,
                              text=True, timeout=10).stdout
-        for pid in out.split():
+        pids = out.split()
+    except (OSError, subprocess.SubprocessError):
+        return
+    if output_dir is None:
+        for pid in pids:
             try:
                 os.kill(int(pid), signal.SIGKILL)
             except (ProcessLookupError, ValueError):
                 pass
-    except (OSError, subprocess.SubprocessError):
-        pass
+        return
+    root = str(output_dir).rstrip("/")
+    for pid in pids:
+        try:
+            cwd = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            cwd = ""
+        if not cwd.startswith(root):
+            log(f"[dev-server] smoke port {smoke_port} held by foreign "
+                f"process {pid} (cwd={cwd or '?'}); leaving it")
+            continue
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except (ProcessLookupError, ValueError):
+            pass
 
 
 def _dev_server_watchdog(output_dir: Path, smoke_port: int, extra_ports: list,
@@ -1314,7 +1377,7 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
     # Boot the app on the smoke port for the duration of the run; specs
     # derive their origin from E2E_BASE_URL (default hardcodes 3301) —
     # set it explicitly, and dual-listen spec base ports as a fallback.
-    _stop_dev_server(smoke_port)
+    _stop_dev_server(smoke_port, output_dir)
     # Always start from the SEED: a leftover db.run.json would shift
     # every state-dependent precondition between staged runs, and make
     # the first-vs-rerun comparison unfair.
@@ -1390,7 +1453,7 @@ def _run_staged_playwright(output_dir: Path, smoke_port: int,
             except (ProcessLookupError, PermissionError, OSError):
                 pass
         shutil.rmtree(grader, ignore_errors=True)
-        _free_web_port(smoke_port)
+        _free_web_port(smoke_port, output_dir)
 
 
 _PAGE_HEALTH_SPEC = """\
@@ -1635,6 +1698,47 @@ def _host_walk_gate(report: dict | None,
     return gated
 
 
+def _round_tail_walk_settlement(output_dir: Path, smoke_port: int,
+                                streaks: dict[str, int],
+                                log=print) -> list[dict]:
+    """轮尾两振结算窗(10-08 两洞补齐之一):末批引入的双渲染没有
+    下一个批尾传感窗,第二振永远凑不齐——final 链之前对在跑的 dev
+    server 补一窗结算 streaks。返回判红明细;无服务/无 staged 件/
+    任一总闸关=空清单(传感自带 None 优雅降级)。判红兑现=轮 verdict
+    G2 fail→下一轮修复——没有"本批"可降级,故不做批级记账,只返回。
+    绝不抛(轮收尾件)。"""
+    try:
+        if os.environ.get("OCTOS_ARC_HOST_WALK_NOTES", "1") == "0":
+            return []
+        if os.environ.get("OCTOS_ARC_HOST_WALK_GATE", "1") == "0":
+            return []
+        report = _host_walk_sensor(output_dir, smoke_port)
+        gated = _host_walk_gate(report, streaks)
+        for d in gated:
+            log(f"[host-walk] round-tail GATE: '{d.get('name')}' "
+                f"matches {d.get('count')} exact-text nodes on "
+                f"{d.get('page')} (strict-mode locator physics; two "
+                "consecutive sensor windows)")
+        return gated
+    except Exception as exc:  # 轮收尾件永不抛
+        try:
+            log(f"[host-walk] round-tail settlement failed: {exc}")
+        except Exception:
+            pass
+        return []
+
+
+def _g2_walk_ok(walk_v: dict | None) -> bool:
+    """evolve 轮 G2 判定(纯函数):page-health 零错误零缺席,且轮尾
+    两振结算零 duplicates(10-08 补齐:结构门判红此前不进轮 verdict,
+    门红了轮仍可能 GREEN)。"""
+    if not isinstance(walk_v, dict):
+        return False
+    return (not walk_v.get("errors")
+            and not walk_v.get("missing")
+            and not walk_v.get("duplicates"))
+
+
 def _host_walk_sensor(output_dir: Path, smoke_port: int) -> dict | None:
     """批尾双腿行走传感(只读):直接跑 staged 的 _host-walk.spec.ts。
 
@@ -1669,13 +1773,23 @@ def _host_walk_sensor(output_dir: Path, smoke_port: int) -> dict | None:
         with socket.create_connection(("127.0.0.1", smoke_port),
                                       timeout=2):
             pass
+        report_path = e2e / "walk-report.json"
+        # 先删旧报告再跑:spec 在双腿走完的末尾才落盘,超时/中途死时
+        # 旧批报告会被当新观测消费(观察句重发+两振 streak 被陈旧数据
+        # 推进)。跑完报告不在场=本窗零观测。
+        try:
+            report_path.unlink()
+        except OSError:
+            pass
         subprocess.run(
             [shutil.which("node") or "node", str(cli), "test",
              "--config", str(cfg), "_host-walk.spec.ts"],
             cwd=str(e2e), capture_output=True, text=True, timeout=180,
             errors="replace")
+        if not report_path.is_file():
+            return None
         report = json.loads(
-            (e2e / "walk-report.json").read_text(encoding="utf-8"))
+            report_path.read_text(encoding="utf-8"))
         return report if isinstance(report, dict) else None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
@@ -1725,7 +1839,7 @@ def _page_health_run(output_dir: Path, smoke_port: int,
             pass
         if not (output_dir / "frontend" / "dist" / "index.html").is_file():
             return None
-        _stop_dev_server(smoke_port)
+        _stop_dev_server(smoke_port, output_dir)
         _reset_runtime_seed(output_dir)
         env = plan_envelope.boot_env(os.environ, smoke_port,
                                                extra_ports or [])
@@ -1782,7 +1896,7 @@ def _page_health_run(output_dir: Path, smoke_port: int,
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 except (ProcessLookupError, PermissionError, OSError):
                     pass
-            _free_web_port(smoke_port)
+            _free_web_port(smoke_port, output_dir)
     finally:
         shutil.rmtree(grader, ignore_errors=True)
 
@@ -1921,22 +2035,33 @@ def js_syntax_errors(output_dir: Path) -> list[str]:
     node --check's ESM-package detection varies by Node version, and it
     cannot parse JSX at all; a truncated .jsx used to sail through to
     the next vite build). Best-effort: a missing checker
-    skips that half rather than the run.
+    skips that half rather than the run — frontend 半区在 esbuild 缺席时
+    整体跳过并大声记日志(10-08 修正:此前降级到 node --check,合法
+    .jsx 必然误报,假红会经修复轮→语法门回滚把整好批核掉;跳过只是
+    失去前端检查面,由 vite build 兜底)。esbuild 由 prewarm 的
+    npm install 落位(frontend/node_modules, vite 传递依赖);门自身
+    绝不联网安装——门必须离线安全、快返回、永不阻塞。
     """
     errors: list[str] = []
     node = shutil.which("node")
     esbuild = _esbuild_bin(output_dir)
+    if not esbuild:
+        log("[gate] esbuild missing; frontend syntax half SKIPPED "
+            "(prewarm npm install did not land?) — backend still checked")
     fe_files: list[Path] = []
     for sub in ("backend", "frontend"):
         root = output_dir / sub
         if not root.is_dir():
             continue
+        skip_fe = sub == "frontend" and not esbuild
         for path in sorted(root.rglob("*.js")) + sorted(root.rglob("*.jsx")):
             rel = path.relative_to(output_dir)
             if any(part in rel.parts for part in ("node_modules", "dist")):
                 continue
             if sub == "frontend" and esbuild:
                 fe_files.append(path)
+                continue
+            if skip_fe:
                 continue
             if not node:
                 continue
@@ -2599,10 +2724,9 @@ def group_families(tree: dict, max_batch: int = 6) -> list[list[dict]]:
     return batches
 
 
-# SEED CONTRACT 块旋钮:待确认是否有用。AGENTS.md FIXTURE CONTRACT 与
-# SCENARIOS 的 GIVEN 行已携带同一契约,此块疑似冗余;拍板前不装配,
-# 装配代码原样保留(确认无用连 gherkin.seed_sentences 一并退役)。
-_TURN_SEED_CONTRACT = False
+# SEED CONTRACT 块已退役(10-08):AGENTS.md FIXTURE CONTRACT 与
+# SCENARIOS 的 GIVEN 行携带同一契约,装配块常年 False 零消费;
+# gherkin.seed_sentences 与其测试自成一体保留(数据源面)。
 
 # 每 turn 种子自愈行:db.json 是评测首 boot 的唯一种子面(交付删活本),
 # 本批 GIVEN 命名项必须已在其中。批间无回种(回种只挂 spec-run/grader
@@ -2652,18 +2776,6 @@ def build_turn_features(batch: list[dict], parent_of: dict[str, dict],
                  "SCENARIOS (verbatim):", features]
     else:
         parts = [f"TASK: implement {task}."]
-    if _TURN_SEED_CONTRACT:
-        seed_sents, seed_dropped = gherkin.seed_sentences(list(batch))
-        if seed_sents:
-            block = ("SEED CONTRACT (backend/data/db.json must already "
-                     "contain — seed sentences verbatim from the "
-                     "requirements):")
-            block += "\n" + "\n".join(f"- {s}" for s in seed_sents)
-            if seed_dropped:
-                block += (f"\n[seed contract truncated: {seed_dropped} more "
-                          "sentence(s) omitted — read requirements/"
-                          "requirements.yaml by heading id]")
-            parts.append(block)
     return "\n\n".join(x for x in parts if x)
 
 
@@ -3050,7 +3162,12 @@ class OctosDriver:
         # skipped — the batch goes blocked and the final-verification
         # chain (LLM-free) records disk state. 0 disables the limit.
         self.auth_failures = 0
-        self.auth_fail_limit = int(os.environ.get("OCTOS_AUTH_FAIL_LIMIT", "6") or 0)
+        # 空串保持既有"禁用"语义("" or 0 → 0,_env_int 会把空串当
+        # 缺省回落 6,与原实现不同——显式保留)。
+        self.auth_fail_limit = (
+            _env_int("OCTOS_AUTH_FAIL_LIMIT", 6)
+            if (os.environ.get("OCTOS_AUTH_FAIL_LIMIT") or "").strip()
+            else 0)
         # The frame stream must never break a turn: open("a") does not
         # create parent dirs, so ensure the contract dir exists up front.
         try:
@@ -3187,33 +3304,38 @@ class OctosDriver:
         return box.get("r", (False, "turn thread ended without result"))
 
 
-    @staticmethod
-    def _auth_failure(text: str) -> bool:
+    # 归因词表形态(10-08 修正):非数字短语保持子串匹配;裸数字
+    # (401/403/429/502/503)必须词边界——"exit 14012"/"port 4030" 这类
+    # 数字串曾可把连接错误误配成 auth 失败,向 auth_failures 灌假计数。
+    _AUTH_FAILURE_RE = re.compile(
+        r"\b(?:401|403)\b|authentication failed|unauthorized|无效的令牌")
+
+    @classmethod
+    def _auth_failure(cls, text: str) -> bool:
         """Credential-shaped failures (vs connection-shaped): 401/403/
         authentication. The platform-injected key can rotate and recover
         mid-run, so these stay retryable — shorter backoff, and counted
         toward OCTOS_AUTH_FAIL_LIMIT so a permanently broken gateway
         stops burning the shared wall clock."""
-        lowered = text.lower()
-        return any(k in lowered for k in (
-            "403", "authentication failed", "401", "unauthorized",
-            "无效的令牌"))
+        return bool(cls._AUTH_FAILURE_RE.search(text.lower()))
 
-    @staticmethod
-    def _transient(text: str) -> bool:
-        lowered = text.lower()
-        return any(k in lowered for k in (
-            "temporarily unavailable", "503", "502", "429", "rate limit",
-            "timeout", "timed out", "connection reset", "overloaded",
-            "failed to send", "streaming request",
-            # "connection closed" 既非 reset 也非 orphaned(会话可原地续),
-            # 短退避重试即可救回。
-            "connection closed", "connection_closed", "connection aborted",
-            "econnreset", "socket hang up",
-            # Platform-injected keys rotate/recover mid-run; a short
-            # retry window lets a recovered key save the run instead of
-            # failing every remaining turn in 0s.
-            "403", "authentication failed", "401", "unauthorized"))
+    _TRANSIENT_RE = re.compile(
+        r"\b(?:429|502|503|401|403)\b|"
+        r"temporarily unavailable|rate limit|"
+        r"timeout|timed out|connection reset|overloaded|"
+        r"failed to send|streaming request|"
+        # "connection closed" 既非 reset 也非 orphaned(会话可原地续),
+        # 短退避重试即可救回。
+        r"connection closed|connection_closed|connection aborted|"
+        r"econnreset|socket hang up|"
+        # Platform-injected keys rotate/recover mid-run; a short
+        # retry window lets a recovered key save the run instead of
+        # failing every remaining turn in 0s.
+        r"authentication failed|unauthorized")
+
+    @classmethod
+    def _transient(cls, text: str) -> bool:
+        return bool(cls._TRANSIENT_RE.search(text.lower()))
 
     @staticmethod
     def _orphaned_turn(text: str) -> bool:
@@ -3241,8 +3363,10 @@ class OctosDriver:
             # Auth failures retry on half the backoff: they resolve by key
             # rotation on the gateway side, not by load draining.
             wait = (15 if auth else 30) * (attempt - 1)
-            print(f"[driver] transient error, retry {attempt}/{attempts} "
-                  f"after {wait}s: {text[:200]}", flush=True)
+            # 走 log():进 debug.log 取证面(直连 print 的行平台日志截断
+            # 后无迹可查)。
+            log(f"[driver] transient error, retry {attempt}/{attempts} "
+                f"after {wait}s: {text[:200]}")
             if cancel is not None:
                 cancel.wait(wait)  # abort the backoff instantly on a cut
             else:
@@ -3250,9 +3374,9 @@ class OctosDriver:
             if cancel is not None and cancel.is_set():
                 break
             if self.auth_exhausted:
-                print(f"[driver] auth failure limit reached "
-                      f"({self.auth_failures}>= {self.auth_fail_limit}); "
-                      "giving up LLM retries", flush=True)
+                log(f"[driver] auth failure limit reached "
+                    f"({self.auth_failures} >= {self.auth_fail_limit}); "
+                    "giving up LLM retries")
                 break
             if self._orphaned_turn(text):
                 # Orphaned kernel turn: killing the session also kills it.
@@ -3799,28 +3923,96 @@ _CONTAIN_DENY = ("backend/data/db.run.json", "dist/", "test-results/",
                  ".playwright-report", "node_modules")
 
 
+def _contain_denied(path: str) -> bool:
+    """路径是否落入伤害遏制豁免面:deny 条目按路径组件序列连续匹配
+    (10-08 修正:裸 startswith 对 "frontend/dist/x" 这类嵌套形态失配,
+    豁免名单宁可多挡不可漏挡)。"""
+    parts = Path(path).parts
+    for deny in _CONTAIN_DENY:
+        dparts = Path(deny.rstrip("/")).parts
+        n = len(dparts)
+        if any(tuple(parts[i:i + n]) == dparts
+               for i in range(len(parts) - n + 1)):
+            return True
+    return False
+
+
+def _porcelain_changes(status: str) -> tuple[list[str], list[str]]:
+    """porcelain 文本 → (tracked 半改, untracked 新建)。renames 两侧
+    都算 tracked;其余状态码一律 tracked(见 rollback_uncommitted)。"""
+    tracked: list[str] = []
+    untracked: list[str] = []
+    for line in status.splitlines():
+        if len(line) < 4:
+            continue
+        code, path = line[:2], line[3:]
+        if code == "??":
+            untracked.append(path)
+            continue
+        if " -> " in path:  # rename:old 侧与 new 侧都要复位
+            tracked.extend(p for p in path.split(" -> ", 1) if p)
+        else:
+            tracked.append(path)
+    return tracked, untracked
+
+
 def rollback_uncommitted(cwd: Path, paths: list[str],
+                         untracked: list[str] | None = None,
                          log=print) -> list[str]:
-    """伤害遏制回滚:把列表内文件恢复到 HEAD(只动它们的未提交改动)。
-    用于止损的修复轮——被切断/变差的修复半改留在工作区会把应用改崩
-    (REQ-8 修复轮 29→1 实证;主轮成果已提交入库不受影响,与语法门
-    git reset 同族的宿主侧手术)。返回实际回滚的文件。"""
-    targets = [p for p in paths if p and not p.startswith(_CONTAIN_DENY)]
-    if not targets:
+    """伤害遏制回滚:tracked 半改恢复到 HEAD,untracked 新建文件直接
+    删除——半写的新文件无从 checkout,留着同样会把应用改崩(REQ-8
+    修复轮 29→1 实证;主轮成果已提交入库不受影响,与语法门 git reset
+    +clean 同族的宿主侧手术)。untracked 删除以 porcelain 条目为界
+    (条目必然是完全未跟踪的文件/目录,gitignored 运行工件不在面内),
+    再过 _CONTAIN_DENY 豁免。返回实际清零的路径。"""
+    untracked = untracked or []
+    targets = [p for p in paths if p and not _contain_denied(p)]
+    new_files = [p for p in untracked if p and not _contain_denied(p)]
+    if not targets and not new_files:
         return []
+    rolled: list[str] = []
+    if targets:
+        try:
+            out = subprocess.run(
+                ["git", "checkout", "HEAD", "--", *targets],
+                cwd=str(cwd), capture_output=True, text=True, timeout=60)
+            if out.returncode == 0:
+                rolled.extend(targets)
+            else:
+                log(f"[contain] rollback failed: {out.stderr[-160:]}")
+        except (OSError, subprocess.SubprocessError) as exc:
+            log(f"[contain] rollback error: {exc}")
+    for rel in new_files:
+        victim = Path(cwd) / rel
+        try:
+            if victim.is_dir():
+                shutil.rmtree(victim, ignore_errors=True)
+            else:
+                victim.unlink(missing_ok=True)
+            rolled.append(rel)
+        except OSError as exc:
+            log(f"[contain] untracked removal failed ({rel}): {exc}")
+    if rolled:
+        log(f"[contain] rolled back failed-repair edits: "
+            f"{', '.join(rolled[:6])}")
+    return rolled
+
+
+def _rollback_half_state(git, output_dir: Path, log=print) -> list[str]:
+    """伤害遏制统一入口:porcelain 口径收集全部半改(tracked 修改 +
+    untracked 新建,git diff 口径看不到新建文件——10-08 修正)交
+    rollback_uncommitted 清零。git 为 runtime.git(gitops)。"""
     try:
-        out = subprocess.run(
-            ["git", "checkout", "HEAD", "--", *targets],
-            cwd=str(cwd), capture_output=True, text=True, timeout=60)
-        if out.returncode == 0:
-            log(f"[contain] rolled back failed-repair edits: "
-                f"{', '.join(targets[:6])}")
-            return targets
-        log(f"[contain] rollback failed: {out.stderr[-160:]}")
+        status = git.run(["-c", "core.quotepath=off",
+                          "status", "--porcelain"]).stdout
+    except Exception as exc:  # noqa: BLE001 — 容器要降级不要炸
+        log(f"[contain] status collection failed: {exc}")
         return []
-    except (OSError, subprocess.SubprocessError) as exc:
-        log(f"[contain] rollback error: {exc}")
+    tracked, untracked = _porcelain_changes(status)
+    if not tracked and not untracked:
         return []
+    return rollback_uncommitted(output_dir, tracked, untracked=untracked,
+                                log=log)
 
 
 def run_own_suite(output_dir: Path, smoke_port: int,
@@ -4223,8 +4415,8 @@ def _evolve_dry_run(req_src: Path, output_dir: Path,
         batch_texts = {
             b[0].get("id"): build_turn_features(b, parent_of, evolve=True)
             + GOAL_FIRST_TURN_COMPLETION.format(
-                smoke=int(os.environ.get("OCTOS_SMOKE_PORT",
-                                         str(plan_envelope.SMOKE_PORT))))
+                smoke=_env_int("OCTOS_SMOKE_PORT",
+                               plan_envelope.SMOKE_PORT))
             for b in batches}
 
         # 档案与需求同源(dest_req 语义:平台=runner 任务目录,本地=副本;
@@ -4335,8 +4527,8 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
              "messages from the kernel llm.jsonl into <dir>/prompts "
              "(dir defaults to --output-dir)")
     parser.add_argument("--web-port", type=int,
-                        default=int(os.environ.get("ARCBENCH_WEB_PORT",
-                                                   os.environ.get("ARC_WEB_PORT", "3000"))))
+                        default=_env_int("ARCBENCH_WEB_PORT",
+                                         _env_int("ARC_WEB_PORT", 3000)))
     # evolve 模式(10-06 设计文档):显式 CLI/参数通道,零环境变量;
     # --mode auto(缺省)按工作区形态检测(平台铺 prior project 后裸调
     # main.py 也能正确走 evolve)。
@@ -4570,8 +4762,7 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
         # 工单正文。家族工单:一个顶层家族一次交给代理连贯深实现(超大
         # 家族沿子家族边界切)。OCTOS_ARC_FAMILIES=运行范围:范围外家族
         # 不生成工单/不计进度/不进 Tier-2;未设置=全量。
-        family_batch_max = int(
-            os.environ.get("OCTOS_ARC_FAMILY_BATCH_MAX", "6"))
+        family_batch_max = _env_int("OCTOS_ARC_FAMILY_BATCH_MAX", 6)
         node_batches = group_families(tree, family_batch_max)
         if family_scope:
             before = len(node_batches)
@@ -4583,6 +4774,12 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                 f"({sum(len(b) for b in node_batches)} node(s)); "
                 "out-of-scope families: no work orders, no ledger, "
                 "no Tier-2")
+        # 判定面节点集(scope 过滤后、批内 trim 前):evolve 轮末
+        # batch_verdicts/G3 只裁范围內节点——范围外节点恒 pending,
+        # 全树口径会让收窄轮 ok 恒 False(evolve_loop 以 ok 停机,
+        # 收窄轮必跑满 max_rounds,10-08 修正)。
+        scoped_node_ids = {
+            str(n.get("id")) for b in node_batches for n in b}
         log(f"[flow] goal-first family work orders: "
             f"{len(node_batches)} batch(es) for {len(atomic_nodes)} "
             f"nodes over "
@@ -4594,20 +4791,19 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
         # The profile cap is session-wide — set max(env, 40×largest
         # batch) before the session bootstraps; the runaway fuse still
         # trips on slow tails.
-        cap_env = os.environ.get("OCTOS_TURN_MAX_ITERATIONS", "").strip()
-        cap_base = int(cap_env) if cap_env else 100
+        cap_base = _env_int("OCTOS_TURN_MAX_ITERATIONS", 100)
         os.environ["OCTOS_TURN_MAX_ITERATIONS"] = str(
             max(cap_base, 40 * max_batch))
         if max_batch > 1:
             log(f"[flow] sibling batching ON: {len(node_batches)} batch(es) "
                 f"for {len(atomic_nodes)} nodes, max batch {max_batch}, "
                 f"turn cap {os.environ['OCTOS_TURN_MAX_ITERATIONS']}")
-        max_iter = int(os.environ.get("OCTOS_MAX_ITERATIONS", "500"))
+        max_iter = _env_int("OCTOS_MAX_ITERATIONS", 500)
         # Idle budget (resets on EVERY protocol event, so a slow-but-
         # streaming turn is never cut): 600s ≈ 2× the worst observed
         # provider TTFB, while still cutting turns that sit silent for
         # many minutes.
-        node_timeout = int(os.environ.get("OCTOS_NODE_TIMEOUT", "600"))
+        node_timeout = _env_int("OCTOS_NODE_TIMEOUT", 600)
         # Total-budget gate: default UNLIMITED — the per-turn bounds
         # (iteration cap, green-stop, doom guard, idle timeout) keep
         # progress bounded without one. When an outer runner timeout is
@@ -4634,19 +4830,20 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
             log(f"[evolve] time budget (explicit API): {budget}s "
                 "(takes precedence over OCTOS_TIME_BUDGET)")
         else:
-            budget = int(os.environ.get("OCTOS_TIME_BUDGET", "0"))
+            budget = _env_int("OCTOS_TIME_BUDGET", 0)
         # Per-turn hard wall, decoupled from the budget: bounds a turn
         # that stays inside its iteration cap but crawls. A wall-cut turn
         # lands on disk and goes blocked (no host recovery gate).
-        node_wall = int(os.environ.get("OCTOS_NODE_WALL", "3600"))
-        final_reserve = int(os.environ.get(
-            "OCTOS_FINAL_RESERVE", str(max(300, budget // 9)) if budget else 0))
-        node_floor = int(os.environ.get("OCTOS_NODE_FLOOR", "300"))
+        node_wall = _env_int("OCTOS_NODE_WALL", 3600)
+        final_reserve = _env_int(
+            "OCTOS_FINAL_RESERVE",
+            max(300, budget // 9) if budget else 0)
+        node_floor = _env_int("OCTOS_NODE_FLOOR", 300)
         t_run_start = time.time()
         # Smoke tests must NEVER use the grading port: the runner treats a
         # live grading port as "agent finished" and kills the process.
-        smoke_port = int(os.environ.get(
-            "OCTOS_SMOKE_PORT", str(plan_envelope.SMOKE_PORT)))
+        smoke_port = _env_int(
+            "OCTOS_SMOKE_PORT", plan_envelope.SMOKE_PORT)
         if smoke_port == args.web_port:
             smoke_port += 1
         # planctl: stage specs read-only + host scaffold + the
@@ -4781,17 +4978,6 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
             fixture_data, fixture_stats)
         # 任务层贡献规则(pi buildRules 贡献源):与全局法则去重合并
         task_rules = fixture_manifest.task_rules(fixture_data, fixture_stats)
-        fixture_given = {
-            nid: info["given"]
-            for nid, info in fixture_data["nodes"].items() if info["given"]}
-        fixture_seeded_nodes = frozenset(
-            (fixture_compiled or {}).get("covered") or ())
-        fixture_arranged_nodes = frozenset(
-            (fixture_compiled or {}).get("arrange") or ())
-        # GIVEN 恒原文(需求原文是唯一判分依据);宿主种子/指针机制退役后
-        # 该集合已无消费方,置空保留参数位。
-        fixture_seeded_scenarios = frozenset()
-
         def remaining() -> float:
             # No budget (0) ⇒ unlimited: the node-skip gate, tail
             # reservation and time_up() all become inert; every turn's own
@@ -4923,8 +5109,6 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
         # 的红不误触发修复)、Phase 0 摘要与基线红集、轮次号、轮末判定。
         completed_families: set[str] = set()
         completed_node_ids: set[str] = set()
-        phase0_summary: dict | None = None
-        phase0_red_titles: set[str] = set()
         round_index = evolve_cfg.round_index
         evolve_verdict: EvolveVerdict | None = None
 
@@ -4987,8 +5171,7 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                for _ in group]
 
             for idx, batch in enumerate(node_batches, 1):
-                segment_every = int(
-                    os.environ.get("OCTOS_ARC_SEGMENT_BATCHES", "0"))
+                segment_every = _env_int("OCTOS_ARC_SEGMENT_BATCHES", 0)
                 if idx > 1 and segment_every > 0 \
                         and (idx - 1) % segment_every == 0:
                     log(f"[flow] session segmentation: closing session "
@@ -5119,7 +5302,9 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                     # B=零真产出(turn 干净返回但零项目文件落盘——纯探索轮/
                     #   shell-spiral 等无标记内核终局盲区)→ 零进展重入。
                     # 同会话重入模型带全上下文;预算门与批尾 trim 环同阈值;
-                    # 重入轮结果即最终结果,仍走下方既有五道门。
+                    # 重入轮结果即最终结果,仍走下方既有五道门。每级入口
+                    # 复查 auth_exhausted——凭证烧穿后梯子各级不再各白烧
+                    # 一次注定失败的 LLM 调用。
                     reentry_kind = ""
                     fresh_repair_ran = False
                     reason = reentry_reason(text, driver.kernel_terminal)
@@ -5128,7 +5313,8 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                         # 重复命令原文仍要留档)。
                         _capture_doom_evidence(output_dir, focus_id,
                                                driver, log)
-                    if (reason and not time_up()
+                    if (reason and not driver.auth_exhausted
+                            and not time_up()
                             and remaining() >= final_reserve + node_floor):
                         reentry_kind = "cut"
                         log(f"[flow] {focus_id}: turn cut ({reason}); "
@@ -5138,7 +5324,8 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                             min(node_timeout, wall), wall)
                         re_reason = reentry_reason(text,
                                                    driver.kernel_terminal)
-                        if (re_reason and not time_up()
+                        if (re_reason and not driver.auth_exhausted
+                                and not time_up()
                                 and remaining()
                                 >= final_reserve + node_floor):
                             reentry_kind = "cut+fresh-session"
@@ -5158,6 +5345,7 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                 min(node_timeout, wall), wall)
                             fresh_repair_ran = True
                     if (not fresh_repair_ran and not reason
+                            and not driver.auth_exhausted
                             and _is_max_iterations_cut(
                                 driver.kernel_terminal)
                             and not time_up()
@@ -5186,6 +5374,7 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                         fresh_repair_ran = True
                     if (not fresh_repair_ran
                             and ok
+                            and not driver.auth_exhausted
                             and not kernel_terminal_marker(
                                 driver.kernel_terminal)
                             and not project_files_changed(output_dir, t0)
@@ -5225,7 +5414,8 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                         "landed on disk (blocked)")
                     for nid in batch_ids:
                         events.mark_implementation_failed(nid, detail)
-                        failed.append(nid)
+                        if nid not in failed:
+                            failed.append(nid)
                 if (ok and not kernel_cut
                         and not project_files_changed(output_dir, t0)):
                     # Lazy turn: protocol ok, zero disk progress. Files-
@@ -5268,6 +5458,23 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                             else:
                                 log(f"[gate] {focus_id}: own suite red on "
                                     f"this batch: {hit[:3]}")
+                    elif tests_dir:
+                        # create+tests_dir 但本批无 staged 映射(spec_map
+                        # 覆盖缺口):不得凭空判懒——B 级零产出重入已在梯
+                        # 上给过机会,以模型自测证据代位(节点 id 在自写
+                        # spec 的末次运行全绿=verification-only 接受;
+                        # 10-08 复审修正,此前两分支皆空→合法零改动轮
+                        # 必失败)。
+                        verdicts = _node_spec_evidence(
+                            output_dir, batch_ids,
+                            _collect_selftest_evidence(output_dir))
+                        if all(v["verdict"] == "done"
+                               for v in verdicts.values()):
+                            log(f"[gate] {focus_id}: no file change, no "
+                                "staged specs for this batch; own-spec "
+                                "evidence green — verification-only "
+                                "turn, accepting")
+                            verified_ok = True
                     # spiral 兜底(10-08 拍板):无标记 ok 截断(shell-spiral
                     # 收尾文本无标记,归因词表够不到)在"文件不变"上的
                     # 最后一道网——扫尾部同签名连发,≥3 即按 doom 同类
@@ -5322,17 +5529,29 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                     for nid in batch_ids:
                         events.mark_implementation_failed(
                             nid, "JS syntax errors: " + "; ".join(syn[:2]))
-                        failed.append(nid)
+                        if nid not in failed:
+                            failed.append(nid)
+                        plan_statuses[nid] = "blocked"
                     if pre_batch_head:
                         # Broken-syntax files must not bleed into the next
-                        # batch's baseline.
+                        # batch's baseline. reset --hard 只复位 tracked
+                        # 文件;批内新建的半写文件是 untracked,必须补
+                        # clean -fd 一并收走(临时仓实测:只 reset 时
+                        # untracked 坏文件原样留到下一批)。
                         try:
                             runtime.git.run(["reset", "--hard", pre_batch_head])
+                            cleaned = runtime.git.run(["clean", "-fd"])
+                            removed = " ".join(
+                                (cleaned.stdout or "").split()[:6])
                             log(f"[plan] batch {focus_id}: unrepaired "
                                 "syntax gate; rolled back to "
-                                f"{pre_batch_head[:8]}")
+                                f"{pre_batch_head[:8]}"
+                                + (f", cleaned untracked: {removed}"
+                                   if removed else ""))
                         except Exception as exc:
                             log(f"[plan] syntax-gate rollback failed: {exc}")
+                    log(f"[plan] batch {focus_id} verdict=blocked "
+                        f"(syntax gate: {len(syn)} error(s) unrepaired)")
                     continue
                 # done 标记只属于成功 turn——失败/切断 turn 不打"实现完成"。
                 # commit 无条件:切断轮已落盘文件仍需入库留痕,成色由平台
@@ -5343,15 +5562,18 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                 runtime.git.commit(
                     f"{focus_id} (implement): "
                     + "; ".join(str(n.get("name", "")) for n in batch))
+                # 批终局账面不受预算门(10-08 复审修正):time_up 短路此前
+                # 把 statuses 留在 "active"——既非 done/blocked/pending 的
+                # 第四态进 verdict.json 账本;记账零成本,不随预算关停。
+                batch_state = _batch_state(batch_turn_ok, kernel_cut)
+                for nid in batch_ids:
+                    plan_statuses[nid] = batch_state
+                # 批终局单行汇总(运营判读面):实现完整性=verdict 字段
+                # (done=turn 正常收束;blocked=turn 失败或被切断),
+                # 不必再从 gate 多行拼推断。平台 e2e 是唯一终裁。
+                log(f"[plan] batch {focus_id} verdict={batch_state} "
+                    f"(turn {main_turn_reason})")
                 if not time_up():
-                    batch_state = _batch_state(batch_turn_ok, kernel_cut)
-                    for nid in batch_ids:
-                        plan_statuses[nid] = batch_state
-                    # 批终局单行汇总(运营判读面):实现完整性=verdict 字段
-                    # (done=turn 正常收束;blocked=turn 失败或被切断),
-                    # 不必再从 gate 多行拼推断。平台 e2e 是唯一终裁。
-                    log(f"[plan] batch {focus_id} verdict={batch_state} "
-                        f"(turn {main_turn_reason})")
                     if not batch_turn_ok or kernel_cut:
                         # 节点级感知(只读):blocked 批到底落了什么——
                         # 法医面,零执行语义;粒度上限(spec 命令聚合
@@ -5440,6 +5662,33 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                     + v_note,
                                     min(node_timeout, r_wall), r_wall,
                                     media=v_media)
+                                # 复测+伤害遏制(10-08 补齐,与 evolve 回归
+                                # 网同则):修复轮结果不能只信——被切断/
+                                # 把红修多时,未提交半改会把应用改崩
+                                # (REQ-8 形态),回滚到 HEAD;修好/变好则
+                                # 留下,残余红由 final Tier-2 记账。
+                                repair_cut = kernel_terminal_marker(
+                                    get_repair_driver().kernel_terminal)
+                                g2_run = _run_staged_playwright(
+                                    output_dir, smoke_port, tests_dir,
+                                    spec_ports_extra,
+                                    spec_files=completed_specs)
+                                if g2_run is not None:
+                                    log(f"[plan] post-repair regression: "
+                                        f"{g2_run[0]}p/{g2_run[1]}f "
+                                        f"(was {g_run[0]}p/{g_run[1]}f)")
+                                    worse = (repair_cut
+                                             or g2_run[1] > g_run[1])
+                                else:
+                                    log("[plan] post-repair regression "
+                                        "re-measure unavailable")
+                                    worse = repair_cut
+                                if worse:
+                                    log("[contain] regression repair cut "
+                                        "or made things worse; rolling "
+                                        "back its uncommitted edits")
+                                    _rollback_half_state(
+                                        runtime.git, output_dir, log=log)
                             elif g_run:
                                 log(f"[plan] regression green: "
                                     f"{g_run[0]}p/{g_run[1]}f")
@@ -5482,7 +5731,7 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                 # (REQ-1-1-1/REQ-4-1-1)与无 id 标题
                                 # (probe5)曾被误归"已知红",20 红只喂 6。
                                 new_reds = _regression_new_reds(
-                                    g["failed_titles"], phase0_red_titles)
+                                    g["failed_titles"])
                                 if g["failed"] > 0 and new_reds:
                                     log(f"[evolve] regression NEW RED: "
                                         f"{len(new_reds)} failure(s) in "
@@ -5490,6 +5739,16 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                         "repairing while the context is "
                                         "hot")
                                     r_wall = turn_wall(len(batch))
+                                    # 视觉搭车(至多一次,随首个修复轮进场;修复 driver 是同一
+                                    # 会话,截图在首条消息后已在上下文,后续轮重发=纯 token 浪费)。
+                                    v_media: list[dict] | None = None
+                                    v_note = ""
+                                    if os.environ.get("OCTOS_ARC_VISUAL_CHECK", "1") != "0":
+                                        _, v_media = _visual_check_prompt_and_media(
+                                            _collect_model_screenshots(output_dir, t0))
+                                        if v_media:
+                                            v_note = _VISUAL_PIGGYBACK_NOTE
+                                            visual_done = True
                                     attempt = 0
                                     prev_failed = g["failed"]
                                     unresolved = bool(new_reds)
@@ -5499,20 +5758,6 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                            and not time_up()
                                            and remaining()
                                            >= final_reserve + node_floor):
-                                        # 视觉搭车(首轮带图,没图不搭)。
-                                        v_media: list[dict] | None = None
-                                        v_note = ""
-                                        if os.environ.get(
-                                                "OCTOS_ARC_VISUAL_CHECK",
-                                                "1") != "0":
-                                            _, v_media = \
-                                                _visual_check_prompt_and_media(
-                                                    _collect_model_screenshots(
-                                                        output_dir, t0))
-                                            if v_media:
-                                                v_note = \
-                                                    _VISUAL_PIGGYBACK_NOTE
-                                                visual_done = True
                                         get_repair_driver().run(
                                             EVOLVE_REGRESSION_REPAIR_PROMPT
                                             .format(
@@ -5530,6 +5775,8 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                             min(node_timeout, r_wall),
                                             r_wall,
                                             media=v_media)
+                                        v_media = None  # 单次进场,后续轮不重发
+                                        v_note = ""
                                         repair_cut = kernel_terminal_marker(
                                             get_repair_driver()
                                             .kernel_terminal)
@@ -5557,27 +5804,18 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                                     "failed"] > prev_failed:
                                                 # 伤害遏制:修复轮被切断
                                                 # 或把红修多了 → 其未提交
-                                                # 半改回滚到 HEAD(REQ-8
-                                                # 修复轮 29→1 的反面:
-                                                # 毒不留工作区)。主轮成果
-                                                # 已提交,不受影响。
-                                                try:
-                                                    dirty = runtime.git \
-                                                        .run(["diff",
-                                                              "--name-only",
-                                                              "HEAD"]) \
-                                                        .stdout.split()
-                                                except Exception:
-                                                    dirty = []
-                                                if dirty:
-                                                    rollback_uncommitted(
-                                                        output_dir, dirty,
-                                                        log=log)
+                                                # 半改清零(REQ-8 修复轮
+                                                # 29→1 的反面:毒不留工作
+                                                # 区)。porcelain 口径连
+                                                # 新建半写文件一并收,
+                                                # 主轮成果已提交不受影响。
+                                                _rollback_half_state(
+                                                    runtime.git, output_dir,
+                                                    log=log)
                                             break
                                         prev_failed = g["failed"]
                                         new_reds = _regression_new_reds(
-                                            g["failed_titles"],
-                                            phase0_red_titles)
+                                            g["failed_titles"])
                                         unresolved = bool(new_reds)
                                         if not unresolved:
                                             log("[evolve] regression "
@@ -5609,6 +5847,84 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                         "no repair turn, round boundary "
                                         "will handle")
 
+                    # ── 批尾行走传感(源码变即跑,独立于视觉窗;10-08
+                    # 两洞补齐之二):被切/blocked 批的双渲染同样要进两
+                    # 振 streaks——判红降级幂等(节点已 blocked、failed
+                    # 去重)。开关正交:OCTOS_ARC_HOST_WALK_NOTES 管传感,
+                    # HOST_GRADE/VISUAL_CHECK 只管下方视觉轮(此前传感
+                    # 嵌在视觉窗内,VISUAL_CHECK=0 会误杀传感)。
+                    v_changed: list[str] = []
+                    if pre_batch_head:
+                        try:
+                            v_changed = _changed_source_paths(
+                                runtime.git.run([
+                                    "diff", "--name-only", pre_batch_head,
+                                    "HEAD"]).stdout.split())
+                        except Exception:
+                            v_changed = []
+                    walk_notes: list[str] = []
+                    walk_keys: list[str] = []
+                    walk_window_ran = False
+                    if (v_changed
+                            and not time_up()
+                            and os.environ.get("OCTOS_ARC_HOST_WALK_NOTES",
+                                               "1") != "0"):
+                        # 对在跑的 dev server 直接跑 staged
+                        # _host-walk.spec.ts(只读,不 boot 不回种);发现=
+                        # 中性观察,只注入未送达过的新发现(驳回即安静,
+                        # 回归重报),有视觉轮则搭车(下方),否则挂
+                        # pending 下一批首 turn 送达。
+                        # 送达集延后到送达判定完成后结算(视觉轮块下方)
+                        # ——观测≠送达:传感窗产出 notes 若被视觉总门拦下
+                        # (blocked 批/预算尾/总闸关),发现此刻入集会让
+                        # 下窗的同发现被去重器吞掉、观察永久哑火
+                        # (10-08 复审修正)。
+                        try:
+                            walk_report = _host_walk_sensor(
+                                output_dir, smoke_port)
+                            walk_notes = _host_walk_notes(
+                                walk_report, delivered_walk_findings)
+                            walk_keys = _host_walk_finding_keys(walk_report)
+                            walk_window_ran = True
+                            # 结构门(10-08 拍板,物理不变量豁免于传感
+                            # 非门定则):重复精确文本命中连续第二个传感
+                            # 窗仍在→本批晚降级 blocked(仿回归降级),
+                            # 修复走既有红处理梯子。首见只走观察句。
+                            # OCTOS_ARC_HOST_WALK_GATE=0 总闸。
+                            if os.environ.get("OCTOS_ARC_HOST_WALK_GATE",
+                                               "1") != "0":
+                                gated = _host_walk_gate(
+                                    walk_report, walk_dup_streaks)
+                                for d in gated:
+                                    detail = (
+                                        "host walk gate: '"
+                                        + str(d.get("name"))
+                                        + "' matches "
+                                        + str(d.get("count"))
+                                        + " exact-text nodes on "
+                                        + str(d.get("page"))
+                                        + " (strict-mode "
+                                        "locator physics; "
+                                        "persists across two "
+                                        "sensor windows)")
+                                    log(f"[host-walk] batch "
+                                        f"{focus_id} GATE: " + detail)
+                                    for nid in batch_ids:
+                                        plan_statuses[nid] = "blocked"
+                                        events.mark_implementation_failed(
+                                            nid, detail)
+                                        if nid not in failed:
+                                            failed.append(nid)
+                            if walk_notes:
+                                log(f"[host-walk] batch {focus_id} "
+                                    "sensor: "
+                                    + " | ".join(
+                                        n.splitlines()[0][:80]
+                                        for n in walk_notes))
+                        except Exception:
+                            walk_notes = []
+                            walk_keys = []
+                            walk_window_ran = False
                     # ── 视觉核验轮(≤1 轮/批):批 done、源码有变、且
                     # 模型本批自截了图 → 归集附回给它自己看(带图请求路
                     # 由 VISUAL_MODEL)。拍什么页、拍不拍归模型决定——
@@ -5623,86 +5939,16 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                                "1") != "0"
                             and os.environ.get("OCTOS_ARC_VISUAL_CHECK",
                                                "1") != "0"):
-                        try:
-                            v_changed = _changed_source_paths(
-                                runtime.git.run([
-                                    "diff", "--name-only", pre_batch_head,
-                                    "HEAD"]).stdout.split())
-                        except Exception:
-                            v_changed = []
                         if v_changed:
                             shots = _collect_model_screenshots(
                                 output_dir, t0)
                             v_prompt, v_media = \
                                 _visual_check_prompt_and_media(shots)
-                            # ── 批尾双腿行走传感(只读,不 boot 不回种):
-                            # 对在跑的 dev server 直接跑 staged
-                            # _host-walk.spec.ts;发现=中性观察,只注入
-                            # 未送达过的新发现(驳回即安静,回归重报),
-                            # 有视觉轮则搭车,否则挂 pending 下一批首
-                            # turn 送达。传感永不红、永不作判据。
-                            # OCTOS_ARC_HOST_WALK_NOTES=0 总闸。
-                            walk_notes: list[str] = []
-                            try:
-                                if os.environ.get(
-                                        "OCTOS_ARC_HOST_WALK_NOTES",
-                                        "1") != "0":
-                                    walk_report = _host_walk_sensor(
-                                        output_dir, smoke_port)
-                                    walk_notes = _host_walk_notes(
-                                        walk_report,
-                                        delivered_walk_findings)
-                                    # 送达集=当前仍在发生的发现;消失即
-                                    # 释锁(修好后又坏可重报)。
-                                    delivered_walk_findings.clear()
-                                    delivered_walk_findings.update(
-                                        _host_walk_finding_keys(
-                                            walk_report))
-                                    # 结构门(10-08 拍板,物理不变量豁免
-                                    # 于传感非门定则):重复精确文本命中
-                                    # 连续第二个传感窗仍在→本批晚降级
-                                    # blocked(仿回归降级),修复走既有
-                                    # 红处理梯子。首见只走观察句。
-                                    # OCTOS_ARC_HOST_WALK_GATE=0 总闸。
-                                    if os.environ.get(
-                                            "OCTOS_ARC_HOST_WALK_GATE",
-                                            "1") != "0":
-                                        gated = _host_walk_gate(
-                                            walk_report, walk_dup_streaks)
-                                        for d in gated:
-                                            detail = (
-                                                "host walk gate: '"
-                                                + str(d.get("name"))
-                                                + "' matches "
-                                                + str(d.get("count"))
-                                                + " exact-text nodes on "
-                                                + str(d.get("page"))
-                                                + " (strict-mode "
-                                                "locator physics; "
-                                                "persists across two "
-                                                "batch tails)")
-                                            log(f"[host-walk] batch "
-                                                f"{focus_id} GATE: "
-                                                + detail)
-                                            for nid in batch_ids:
-                                                plan_statuses[nid] = (
-                                                    "blocked")
-                                                events                                                     .mark_implementation_failed(
-                                                        nid, detail)
-                                                if nid not in failed:
-                                                    failed.append(nid)
-                                if walk_notes:
-                                    log(f"[host-walk] batch {focus_id} "
-                                        "sensor: "
-                                        + " | ".join(
-                                            n.splitlines()[0][:80]
-                                            for n in walk_notes))
-                            except Exception:
-                                walk_notes = []
                             if v_prompt:
                                 if walk_notes:
                                     v_prompt = ("\n\n".join(walk_notes)
                                                 + "\n\n" + v_prompt)
+                                    walk_notes = []  # 随视觉轮进场=已送达
                                 log(f"[visual] batch {focus_id} nav check "
                                     f"turn ({len(v_media)} model "
                                     "screenshot(s))")
@@ -5710,15 +5956,50 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                                 driver.run(v_prompt,
                                            min(node_timeout, v_wall),
                                            v_wall)
-                            elif walk_notes or not shots:
-                                # 无视觉轮可搭车(典型=零图):观察挂起,
-                                # 零图另附视觉通道提醒,下一批首 turn 送达。
-                                if not shots:
-                                    walk_notes.append(_NO_CAPTURE_NOTE)
-                                pending_host_notes.extend(walk_notes)
-                                log(f"[host-walk] batch {focus_id}: "
-                                    f"{len(walk_notes)} note(s) queued "
-                                    "for the next batch turn")
+                                # 视觉轮也是写轮:过语法门防半写交付(10-08
+                                # 补齐;此前视觉轮改动只由收尾 commit 兜底,
+                                # 无任何完整性检查)。修复轮 1 次足矣——
+                                # 无批上下文,不做回滚,残余红交给 final
+                                # Tier-2 记账。
+                                syn_v = js_syntax_errors(output_dir)
+                                if syn_v:
+                                    log(f"[visual] batch {focus_id}: nav "
+                                        f"check left {len(syn_v)} JS "
+                                        f"syntax error(s): {syn_v[:3]}")
+                                    get_repair_driver().run(
+                                        syntax_repair_prompt(syn_v),
+                                        2400, 2400)
+                                    syn_v = js_syntax_errors(output_dir)
+                                    if syn_v:
+                                        log(f"[visual] batch {focus_id}: "
+                                            "syntax still broken after "
+                                            f"repair: {syn_v[:3]}")
+                            elif not shots:
+                                # 视觉轮够格却零图:附视觉通道提醒;挂起
+                                # 交由下方送达兜底统一处理。
+                                walk_notes.append(_NO_CAPTURE_NOTE)
+
+                    # 送达兜底(10-08 复审修正):传感窗 notes 凡未被视觉
+                    # 轮消费的一律挂 pending 下一批首 turn 送达——blocked
+                    # 批/预算尾/视觉总闸关不再静默丢观察;送达集随本窗
+                    # keys 结算(观测=送达成立:消费/挂起都终将抵达模型;
+                    # 消失即释锁,回归可重报)。
+                    if walk_notes:
+                        pending_host_notes.extend(walk_notes)
+                        log(f"[host-walk] batch {focus_id}: "
+                            f"{len(walk_notes)} note(s) queued for the "
+                            "next batch turn")
+                        walk_notes = []
+                    if walk_window_ran:
+                        delivered_walk_findings.clear()
+                        delivered_walk_findings.update(walk_keys)
+
+            # 轮尾两振结算(10-08 两洞补齐之一):末批的双渲染没有下
+            # 一个批尾传感窗;在 final 链停看门狗/boot 自起服务之前,
+            # 对在跑的 dev server 补一窗结算 streaks。判红走 G2(下一轮
+            # 接续兑现),不做批级降级。
+            round_tail_duplicates = _round_tail_walk_settlement(
+                output_dir, smoke_port, walk_dup_streaks, log=log)
 
             # Final verification pass (read-only): the host measures
             # whatever landed — staged specs (Tier-2), page-health,
@@ -5865,7 +6146,7 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
             # 交付前清场：宿主托管的 dev server 不得占住冒烟端口。
             # 先停看门狗再清场——顺序反了清场会被看门狗拉回来。
             dev_watchdog_stop.set()
-            _stop_dev_server(smoke_port)
+            _stop_dev_server(smoke_port, output_dir)
             # ── evolve 轮末判定(§5 三门;外层闭环的输入)──
             # G1=冷启动自有套件全绿;G2=page-health 行走净+种子实体零
             # 缺席;G3=批账本全 done。三门全过才算达标(预算耗尽=未测
@@ -5881,7 +6162,7 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                             output_dir, smoke_port,
                             artifact_dir=v_dir, log=log),
                         log=log)
-                    _stop_dev_server(smoke_port)
+                    _stop_dev_server(smoke_port, output_dir)
                 walk_v: dict | None = None
                 ph = hs.get("page_health") if isinstance(
                     hs.get("page_health"), dict) else None
@@ -5890,16 +6171,25 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                         "errors": list(ph.get("errors") or []),
                         "missing": list(
                             (ph.get("walk") or {}).get("missing") or [])}
+                if round_tail_duplicates:
+                    walk_v = dict(walk_v or {})
+                    walk_v["duplicates"] = [
+                        {"page": str(d.get("page")),
+                         "name": str(d.get("name")),
+                         "count": int(d.get("count") or 0)}
+                        for d in round_tail_duplicates]
                 batch_verdicts = {
                     str(n.get("id")):
                         plan_statuses.get(str(n.get("id")), "pending")
-                    for n in atomic_nodes}
+                    for n in atomic_nodes
+                    # 只裁本轮 scope 內节点(全量轮=全树,口径不变);
+                    # 范围外节点恒 pending,计入会让收窄轮 G3 恒假。
+                    if str(n.get("id")) in scoped_node_ids}
                 g3 = (not failed and bool(batch_verdicts)
                       and all(v == "done" for v in batch_verdicts.values()))
                 g1 = bool(suite_v and suite_v["failed"] == 0
                           and suite_v["passed"] > 0)
-                g2 = bool(walk_v and not walk_v["errors"]
-                          and not walk_v["missing"])
+                g2 = _g2_walk_ok(walk_v)
                 coverage = _scenario_coverage(
                     tree, (suite_v or {}).get("passed_titles") or [])
                 evolve_verdict = EvolveVerdict(
@@ -5908,7 +6198,7 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
                     batch_verdicts=batch_verdicts,
                     failed_nodes=list(failed),
                     suite=suite_v, walk=walk_v, coverage=coverage,
-                    phase0=phase0_summary, artifacts_dir=str(v_dir))
+                    artifacts_dir=str(v_dir))
                 try:
                     v_dir.mkdir(parents=True, exist_ok=True)
                     (v_dir / "verdict.json").write_text(
@@ -5933,6 +6223,7 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
             dev_watchdog_stop.set()
             watchdog_stop.set()
             driver.close()
+            shutil.rmtree(config_dir, ignore_errors=True)
             if repair_driver is not None:
                 repair_driver.close()
                 shutil.rmtree(repair_data_dir, ignore_errors=True)
@@ -5959,8 +6250,8 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
             events.mark_run_completed(note)
         else:
             events.mark_run_completed("all requirement nodes implemented")
-        _postflight_structure_check(output_dir, args.web_port)
-        _free_web_port(args.web_port)
+        _postflight_structure_check(output_dir)
+        _free_web_port(args.web_port, output_dir)
         # Tell the platform the preview can be served (mirrors the demo agent).
         artifacts_dir = os.environ.get("ARCBENCH_ARTIFACTS_DIR")
         if artifacts_dir:
@@ -5990,8 +6281,8 @@ def main(argv=None, evolve_options: EvolveOptions | None = None
         # 工件里，否则秒退原因只存在 traceability 记录中、无法排查。
         log(f"[fatal] {type(exc).__name__}: {exc}")
         traceback.print_exc()
-        _postflight_structure_check(output_dir, args.web_port)
-        _free_web_port(args.web_port)
+        _postflight_structure_check(output_dir)
+        _free_web_port(args.web_port, output_dir)
         _ensure_eval_telemetry(output_dir)
         try:
             dump_runtime_prompts(output_dir)

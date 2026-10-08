@@ -130,9 +130,9 @@ class RequirementsMapTests(unittest.TestCase):
 class TurnBlockTests(unittest.TestCase):
     """build_turn_features 统一块骨架:TASK → SEED → SCENARIOS(本批
     Feature 原文)。DEPENDENCIES/REUSED UI CONTRACT 依赖块已整体退役
-    (装配与闭包机器全删);SEED CONTRACT 暂停装配待确认是否有用(代码
-    保留,_TURN_SEED_CONTRACT 旋钮);SEED 行=种子自愈指令(_TURN_SEED_
-    LINE,SCENARIOS 空时一并省略)。本批节点自己的 GIVEN 仍逐字(LAW 4,
+    (装配与闭包机器全删);SEED CONTRACT 装配块亦退役(10-08,常年
+    False 零消费);SEED 行=种子自愈指令(_TURN_SEED_LINE,SCENARIOS
+    空时一并省略)。本批节点自己的 GIVEN 仍逐字(LAW 4,
     SeedOwnershipTests)。"""
 
     def _blob(self, batch_ids, tree=None):
@@ -925,6 +925,60 @@ class GoalFirstRulesTests(unittest.TestCase):
         self.assertEqual(main._host_walk_gate(d2, streaks),
                          d2["duplicates"])
         self.assertEqual(streaks, {"Widgets@#/w/two": 2})
+
+    def test_round_tail_walk_settlement_two_strike(self):
+        # 10-08 两洞补齐之一:末批双渲染没有下一批尾窗——轮尾结算窗
+        # 供 streaks 凑第二振;总闸关/传感异常=空清单且不抛。
+        import os
+        from unittest import mock
+        dup_report = {"duplicates": [{"page": "#/w", "name": "Q3 Sales",
+                                      "count": 2}], "login": "ok"}
+        streaks: dict = {}
+        with mock.patch.dict(os.environ,
+                             {"OCTOS_ARC_HOST_WALK_NOTES": "1",
+                              "OCTOS_ARC_HOST_WALK_GATE": "1"}):
+            with mock.patch.object(main, "_host_walk_sensor",
+                                   return_value=dup_report):
+                with tempfile.TemporaryDirectory() as td:
+                    logs: list = []
+                    self.assertEqual(
+                        main._round_tail_walk_settlement(
+                            Path(td), 43101, streaks, log=logs.append),
+                        [])  # 首窗只计数
+                    gated = main._round_tail_walk_settlement(
+                        Path(td), 43101, streaks, log=logs.append)
+                    self.assertEqual(gated, dup_report["duplicates"])  # 二窗判红
+                    self.assertTrue(any("round-tail GATE" in x
+                                        for x in logs), logs)
+            # 任一总闸关 → 空清单(不碰传感)
+            with mock.patch.dict(os.environ,
+                                 {"OCTOS_ARC_HOST_WALK_GATE": "0"}):
+                self.assertEqual(
+                    main._round_tail_walk_settlement(
+                        Path("/nonexistent"), 43101, {}), [])
+            # 传感抛异常 → 空清单不抛(轮收尾件永不抛)
+            with mock.patch.object(main, "_host_walk_sensor",
+                                   side_effect=RuntimeError("boom")):
+                self.assertEqual(
+                    main._round_tail_walk_settlement(
+                        Path("/nonexistent"), 43101, {}), [])
+
+    def test_g2_walk_ok_includes_duplicates(self):
+        # 10-08 补齐:结构门判红进轮 verdict G2——duplicates 非空即
+        # G2 fail(此前门红与轮 GREEN 互不相干)。
+        self.assertFalse(main._g2_walk_ok(None))
+        self.assertTrue(main._g2_walk_ok(
+            {"errors": [], "missing": [], "duplicates": []}))
+        self.assertFalse(main._g2_walk_ok(
+            {"errors": [], "missing": [],
+             "duplicates": [{"page": "p", "name": "n", "count": 2}]}))
+        self.assertFalse(main._g2_walk_ok(
+            {"errors": ["pageerror: x"], "missing": []}))
+        # 接线源钉:结算窗在 final 链之前被调用,duplicates 进 walk_v。
+        src = Path(main.__file__).read_text(encoding="utf-8")
+        self.assertIn("round_tail_duplicates = "
+                      "_round_tail_walk_settlement(", src)
+        self.assertIn('walk_v["duplicates"]', src)
 
     def test_fixture_walk_login_first_password_account(self):
         # 凭据源=fixture 首个带明文密码的种子账号(email 从种子 users

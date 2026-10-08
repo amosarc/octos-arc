@@ -448,8 +448,8 @@ class QuotedNamesTests(unittest.TestCase):
 class SeedSentencesTests(unittest.TestCase):
     """SEED CONTRACT 块的数据源(gherkin.seed_sentences):含 "seed"
     的整句逐字提取,词汇无关(逐实体正则不具泛化能力——09-30 用户拍板);
-    "Seed values:" 字面重复句照既有清洗律丢弃。块本身暂停装配待确认
-    是否有用(main._TURN_SEED_CONTRACT),函数与测试保留。"""
+    "Seed values:" 字面重复句照既有清洗律丢弃。装配块已在 main.py 退役
+    (10-08,常年 False 零消费);函数与测试自成一体保留。"""
 
     def test_seed_declaration_sentence_extracted_verbatim(self):
         n = {"id": "REQ-1", "name": "n", "description": "", "scenarios": [
