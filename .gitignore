@@ -44,6 +44,9 @@ node_modules/
 !api/*.md
 !crates/octos-agent/skills/**/SKILL.md
 !arc/SCOPE.md
+# Repo-front README (public face of the project; documents the hackathon
+# kernel modifications). Everything else under *.md stays local-only.
+!/README.md
 # Companion docs/ markdown for in-tree skill manifest discovery hints
 # (split out of SKILL.md when the body exceeds the ≤80-line discovery cap).
 !crates/octos-agent/skills/**/docs/*.md
